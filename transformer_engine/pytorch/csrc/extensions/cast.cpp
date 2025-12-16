@@ -840,7 +840,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 
           auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
           auto columnwise_amax_ptr = output_list[i].get_columnwise_amax().data_ptr;
-          void* amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+          void *amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
           if (amax_ptr != nullptr) {
             if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
               NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),

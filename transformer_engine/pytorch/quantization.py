@@ -1330,8 +1330,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     columnwise=True,
                     with_rht=qparams.random_hadamard_transform,
                     with_post_rht_amax=(
-                        qparams.random_hadamard_transform
-                        and qparams.amax_estimation_scale is None
+                        qparams.random_hadamard_transform and qparams.amax_estimation_scale is None
                     ),
                     amax_estimation_scale=qparams.amax_estimation_scale,
                     with_2d_quantization=qparams.fp4_2d_quantization,

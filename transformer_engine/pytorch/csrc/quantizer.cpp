@@ -6,11 +6,10 @@
 
 #include <pybind.h>
 
-#include "transformer_engine/recipe.h"
-
 #include "common.h"
 #include "pybind.h"
 #include "torch/torch.h"
+#include "transformer_engine/recipe.h"
 
 namespace transformer_engine::pytorch {
 
@@ -1615,9 +1614,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // This is intentionally done as a small standalone kernel to avoid touching compute kernels.
   if (this->with_rht && !this->with_post_rht_amax && this->with_amax_estimation &&
       this->columnwise_usage) {
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_scale_amax(out.data(), /*columnwise=*/true, this->amax_estimation_scale, stream);
-    });
+    NVTE_SCOPED_GIL_RELEASE(
+        { nvte_scale_amax(out.data(), /*columnwise=*/true, this->amax_estimation_scale, stream); });
   }
 
   if (this->with_rht) {

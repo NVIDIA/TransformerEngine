@@ -212,9 +212,10 @@ void nvte_scale_amax(NVTETensor tensor_, bool columnwise, float scale, cudaStrea
   NVTE_CHECK((!columnwise && tensor.amax.numel() == 1) ||
                  (columnwise && tensor.columnwise_amax.numel() == 1),
              "Invalid amax buffer (expected 1 element)");
-  NVTE_CHECK((!columnwise && tensor.amax.dtype == transformer_engine::DType::kFloat32) ||
-                 (columnwise && tensor.columnwise_amax.dtype == transformer_engine::DType::kFloat32),
-             "Invalid amax dtype (expected FP32)");
+  NVTE_CHECK(
+      (!columnwise && tensor.amax.dtype == transformer_engine::DType::kFloat32) ||
+          (columnwise && tensor.columnwise_amax.dtype == transformer_engine::DType::kFloat32),
+      "Invalid amax dtype (expected FP32)");
 
   // No-op for scale==1 to save a launch
   if (scale == 1.0f) {
