@@ -370,10 +370,12 @@ struct GemmAr : public CommGemmFixure {
                          accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
   }
 
+#if CUBLASMP_VERSION < 600
   void SetUp() override {
     if (!IsMulticastSupported(rank_))
       GTEST_SKIP() << "Multicast is not supported on device " << rank_;
   }
+#endif
 };
 
 TEST_P(AgGemm, Gemm) {
