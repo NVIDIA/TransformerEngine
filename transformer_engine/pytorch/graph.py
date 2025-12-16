@@ -69,12 +69,12 @@ def _none_grad_context_wrapper(inputs):
     in case the backward pass makes grad accumulations.
     """
     original_input_grads = []
-    for input in inputs:
-        original_input_grads.append(input.grad)
-        input.grad = None
+    for input_tensor in inputs:
+        original_input_grads.append(input_tensor.grad)
+        input_tensor.grad = None
     yield
-    for input, original_grad in zip(inputs, original_input_grads):
-        input.grad = original_grad
+    for input_tensor, original_grad in zip(inputs, original_input_grads):
+        input_tensor.grad = original_grad
 
 
 @contextlib.contextmanager
