@@ -37,8 +37,10 @@ between CPU and GPU, which limits offloading benefits.
 
 With **NVLink-C2C** (GH200), bandwidth jumps to **900 GB/s** bidirectional,
 making offloading increasingly attractive on modern NVIDIA superchips.
+The GH200 pairs a Grace CPU with 512 GB LPDDR5X memory and a Hopper GPU
+with 96 GB or 141 GB HBM3e, providing ample CPU memory for offloading activations.
 
-Note that offloading/reloading consumes HBM bandwidth, which may compete with
+Offloading/reloading consumes HBM bandwidth, which may compete with
 computation — even when transfers are asynchronous. At full speed, this takes
 up to **900 GB/s** of HBM bandwidth. However, GH200's HBM3e provides **~4.9 TB/s**,
 so offloading/reloading uses less than 20%, making the impact on compute minimal.
@@ -46,68 +48,38 @@ so offloading/reloading uses less than 20%, making the impact on compute minimal
 CPU Offloading in Transformer Engine
 ------------------------------------
 
-Transformer Engine supports activations CPU offloading for sequences of layers, where each layer
-consumes the output of the previous one. Note that these layers don't need to be TE layers —
-they can be arbitrary PyTorch modules. Let's look at the API:
+Transformer Engine supports CPU offloading of activations for sequences of layers, where each layer
+consumes the output of the previous one — which is the case for most LLM architectures.
+These layers do not need to be TE layers —
+they can be arbitrary PyTorch modules. The API is as follows:
 
 .. code-block:: python
 
     def get_cpu_offload_context(
         enabled: bool = False,
-        num_layers: int = 1,
+        num_layers: Optional[int] = 1,
         model_layers: int = 1,
         manual_synchronization: bool = False,
         retain_pinned_cpu_buffers: bool = False,
         offload_stream: Optional[torch.cuda.Stream] = None,
-    ) -> Tuple[ContextManager, Callable, Optional[ManualOffloadSynchronizer]]:
+    ) -> Union[Tuple[ContextManager, Callable], Tuple[ContextManager, Callable, ManualOffloadSynchronizer]]:
         ...
 
-You need to specify the total number of layers in the model by setting the ``model_layers`` argument.
-Then, you can specify how many layers to offload by setting the ``num_layers`` argument.
-Due to the scheduling algorithm, you only need to specify a low enough number of layers to offload to
-enable full overlap of computation and offload/reload.
+The ``model_layers`` parameter must always be set to the total number of layers in the model.
+There are two modes of operation:
 
-**Default scheduling algorithm**
+1. **Default scheduling** — set ``num_layers`` to the number of layers to offload.
+   The algorithm automatically schedules offload/reload operations to overlap with computation.
 
-For ``num_layers`` layers offloaded of ``model_layers`` layers:
-
-- First ``num_layers`` layers are offloaded to CPU.
-- Offloading starts as tensors are saved for backward.
-- At most ``(model_layers - num_layers)`` sets of activations are on GPU at any time;
-  compute may be stalled to enforce this limit.
-- Reloading of the tensor must end by the time the tensor is needed for the backward pass of the layer.
-
-Below we present two example scenarios — one with full overlap of computation and offload/reload, and one with stalls.
-Let's see the first scenario:
-
-.. raw:: html
-   :file: img/scheduling.svg
-
-*Figure 2. With* ``num_layers=2`` *, at most 3 sets of activations are on GPU. Offloading fully overlaps with forward, reloading fully overlaps with backward.*
-
-When ``num_layers`` is too high, the GPU memory limit forces stalls. Let's see an example:
-
-.. raw:: html
-   :file: img/scheduling_stall.svg
-
-*Figure 3. With* ``num_layers=3`` *and* ``model_layers=5`` *, at most 2 sets of activations can be on GPU (5−3=2), which causes stalls.*
-
-In this case:
-
-- **Forward**: Layer 4 cannot start until Layer 2 is offloaded, otherwise there would be
-  3 sets of activations on GPU (Layers 2, 3, 4).
-- **Backward**: Layer 3 backward cannot start immediately — its activations are still
-  on CPU and must be reloaded first. Note that some tensors may finish reloading earlier,
-  allowing parts of the layer (e.g., a sublayer) to run while the rest waits.
-  The same applies to Layers 2 and 1.
-
-Example
--------
+2. **Manual synchronization** — set ``manual_synchronization=True`` (do not set ``num_layers``).
+   This mode provides explicit control over when to start offload/reload using the returned ``ManualOffloadSynchronizer``.
 
 The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns:
 
-- **context manager** — wrap each layer's forward pass to enable activation capture.
-- **sync function** — call after each layer on the output tensor as shown in the example below.
+- **context manager** — wrap each layer's forward pass with it to enable activation capture.
+- **sync function** — call on the output tensor after each layer, as shown in the example below.
+
+The example below shows how to offload activations for a sequence of ``torch.nn.Linear`` layers using the default scheduling algorithm:
 
 .. tabs::
 
@@ -119,30 +91,69 @@ The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns:
          :end-before: # END_BASIC_EXAMPLE
 
 
+Default Offloading Scheduling
+-----------------------------
+
+Default scheduling is enabled when ``manual_synchronization=False`` (the default).
+The ``num_layers`` parameter must be specified to set the number of layers to offload.
+The algorithm then automatically determines when to offload and reload activations
+to maximize overlap with computation.
+
+For ``num_layers`` layers offloaded of ``model_layers`` layers:
+
+- First ``num_layers`` layers are offloaded to CPU.
+- Offloading starts as soon as tensors are saved for backward — it does not wait
+  for the layer's forward pass to complete.
+- At most ``(model_layers - num_layers)`` sets of activations are on GPU at any time;
+  both compute and reload may be stalled to enforce this limit.
+- Reloading must complete by the time the tensor is needed for the layer's backward pass.
+
+Specifying a low enough ``num_layers`` enables full overlap of computation
+and offload/reload. The following two scenarios illustrate this — one with full overlap, and one with stalls.
+
+.. raw:: html
+   :file: img/scheduling.svg
+
+*Figure 2. With* ``num_layers=2`` *and* ``model_layers=5`` *, at most 3 sets of activations are on GPU. Layer 1 offloading starts during its forward pass (when the first tensor is saved for backward). Offloading fully overlaps with forward, reloading fully overlaps with backward.*
+
+When ``num_layers`` is too high, the GPU memory limit forces stalls:
+
+.. raw:: html
+   :file: img/scheduling_stall.svg
+
+*Figure 3. With* ``num_layers=3`` *and* ``model_layers=5`` *, at most 2 sets of activations can be on GPU (5-3=2), which causes stalls. In forward, Layer 4 cannot start until Layer 2 is offloaded, otherwise there would be 3 sets of activations on GPU (Layers 2, 3, 4). In backward, Layer 3 cannot start immediately — its activations are still on CPU and must be reloaded first. Some tensors may finish reloading earlier, allowing parts of the layer (e.g., a sublayer) to run while the rest waits. The same applies to Layers 2 and 1.*
+
+
 Manual Synchronization
 ----------------------
 
-For custom scheduling (e.g. in pipeline parallelism), set ``manual_synchronization=True``
-and pass your own ``offload_stream``. This gives you a ``ManualOffloadSynchronizer``
-with explicit control over transfers, and lets you synchronize via stream operations.
+For custom scheduling, set ``manual_synchronization=True``
+and pass a custom ``offload_stream``. This returns a ``ManualOffloadSynchronizer``
+with explicit control over transfers and allows synchronization via stream operations.
+
+This mode is useful when training does not follow the standard "all forwards then all backwards"
+pattern — for example, in pipeline parallelism. Having access to the ``offload_stream`` enables
+custom synchronization logic (e.g., waiting, recording events) tailored to the specific workload.
 
 The ``ManualOffloadSynchronizer`` object provides the following methods:
 
-- ``start_offload_layer(layer_id)`` — begin async copy to CPU.
-- ``release_activation_forward_gpu_memory(layer_id)`` — free GPU memory after offload completes.
-- ``start_reload_layer(layer_id)`` — begin async copy back to GPU.
+- ``start_offload_layer(layer_id)`` — queue async GPU→CPU copies on the offload stream.
+  Before each copy, the offload stream waits for an event recorded when that tensor
+  was saved for backward.
+- ``release_activation_forward_gpu_memory(layer_id)`` — wait for the offload to complete
+  and release GPU memory.
+- ``start_reload_layer(layer_id)`` — queue async CPU→GPU copies on the offload stream.
+  When tensors are accessed in backward, compute stream waits for each tensor's reload
+  to complete.
 
-.. warning::
-
-   Never call ``release_activation_forward_gpu_memory()`` before the offload completes.
-   Always synchronize the offload stream first, otherwise data may be corrupted.
+To skip offloading for a specific layer, simply do not call any of these methods for that layer.
 
 .. tabs::
 
    .. tab:: PyTorch
 
       The example demonstrates:
-      
+
       1. **Forward pass**: After each layer, call ``start_offload_layer(i)`` to begin
          async copy of layer ``i``'s activations to CPU.
       2. **Release GPU memory**: Call ``offload_stream.synchronize()`` to wait for all
@@ -190,14 +201,30 @@ Caveats
 
 .. warning::
 
+   **Heuristic activation detection**:
+
+   CPU Offloading is implemented using
+   `PyTorch saved tensors hooks <https://docs.pytorch.org/docs/stable/notes/autograd.html#saved-tensors-hooks-doc>`_.
+   PyTorch saves various tensors for backward — not just activations, but also weights and other data.
+
+   Activation detection is heuristic: all CUDA tensors that are not ``torch.nn.Parameter`` are offloaded.
+   For TE layers, tensors that should not be offloaded are manually excluded.
+   For non-TE layers, no such exclusions exist, so some tensors may remain pinned in GPU memory
+   even after being copied to CPU (e.g., if the layer stores references in ``ctx``),
+   resulting in wasted bandwidth with no memory savings.
+
+.. warning::
+
    **Memory layout changes**:
 
    Offloading/reloading can change tensor memory layout and relations:
 
-   - Adjacent tensors (e.g., ``a`` and ``b``) may not be adjacent after reload.
-   - Views of the same storage may be restored as separate allocations.
+   1. Views of the same storage may be restored as separate allocations.
+   2. Adjacent tensors may not be adjacent after reload.
 
-   To mitigate this, we skip offloading non-trivial views (except for TE
-   attention kernels, which are tested and supported). Custom kernels
-   relying on memory layout may still fail.
+   CUDA kernels that rely on specific memory layout may produce unexpected results.
+   To mitigate (1), non-trivial views are excluded from offloading by default.
+   TE attention kernels are an exception — they use internal handling that is tested and supported.
+   Issue (2) is not mitigated — custom kernels that assume adjacent tensors share
+   contiguous memory may still fail.
 

@@ -21,7 +21,7 @@ for i in range(num_layers):
     # These tensors will be offloaded to CPU asynchronously.
     with cpu_offload_context:
         x = layers[i](x)
-    
+
     # sync_function must be called after each layer's forward pass.
     # This cannot be done inside the context manager because
     # it needs the output tensor after the layer has finished.

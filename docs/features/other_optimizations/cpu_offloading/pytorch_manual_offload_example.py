@@ -30,7 +30,6 @@ for i in range(num_layers):
 # Start reloading before backward
 for i in range(num_layers - 1, -1, -1):
     manual_controller.start_reload_layer(i)
-offload_stream.synchronize()
 
 # Backward pass
 loss = x.sum()
