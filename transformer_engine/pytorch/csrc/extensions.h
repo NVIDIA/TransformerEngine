@@ -546,8 +546,8 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
   CommOverlap(CommOverlapHelper *helper, int tp_size, int tp_rank, int num_comm_sm = 16,
               bool atomic_gemm = false)
-    : CommOverlapBase(helper->get_nccl_comm_ptr("intra"), tp_size, tp_rank, num_comm_sm,
-                      atomic_gemm) {}
+      : CommOverlapBase(helper->get_nccl_comm_ptr("intra"), tp_size, tp_rank, num_comm_sm,
+                        atomic_gemm) {}
 
   ~CommOverlap() {}
 
@@ -572,8 +572,8 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
 
   CommOverlapP2P(CommOverlapHelper *helper, int tp_size, int tp_rank, int num_comm_sm = 16,
                  bool atomic_gemm = false)
-    : CommOverlapP2PBase(helper->get_nccl_comm_ptr("intra"), tp_size, tp_rank, num_comm_sm,
-                         atomic_gemm) {}
+      : CommOverlapP2PBase(helper->get_nccl_comm_ptr("intra"), tp_size, tp_rank, num_comm_sm,
+                           atomic_gemm) {}
 
   ~CommOverlapP2P() {}
 
