@@ -232,7 +232,7 @@ class CustomizedPipelineTmaUmmaAsync {
       }
     } else {
       if (!skip) {
-        if constexpr (cute::is_static_v<ClusterShape> and size(ClusterShape{}) == 1) {
+        if constexpr (cute::is_static_v<ClusterShape> && size(ClusterShape{}) == 1) {
           cutlass::arch::umma_arrive(smem_ptr);
         } else {
           cutlass::arch::umma_arrive_multicast(smem_ptr, block_id_mask_);

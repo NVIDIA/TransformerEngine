@@ -639,7 +639,6 @@ class NVFP4QuantizerRef(Quantizer):
                 if self.columnwise_usage
                 else global_amax_row
             )
-            # TODO: this is a horrible hack to pass zero tolerance test
             # currently the amax of RHT transform still has a fp32 -> bf16 -> fp32 round-trip
             # this is to simulate that behaviour and we will remove this once the amax of RHT transform is fixed
             if self.columnwise_usage and with_rht_cast_fusion:
