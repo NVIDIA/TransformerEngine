@@ -26,7 +26,7 @@ from transformer_engine.jax.attention import (
     CPStrategy,
     SequenceDescriptor,
 )
-from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES
+from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES, is_mesh_available
 
 from .base import BasePrimitive, register_primitive
 from .misc import (
@@ -3288,7 +3288,7 @@ register_primitive(FusedRingAttnStripedBwdPrimitive)
 
 
 def _maybe_context_parallel_axis(cp_axis: str):
-    if not cp_axis:
+    if not cp_axis and is_mesh_available():
         gmr = global_mesh_resource()
         if gmr is not None:
             cp_axis = gmr.cp_resource
