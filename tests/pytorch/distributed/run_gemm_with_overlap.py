@@ -24,7 +24,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
 )
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace_size_bytes
+
 from transformer_engine.pytorch.module.base import fill_userbuffers_buffer_for_all_gather
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)

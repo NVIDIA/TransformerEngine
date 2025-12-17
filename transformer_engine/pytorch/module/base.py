@@ -331,7 +331,6 @@ def initialize_ub(
         comm_priority: int = 0,
         gemm_priority: int = 0,
         pipeline_rs_overlap_first_gemm: bool = False,
-        with_cublasmp: bool = False,
     ) -> None:
         if atomic_gemm:
             warnings.warn(
@@ -506,7 +505,7 @@ def fill_userbuffers_buffer_for_all_gather(
     """
     # cuBlasMp already handles its own buffer filling and quantization factors
     if comm.with_cublasmp():
-        return
+        return local_tensor, local_tensor
 
     # Tensor dimensions
     local_shape = local_tensor.size()
