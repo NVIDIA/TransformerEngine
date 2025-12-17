@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""MoE Permutaion API"""
+"""MoE Permutation API"""
 import warnings
 from typing import Optional, Tuple
 import torch
@@ -191,7 +191,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
         routing_map: torch.Tensor,
         num_out_tokens: int,
         probs: torch.Tensor,
-        pad_offsets: torch.Tensor,
+        pad_offsets: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
