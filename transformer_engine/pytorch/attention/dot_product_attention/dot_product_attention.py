@@ -423,7 +423,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             "attention_dropout_ctx": attention_dropout_ctx,
         }
 
-        self.flash_attention = backend.flash_attention(
+        self.flash_attention = FlashAttention(
             softmax_scale,
             attention_type=attention_type,
             layer_number=layer_number,
@@ -1390,7 +1390,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
-                return self.flash_attention(
+                return backend.flash_attention(
+                    self.flash_attention,
                     query_layer,
                     key_layer,
                     value_layer,

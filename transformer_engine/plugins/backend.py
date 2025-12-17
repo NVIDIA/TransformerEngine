@@ -69,6 +69,20 @@ class BackendDispatch:
         
         return impl
     
+    def _reset_cache_to_native(self, operation: str):
+        # Check cache first
+        if operation in self._impl_cache:
+            # Get native backend
+            native_backend = get_backend("native")
+            impl = native_backend.get(operation)
+            if impl is None:
+                raise RuntimeError(
+                    f"Operation '{operation}' is not registered in native backend. "
+                    f"Available operations: {sorted(native_backend._implementations.keys())}"
+                )
+            # Cache the implementation for future use
+            self._impl_cache[operation] = impl
+
     def clear_cache(self):
         """Clear the implementation cache. Useful if flags change at runtime."""
         self._impl_cache.clear()
@@ -81,6 +95,7 @@ class BackendDispatch:
             return impl(*args, **kwargs)
         except Exception as e:
             logger.warning(f"GEMM implementation failed, falling back to native: {e}")
+            self._reset_cache_to_native("gemm")
             native_backend = get_backend("native")
             return native_backend.get("gemm")(*args, **kwargs)
     
@@ -91,6 +106,7 @@ class BackendDispatch:
             return impl(*args, **kwargs)
         except Exception as e:
             logger.warning(f"Apply Normalization implementation failed, falling back to native: {e}")
+            self._reset_cache_to_native("apply_normalization")
             native_backend = get_backend("native")
             return native_backend.get("apply_normalization")(*args, **kwargs)
     
@@ -101,6 +117,7 @@ class BackendDispatch:
             return impl(*args, **kwargs)
         except Exception as e:
             logger.warning(f"RmsNorm FWD implementation failed, falling back to native: {e}")
+            self._reset_cache_to_native("rmsnorm_fwd")
             native_backend = get_backend("native")
             return native_backend.get("rmsnorm_fwd")(*args, **kwargs)
     
@@ -111,6 +128,7 @@ class BackendDispatch:
             return impl(*args, **kwargs)
         except Exception as e:
             logger.warning(f"RmsNorm BWD implementation failed, falling back to native: {e}")
+            self._reset_cache_to_native("rmsnorm_bwd")
             native_backend = get_backend("native")
             trimmed_args = args[:-1]  # cut eps
             return native_backend.get("rmsnorm_bwd")(*trimmed_args, **kwargs)
@@ -122,18 +140,24 @@ class BackendDispatch:
             return impl
         except Exception as e:
             logger.warning(f"Adam implementation failed, falling back to native: {e}")
+            self._reset_cache_to_native("adam")
             native_backend = get_backend("native")
             return native_backend.get("adam")
     
     def flash_attention(self, *args, **kwargs):
         """Flash Attention with automatic fallback to native."""
-        impl = self._get_impl("flash_attention")
+        flash_attention_instance = args[0]
+        trimmed_args = args[1:]
+        native_impl = get_backend("native").get("flash_attention")
         try:
-            return impl(*args, **kwargs)
+            selected_impl = self._get_impl("flash_attention")
+            flash_attention_instance.forward = selected_impl.forward.__get__(flash_attention_instance, native_impl)
+            return flash_attention_instance(*trimmed_args, **kwargs)
         except Exception as e:
-            logger.warning(f"Flash Attention implementation failed, falling back to native: {e}")
-            native_backend = get_backend("native")
-            return native_backend.get("flash_attention")(*args, **kwargs)
+            logger.warning(f"Flash Attention Forward implementation failed, falling back to native: {e}")
+            self._reset_cache_to_native("flash_attention")
+            flash_attention_instance.forward = native_impl.forward.__get__(flash_attention_instance, native_impl)
+            return flash_attention_instance(*trimmed_args, **kwargs)
 
 
 # Backend initialization state
