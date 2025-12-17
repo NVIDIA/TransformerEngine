@@ -57,3 +57,4 @@ Transformer Engine documentation
    api/c/index
    debug
    examples/attention/attention.ipynb
+   examples/attention/cp_ag_thd_dpa_jax_deep_dive.ipynb
