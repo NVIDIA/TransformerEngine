@@ -453,23 +453,23 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     Parameters
     ----------
-    shape: int or iterable of int
+    shape : int or iterable of int
         Tensor dimensions.
-    dtype: torch.dtype
+    dtype : torch.dtype
         Nominal tensor datatype.
-    requires_grad: bool, optional = False
+    requires_grad : bool, optional = False
         Whether to compute gradients for this tensor.
-    data: torch.Tensor
+    data : torch.Tensor
         Raw FP8 data in a uint8 tensor
-    fp8_scale_inv: torch.Tensor
+    fp8_scale_inv : torch.Tensor
         Reciprocal of the scaling factor applied when casting to FP8,
         i.e. the scaling factor that must be applied when casting from
         FP8 to higher precision.
-    fp8_dtype: transformer_engine_torch.DType
+    fp8_dtype : transformer_engine_torch.DType
         FP8 format.
-    data_transpose: torch.Tensor, optional
+    data_transpose : torch.Tensor, optional
         FP8 transpose data in a uint8 tensor
-    quantizer: Float8Quantizer, Float8CurrentScalingQuantizer, optional
+    quantizer : Float8Quantizer, Float8CurrentScalingQuantizer, optional
         Builder class for FP8 tensors
 
     """
@@ -493,10 +493,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # Convert PyTorch dtype to TE dtype
         if dtype is None:
             dtype = self.dtype
-
+        tensor = self.contiguous()
         if torch.is_grad_enabled():
-            return _FromFloat8Func.apply(self, dtype)
-        return _FromFloat8Func.forward(None, self, dtype)
+            return _FromFloat8Func.apply(tensor, dtype)
+        return _FromFloat8Func.forward(None, tensor, dtype)
 
     def quantize_(
         self,
@@ -554,13 +554,19 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         Returns `self` if data is already in correct memory format.
 
         """
-        if self._data is not None and self._data.is_contiguous(memory_format=memory_format):
-            return self
-        if self._transpose is not None and self._transpose.is_contiguous(
-            memory_format=memory_format
-        ):
-            return self
-        return Float8Tensor.make_like(tensor=self, data=self._data.contiguous())
+        # requires_grad remains unaltered when calling contiguous on
+        # torch tensor and so should be the case for our custom float8 tensor
+        # as well.
+        return Float8Tensor.make_like(
+            tensor=self,
+            data=self._data.contiguous(memory_format=memory_format),
+            data_transpose=(
+                self._transpose.contiguous(memory_format=memory_format)
+                if self._transpose is not None
+                else None
+            ),
+            requires_grad=self.requires_grad,
+        )
 
         # raise ValueError("Float8Tensor does not support different memory formats!")
 
@@ -713,9 +719,8 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     [transpose, t_shape] + list(args[2:]),
                     kwargs,
                 )
-            # deep copy the scale inverse tensor and quantizer as well.
             scale_inv = tensor._scale_inv.detach().clone()
-            quantizer = tensor._quantizer.copy()
+            quantizer = tensor._quantizer  # Deep-copied in constructor
             out_tensor = Float8Tensor(
                 data=func_out,
                 shape=func_out.shape,
@@ -820,7 +825,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             # sure that updated Quantized weight tensor have same scale inverse across all shards.
             self._quantizer.amax_reduction_group = mesh.get_group()
             self._quantizer.with_amax_reduction = True
-        quantizer = self._quantizer.copy()  # quantizer to be used for allgathered weights
+
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
         # If weights are resharded after forward pass, then its enough to set the quantizer usages
@@ -833,9 +838,13 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # In case of hopper/L40, only one of data/transpose is needed
             # based on forward or backward pass. So setting the quantizer usages appropriately.
-            quantizer.set_usage(rowwise=not is_backward_pass, columnwise=is_backward_pass)
+            rowwise_usage = not is_backward_pass
+            columnwise_usage = is_backward_pass
+        else:
+            rowwise_usage = True
+            columnwise_usage = self._quantizer.columnwise_usage
         sharded_tensors = (self._data,)
-        metadata = (self._scale_inv, self._fp8_dtype, quantizer)
+        metadata = (self._scale_inv, rowwise_usage, columnwise_usage, self._fp8_dtype)
         return sharded_tensors, metadata
 
     def fsdp_post_all_gather(
@@ -861,7 +870,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         """
 
         (data,) = all_gather_outputs
-        (fp8_scale_inv, fp8_dtype, quantizer) = metadata
+        (fp8_scale_inv, rowwise_usage, columnwise_usage, fp8_dtype) = metadata
         orig_shape = data.size()
         # Quantizer has only columnwise usage set for backward pass
         # In Blackwell+ architectures, transpose is not needed at all,
@@ -870,20 +879,27 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         if out is not None:
             out._data = data
         else:
+            # We ll be here when post all gather is called the first time.
+            # Float8Tensor constructor makes a copy of the quantizer to
+            # save as its own quantizer. For the consequent iterations,
+            # the same quantizer is used. Copy is needed in the first iteration,
+            # since we need different quantizers for sharded and allgathered tensors.
+            # and self._quantizer belongs to the sharded parameter.
             fp8_args = {
                 "shape": orig_shape,
                 "dtype": param_dtype,
                 "fp8_scale_inv": fp8_scale_inv,
                 "fp8_dtype": fp8_dtype,
-                "quantizer": quantizer,
+                "quantizer": self._quantizer,
                 "requires_grad": False,
                 "data": data,
             }
             out = Float8Tensor(**fp8_args)
 
+        out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
         out.update_usage(
-            rowwise_usage=quantizer.rowwise_usage,
-            columnwise_usage=quantizer.columnwise_usage,
+            rowwise_usage=rowwise_usage,
+            columnwise_usage=columnwise_usage,
         )
         return out, all_gather_outputs
 

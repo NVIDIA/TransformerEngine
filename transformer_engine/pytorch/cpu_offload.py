@@ -657,60 +657,64 @@ def get_cpu_offload_context(
 
     Parameters
     ----------
-    enabled: bool, default = `False`
+    enabled : bool, default = False
              When set to True, CPU Offloading functionality is enabled.
-    num_layers: int, default = 1
+    num_layers : int, default = 1
             Determines the number of layers
             you want to offload activations/weights for.
-    model_layers: int, default = 1
+    model_layers : int, default = 1
             Number of layers in the model that will be used under this context.
-    offload_activations: bool, default = `True`
+    offload_activations : bool, default = True
             Deprecated.
-    offload_weights: bool, default = `True`
+    offload_weights : bool, default = True
             Deprecated.
-    double_buffering: bool, default = `False`
+    double_buffering : bool, default = False
             Deprecated.
-    retain_pinned_cpu_buffers: bool, default = `False`
+    retain_pinned_cpu_buffers : bool, default = False
             If True, the pinned CPU buffers are retained after offloading
             and reused for the next iteration. It is useful for cuda graphs capture.
-    manual_synchronization: bool, default = `False`
+    manual_synchronization : bool, default = False
             If True, the synchronization is done manually by the user.
             Additional argument manual_controller is returned. See more in manual control section.
-    offload_stream: torch.cuda.Stream, default = `None`
+    offload_stream : torch.cuda.Stream, default = None
             If provided, the offload stream is used for offloading and reloading.
             Otherwise, a new stream is allocated internally. It can be other than None
             only if manual_synchronization is True.
 
-    Manual synchronization
-    ----------
+    Notes
+    -----
+    **Manual synchronization:**
+
     By default, layers are offloaded/reloaded asynchronously
     with respect to the current forward/backward stream with predefined synchronization,
     to ensure that activation memory usage is equal to
-    `(num_layers - num_offloaded_layers) * T`, where `T` is the memory footprint of a layer.
+    ``(num_layers - num_offloaded_layers) * T``, where ``T`` is the memory footprint of a layer.
 
-    For more control over the offloading and reloading process, you can set `manual_synchronization=True`.
-    In this case, an additional argument, `manual_controller`, is returned.
+    For more control over the offloading and reloading process, you can set ``manual_synchronization=True``.
+    In this case, an additional argument, ``manual_controller``, is returned.
 
-    The `manual_controller` provides the following methods:
-    - `start_offload_layer(layer_id: int)`
-    - `release_activation_forward_gpu_memory(layer_id: int)`
-    - `start_reload_layer(layer_id: int)`
+    The ``manual_controller`` provides the following methods:
+    - ``start_offload_layer(layer_id: int)``
+    - ``release_activation_forward_gpu_memory(layer_id: int)``
+    - ``start_reload_layer(layer_id: int)``
 
     If none of these methods are invoked for a given layer, that layer will not be offloaded or reloaded.
-    If `start_offload_layer()` is called for a layer, offload copies for that layer begin asynchronously on the offload stream.
+    If ``start_offload_layer()`` is called for a layer, offload copies for that layer begin asynchronously on the offload stream.
 
     Since GPU activations must be kept in memory until the copy is finished, pointers to all activations are stored.
-    To release this memory, you need to call `release_activation_forward_gpu_memory(layer_id)`.
+    To release this memory, you need to call ``release_activation_forward_gpu_memory(layer_id)``.
     This method makes the current stream wait for an event recorded on the offload stream after all tensors from the layer have been offloaded.
 
-    The `start_reload_layer()` method is used to start reloading a layer.
-    Each tensor reload is awaited to finish before `tensor_pop()` for that tensor is called on the current stream.
+    The ``start_reload_layer()`` method is used to start reloading a layer.
+    Each tensor reload is awaited to finish before ``tensor_pop()`` for that tensor is called on the current stream.
 
-    You can provide an `offload_stream` to be used for offload and reload operations.
+    You can provide an ``offload_stream`` to be used for offload and reload operations.
     This allows for more detailed synchronization, such as delaying the start of offloading.
 
-    Example:
+    **Example:**
+
     .. code-block:: python
+
         offload_stream = torch.cuda.Stream()
         cpu_offload_context, sync_function, manual_controller = get_cpu_offload_context(
             enabled=True, model_layers=num_layers, manual_synchronization=True, offload_stream=offload_stream)
@@ -732,10 +736,10 @@ def get_cpu_offload_context(
         for i in range(num_layers):
             out[i].sum().backward()
 
-    V1 code path
-    ----------
+    **V1 code path:**
+
     If you want to use the v1 code path for offloading,
-    please set the environment variable NVTE_CPU_OFFLOAD_V1 to 1.
+    please set the environment variable ``NVTE_CPU_OFFLOAD_V1`` to 1.
 
     """
     if NVTE_CPU_OFFLOAD_V1:

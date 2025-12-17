@@ -255,7 +255,7 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
                                               std::vector<py::handle> quantizer_list);
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
-                                       const std::vector<int> &split_sections,
+                                       const std::vector<size_t> &split_sections,
                                        std::vector<py::handle> quantizer_list);
 
 /***************************************************************************************************
@@ -343,6 +343,14 @@ void nvfp4_2d_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, si
 void nvfp4_2d_partial_cast(const at::Tensor &inp, py::handle out, const at::Tensor &scale,
                            const at::Tensor &global_scale, size_t h, size_t w, size_t start_offset,
                            size_t block_len);
+void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
+                                        at::Tensor amax_colwise, int rows, int cols,
+                                        size_t start_offset);
+
+void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwise,
+                                at::Tensor output_colwise, const at::Tensor &scale_inv_rowwise,
+                                const at::Tensor &scale_inv_colwise, int rows, int cols,
+                                size_t start_offset);
 
 /***************************************************************************************************
  * Rotary positional embedding
@@ -459,6 +467,9 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
 void multi_tensor_compute_scale_and_scale_inv_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     float max_fp8, bool force_pow_2_scales, float epsilon);
+
+void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, const py::object &dummy,
+                                              std::vector<std::vector<at::Tensor>> tensor_lists);
 
 /***************************************************************************************************
  * padding

@@ -19,6 +19,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     Float8BlockScaling,
     NVFP4BlockScaling,
+    MXFP8BlockScaling,
     Format,
     Recipe,
 )
@@ -31,6 +32,11 @@ from transformer_engine.pytorch import (
     Float8Tensor,
     Float8BlockwiseQTensor,
     NVFP4Tensor,
+    is_mxfp8_available,
+    QuantizedTensor,
+    Float8Tensor,
+    Float8BlockwiseQTensor,
+    MXFP8Tensor,
 )
 from transformer_engine.pytorch.tensor import (
     cast_master_weights_to_fp8,
@@ -49,17 +55,21 @@ def _get_quantization_recipe(quantization) -> Recipe:
         return Float8CurrentScaling(fp8_format=fp8_format)
     elif quantization == "fp8_block":
         return Float8BlockScaling(fp8_format=fp8_format)
+    elif quantization == "mxfp8":
+        return MXFP8BlockScaling()
     else:
         raise ValueError(f"Unsupported quantization: {quantization}")
 
 
-def _get_raw_data(quantized_tensor):
+def _get_raw_data(quantized_tensor, colwise=False):
     """Get the underlying data of a quantized tensor, used in zero-1 optimizer"""
     if isinstance(quantized_tensor, Float8Tensor):
+        assert not colwise, "Float8Tensor does not support get colwise data"
         assert hasattr(quantized_tensor, "_data"), "Float8Tensor does not have _data attribute"
         assert quantized_tensor._data.dtype == torch.uint8, "Float8Tensor _data must be uint8"
         return quantized_tensor._data
     elif isinstance(quantized_tensor, Float8BlockwiseQTensor):
+        assert not colwise, "Float8BlockwiseQTensor does not support get colwise data"
         assert hasattr(
             quantized_tensor, "_rowwise_data"
         ), "Float8BlockwiseQTensor does not have _rowwise_data attribute"
@@ -73,6 +83,23 @@ def _get_raw_data(quantized_tensor):
             quantized_tensor._rowwise_data.dtype == torch.uint8
         ), "NVFP4Tensor _rowwise_data must be uint8"
         return quantized_tensor._rowwise_data
+    elif isinstance(quantized_tensor, MXFP8Tensor):
+        if colwise:
+            assert hasattr(
+                quantized_tensor, "_columnwise_data"
+            ), "MXFP8Tensor does not have columnwise_data attribute"
+            assert (
+                quantized_tensor._columnwise_data.dtype == torch.uint8
+            ), "MXFP8Tensor columnwise_data must be uint8"
+            return quantized_tensor._columnwise_data
+        else:
+            assert hasattr(
+                quantized_tensor, "_rowwise_data"
+            ), "MXFP8Tensor does not have rowwise_data attribute"
+            assert (
+                quantized_tensor._rowwise_data.dtype == torch.uint8
+            ), "MXFP8Tensor rowwise_data must be uint8"
+            return quantized_tensor._rowwise_data
     else:
         raise ValueError(f"Unsupported quantized tensor type: {type(quantized_tensor)}")
 
@@ -326,41 +353,43 @@ class MiniZero_1:
             weight_slice = weight.view(-1)[start_offset : start_offset + master_weight.numel()]
             overlapping_start, overlapping_end = self.overlapping_areas[i]
             self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
+        colwise_list = [False]
+        if isinstance(self.weights[0], MXFP8Tensor):
+            colwise_list.append(True)
 
-        # -----------------------------------------------------------------------------------------
+        for colwise in colwise_list:
+            # -------------------------------------------------------------------------------------
+            # Step 5: Copy the updated weights (not all weights) to the weight buffer
+            # -------------------------------------------------------------------------------------
+            for i in range(len(self.weights)):
+                master_weight = self.master_weights[i]
+                if master_weight is None:
+                    continue
+                start_offset = self.start_offsets[i]
+                if isinstance(self.weights[i], QuantizedTensor):
+                    weight = _get_raw_data(self.weights[i], colwise)
+                else:
+                    weight = self.weights[i]
+                weight_slice = weight.view(-1)[start_offset : start_offset + master_weight.numel()]
+                overlapping_start, overlapping_end = self.overlapping_areas[i]
+                self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
+
+        # -------------------------------------------------------------------------------------
         # Step 6: Weight all-gather (FP8 or BF16)
-        # -----------------------------------------------------------------------------------------
+        # -------------------------------------------------------------------------------------
         dist.all_gather_into_tensor(
             self.weight_buffer, self.weight_buffer_slice, group=self.dp_group
         )
 
-        # -----------------------------------------------------------------------------------------
+        # -------------------------------------------------------------------------------------
         # Step 7: Copy the gathered weights from weight buffer to the actual weights
-        # -----------------------------------------------------------------------------------------
-        for idx, weight in enumerate(self.weights):
-            if isinstance(weight, NVFP4Tensor):
-                start = self.storage_offsets[idx]
-                end = start + self.storage_sizes[idx]
-                weight_data = _get_raw_data(weight)
-                buffer_len = end - start
-                slice_len = weight_data.view(-1).numel()
-                if slice_len != (end - start):
-                    print(
-                        "[MiniZero_1] gather mismatch:",
-                        f"buffer_len={buffer_len}",
-                        f"slice_len={slice_len}",
-                        f"weight_shape={tuple(weight_data.shape)}",
-                        f"offset=({start},{end})",
-                    )
-                weight_data.view(-1).data.copy_(self.weight_buffer[start:end])
-                continue
-            start = self.offsets[idx]
-            end = start + weight.numel()
+        # -------------------------------------------------------------------------------------
+        for weight, offset in zip(self.weights, self.offsets[:-1]):
+            start = offset
+            end = offset + weight.numel()
             if isinstance(weight, QuantizedTensor):
-                weight_data = _get_raw_data(weight)
-            else:
-                weight_data = weight
-            weight_data.view(-1).data.copy_(self.weight_buffer[start:end])
+                weight = _get_raw_data(weight, colwise)
+            weight.view(-1).data.copy_(self.weight_buffer[start:end])
 
         if self.manual_post_all_gather_processing:
             quantized_weights = [
@@ -385,9 +414,15 @@ class MiniFSDP:
         else:
             raw_data_list = [w.view(-1) for w in weights]
         self.flatten_weight, original_length = self._flatten_tensors_with_pad(raw_data_list)
+        if isinstance(weights[0], MXFP8Tensor):
+            self.flatten_columnwise = self.flatten_weight.clone()
+        else:
+            self.flatten_columnwise = None
 
         # Split flattened weights into shards
         self.local_weight_shard = torch.chunk(self.flatten_weight, world_size)[rank]
+        if self.flatten_columnwise is not None:
+            self.local_columnwise_shard = torch.chunk(self.flatten_columnwise, world_size)[rank]
         self.local_main_grad_shard = torch.zeros_like(
             self.local_weight_shard, dtype=torch.float32, device="cuda"
         )
@@ -419,14 +454,25 @@ class MiniFSDP:
                 self.shard_indices.append((None, None))
 
             if isinstance(weights[idx], QuantizedTensor):
-                replace_raw_data(
-                    weights[idx], self.flatten_weight[start:end].view(weights[idx].shape)
-                )
+                if self.flatten_columnwise is not None:
+                    new_rowwise_data = self.flatten_weight[start:end].view(weights[idx].shape)
+                    new_rowwise_data.copy_(weights[idx]._rowwise_data)
+                    weights[idx]._rowwise_data = new_rowwise_data
+                    new_columnwise_data = self.flatten_columnwise[start:end].view(
+                        weights[idx].shape
+                    )
+                    new_columnwise_data.copy_(weights[idx]._columnwise_data)
+                    weights[idx]._columnwise_data = new_columnwise_data
+                else:
+                    replace_raw_data(
+                        weights[idx], self.flatten_weight[start:end].view(weights[idx].shape)
+                    )
             else:
                 weights[idx].data = self.flatten_weight[start:end].view(weights[idx].shape)
 
         # Initialize local model weights and high-precision master weights
         self.local_weights = []
+        self.local_columnwise = []
         self.master_weights = []
         for i, weight in enumerate(self.weights):
             weight_start, weight_end = self.weight_indices[i]
@@ -434,6 +480,11 @@ class MiniFSDP:
             if shard_start is not None and shard_end is not None:
                 local_weight_shard = self.local_weight_shard[shard_start:shard_end]
                 self.local_weights.append(local_weight_shard)
+                if self.flatten_columnwise is not None:
+                    local_columnwise_shard = self.local_columnwise_shard[shard_start:shard_end]
+                else:
+                    local_columnwise_shard = None
+                self.local_columnwise.append(local_columnwise_shard)
 
                 if isinstance(weight, QuantizedTensor):
                     high_precision_init_val = weight.get_high_precision_init_val().view(-1)
@@ -445,6 +496,7 @@ class MiniFSDP:
                 self.master_weights.append(master_weight_shard)
             else:
                 self.local_weights.append(None)
+                self.local_columnwise.append(None)
                 self.master_weights.append(None)
             setattr(
                 weight, "main_grad", torch.zeros_like(weight, dtype=torch.float32, device="cuda")
@@ -530,12 +582,12 @@ class MiniFSDP:
             )
         elif isinstance(first_weight, QuantizedTensor):
             local_weights = []
-            for local_weight in self.local_weights:
-                if local_weight is None:
-                    local_weights.append(None)
-                    continue
-
-                local_weights.append(local_weight)
+            for i, local_weight in enumerate(self.local_weights):
+                if self.flatten_columnwise is not None:
+                    local_columnwise = self.local_columnwise[i]
+                    local_weights.append((local_weight, local_columnwise))
+                else:
+                    local_weights.append(local_weight)
 
             cast_master_weights_to_fp8(
                 self.weights,
@@ -557,6 +609,10 @@ class MiniFSDP:
         dist.all_gather_into_tensor(
             self.flatten_weight, self.local_weight_shard, group=self.dp_group
         )
+        if self.flatten_columnwise is not None:
+            dist.all_gather_into_tensor(
+                self.flatten_columnwise, self.local_columnwise_shard, group=self.dp_group
+            )
 
         if self.manual_post_all_gather_processing:
             quantized_weights = [
@@ -628,15 +684,15 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group, manual_post_all_gat
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256 + 16, **linear_kwargs),
-            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256 + 32, **linear_kwargs),
+            te.Linear(256 + 32, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256 + 16, **linear_kwargs),
-        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256 + 32, **linear_kwargs),
+        te.Linear(256 + 32, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -661,7 +717,7 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group, manual_post_all_gat
             w.main_grad.zero_()
 
         inputs = [
-            torch.randn(16, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
+            torch.randn(32, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
         ]
         # Choose based on rank to make sure the inputs of different ranks are different.
         x = inputs[rank]
@@ -692,7 +748,9 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group, manual_post_all_gat
         optimizer_fp8.step()
         optimizer.step()
 
-        torch.testing.assert_close(loss_fp8, loss, atol=0, rtol=0)
+        assert torch.allclose(
+            loss_fp8, loss, atol=0, rtol=0
+        ), f"Loss mismatch at rank {rank}, step {i} for {quantization}"
 
 
 def _test_fsdp_cast_master_weights_to_fp8(
@@ -724,15 +782,15 @@ def _test_fsdp_cast_master_weights_to_fp8(
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256 + 16, **linear_kwargs),
-            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256 + 32, **linear_kwargs),
+            te.Linear(256 + 32, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256 + 16, **linear_kwargs),
-        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256 + 32, **linear_kwargs),
+        te.Linear(256 + 32, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -746,12 +804,12 @@ def _test_fsdp_cast_master_weights_to_fp8(
     )
     optimizer = MiniFSDP([w for w in model.parameters()], 10.0, dp_group)
 
-    for _ in range(100):
+    for i in range(100):
         optimizer_fp8.zero_grad()
         optimizer.zero_grad()
 
         inputs = [
-            torch.randn(16, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
+            torch.randn(32, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
         ]
         # Choose based on rank to make sure the inputs of different ranks are different.
         x = inputs[rank]
@@ -782,7 +840,9 @@ def _test_fsdp_cast_master_weights_to_fp8(
         optimizer_fp8.step()
         optimizer.step()
 
-        torch.testing.assert_close(loss_fp8, loss, atol=0, rtol=0)
+        assert torch.allclose(
+            loss_fp8, loss, atol=0, rtol=0
+        ), f"Loss mismatch at rank {rank}, step {i} for {quantization} (FSDP)"
 
 
 def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processing):
@@ -916,6 +976,9 @@ def run_parallel_tests() -> None:
         quantizations.extend(["fp8", "fp8_cs"])
     if is_fp8_block_scaling_available():
         quantizations.append("fp8_block")
+    if is_mxfp8_available():
+        quantizations.append("mxfp8")
+
     manual_post_all_gather_processings = [False, True]
     print("starting mini optimizer test")
     _test_mini_optimizer(dp_group)

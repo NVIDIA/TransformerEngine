@@ -4,7 +4,7 @@
     See LICENSE for license information.
 
 Getting started
-==============
+===============
 
 .. note::
 
@@ -21,7 +21,7 @@ Transformer Engine provides a set of precision debug tools which allow you to ea
 There are 4 things one needs to do to use Transformer Engine debug features:
 
 1. Create a configuration YAML file to configure the desired features.
-2. Import, initialize, and install the `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ tool.
+2. Import and initialize the `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ tool, which is installed as a dependency of Transformer Engine.
 3. One can pass ``name="..."`` when creating TE layers to easier identify layer names. If this is not provided, names will be inferred automatically.
 4. Invoke ``debug_api.step()`` at the end of one forward-backward pass.
 
@@ -38,7 +38,7 @@ To start debugging, one needs to create a configuration YAML file. This file lis
    one - ``UserProvidedPrecision`` - is a custom feature implemented by the user. Nvidia-DL-Framework-Inspect inserts features into the layers according to the config.
 
 Example training script
-----------------------
+-----------------------
 
 Let's look at a simple example of training a Transformer layer using Transformer Engine with FP8 precision. This example demonstrates how to set up the layer, define an optimizer, and perform a few training iterations using synthetic data.
 
@@ -81,7 +81,7 @@ We will demonstrate two debug features on the code above:
 2. Logging statistics for other GEMM operations, such as gradient statistics for data gradient GEMM within the LayerNormLinear sub-layer of the TransformerLayer.
 
 Config file
-----------
+-----------
 
 We need to prepare the configuration YAML file, as below
 
@@ -114,7 +114,8 @@ We need to prepare the configuration YAML file, as below
 Further explanation on how to create config files is in the :doc:`next part of the documentation <2_config_file_structure>`.
 
 Adjusting Python file
---------------------
+---------------------
+
 
 .. code-block:: python
 
@@ -145,7 +146,8 @@ In the modified code above, the following changes were made:
 3. Added ``debug_api.step()`` after each of the forward-backward pass.
 
 Inspecting the logs
-------------------
+-------------------
+
 
 Let's look at the files with the logs. Two files will be created:
 
@@ -213,7 +215,8 @@ The second log file (``nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-
     INFO - transformer_layer.self_attention.layernorm_qkv_activation_l1_norm             iteration=000004                  value=130776.7969
 
 Logging using TensorBoard
-------------------------
+-------------------------
+
 
 Precision debug tools support logging using `TensorBoard <https://www.tensorflow.org/tensorboard>`_. To enable it, one needs to pass the argument ``tb_writer`` to the ``debug_api.initialize()``.  Let's modify ``train.py`` file.
 
