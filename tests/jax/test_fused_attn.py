@@ -677,6 +677,8 @@ class FusedAttnRunner:
                             self.cp_reorder_fn(self.segment_pos_q),
                             self.cp_reorder_fn(self.segment_pos_kv),
                         ),
+                        self.qkv_layout.is_thd(),
+                        self.cp_size > 1 and self.cp_load_balanced,
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
@@ -704,6 +706,8 @@ class FusedAttnRunner:
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (self.segment_ids_q, self.segment_ids_kv),
                         None,
+                        self.qkv_layout.is_thd(),
+                        self.cp_size > 1 and self.cp_load_balanced,
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
