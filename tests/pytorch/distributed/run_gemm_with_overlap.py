@@ -338,11 +338,16 @@ def _main(opts):
                 atomic_gemm=opts.atomic,
                 aggregate=opts.aggregate,
                 use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
-            ) if not opts.use_cublasmp
-            else tex.CommOverlapP2P(
-                helper, tp_rank, tp_size, atomic_gemm=opts.atomic,
             )
-        ) if opts.p2p
+            if not opts.use_cublasmp
+            else tex.CommOverlapP2P(
+                helper,
+                tp_rank,
+                tp_size,
+                atomic_gemm=opts.atomic,
+            )
+        )
+        if opts.p2p
         else (
             tex.CommOverlap(
                 (outer_size, hidden_size),
@@ -350,9 +355,13 @@ def _main(opts):
                 helper,
                 tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
                 atomic_gemm=opts.atomic,
-            ) if not opts.use_cublasmp
+            )
+            if not opts.use_cublasmp
             else tex.CommOverlap(
-                helper, tp_rank, tp_size, atomic_gemm=opts.atomic,
+                helper,
+                tp_rank,
+                tp_size,
+                atomic_gemm=opts.atomic,
             )
         )
     )
@@ -370,11 +379,11 @@ def _main(opts):
                     tex.CommOverlapType.RS,
                     set_sm_margin=True,
                     atomic_gemm=True,
-                ) if not opts.use_cublasmp
-                else tex.CommOverlapP2P(
-                    helper, tp_rank, tp_size, atomic_gemm=True
                 )
-            ) if opts.atomic_rs_p2p
+                if not opts.use_cublasmp
+                else tex.CommOverlapP2P(helper, tp_rank, tp_size, atomic_gemm=True)
+            )
+            if opts.atomic_rs_p2p
             else (
                 tex.CommOverlap(
                     (outer_size, hidden_size),
@@ -382,10 +391,9 @@ def _main(opts):
                     helper,
                     tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
                     atomic_gemm=True,
-                ) if not opts.use_cublasmp
-                else tex.CommOverlap(
-                    helper, tp_rank, tp_size, atomic_gemm=True
                 )
+                if not opts.use_cublasmp
+                else tex.CommOverlap(helper, tp_rank, tp_size, atomic_gemm=True)
             )
         )
 

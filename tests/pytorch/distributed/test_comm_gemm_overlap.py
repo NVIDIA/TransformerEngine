@@ -50,8 +50,9 @@ os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 torch._dynamo.reset()
 
 
-def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization,
-                           use_cublasmp=False):
+def _run_gemm_with_overlap(
+    comm_type, bulk, p2p, atomic, aggregate, quantization, use_cublasmp=False
+):
     test_path = TEST_ROOT / "run_gemm_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -93,8 +94,13 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization
 
 
 def _run_layer_with_overlap(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers=1,
-    use_cublasmp=False
+    layer_type,
+    linear_parallel_mode,
+    overlap_rs_dgrad,
+    fp8,
+    quantization,
+    num_layers=1,
+    use_cublasmp=False,
 ):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
@@ -205,6 +211,7 @@ def test_bulk_overlaps(comm_type, quantization, connections):
     else:
         _run_gemm_with_overlap(comm_type, True, False, False, False, quantization)
 
+
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
     "fp8",
@@ -246,12 +253,16 @@ def test_bulk_overlaps(comm_type, quantization, connections):
         )
     ],
 )
-def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_dgrad, use_cublasmp, fp8):
+def test_layers_with_overlap_bf16(
+    layer_type, linear_parallel_mode, overlap_rs_dgrad, use_cublasmp, fp8
+):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None,
-                            use_cublasmp=use_cublasmp)
+    _run_layer_with_overlap(
+        layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None, use_cublasmp=use_cublasmp
+    )
+
 
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
@@ -301,8 +312,15 @@ def test_layers_with_overlap_fp8(
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, True, quantization,
-                            use_cublasmp=use_cublasmp)
+    _run_layer_with_overlap(
+        layer_type,
+        linear_parallel_mode,
+        overlap_rs_dgrad,
+        True,
+        quantization,
+        use_cublasmp=use_cublasmp,
+    )
+
 
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
@@ -343,9 +361,15 @@ def test_multi_layer_with_overlap_bf16(
     Test Transformer Engine layers with comm+GEMM overlap.
     """
     _run_layer_with_overlap(
-        layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None, num_layers,
-        use_cublasmp=use_cublasmp
+        layer_type,
+        linear_parallel_mode,
+        overlap_rs_dgrad,
+        fp8,
+        None,
+        num_layers,
+        use_cublasmp=use_cublasmp,
     )
+
 
 @pytest.mark.parametrize("use_cublasmp", (False, True))
 @pytest.mark.parametrize(
@@ -380,6 +404,11 @@ def test_multi_layer_with_overlap_fp8(
     Test Transformer Engine layers with comm+GEMM overlap.
     """
     _run_layer_with_overlap(
-        layer_type, linear_parallel_mode, overlap_rs_dgrad, True, quantization, num_layers,
-        use_cublasmp=use_cublasmp
+        layer_type,
+        linear_parallel_mode,
+        overlap_rs_dgrad,
+        True,
+        quantization,
+        num_layers,
+        use_cublasmp=use_cublasmp,
     )
