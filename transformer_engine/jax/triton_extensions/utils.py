@@ -142,16 +142,16 @@ def compile_triton(
     )
 
     # Create kernel object for JAX
+    # From jax/jaxlib/gpu/triton_kernels.cc:
+    # Kernel::Kernel(kernel_name, num_warps, num_ctas, shared_mem_bytes, ptx, ttir, compute_capability)
     kernel = gpu_triton.TritonKernel(
-        compiled.name,
-        num_warps,
-        compiled.metadata.shared,
-        compiled.asm["ptx"],
-        "",  # ttir
-        compute_capability,
-        1,
-        1,
-        1,  # cluster_dims
+        compiled.name,            # arg0: kernel_name (str)
+        num_warps,                # arg1: num_warps (int)
+        num_ctas,                 # arg2: num_ctas (int)
+        compiled.metadata.shared, # arg3: shared_mem_bytes (int)
+        compiled.asm["ptx"],      # arg4: ptx (str)
+        "",                       # arg5: ttir (str) - empty
+        compute_capability,       # arg6: compute_capability (int)
     )
 
     _TRITON_KERNEL_CACHE[cache_key] = kernel

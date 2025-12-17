@@ -443,7 +443,7 @@ class TestHighLevelPermutationAPI:
 
         # Define loss functions
         def loss_fn(x):
-            output, _, _ = token_dispatch(x, routing_map, num_out_tokens)
+            output, _, _, _, _ = token_dispatch(x, routing_map, num_out_tokens)
             return jnp.sum(output**2)
 
         def ref_loss_fn(x):
@@ -454,7 +454,7 @@ class TestHighLevelPermutationAPI:
         ref_loss_val, ref_grad = jax.value_and_grad(ref_loss_fn)(inp)
 
         # Compare forward outputs
-        output, _, _ = token_dispatch(inp, routing_map, num_out_tokens)
+        output, _, _, _, _ = token_dispatch(inp, routing_map, num_out_tokens)
         ref_output, _, _ = reference_token_dispatch(inp, routing_map, num_out_tokens)
         assert_allclose(output, ref_output)
 
@@ -496,7 +496,7 @@ class TestHighLevelPermutationAPI:
         # Define loss function that uses token_dispatch with probs
         # We compute gradients w.r.t. both inp and probs
         def loss_fn(x, p):
-            output, permuted_probs, _ = token_dispatch(x, routing_map, num_out_tokens, probs=p)
+            output, permuted_probs, _, _, _ = token_dispatch(x, routing_map, num_out_tokens, probs=p)
             return jnp.sum(output**2) + jnp.sum(permuted_probs**2)
 
         def ref_loss_fn(x, p):
@@ -510,7 +510,7 @@ class TestHighLevelPermutationAPI:
             ref_loss_fn, argnums=(0, 1)
         )(inp, probs)
 
-        output, permuted_probs, _ = token_dispatch(inp, routing_map, num_out_tokens, probs=probs)
+        output, permuted_probs, _, _, _ = token_dispatch(inp, routing_map, num_out_tokens, probs=probs)
 
         ref_output, ref_permuted_probs, _ = reference_token_dispatch(
             inp, routing_map, num_out_tokens, probs=probs
@@ -684,11 +684,310 @@ class TestHighLevelPermutationAPI:
             jnp.sum(routing_map, axis=1, keepdims=True), 1.0
         )
 
-        # Dispatch tokens to experts (returns output, permuted_probs, row_id_map)
-        dispatched, _, row_id_map = token_dispatch(inp, routing_map, num_out_tokens)
+        # Dispatch tokens to experts (returns output, permuted_probs, row_id_map, ...)
+        dispatched, _, row_id_map, _, _ = token_dispatch(inp, routing_map, num_out_tokens)
 
         # Combine tokens back (with uniform merging) (new signature)
         combined = token_combine(dispatched, row_id_map, merging_probs)
 
         # Compare with original input
         assert_allclose(combined, inp)
+
+    # =========================================================================
+    # token_dispatch with padding tests (using unified API)
+    # =========================================================================
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        [
+            (32, 8, 256, 2, 16),
+            (64, 16, 512, 3, 32),
+            (128, 8, 128, 4, 64),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    def test_token_dispatch_with_padding(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, align_size, dtype
+    ):
+        """Test token_dispatch with padding forward and backward pass"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
+        num_out_tokens = int(jnp.sum(routing_map))  # Ignored when using padding
+
+        # Generate input data
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Test forward pass with padding (using unified API)
+        # Note: num_out_tokens is not needed when using padding - it's computed internally
+        output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert = token_dispatch(
+            inp,
+            routing_map,
+            tokens_per_expert=tokens_per_expert_arr,
+            align_size=align_size,
+        )
+
+        # Check output shape - should be padded
+        expected_padded_tokens = int(jnp.sum(target_tokens_per_expert))
+        assert output.shape == (expected_padded_tokens, hidden_size)
+        assert permuted_probs is None  # No probs provided
+
+        # Check that each expert's tokens are aligned
+        for expert_idx in range(num_experts):
+            expert_tokens = int(target_tokens_per_expert[expert_idx])
+            assert expert_tokens % align_size == 0 or expert_tokens == 0
+
+        # Test backward pass
+        def loss_fn(x):
+            out, _, _, _, _ = token_dispatch(
+                x,
+                routing_map,
+                tokens_per_expert=tokens_per_expert_arr,
+                align_size=align_size,
+            )
+            return jnp.sum(out**2)
+
+        grad = jax.grad(loss_fn)(inp)
+        assert grad.shape == inp.shape
+        assert not jnp.any(jnp.isnan(grad))
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        [
+            (32, 8, 256, 2, 16),
+            (64, 16, 512, 3, 32),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    def test_token_dispatch_with_padding_and_probs(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, align_size, dtype
+    ):
+        """Test token_dispatch with padding and probs"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
+        num_out_tokens = int(jnp.sum(routing_map))  # Ignored when using padding
+
+        # Generate input data and probs
+        key, inp_key, prob_key = jax.random.split(key, 3)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+        probs = jax.random.uniform(
+            prob_key, (num_tokens, num_experts), dtype=dtype, minval=0.0, maxval=1.0
+        )
+
+        # Test forward pass with padding and probs
+        # Note: num_out_tokens is not needed when using padding - it's computed internally
+        output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert = token_dispatch(
+            inp,
+            routing_map,
+            probs=probs,
+            tokens_per_expert=tokens_per_expert_arr,
+            align_size=align_size,
+        )
+
+        # Check output shape
+        expected_padded_tokens = int(jnp.sum(target_tokens_per_expert))
+        assert output.shape == (expected_padded_tokens, hidden_size)
+        assert permuted_probs is not None
+        assert permuted_probs.shape == (expected_padded_tokens,)
+
+        # Test backward pass
+        def loss_fn(x, p):
+            out, perm_probs, _, _, _ = token_dispatch(
+                x,
+                routing_map,
+                probs=p,
+                tokens_per_expert=tokens_per_expert_arr,
+                align_size=align_size,
+            )
+            return jnp.sum(out**2) + jnp.sum(perm_probs**2)
+
+        (inp_grad, probs_grad) = jax.grad(loss_fn, argnums=(0, 1))(inp, probs)
+        assert inp_grad.shape == inp.shape
+        assert probs_grad.shape == probs.shape
+        assert not jnp.any(jnp.isnan(inp_grad))
+        assert not jnp.any(jnp.isnan(probs_grad))
+
+    # =========================================================================
+    # token_combine with unpad tests (using unified API)
+    # =========================================================================
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        [
+            (32, 8, 256, 2, 16),
+            (64, 16, 512, 3, 32),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    @pytest.mark.parametrize("with_merging_probs", [True, False])
+    def test_token_combine_with_unpad(
+        self,
+        num_tokens,
+        num_experts,
+        hidden_size,
+        tokens_per_expert,
+        align_size,
+        dtype,
+        with_merging_probs,
+    ):
+        """Test token_combine with unpad forward and backward pass"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate input and dispatch with padding to get row_id_map and pad_offsets
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        _, _, row_id_map, pad_offsets, target_tokens_per_expert = token_dispatch(
+            inp,
+            routing_map,
+            tokens_per_expert=tokens_per_expert_arr,
+            align_size=align_size,
+        )
+
+        # Generate expert output data (padded)
+        expected_padded_tokens = int(jnp.sum(target_tokens_per_expert))
+        key, expert_key, merge_key = jax.random.split(key, 3)
+        expert_output = jax.random.uniform(
+            expert_key, (expected_padded_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        if with_merging_probs:
+            merging_probs = jax.random.uniform(
+                merge_key, (num_tokens, num_experts), dtype=dtype, minval=0.0, maxval=1.0
+            )
+            # Normalize per token
+            merging_probs = merging_probs / (jnp.sum(merging_probs, axis=1, keepdims=True) + 1e-8)
+        else:
+            merging_probs = None
+
+        # Test forward pass with unpad (using unified API)
+        output = token_combine(expert_output, row_id_map, merging_probs, pad_offsets)
+        assert output.shape == (num_tokens, hidden_size)
+
+        # Test backward pass
+        def loss_fn(x):
+            out = token_combine(x, row_id_map, merging_probs, pad_offsets)
+            return jnp.sum(out**2)
+
+        grad = jax.grad(loss_fn)(expert_output)
+        assert grad.shape == expert_output.shape
+        assert not jnp.any(jnp.isnan(grad))
+
+    # =========================================================================
+    # Round-trip tests with padding
+    # =========================================================================
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        [
+            (32, 8, 256, 2, 16),
+            (64, 16, 512, 3, 32),
+            (128, 8, 128, 4, 64),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    def test_dispatch_combine_with_padding_roundtrip(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, align_size, dtype
+    ):
+        """Test that token_dispatch with padding followed by token_combine with unpad recovers input"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate input data
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Create uniform merging probs (equal weight for all routed experts)
+        merging_probs = routing_map.astype(dtype) / jnp.maximum(
+            jnp.sum(routing_map, axis=1, keepdims=True), 1.0
+        )
+
+        # Dispatch tokens to experts with padding
+        # Note: num_out_tokens is not needed when using padding - it's computed internally
+        dispatched, _, row_id_map, pad_offsets, _ = token_dispatch(
+            inp,
+            routing_map,
+            tokens_per_expert=tokens_per_expert_arr,
+            align_size=align_size,
+        )
+
+        # Combine tokens back with unpadding
+        combined = token_combine(dispatched, row_id_map, merging_probs, pad_offsets)
+
+        # Compare with original input
+        assert_allclose(combined, inp)
+
+    @pytest.mark.parametrize(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        [
+            (32, 8, 256, 2, 16),
+            (64, 16, 512, 3, 32),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    def test_dispatch_combine_with_padding_gradient_flow(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, align_size, dtype
+    ):
+        """Test gradient flow through dispatch with padding -> combine with unpad"""
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate input data
+        key, inp_key = jax.random.split(key)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Create uniform merging probs
+        merging_probs = routing_map.astype(dtype) / jnp.maximum(
+            jnp.sum(routing_map, axis=1, keepdims=True), 1.0
+        )
+
+        # Define end-to-end function
+        def forward(x):
+            dispatched, _, row_id_map, pad_offsets, _ = token_dispatch(
+                x,
+                routing_map,
+                tokens_per_expert=tokens_per_expert_arr,
+                align_size=align_size,
+            )
+            # Simulate some expert processing (e.g., scaling)
+            processed = dispatched * 2.0
+            combined = token_combine(processed, row_id_map, merging_probs, pad_offsets)
+            return jnp.sum(combined**2)
+
+        # Test gradient computation
+        grad = jax.grad(forward)(inp)
+        assert grad.shape == inp.shape
+        assert not jnp.any(jnp.isnan(grad))
+
+        # Verify gradient is non-zero for inputs that are routed
+        routed_mask = jnp.any(routing_map > 0, axis=1)
+        assert jnp.any(grad[routed_mask] != 0)
