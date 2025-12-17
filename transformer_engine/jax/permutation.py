@@ -45,9 +45,8 @@ __all__ = [
 def token_dispatch(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
-    num_out_tokens: Optional[int] = None,
+    num_out_tokens: int,
     probs: Optional[jnp.ndarray] = None,
-    tokens_per_expert: Optional[jnp.ndarray] = None,
     align_size: Optional[int] = None,
 ) -> Tuple[
     jnp.ndarray,
@@ -63,9 +62,9 @@ def token_dispatch(
     to their designated experts according to the routing map. The row_id_map
     is computed internally from the routing_map.
 
-    Optionally supports fused padding for alignment when both `tokens_per_expert`
-    and `align_size` are provided. This is useful for efficient matrix multiplications
-    that require aligned tensor dimensions.
+    Optionally supports fused padding for alignment when `align_size` is provided.
+    This is useful for efficient matrix multiplications that require aligned tensor
+    dimensions. The padding is computed internally from the routing_map.
 
     Parameters
     ----------
@@ -74,31 +73,30 @@ def token_dispatch(
     routing_map : jnp.ndarray
         Routing mask of shape [batch, sequence, num_experts] or [num_tokens, num_experts].
         Values: 1 = routed, 0 = not routed.
-    num_out_tokens : Optional[int], default = None
-        The number of output tokens after permutation. For the dropless case, this should be equal to 
-        the sum of routing_map and must be provided explicitly for JIT compatibility when NOT
-        using padding.
-        When using padding (tokens_per_expert and align_size provided), this value
-        is ignored and computed internally based on aligned sizes. If provided along
-        with padding parameters, a warning will be issued.
+    num_out_tokens : int
+        The number of output tokens after permutation (before padding). For the dropless
+        case, this should be equal to the sum of routing_map. Must be provided explicitly
+        for JIT compatibility since output shape must be known at compile time.
     probs : Optional[jnp.ndarray]
         Optional routing probabilities of shape [batch, sequence, num_experts] or
         [num_tokens, num_experts]. If provided, permuted_probs will be returned.
-    tokens_per_expert : Optional[jnp.ndarray]
-        Optional tensor of shape [num_experts] containing actual token counts per expert.
-        Required for fused padding. If provided along with align_size, outputs will be
-        padded to align each expert's tokens, and num_out_tokens will be computed internally.
     align_size : Optional[int]
-        Optional alignment size for padding. Required for fused padding.
-        Each expert's tokens will be padded to a multiple of this size.
+        Optional alignment size for padding. If provided, outputs will be padded to
+        align each expert's tokens to a multiple of this size. The output buffer is
+        allocated with worst-case size, rounded down to align_size:
+        ((num_out_tokens + num_experts * (align_size - 1)) // align_size) * align_size
+        This enables full JIT compatibility.
 
     Returns
     -------
     output : jnp.ndarray
-        Permuted output tensor of shape [num_out_tokens, hidden_size]
-        (or [num_out_tokens_padded, hidden_size] when using padding fusion).
+        Permuted output tensor of shape [num_out_tokens, hidden_size] without padding,
+        or [worst_case_padded_size, hidden_size] when using padding fusion.
+        With padding, the actual used portion may be smaller than the buffer; check
+        actual_num_out_tokens (sum of target_tokens_per_expert) for the actual size.
     permuted_probs : Optional[jnp.ndarray]
-        Permuted probabilities of shape [num_out_tokens], or None if probs was not provided.
+        Permuted probabilities of shape [num_out_tokens] or [worst_case_padded_size],
+        or None if probs was not provided.
     row_id_map : jnp.ndarray
         Row ID map for use in token_combine (shape [num_tokens, num_experts * 2 + 1]).
     pad_offsets : Optional[jnp.ndarray]
@@ -110,52 +108,33 @@ def token_dispatch(
 
     Note
     ----
-    **JIT Compatibility with Fused Padding:**
+    **JIT Compatibility:**
 
-    When using fused padding (tokens_per_expert and align_size provided), the output
-    size is computed from `tokens_per_expert` values. This requires concrete (non-traced)
-    values at compile time because JAX needs to know output shapes during tracing.
+    This function is fully JIT-compatible. When using padding (align_size provided),
+    the output buffer is allocated with a fixed worst-case size that depends only on
+    compile-time constants (num_out_tokens, num_experts, align_size). The actual
+    padding offsets (pad_offsets) and aligned token counts (target_tokens_per_expert)
+    are computed internally from the routing_map and can be traced values.
 
-    If `tokens_per_expert` contains traced values (e.g., computed from traced inputs
-    inside a JIT-compiled function), a ValueError will be raised with instructions.
-
-    To ensure compatibility, compute `tokens_per_expert` outside the JIT boundary
-    and pass it as a concrete array argument to the JIT-compiled function.
-
-    Without padding (only `num_out_tokens` provided), the function is fully JIT-compatible
-    since `num_out_tokens` is a Python int known at trace time.
+    The worst-case output size is:
+    ((num_out_tokens + num_experts * (align_size - 1)) // align_size) * align_size
+    This accounts for the maximum possible padding when each expert needs (align_size - 1)
+    extra tokens to align, rounded down to align_size for buffer alignment.
     """
-    # Check that both or neither padding parameters are provided
-    use_padding = tokens_per_expert is not None and align_size is not None
-    if (tokens_per_expert is None) != (align_size is None):
-        raise ValueError(
-            "Both tokens_per_expert and align_size must be provided together for fused padding, "
-            "or both must be None."
-        )
+    use_padding = align_size is not None
+    num_experts = routing_map.shape[-1]
 
-    # Validate num_out_tokens usage
     if use_padding:
-        if num_out_tokens is not None:
-            warnings.warn(
-                "num_out_tokens is ignored when using fused padding (tokens_per_expert and "
-                "align_size are provided). The output token count will be computed internally "
-                "based on the aligned tokens_per_expert.",
-                UserWarning,
-                stacklevel=2,
-            )
-        # Set a dummy value - will be recomputed in the forward rule
-        actual_num_out_tokens = -1
+        # Compute worst-case output size (compile-time constant)
+        # This is the maximum possible size when each expert needs max padding
+        worst_case_out_tokens = (
+            (num_out_tokens + num_experts * (align_size - 1)) // align_size
+        ) * align_size
     else:
-        if num_out_tokens is None:
-            raise ValueError(
-                "num_out_tokens must be provided when not using fused padding. "
-                "Either provide num_out_tokens, or provide both tokens_per_expert and align_size "
-                "for fused padding."
-            )
-        actual_num_out_tokens = num_out_tokens
+        worst_case_out_tokens = num_out_tokens
 
     return _token_dispatch(
-        inp, routing_map, probs, actual_num_out_tokens, tokens_per_expert, align_size, use_padding
+        inp, routing_map, probs, num_out_tokens, worst_case_out_tokens, align_size, use_padding
     )
 
 
@@ -165,7 +144,7 @@ def _token_dispatch(
     routing_map: jnp.ndarray,
     probs: Optional[jnp.ndarray],
     num_out_tokens: int,
-    tokens_per_expert: Optional[jnp.ndarray],
+    worst_case_out_tokens: int,
     align_size: Optional[int],
     use_padding: bool,
 ) -> Tuple[
@@ -182,7 +161,7 @@ def _token_dispatch(
             routing_map,
             probs,
             num_out_tokens,
-            tokens_per_expert,
+            worst_case_out_tokens,
             align_size,
             use_padding,
         )
@@ -195,7 +174,7 @@ def _token_dispatch_fwd_rule(
     routing_map: jnp.ndarray,
     probs: Optional[jnp.ndarray],
     num_out_tokens: int,
-    tokens_per_expert: Optional[jnp.ndarray],
+    worst_case_out_tokens: int,
     align_size: Optional[int],
     use_padding: bool,
 ) -> Tuple[
@@ -235,38 +214,26 @@ def _token_dispatch_fwd_rule(
     with_probs = probs is not None
 
     if use_padding:
-        # Ensure tokens_per_expert contains concrete values (not traced).
-        # This is required because the output shape depends on the sum of aligned token counts.
-        # Using jax.ensure_compile_time_eval will raise a clear ConcretizationTypeError
-        # if tokens_per_expert is a traced array.
-        try:
-            with jax.ensure_compile_time_eval():
-                # Calculate aligned token counts per expert
-                target_tokens_per_expert = (
-                    jnp.ceil(tokens_per_expert / align_size) * align_size
-                ).astype(jnp.int32)
+        # Compute tokens_per_expert internally from routing_map
+        # This can be a traced value since output shape uses worst_case_out_tokens
+        tokens_per_expert = jnp.sum(routing_map, axis=0).astype(jnp.int32)
 
-                # Always compute pad_offsets when use_padding=True
-                # This ensures deterministic control flow for JIT compilation.
-                # If no padding is actually needed (tokens already aligned), pad_offsets
-                # will be all zeros, and the kernel handles this correctly (adding 0 is a no-op).
-                pad_lengths = target_tokens_per_expert - tokens_per_expert
-                cum_pad = jnp.cumsum(pad_lengths)
-                pad_offsets = jnp.concatenate(
-                    [jnp.array([0], dtype=cum_pad.dtype), cum_pad[:-1]]
-                )
+        # Calculate aligned token counts per expert
+        target_tokens_per_expert = (
+            jnp.ceil(tokens_per_expert / align_size) * align_size
+        ).astype(jnp.int32)
 
-                actual_num_out_tokens = int(jnp.sum(target_tokens_per_expert))
-        except jax.errors.ConcretizationTypeError as e:
-            raise ValueError(
-                "tokens_per_expert must contain concrete (non-traced) values when using "
-                "fused padding. The output shape depends on the sum of aligned token counts, "
-                "which must be known at compile time. "
-                "Ensure tokens_per_expert is computed outside the JIT boundary or passed as "
-                "a concrete array to the JIT-compiled function."
-            ) from e
+        # Compute pad_offsets: cumulative padding for each expert
+        # pad_offsets[i] = sum of (target - actual) for experts 0..i-1
+        pad_lengths = target_tokens_per_expert - tokens_per_expert
+        cum_pad = jnp.cumsum(pad_lengths)
+        pad_offsets = jnp.concatenate(
+            [jnp.array([0], dtype=cum_pad.dtype), cum_pad[:-1]]
+        )
 
-        # Always use the padded kernel when use_padding=True (static branch)
+        # Use worst_case_out_tokens as the output buffer size (compile-time constant)
+        # The actual used size is sum(target_tokens_per_expert), which may be smaller.
+        # Unused positions will be zero-initialized by the kernel.
         output, permuted_probs = permute_with_mask_map_and_pad(
             inp,
             row_id_map,
@@ -274,7 +241,7 @@ def _token_dispatch_fwd_rule(
             pad_offsets,
             num_tokens,
             num_experts,
-            actual_num_out_tokens,
+            worst_case_out_tokens,
             hidden_size,
         )
     else:
@@ -306,7 +273,7 @@ def _token_dispatch_fwd_rule(
 def _token_dispatch_bwd_rule(
     _routing_map: jnp.ndarray,
     _num_out_tokens: int,
-    _tokens_per_expert: Optional[jnp.ndarray],
+    _worst_case_out_tokens: int,
     _align_size: Optional[int],
     _use_padding: bool,
     residuals: Tuple[jnp.ndarray, Optional[jnp.ndarray], int, int, int, bool],

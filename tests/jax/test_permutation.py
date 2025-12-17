@@ -698,7 +698,7 @@ class TestHighLevelPermutationAPI:
     # =========================================================================
 
     @pytest.mark.parametrize(
-        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        "num_tokens,num_experts,hidden_size,topk,align_size",
         [
             (32, 8, 256, 2, 16),
             (64, 16, 512, 3, 32),
@@ -707,15 +707,14 @@ class TestHighLevelPermutationAPI:
     )
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
     def test_token_dispatch_with_padding(
-        self, num_tokens, num_experts, hidden_size, tokens_per_expert, align_size, dtype
+        self, num_tokens, num_experts, hidden_size, topk, align_size, dtype
     ):
         """Test token_dispatch with padding forward and backward pass"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
-        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
-        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
-        num_out_tokens = int(jnp.sum(routing_map))  # Ignored when using padding
+        routing_map = self.generate_routing_map(num_tokens, num_experts, topk, key)
+        num_out_tokens = int(jnp.sum(routing_map))
 
         # Generate input data
         key, inp_key = jax.random.split(key)
@@ -724,17 +723,19 @@ class TestHighLevelPermutationAPI:
         )
 
         # Test forward pass with padding (using unified API)
-        # Note: num_out_tokens is not needed when using padding - it's computed internally
+        # Now we just pass num_out_tokens and align_size - tokens_per_expert is computed internally
         output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert = token_dispatch(
             inp,
             routing_map,
-            tokens_per_expert=tokens_per_expert_arr,
+            num_out_tokens,
             align_size=align_size,
         )
 
-        # Check output shape - should be padded
-        expected_padded_tokens = int(jnp.sum(target_tokens_per_expert))
-        assert output.shape == (expected_padded_tokens, hidden_size)
+        # Check output shape - should be worst-case padded size
+        worst_case_size = (
+            (num_out_tokens + num_experts * (align_size - 1)) // align_size
+        ) * align_size
+        assert output.shape == (worst_case_size, hidden_size)
         assert permuted_probs is None  # No probs provided
 
         # Check that each expert's tokens are aligned
@@ -747,7 +748,7 @@ class TestHighLevelPermutationAPI:
             out, _, _, _, _ = token_dispatch(
                 x,
                 routing_map,
-                tokens_per_expert=tokens_per_expert_arr,
+                num_out_tokens,
                 align_size=align_size,
             )
             return jnp.sum(out**2)
@@ -757,7 +758,7 @@ class TestHighLevelPermutationAPI:
         assert not jnp.any(jnp.isnan(grad))
 
     @pytest.mark.parametrize(
-        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        "num_tokens,num_experts,hidden_size,topk,align_size",
         [
             (32, 8, 256, 2, 16),
             (64, 16, 512, 3, 32),
@@ -765,15 +766,14 @@ class TestHighLevelPermutationAPI:
     )
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
     def test_token_dispatch_with_padding_and_probs(
-        self, num_tokens, num_experts, hidden_size, tokens_per_expert, align_size, dtype
+        self, num_tokens, num_experts, hidden_size, topk, align_size, dtype
     ):
         """Test token_dispatch with padding and probs"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
-        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
-        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
-        num_out_tokens = int(jnp.sum(routing_map))  # Ignored when using padding
+        routing_map = self.generate_routing_map(num_tokens, num_experts, topk, key)
+        num_out_tokens = int(jnp.sum(routing_map))
 
         # Generate input data and probs
         key, inp_key, prob_key = jax.random.split(key, 3)
@@ -785,28 +785,30 @@ class TestHighLevelPermutationAPI:
         )
 
         # Test forward pass with padding and probs
-        # Note: num_out_tokens is not needed when using padding - it's computed internally
+        # tokens_per_expert is computed internally from routing_map
         output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert = token_dispatch(
             inp,
             routing_map,
+            num_out_tokens,
             probs=probs,
-            tokens_per_expert=tokens_per_expert_arr,
             align_size=align_size,
         )
 
-        # Check output shape
-        expected_padded_tokens = int(jnp.sum(target_tokens_per_expert))
-        assert output.shape == (expected_padded_tokens, hidden_size)
+        # Check output shape - should be worst-case padded size
+        worst_case_size = (
+            (num_out_tokens + num_experts * (align_size - 1)) // align_size
+        ) * align_size
+        assert output.shape == (worst_case_size, hidden_size)
         assert permuted_probs is not None
-        assert permuted_probs.shape == (expected_padded_tokens,)
+        assert permuted_probs.shape == (worst_case_size,)
 
         # Test backward pass
         def loss_fn(x, p):
             out, perm_probs, _, _, _ = token_dispatch(
                 x,
                 routing_map,
+                num_out_tokens,
                 probs=p,
-                tokens_per_expert=tokens_per_expert_arr,
                 align_size=align_size,
             )
             return jnp.sum(out**2) + jnp.sum(perm_probs**2)
@@ -822,7 +824,7 @@ class TestHighLevelPermutationAPI:
     # =========================================================================
 
     @pytest.mark.parametrize(
-        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        "num_tokens,num_experts,hidden_size,topk,align_size",
         [
             (32, 8, 256, 2, 16),
             (64, 16, 512, 3, 32),
@@ -835,7 +837,7 @@ class TestHighLevelPermutationAPI:
         num_tokens,
         num_experts,
         hidden_size,
-        tokens_per_expert,
+        topk,
         align_size,
         dtype,
         with_merging_probs,
@@ -844,8 +846,7 @@ class TestHighLevelPermutationAPI:
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
-        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
-        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
+        routing_map = self.generate_routing_map(num_tokens, num_experts, topk, key)
         num_out_tokens = int(jnp.sum(routing_map))
 
         # Generate input and dispatch with padding to get row_id_map and pad_offsets
@@ -854,18 +855,21 @@ class TestHighLevelPermutationAPI:
             inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
         )
 
+        # Dispatch with padding to get row_id_map and pad_offsets
         _, _, row_id_map, pad_offsets, target_tokens_per_expert = token_dispatch(
             inp,
             routing_map,
-            tokens_per_expert=tokens_per_expert_arr,
+            num_out_tokens,
             align_size=align_size,
         )
 
-        # Generate expert output data (padded)
-        expected_padded_tokens = int(jnp.sum(target_tokens_per_expert))
+        # Generate expert output data (worst-case padded size)
+        worst_case_size = (
+            (num_out_tokens + num_experts * (align_size - 1)) // align_size
+        ) * align_size
         key, expert_key, merge_key = jax.random.split(key, 3)
         expert_output = jax.random.uniform(
-            expert_key, (expected_padded_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+            expert_key, (worst_case_size, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
         )
 
         if with_merging_probs:
@@ -895,7 +899,7 @@ class TestHighLevelPermutationAPI:
     # =========================================================================
 
     @pytest.mark.parametrize(
-        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        "num_tokens,num_experts,hidden_size,topk,align_size",
         [
             (32, 8, 256, 2, 16),
             (64, 16, 512, 3, 32),
@@ -904,14 +908,13 @@ class TestHighLevelPermutationAPI:
     )
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
     def test_dispatch_combine_with_padding_roundtrip(
-        self, num_tokens, num_experts, hidden_size, tokens_per_expert, align_size, dtype
+        self, num_tokens, num_experts, hidden_size, topk, align_size, dtype
     ):
         """Test that token_dispatch with padding followed by token_combine with unpad recovers input"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
-        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
-        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
+        routing_map = self.generate_routing_map(num_tokens, num_experts, topk, key)
         num_out_tokens = int(jnp.sum(routing_map))
 
         # Generate input data
@@ -926,11 +929,11 @@ class TestHighLevelPermutationAPI:
         )
 
         # Dispatch tokens to experts with padding
-        # Note: num_out_tokens is not needed when using padding - it's computed internally
+        # tokens_per_expert is computed internally from routing_map
         dispatched, _, row_id_map, pad_offsets, _ = token_dispatch(
             inp,
             routing_map,
-            tokens_per_expert=tokens_per_expert_arr,
+            num_out_tokens,
             align_size=align_size,
         )
 
@@ -941,7 +944,7 @@ class TestHighLevelPermutationAPI:
         assert_allclose(combined, inp)
 
     @pytest.mark.parametrize(
-        "num_tokens,num_experts,hidden_size,tokens_per_expert,align_size",
+        "num_tokens,num_experts,hidden_size,topk,align_size",
         [
             (32, 8, 256, 2, 16),
             (64, 16, 512, 3, 32),
@@ -949,14 +952,13 @@ class TestHighLevelPermutationAPI:
     )
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
     def test_dispatch_combine_with_padding_gradient_flow(
-        self, num_tokens, num_experts, hidden_size, tokens_per_expert, align_size, dtype
+        self, num_tokens, num_experts, hidden_size, topk, align_size, dtype
     ):
         """Test gradient flow through dispatch with padding -> combine with unpad"""
         key = jax.random.PRNGKey(42)
 
         # Generate routing map
-        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
-        tokens_per_expert_arr = jnp.sum(routing_map, axis=0).astype(jnp.int32)
+        routing_map = self.generate_routing_map(num_tokens, num_experts, topk, key)
         num_out_tokens = int(jnp.sum(routing_map))
 
         # Generate input data
@@ -975,7 +977,7 @@ class TestHighLevelPermutationAPI:
             dispatched, _, row_id_map, pad_offsets, _ = token_dispatch(
                 x,
                 routing_map,
-                tokens_per_expert=tokens_per_expert_arr,
+                num_out_tokens,
                 align_size=align_size,
             )
             # Simulate some expert processing (e.g., scaling)
