@@ -296,6 +296,10 @@ class NVFP4Quantizer : public Quantizer {
   // 2D block scaling
   bool with_2d_quantization;
   bool stochastic_rounding;
+  // Scale factor for estimating post-RHT amax from pre-RHT amax.
+  // When <= 0.0f, true post-RHT amax is used (default behavior).
+  // When > 0.0f, post-RHT amax is estimated as: pre_rht_amax * amax_estimation_scale
+  float amax_estimation_scale;
 
   int rht_matrix_random_sign_mask_t;
   at::Tensor rht_matrix;
