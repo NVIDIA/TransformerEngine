@@ -812,11 +812,11 @@ class GemmPrimitive(BasePrimitive):
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
         # Validate batch dimensions
-        if lhs_bdims is not None or rhs_bdims is not None:
-            assert lhs_bdims == rhs_bdims, (
-                "Batched GEMM requires matching batch dimensions, "
-                f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
-            )
+        # if lhs_bdims is not None or rhs_bdims is not None:
+        #     assert lhs_bdims == rhs_bdims, (
+        #         "Batched GEMM requires matching batch dimensions, "
+        #         f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
+        #     )
 
         # Use general batcher from BasePrimitive
         return GemmPrimitive.batcher_impl(

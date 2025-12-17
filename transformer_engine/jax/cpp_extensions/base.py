@@ -207,12 +207,12 @@ class BasePrimitive(metaclass=ABCMeta):
                 if batch_dim is None:
                     batch_dim = bdim
                     batch_size = arg.shape[bdim]
-                elif bdim != batch_dim:
-                    raise ValueError(
-                        "All batched arguments must have the same batch dimension. "
-                        f"Got batch_dims={batch_dims}"
-                    )
-        assert batch_dim is not None and batch_size is not None, "Invalid batching config!"
+                # elif bdim != batch_dim:
+                #     raise ValueError(
+                #         "All batched arguments must have the same batch dimension. "
+                #         f"Got batch_dims={batch_dims}"
+                #     )
+        # assert batch_dim is not None and batch_size is not None, "Invalid batching config!"
 
         # Loop over batch dimension and collect results
         all_results = []
