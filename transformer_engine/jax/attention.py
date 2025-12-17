@@ -821,6 +821,8 @@ class SequenceDescriptor:
         Return:
             A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
+        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
+        
         # If using defaults
         if segment_pos is None:
             # Segment pos is not calculated implicitly for THD cases and Load balancing cases
@@ -843,8 +845,6 @@ class SequenceDescriptor:
             segment_pos = (q_seg_pos, kv_seg_pos)
         else:  # Explicitly passed segment_pos
             segment_pos = cls._expand_to_pair(segment_pos)
-
-        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
 
         return cls(
             segment_ids=(q_seg_ids, kv_seg_ids),
