@@ -791,7 +791,7 @@ class SequenceDescriptor:
         q_offsets, kv_offsets = cls._expand_to_pair(seq_offsets)
         return cls(seqlens=(q_seqlens, kv_seqlens), seq_offsets=(q_offsets, kv_offsets))
 
-    #TODO(KshitijLakhani), TODO(mgoldfarb-nvidia): Consider adding support for THD layout (non load balanced).
+    # TODO(KshitijLakhani), TODO(mgoldfarb-nvidia): Consider adding support for THD layout (non load balanced).
     @classmethod
     def from_segment_ids_and_pos(
         cls,
@@ -823,12 +823,14 @@ class SequenceDescriptor:
         """
         # If using defaults
         if segment_pos is None:
-            # Segment pos is not calculated implicitly for THD cases and Load balancing cases 
-            assert not is_load_balanced, f"segment_pos = None default arg is not supported for load balanced inputs"
+            # Segment pos is not calculated implicitly for THD cases and Load balancing cases
+            assert (
+                not is_load_balanced
+            ), f"segment_pos = None default arg is not supported for load balanced inputs"
             assert not is_thd, f"segment_pos = None default arg is not supported for THD layouts"
             warnings.warn(
-                "segment_pos = None is only acceptable if using BSHD and no load balancing. For all other cases, " \
-                "segment_pos must be passed explicitly",
+                "segment_pos = None is only acceptable if using BSHD and no load balancing. For all"
+                " other cases, segment_pos must be passed explicitly",
                 UserWarning,
             )
 
@@ -839,7 +841,7 @@ class SequenceDescriptor:
             q_seg_pos = generate_default_pos(q_seg_ids)
             kv_seg_pos = generate_default_pos(kv_seg_ids)
             segment_pos = (q_seg_pos, kv_seg_pos)
-        else: # Explicitly passed segment_pos
+        else:  # Explicitly passed segment_pos
             segment_pos = cls._expand_to_pair(segment_pos)
 
         q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
