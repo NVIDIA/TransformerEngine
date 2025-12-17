@@ -24,7 +24,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
 )
 import transformer_engine.pytorch.cpp_extensions as tex
-
+from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace_size_bytes
 from transformer_engine.pytorch.module.base import fill_userbuffers_buffer_for_all_gather
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -206,6 +206,7 @@ def _main(opts):
         capture_output=True,
         text=True,
         shell=True,
+        check=False,
     )
 
     if result.stdout == "0":  # Extra checks for non-MNNVL platforms
@@ -339,7 +340,7 @@ def _main(opts):
                 use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
             ) if not opts.use_cublasmp
             else tex.CommOverlapP2P(
-                helper, tp_size, tp_rank, atomic_gemm=opts.atomic,
+                helper, tp_rank, tp_size, atomic_gemm=opts.atomic,
             )
         ) if opts.p2p
         else (
@@ -351,7 +352,7 @@ def _main(opts):
                 atomic_gemm=opts.atomic,
             ) if not opts.use_cublasmp
             else tex.CommOverlap(
-                helper, tp_size, tp_rank, atomic_gemm=opts.atomic,
+                helper, tp_rank, tp_size, atomic_gemm=opts.atomic,
             )
         )
     )
@@ -371,7 +372,7 @@ def _main(opts):
                     atomic_gemm=True,
                 ) if not opts.use_cublasmp
                 else tex.CommOverlapP2P(
-                    helper, tp_size, tp_rank, atomic_gemm=True
+                    helper, tp_rank, tp_size, atomic_gemm=True
                 )
             ) if opts.atomic_rs_p2p
             else (
@@ -383,7 +384,7 @@ def _main(opts):
                     atomic_gemm=True,
                 ) if not opts.use_cublasmp
                 else tex.CommOverlap(
-                    helper, tp_size, tp_rank, atomic_gemm=True
+                    helper, tp_rank, tp_size, atomic_gemm=True
                 )
             )
         )

@@ -387,8 +387,8 @@ def initialize_ub(
             if with_cublasmp:
                 ub_obj = tex.CommOverlapP2P(
                     helper,
-                    tp_size,
                     local_rank,
+                    tp_size,
                     num_comm_sm=num_sm,
                     atomic_gemm=atomic_gemm,
                 )
@@ -413,8 +413,8 @@ def initialize_ub(
             if with_cublasmp and method != "bulk":
                 ub_obj = tex.CommOverlap(
                     helper,
-                    tp_size,
                     local_rank,
+                    tp_size,
                     num_comm_sm=num_sm,
                     atomic_gemm=atomic_gemm,
                 )
