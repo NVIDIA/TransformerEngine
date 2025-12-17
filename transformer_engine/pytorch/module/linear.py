@@ -1310,7 +1310,6 @@ class Linear(TransformerEngineBaseModule):
 
         self._default_setattr = self._warning_setattr
 
-
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
