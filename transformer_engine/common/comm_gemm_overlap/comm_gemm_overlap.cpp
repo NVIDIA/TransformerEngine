@@ -332,7 +332,7 @@ void CommOverlapCore::cublasmp_gemm_rs(const TensorWrapper &A, bool transa, cons
   int64_t m = transa ? A.size(0) : A.size(1);
   int64_t n = transb ? B.size(1) : B.size(0);
   int64_t k_local = transa ? A.size(1) : A.size(0);
-  int64_t k = k * _tp_size;
+  int64_t k = k_local * _tp_size;
 
   nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
                            pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,

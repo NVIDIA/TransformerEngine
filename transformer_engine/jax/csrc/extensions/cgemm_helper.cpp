@@ -132,7 +132,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
   // Allocate device memory for barrier operations
-  NVTE_CHECK_CUDA(cudaMalloc(&reinterpret_cast<int>(handler._device_barrier), sizeof(int)));
+  NVTE_CHECK_CUDA(cudaMalloc(&handler._device_barrier, sizeof(int)));
 
   handler._initialize = true;
 
@@ -195,8 +195,9 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   std::unique_ptr<CommOverlapCore> executor;
   if (use_cublasmp) {
     executor = std::make_unique<CommOverlapP2PBase>(
-        reinterpret_cast<int64_t>(comm_handler.get_comm_for_current_device()), comm_handler.tp_size,
-        comm_handler.get_tp_domain_id(), cgemm_config.num_comm_sm, cgemm_config.aggregate_ag);
+        reinterpret_cast<int64_t>(comm_handler.get_comm_for_current_device()),
+        comm_handler.get_tp_domain_id(), comm_handler.tp_size, cgemm_config.num_comm_sm,
+        cgemm_config.aggregate_ag);
   } else {
     executor = std::make_unique<CommOverlapP2PBase>(
         buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,

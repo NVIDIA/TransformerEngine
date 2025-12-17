@@ -408,7 +408,6 @@ def _main(opts):
         if opts.comm_type == tex.CommOverlapType.AG:
             # (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
             local_kernel_t_shape = (ffn_hidden_size // tp_size, hidden_size)
-            local_kernel2_t_shape = (0, )
             local_inp_shape = (outer_size // tp_size, hidden_size)
             if ub_obj2 is not None:
                 local_kernel2_t_shape = (hidden_size, ffn_hidden_size // tp_size)
@@ -479,7 +478,6 @@ def _main(opts):
             ref_g = torch.stack(bulk_inp_list).sum(dim=0)
     else:
         ref_g = torch.matmul(inp_g, ker_g)
-        ref2_g = (0, )
         if ub_obj2 is not None:
             inp2_g = torch.nn.functional.gelu(ref_g)  # pylint: disable=not-callable
             ref2_g = torch.matmul(inp2_g, ker2_g)
