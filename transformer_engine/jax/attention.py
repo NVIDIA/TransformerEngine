@@ -791,11 +791,14 @@ class SequenceDescriptor:
         q_offsets, kv_offsets = cls._expand_to_pair(seq_offsets)
         return cls(seqlens=(q_seqlens, kv_seqlens), seq_offsets=(q_offsets, kv_offsets))
 
+    #TODO(KshitijLakhani), TODO(mgoldfarb-nvidia): Consider adding support for THD layout (non load balanced).
     @classmethod
     def from_segment_ids_and_pos(
         cls,
         segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
-        segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]],
+        segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
+        is_thd: bool = False,
+        is_load_balanced: bool = False,
     ) -> SequenceDescriptor:
         """
         Experimental factory method for inputs with segment IDs and optional positions.
@@ -813,19 +816,19 @@ class SequenceDescriptor:
                   The position inside each segment for query, with shape [batch, max_seqlen].
                 - kv_segment_pos (jnp.ndarray):
                   The position inside each segment for key, value, with shape [batch, max_seqlen].
+            is_thd(bool): If True, QKVLayout is of type THD, else it is BSHD
+            is_load_balanced(bool): If True, CP is being used and the inputs have been load balanced.
         Return:
             A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
-        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
-
+        # If using defaults
         if segment_pos is None:
+            # Segment pos is not calculated implicitly for THD cases and Load balancing cases 
+            assert not is_load_balanced, f"segment_pos = None default arg is not supported for load balanced inputs"
+            assert not is_thd, f"segment_pos = None default arg is not supported for THD layouts"
             warnings.warn(
-                "segment_pos no longer defaults to None and must be explicitly passed",
-                DeprecationWarning,
-            )
-            warnings.warn(
-                "segment_pos = None is only acceptable if using BSHD and no load balancing. For all"
-                " other cases,  please explicitly pass the segment_pos",
+                "segment_pos = None is only acceptable if using BSHD and no load balancing. For all other cases, " \
+                "segment_pos must be passed explicitly",
                 UserWarning,
             )
 
@@ -836,8 +839,10 @@ class SequenceDescriptor:
             q_seg_pos = generate_default_pos(q_seg_ids)
             kv_seg_pos = generate_default_pos(kv_seg_ids)
             segment_pos = (q_seg_pos, kv_seg_pos)
-        else:
+        else: # Explicitly passed segment_pos
             segment_pos = cls._expand_to_pair(segment_pos)
+
+        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
 
         return cls(
             segment_ids=(q_seg_ids, kv_seg_ids),
