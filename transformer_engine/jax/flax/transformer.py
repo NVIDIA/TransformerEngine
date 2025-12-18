@@ -723,15 +723,17 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             if self.dtype == input_dtype:
                 warnings.warn(
                     "The dtype argument is deprecated and will be removed in a future release."
-                    " DotProductAttention will use the dtype of the inputs instead as this"
-                    f" module does not have any parameters. Module dtype specified {self.dtype=} matches dtype of inputs so behavior is unchanged. Please remove the dtype argument within the next few releases."
+                    " DotProductAttention will use the dtype of the inputs instead as this module"
+                    f" does not have any parameters. Module dtype specified {self.dtype=} matches"
+                    " dtype of inputs so behavior is unchanged. Please remove the dtype argument"
+                    " within the next few releases."
                 )
             else:
                 raise ValueError(
-                    f"The DotProductAttention module dtype is deprecated and will be removed in a future release."
-                    f" DotProductAttention will use the dtype of the inputs instead as this"
-                    f" module does not have any parameters. Module dtype specified {self.dtype=} does not match dtype of inputs "
-                    f" {input_dtype=}."
+                    "The DotProductAttention module dtype is deprecated and will be removed in a"
+                    " future release. DotProductAttention will use the dtype of the inputs instead"
+                    " as this module does not have any parameters. Module dtype specified"
+                    f" {self.dtype=} does not match dtype of inputs  {input_dtype=}."
                 )
 
         # Use fused attn (if kernel check below passes) by default
