@@ -501,9 +501,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
   accumulator_pipeline_params.consumer_arv_count =
       size(AtomThrShapeMNK{}) * NumEpilogueColQuantThreadCount;
   accumulator_pipeline_params.initializing_warp = 1;
+  using IsInitAccumulatorPipeline = cute::conditional_t<kEnableRHTColQuant, cute::true_type, cute::false_type>;
   AccumulatorPipeline accumulator_pipeline(shared_storage.accumulator, accumulator_pipeline_params,
                                            cluster_shape,
-                                           cute::true_type{},   // Perform barrier init
+                                           IsInitAccumulatorPipeline{},  // Perform barrier init
                                            cute::true_type{});  // Delay mask calculation
   // CLC pipeline
   typename CLCPipeline::Params clc_pipeline_params;
