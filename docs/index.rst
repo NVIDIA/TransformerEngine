@@ -48,6 +48,7 @@ Transformer Engine documentation
    examples/te_llama/tutorial_accelerate_hf_llama_with_te.ipynb
    examples/te_gemma/tutorial_generation_gemma_with_te.ipynb
    examples/onnx/onnx_export.ipynb
+   examples/te_jax_integration.ipynb
 
 .. toctree::
    :hidden:
@@ -56,3 +57,4 @@ Transformer Engine documentation
    api/c/index
    debug
    examples/attention/attention.ipynb
+   examples/attention/cp_ag_thd_dpa_jax_deep_dive.ipynb
