@@ -212,7 +212,7 @@ class BasePrimitive(metaclass=ABCMeta):
                 #         "All batched arguments must have the same batch dimension. "
                 #         f"Got batch_dims={batch_dims}"
                 #     )
-        # assert batch_dim is not None and batch_size is not None, "Invalid batching config!"
+        assert batch_dim is not None and batch_size is not None, "Invalid batching config!"
 
         # Loop over batch dimension and collect results
         all_results = []

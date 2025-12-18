@@ -69,7 +69,6 @@ def dense(
     output_axes: Tuple[str, ...] = None,
     collective_op_set: tex.CollectiveOpSet = tex.noop_collective_op_set,
     quantizer_set: QuantizerSet = noop_quantizer_set,
-    batch_dims : Tuple[Sequence[int], Sequence[int]] = ((), ()),
 ):
     """Perform dense layer transformation with optional quantization.
 
@@ -110,12 +109,11 @@ def dense(
         output_axes,
         collective_op_set,
         quantizer_set,
-        batch_dims,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7, 8, 10))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7, 8))
 def _dense(
     x,
     kernel,
@@ -127,7 +125,6 @@ def _dense(
     output_axes,
     collective_op_set,
     quantizer_set,  # need to be a diff_arg for DelayedScaling state management
-    batch_dims,
 ):
     """Internal implementation of dense layer transformation with custom VJP.
 
@@ -160,7 +157,6 @@ def _dense(
         output_axes,
         collective_op_set,
         quantizer_set,
-        batch_dims,
     )
     return output
 
@@ -176,7 +172,6 @@ def _dense_fwd_rule(
     output_axes,
     collective_op_set,
     quantizer_set,
-    batch_dims,
 ):
     """Forward pass rule for dense layer transformation.
 
@@ -291,7 +286,6 @@ def _dense_bwd_rule(
     kernel_axes,
     output_axes,
     collective_op_set,
-    batch_dims,
     ctx,
     grad,
 ):
@@ -325,6 +319,7 @@ def _dense_bwd_rule(
     )
 
     fwd_cdims = (fwd_x_contracting_dims, fwd_k_contracting_dims)
+    batch_dims = ((), ()) # vmap is done outside dense VJP if needed
     dims = (fwd_cdims, batch_dims)
 
     dgrad = dot_general_transpose_lhs(

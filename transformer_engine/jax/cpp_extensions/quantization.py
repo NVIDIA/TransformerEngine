@@ -362,7 +362,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         use_rht,
     ):
         """Batch rule for quantization primitive using general batcher."""
-        check_valid_batch_dims(batch_dims)
+        # check_valid_batch_dims(batch_dims)
         assert BaseDBiasQuantizePrimitive.outer_primitive is not None
 
         return BaseDBiasQuantizePrimitive.batcher_impl(
