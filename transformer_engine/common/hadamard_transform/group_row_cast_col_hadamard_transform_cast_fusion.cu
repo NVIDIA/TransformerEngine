@@ -201,14 +201,6 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                       "Try recompiling with sm_100a or similar.");
     return;
   }
-  if constexpr (!kEnableRHTColQuant_) {
-    // With kEnableRHTColQuant=false, we might configure
-    // mainloop_pipeline and accumulator_pipeline with zero consumers,
-    // which causes internal problems in CUTLASS and esoteric
-    // compile-time errors ("ptxas fatal: internal compiler error").
-    NVTE_DEVICE_ERROR("group_row_col_rht_gemm_device requires column-wise quantization.");
-    return;
-  }
 #if !defined(CUTLASS_ARCH_CLC_ENABLED)
   CUTLASS_NOT_IMPLEMENTED();
   return;
@@ -1426,9 +1418,6 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
     kernel_args.num_tensors++;
   }
 
-  // Check that column-wise data is available in output
-  NVTE_CHECK(all_has_col_quant, "Column-wise quantization is required.");
-
   // Stochastic rounding config
   const bool use_stochastic_rounding = quant_config.stochastic_rounding;
   const size_t *rng_state = nullptr;
@@ -1492,11 +1481,13 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
           all_has_row_quant, kEnableRowQuant,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              all_has_col_quant, kEnableRHTColQuant,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
               use_swizzle_sf_output, kEnableSwizzleSFOutput,
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   use_fast_math, kEnableFastMath,
                   detail::group_row_col_rht_gemm_ntt_w_sfc<
-                      kEnableStochasticRounding, /*kEnableRhtColQuant=*/true, kEnableRowQuant,
+                      kEnableStochasticRounding, /*kEnableRhtColQuant=*/kEnableRHTColQuant, kEnableRowQuant,
                       kEnableSwizzleSFOutput, TA, TB, TQA, TSFA, TD, TSFD, kEnableFastMath>(
                       /*packed_sequence_length=*/m, /*hidden_size=*/n,
                       /*A=*/reinterpret_cast<TA const *>(input.dptr),
@@ -1506,7 +1497,7 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
                       /*args=*/kernel_args,
                       /*rng_state=*/rng_state, /*sm_count=*/sm_count,
                       /*stream=*/stream, /*k_tile_size=*/k_tile_size);
-               ););););
+  );););););
 }
 
 }  // namespace transformer_engine
