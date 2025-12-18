@@ -36,6 +36,7 @@ W_FSDP_AXES = "nvte_w_fsdp"
 W_TP_AXES = "nvte_w_tp"
 W_JOINED_AXES = "nvte_w_joined"
 
+
 def _get_mesh():
     # Handle Mesh's set via `with mesh:`
     mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
@@ -43,6 +44,7 @@ def _get_mesh():
         return mesh
     # Handle Mesh's set via `jax.set_mesh(mesh)`
     return jax.sharding.get_abstract_mesh()
+
 
 def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
