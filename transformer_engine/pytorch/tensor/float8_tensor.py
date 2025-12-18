@@ -556,14 +556,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         """
 
         # Check if tensor already has correct memory format
-        if (
-            self._data is not None
-            and not self._data.is_contiguous(memory_format=memory_format)
-        ):
+        if self._data is not None and not self._data.is_contiguous(memory_format=memory_format):
             pass
-        elif (
-            self._transpose is not None
-            and not self._transpose.is_contiguous(memory_format=memory_format)
+        elif self._transpose is not None and not self._transpose.is_contiguous(
+            memory_format=memory_format
         ):
             pass
         else:
