@@ -259,11 +259,14 @@ def fused_attn_fwd(
     max_logit : if return_max_logit = True, shape [h] and same data type as O; otherwise None
     """
 
-    bottom_right_diagonal = (
-        bottom_right_diagonal
-        if bottom_right_diagonal is not None
-        else "bottom_right" in attn_mask_type
-    )
+    if bottom_right_diagonal is None:
+        if attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }:
+            bottom_right_diagonal = True
+        else:
+            bottom_right_diagonal = False
 
     if attn_scale is None:
         d = q.size(-1)
