@@ -117,6 +117,7 @@ class NVFP4Quantizer(Quantizer):
     """Random Hadamard Transform"""
     with_rht: bool
     with_post_rht_amax: bool
+    amax_estimation_scale: Optional[float]
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
@@ -140,6 +141,7 @@ class NVFP4Quantizer(Quantizer):
         amax_reduction_group: Optional[dist_group_type] = None,
         with_rht: bool = False,
         with_post_rht_amax: bool = False,
+        amax_estimation_scale: Optional[float] = None,
         with_2d_quantization: bool = False,
         stochastic_rounding: bool = False,
         with_random_sign_mask: bool = True,
@@ -148,6 +150,7 @@ class NVFP4Quantizer(Quantizer):
         self.dtype = fp4_dtype
         self.with_rht = with_rht
         self.with_post_rht_amax = with_post_rht_amax
+        self.amax_estimation_scale = amax_estimation_scale
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
@@ -189,6 +192,7 @@ class NVFP4Quantizer(Quantizer):
             amax_reduction_group=self.amax_reduction_group,
             with_rht=self.with_rht,
             with_post_rht_amax=self.with_post_rht_amax,
+            amax_estimation_scale=self.amax_estimation_scale,
             with_2d_quantization=self.with_2d_quantization,
             stochastic_rounding=self.stochastic_rounding,
         )

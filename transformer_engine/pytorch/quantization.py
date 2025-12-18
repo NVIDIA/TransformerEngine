@@ -1329,7 +1329,10 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     rowwise=True,
                     columnwise=True,
                     with_rht=qparams.random_hadamard_transform,
-                    with_post_rht_amax=qparams.random_hadamard_transform,
+                    with_post_rht_amax=(
+                        qparams.random_hadamard_transform and qparams.amax_estimation_scale is None
+                    ),
+                    amax_estimation_scale=qparams.amax_estimation_scale,
                     with_2d_quantization=qparams.fp4_2d_quantization,
                     stochastic_rounding=qparams.stochastic_rounding,
                 )
@@ -1343,7 +1346,11 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     rowwise=True,
                     columnwise=True,
                     with_rht=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
-                    with_post_rht_amax=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
+                    with_post_rht_amax=(
+                        self.recipe.fp4_quant_bwd_grad.random_hadamard_transform
+                        and self.recipe.fp4_quant_bwd_grad.amax_estimation_scale is None
+                    ),
+                    amax_estimation_scale=self.recipe.fp4_quant_bwd_grad.amax_estimation_scale,
                     with_2d_quantization=self.recipe.fp4_quant_bwd_grad.fp4_2d_quantization,
                     stochastic_rounding=self.recipe.fp4_quant_bwd_grad.stochastic_rounding,
                 )
