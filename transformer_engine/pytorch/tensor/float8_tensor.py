@@ -558,8 +558,8 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             self._data is not None
             and self._data.is_contiguous(memory_format=memory_format)
             and (
-                self._transpose is None or
-                self._transpose.is_contiguous(memory_format=memory_format)
+                self._transpose is None
+                or self._transpose.is_contiguous(memory_format=memory_format)
             )
         ):
             return self
