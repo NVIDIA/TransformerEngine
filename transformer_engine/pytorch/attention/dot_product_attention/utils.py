@@ -877,9 +877,6 @@ def get_attention_backend(
     #                            |                        | converts window_size to an 'arbitrary' mask
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
-    # (cyang: Why is window_size is being modified but then its value ignored
-    #  in the following else block?)
-    # else:
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
         if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
             logger.debug(

@@ -75,6 +75,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   if (is_bottom_right && s_q == s_kv && !is_padding) {
     is_causal = true;
     is_bottom_right = false;
+    bottom_right_diagonal = false;
   }
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   bool is_dropout = (is_training && dropout_probability != 0.0f);
@@ -572,6 +573,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   if (is_bottom_right && s_q == s_kv && !is_padding) {
     is_causal = true;
     is_bottom_right = false;
+    bottom_right_diagonal = false;
   }
   bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   bool is_dropout = (dropout_probability != 0.0f);

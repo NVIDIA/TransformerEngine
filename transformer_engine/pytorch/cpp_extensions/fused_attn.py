@@ -137,7 +137,7 @@ def fused_attn_fwd(
     attn_mask_type: str = "padding",
     softmax_type: str = "vanilla",
     window_size: Tuple[int, int] = (-1, -1),
-    bottom_right_diagonal: bool = True,
+    bottom_right_diagonal: bool = None,
     rng_gen: torch.Generator = None,
     softmax_offset: torch.Tensor = None,
     return_max_logit: bool = False,
@@ -213,7 +213,7 @@ def fused_attn_fwd(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
-    bottom_right_diagonal: bool, default = True
+    bottom_right_diagonal: bool, default = None
                 whether to align sliding window and ALiBi diagonal to the top left (False) or
                 bottom right (True) corner of the softmax matrix.
     rng_gen : torch.Generator, default = None
@@ -258,6 +258,12 @@ def fused_attn_fwd(
                     [seed, offset], dtype uint64
     max_logit : if return_max_logit = True, shape [h] and same data type as O; otherwise None
     """
+
+    bottom_right_diagonal = (
+        bottom_right_diagonal
+        if bottom_right_diagonal is not None
+        else "bottom_right" in attn_mask_type
+    )
 
     if attn_scale is None:
         d = q.size(-1)
@@ -375,7 +381,7 @@ def fused_attn_bwd(
     attn_mask_type: str = "padding",
     softmax_type: str = "vanilla",
     window_size: Tuple[int, int] = (-1, -1),
-    bottom_right_diagonal: bool = True,
+    bottom_right_diagonal: bool = None,
     deterministic: bool = False,
     cuda_graph: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
@@ -471,6 +477,12 @@ def fused_attn_bwd(
                 gradient tensor of softmax offset of shape [1, h_q, 1, 1].
                 See softmax_type in DotProductAttention for details.
     """
+    bottom_right_diagonal = (
+        bottom_right_diagonal
+        if bottom_right_diagonal is not None
+        else "bottom_right" in attn_mask_type
+    )
+
     if attn_scale is None:
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
