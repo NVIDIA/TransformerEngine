@@ -598,6 +598,11 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
         (``'zero sink'`` and ``'learnable sink'``).
+
+    Optimization parameters
+    -----------------------
+    dtype(deprecated): jax.numpy.dtype, default  = None
+        This dtype is deprecated and will be removed in a future release. DPA will use the dtype of the inputs instead as this module does not have any parameters.
     """
 
     head_dim: int
@@ -606,6 +611,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attention_dropout: float = 0.0
     attn_mask_type: AttnMaskType = "causal"
     attn_bias_type: AttnBiasType = None
+    dtype: Optional[DType] = None  # Deprecated
     dropout_rng_name: str = "dropout"
     float32_logits: bool = False
     qkv_layout: str = "bshd_bshd_bshd"
@@ -637,14 +643,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         elif qkv_layout.is_kvpacked():
             assert (
                 key.dtype == query.dtype
-            ), f"Expected kv dtype={key.dtype} to match query dtype={query.dtype}."
+            ), f"Expected kv {key.dtype=} to match query {query.dtype=}."
         elif qkv_layout.is_separate():
             assert (
                 key.dtype == query.dtype
-            ), f"Expected key dtype={key.dtype} to match query dtype={query.dtype}."
+            ), f"Expected key {key.dtype=} to match query {query.dtype=}."
             assert (
                 value.dtype == query.dtype
-            ), f"Expected value dtype={value.dtype} to match query dtype={query.dtype}."
+            ), f"Expected value {value.dtype=} to match query {query.dtype=}."
         else:
             raise ValueError(f"Unsupported {qkv_layout=}.")
 
@@ -713,6 +719,20 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             bias = bias.astype(input_dtype)
 
         self._assert_dtypes(query, key, value, qkv_layout)
+        if self.dtype is not None:
+            if self.dtype == input_dtype:
+                warnings.warn(
+                    "The dtype argument is deprecated and will be removed in a future release."
+                    " DotProductAttention will use the dtype of the inputs instead as this"
+                    f" module does not have any parameters. Module dtype specified {self.dtype=} matches dtype of inputs so behavior is unchanged. Please remove the dtype argument within the next few releases."
+                )
+            else:
+                raise ValueError(
+                    f"The DotProductAttention module dtype is deprecated and will be removed in a future release."
+                    f" DotProductAttention will use the dtype of the inputs instead as this"
+                    f" module does not have any parameters. Module dtype specified {self.dtype=} does not match dtype of inputs "
+                    f" {input_dtype=}."
+                )
 
         # Use fused attn (if kernel check below passes) by default
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
