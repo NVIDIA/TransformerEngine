@@ -842,10 +842,10 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   // and inconsistently implemented.
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
   if (use_fast_math) {
-    for (auto &config: quant_config_list) {
+    for (auto &config : quant_config_list) {
       config.set_use_fast_math(true);
     }
-    for (auto &config: quant_config_list_colwise) {
+    for (auto &config : quant_config_list_colwise) {
       config.set_use_fast_math(true);
     }
   }
