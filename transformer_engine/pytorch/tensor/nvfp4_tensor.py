@@ -289,8 +289,6 @@ class NVFP4Quantizer(Quantizer):
         device: Optional[torch.device] = None,
         pin_memory: bool = False,
         requires_grad: bool = False,
-        share_scales: bool = False,
-        like: Optional[QuantizedTensor] = None,
     ) -> NVFP4Tensor:
 
         # Canonicalize tensor attributes
@@ -310,7 +308,7 @@ class NVFP4Quantizer(Quantizer):
 
         # Allocate FP4 data
         data = None
-        rowwise_scale_inv = None
+        scale_inv = None
         amax_rowwise = None
         if self.rowwise_usage:
             data = torch.empty(
@@ -319,24 +317,12 @@ class NVFP4Quantizer(Quantizer):
                 device=device,
                 pin_memory=pin_memory,
             )
-            if share_scales:
-                if (
-                    like is None
-                    or not hasattr(like, "_rowwise_scale_inv")
-                    or like._rowwise_scale_inv is None
-                ):
-                    raise ValueError("share_scales requested but no rowwise scale tensor provided")
-                rowwise_scale_inv = like._rowwise_scale_inv
-                amax_rowwise = getattr(like, "_amax_rowwise", None)
-            else:
-                scale_shape = self.get_scale_shape(shape, columnwise=False)
-                rowwise_scale_inv = torch.empty(
-                    scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
-                )
-                # Allocate per tensor scale inverse. FP32 format.
-                amax_rowwise = torch.zeros(
-                    1, dtype=torch.float32, device=device, pin_memory=pin_memory
-                )
+            scale_shape = self.get_scale_shape(shape, columnwise=False)
+            scale_inv = torch.empty(
+                scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+            )
+            # Allocate per tensor scale inverse. FP32 format.
+            amax_rowwise = torch.zeros(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
@@ -352,32 +338,20 @@ class NVFP4Quantizer(Quantizer):
                 device=device,
                 pin_memory=pin_memory,
             )
-            if share_scales:
-                if (
-                    like is None
-                    or not hasattr(like, "_columnwise_scale_inv")
-                    or like._columnwise_scale_inv is None
-                ):
-                    raise ValueError(
-                        "share_scales requested but no columnwise scale tensor provided"
-                    )
-                columnwise_scale_inv = like._columnwise_scale_inv
-                amax_columnwise = getattr(like, "_amax_columnwise", None)
-            else:
-                columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
-                columnwise_scale_inv = torch.empty(
-                    columnwise_scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
-                )
-                amax_columnwise = torch.zeros(
-                    1, dtype=torch.float32, device=device, pin_memory=pin_memory
-                )
+            columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
+            columnwise_scale_inv = torch.empty(
+                columnwise_scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+            )
+            amax_columnwise = torch.zeros(
+                1, dtype=torch.float32, device=device, pin_memory=pin_memory
+            )
 
         # Construct FP8 tensor
         return NVFP4Tensor(
             shape=shape,
             dtype=dtype,
             rowwise_data=data,
-            rowwise_scale_inv=rowwise_scale_inv,
+            rowwise_scale_inv=scale_inv,
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             amax_rowwise=amax_rowwise,

@@ -231,8 +231,6 @@ class Float8BlockQuantizer(Quantizer):
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
         pin_memory: bool = False,
-        share_scales: bool = False,
-        like: Optional[QuantizedTensor] = None,
     ) -> Float8BlockwiseQTensor:
         """Construct quantized tensor with uninitialized data"""
         if device is None:
@@ -246,25 +244,16 @@ class Float8BlockQuantizer(Quantizer):
 
         # Allocate FP8 data
         data = None
-        rowwise_scale_inv = None
+        scale_inv = None
         if self.rowwise_usage:
             data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
-            if share_scales:
-                if (
-                    like is None
-                    or not hasattr(like, "_rowwise_scale_inv")
-                    or like._rowwise_scale_inv is None
-                ):
-                    raise ValueError("share_scales requested but no rowwise scale tensor provided")
-                rowwise_scale_inv = like._rowwise_scale_inv
-            else:
-                scale_shape = self.get_scale_shape(shape, columnwise=False)
-                rowwise_scale_inv = torch.empty(
-                    scale_shape,
-                    dtype=torch.float32,
-                    device=device,
-                    pin_memory=pin_memory,
-                )
+            scale_shape = self.get_scale_shape(shape, columnwise=False)
+            scale_inv = torch.empty(
+                scale_shape,
+                dtype=torch.float32,
+                device=device,
+                pin_memory=pin_memory,
+            )
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
@@ -276,22 +265,13 @@ class Float8BlockQuantizer(Quantizer):
                 device=device,
                 pin_memory=pin_memory,
             )
-            if share_scales:
-                if (
-                    like is None
-                    or not hasattr(like, "_columnwise_scale_inv")
-                    or like._columnwise_scale_inv is None
-                ):
-                    raise ValueError("share_scales requested but no columnwise scale tensor provided")
-                columnwise_scale_inv = like._columnwise_scale_inv
-            else:
-                columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
-                columnwise_scale_inv = torch.empty(
-                    columnwise_scale_shape,
-                    dtype=torch.float32,
-                    device=device,
-                    pin_memory=pin_memory,
-                )
+            columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
+            columnwise_scale_inv = torch.empty(
+                columnwise_scale_shape,
+                dtype=torch.float32,
+                device=device,
+                pin_memory=pin_memory,
+            )
 
         # Construct FP8 tensor
         return Float8BlockwiseQTensor(
@@ -299,7 +279,7 @@ class Float8BlockQuantizer(Quantizer):
             dtype=dtype,
             fp8_dtype=self.dtype,
             rowwise_data=data,
-            rowwise_scale_inv=rowwise_scale_inv,
+            rowwise_scale_inv=scale_inv,
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
