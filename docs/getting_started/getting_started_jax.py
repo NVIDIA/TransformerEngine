@@ -41,11 +41,13 @@ mesh_resource = MeshResource()
 # Baseline: Pure Flax Implementation
 # =============================================================================
 
+
 # BASELINE_MLP_START
 class FlaxMLP(nn.Module):
     """Feed-forward network in Transformer layer.
     Built with plain Flax modules.
     """
+
     hidden_size: int
     ffn_hidden_size: int
 
@@ -55,12 +57,15 @@ class FlaxMLP(nn.Module):
         x = nn.gelu(x, approximate=True)
         x = nn.Dense(features=self.hidden_size, use_bias=True)(x)
         return x
+
+
 # BASELINE_MLP_END
 
 
 # BASELINE_LAYER_START
 class FlaxTransformerLayer(nn.Module):
     """Basic Transformer layer using plain Flax modules."""
+
     hidden_size: int
     ffn_hidden_size: int
     num_attention_heads: int
@@ -75,7 +80,7 @@ class FlaxTransformerLayer(nn.Module):
         self,
         x: jnp.ndarray,
         attention_mask: Optional[jnp.ndarray] = None,
-        deterministic: bool = False
+        deterministic: bool = False,
     ) -> jnp.ndarray:
         if attention_mask is None:
             attention_mask = nn.make_causal_mask(x[..., 0], dtype=jnp.bool_)
@@ -85,12 +90,14 @@ class FlaxTransformerLayer(nn.Module):
 
         # Fused QKV projection
         qkv = nn.Dense(features=3 * self.hidden_size, use_bias=True)(x)
-        qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], self.num_attention_heads, 3 * self.kv_channels)
+        qkv = qkv.reshape(
+            qkv.shape[0], qkv.shape[1], self.num_attention_heads, 3 * self.kv_channels
+        )
         q, k, v = jnp.split(qkv, 3, axis=3)
 
         dropout_rng = None
         if not deterministic and self.attention_dropout > 0:
-            dropout_rng = self.make_rng('dropout')
+            dropout_rng = self.make_rng("dropout")
 
         x = nn.dot_product_attention(
             query=q,
@@ -114,6 +121,8 @@ class FlaxTransformerLayer(nn.Module):
         x = mlp(x)
 
         return x + res
+
+
 # BASELINE_LAYER_END
 
 
@@ -127,7 +136,9 @@ baseline = FlaxTransformerLayer(
 params = baseline.init(key, x, deterministic=False)
 
 print("Baseline Flax:")
-time_baseline = speedometer(baseline.apply, params, x, forward_kwargs={"deterministic": True}, label="baseline")
+time_baseline = speedometer(
+    baseline.apply, params, x, forward_kwargs={"deterministic": True}, label="baseline"
+)
 # BENCHMARK_BASELINE_END
 print("# BENCHMARK_BASELINE_OUTPUT_END\n")
 
@@ -136,9 +147,11 @@ print("# BENCHMARK_BASELINE_OUTPUT_END\n")
 # TE Unfused: Basic TE Modules
 # =============================================================================
 
+
 # TE_UNFUSED_MLP_START
 class TEUnfusedMLP(nn.Module):
     """MLP using TE modules."""
+
     hidden_size: int
     ffn_hidden_size: int
 
@@ -146,15 +159,18 @@ class TEUnfusedMLP(nn.Module):
     def __call__(self, x: jnp.ndarray, deterministic: bool) -> jnp.ndarray:
         x = te_flax.DenseGeneral(features=self.ffn_hidden_size, use_bias=True)(x)
         x = x.reshape(*x.shape[:-1], 1, x.shape[-1])
-        x = te.activation.activation(x, activation_type=('gelu',))
+        x = te.activation.activation(x, activation_type=("gelu",))
         x = te_flax.DenseGeneral(features=self.hidden_size, use_bias=True)(x)
         return x
+
+
 # TE_UNFUSED_MLP_END
 
 
 # TE_UNFUSED_LAYER_START
 class TEUnfusedTransformerLayer(nn.Module):
     """Transformer layer using basic TE modules (without TE attention)."""
+
     hidden_size: int
     ffn_hidden_size: int
     num_attention_heads: int
@@ -169,7 +185,7 @@ class TEUnfusedTransformerLayer(nn.Module):
         self,
         x: jnp.ndarray,
         attention_mask: Optional[jnp.ndarray] = None,
-        deterministic: bool = False
+        deterministic: bool = False,
     ) -> jnp.ndarray:
         if attention_mask is None:
             attention_mask = nn.make_causal_mask(x[..., 0], dtype=jnp.bool_)
@@ -178,12 +194,14 @@ class TEUnfusedTransformerLayer(nn.Module):
         x = te_flax.LayerNorm(epsilon=self.layernorm_eps)(x)
 
         qkv = te_flax.DenseGeneral(features=3 * self.hidden_size, use_bias=True)(x)
-        qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], self.num_attention_heads, 3 * self.kv_channels)
+        qkv = qkv.reshape(
+            qkv.shape[0], qkv.shape[1], self.num_attention_heads, 3 * self.kv_channels
+        )
         q, k, v = jnp.split(qkv, 3, axis=3)
 
         dropout_rng = None
         if not deterministic and self.attention_dropout > 0:
-            dropout_rng = self.make_rng('dropout')
+            dropout_rng = self.make_rng("dropout")
 
         x = nn.dot_product_attention(
             query=q,
@@ -209,6 +227,8 @@ class TEUnfusedTransformerLayer(nn.Module):
         x = nn.Dropout(rate=self.attention_dropout)(x, deterministic=deterministic)
 
         return x + res
+
+
 # TE_UNFUSED_LAYER_END
 
 
@@ -222,7 +242,9 @@ te_unfused = TEUnfusedTransformerLayer(
 params = te_unfused.init(key, x, deterministic=False)
 
 print("TE Unfused:")
-time_te_unfused = speedometer(te_unfused.apply, params, x, forward_kwargs={"deterministic": True}, label="te_unfused")
+time_te_unfused = speedometer(
+    te_unfused.apply, params, x, forward_kwargs={"deterministic": True}, label="te_unfused"
+)
 # BENCHMARK_TE_UNFUSED_END
 print("# BENCHMARK_TE_UNFUSED_OUTPUT_END\n")
 
@@ -231,9 +253,11 @@ print("# BENCHMARK_TE_UNFUSED_OUTPUT_END\n")
 # TE Unfused + TE Attention
 # =============================================================================
 
+
 # TE_UNFUSED_ATTN_LAYER_START
 class TEUnfusedAttnTransformerLayer(nn.Module):
     """Transformer layer using TE modules including TE DotProductAttention."""
+
     hidden_size: int
     ffn_hidden_size: int
     num_attention_heads: int
@@ -248,13 +272,17 @@ class TEUnfusedAttnTransformerLayer(nn.Module):
         self,
         x: jnp.ndarray,
         attention_mask: Optional[jnp.ndarray] = None,
-        deterministic: bool = False
+        deterministic: bool = False,
     ) -> jnp.ndarray:
         res = x
         x = te_flax.LayerNorm(epsilon=self.layernorm_eps, dtype=jnp.bfloat16)(x)
 
-        qkv = te_flax.DenseGeneral(features=3 * self.hidden_size, use_bias=True, dtype=jnp.bfloat16)(x)
-        qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], self.num_attention_heads, 3 * self.kv_channels)
+        qkv = te_flax.DenseGeneral(
+            features=3 * self.hidden_size, use_bias=True, dtype=jnp.bfloat16
+        )(x)
+        qkv = qkv.reshape(
+            qkv.shape[0], qkv.shape[1], self.num_attention_heads, 3 * self.kv_channels
+        )
         q, k, v = jnp.split(qkv, 3, axis=3)
 
         attention = te_flax.DotProductAttention(
@@ -262,7 +290,7 @@ class TEUnfusedAttnTransformerLayer(nn.Module):
             num_attention_heads=self.num_attention_heads,
             num_gqa_groups=self.num_attention_heads,
             attention_dropout=self.attention_dropout,
-            attn_mask_type='causal',
+            attn_mask_type="causal",
             transpose_batch_sequence=False,
         )
         x = attention(q, k, v, deterministic=deterministic)
@@ -279,6 +307,8 @@ class TEUnfusedAttnTransformerLayer(nn.Module):
         x = nn.Dropout(rate=self.attention_dropout)(x, deterministic=deterministic)
 
         return x + res
+
+
 # TE_UNFUSED_ATTN_LAYER_END
 
 
@@ -300,7 +330,7 @@ time_te_unfused_attn = speedometer(
     x,
     forward_kwargs={"deterministic": True},
     autocast_kwargs={"enabled": False, "mesh_resource": mesh_resource},
-    label="te_unfused_attn"
+    label="te_unfused_attn",
 )
 # BENCHMARK_TE_UNFUSED_ATTN_END
 print("# BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_END\n")
@@ -312,11 +342,7 @@ print("# BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_END\n")
 
 print("# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_START")
 # BENCHMARK_TE_UNFUSED_FP8_START
-recipe = DelayedScaling(
-    fp8_format=Format.HYBRID,
-    amax_history_len=16,
-    amax_compute_algo="max"
-)
+recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max")
 
 te_unfused_fp8 = TEUnfusedAttnTransformerLayer(
     hidden_size=hidden_size,
@@ -334,7 +360,7 @@ time_te_unfused_fp8 = speedometer(
     x,
     forward_kwargs={"deterministic": True},
     autocast_kwargs={"enabled": True, "recipe": recipe, "mesh_resource": mesh_resource},
-    label="te_unfused_fp8"
+    label="te_unfused_fp8",
 )
 # BENCHMARK_TE_UNFUSED_FP8_END
 print("# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_END\n")
@@ -344,9 +370,11 @@ print("# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_END\n")
 # TE Fused + FP8: Optimized Modules with FP8
 # =============================================================================
 
+
 # TE_FUSED_LAYER_START
 class TEFusedTransformerLayer(nn.Module):
     """Transformer layer using fused TE modules for better performance."""
+
     hidden_size: int
     ffn_hidden_size: int
     num_attention_heads: int
@@ -361,7 +389,7 @@ class TEFusedTransformerLayer(nn.Module):
         self,
         x: jnp.ndarray,
         attention_mask: Optional[jnp.ndarray] = None,
-        deterministic: bool = False
+        deterministic: bool = False,
     ) -> jnp.ndarray:
         res = x
 
@@ -370,7 +398,7 @@ class TEFusedTransformerLayer(nn.Module):
             features=3 * self.hidden_size,
             epsilon=self.layernorm_eps,
             use_bias=True,
-            return_layernorm_output=False
+            return_layernorm_output=False,
         )(x)
         qkv = qkv.reshape(qkv.shape[0], qkv.shape[1], 3, self.num_attention_heads, self.kv_channels)
         q, k, v = qkv[:, :, 0, :, :], qkv[:, :, 1, :, :], qkv[:, :, 2, :, :]
@@ -380,8 +408,8 @@ class TEFusedTransformerLayer(nn.Module):
             num_attention_heads=self.num_attention_heads,
             num_gqa_groups=self.num_attention_heads,
             attention_dropout=self.attention_dropout,
-            attn_mask_type='causal',
-            qkv_layout='bshd_bshd_bshd',
+            attn_mask_type="causal",
+            qkv_layout="bshd_bshd_bshd",
             transpose_batch_sequence=False,
         )
         x = attention(q, k, v, deterministic=deterministic)
@@ -397,13 +425,15 @@ class TEFusedTransformerLayer(nn.Module):
             intermediate_dim=self.ffn_hidden_size,
             epsilon=self.layernorm_eps,
             use_bias=True,
-            activations=('gelu',),
+            activations=("gelu",),
             intermediate_dropout_rate=0.0,
-            return_layernorm_output=False
+            return_layernorm_output=False,
         )(x, deterministic=deterministic)
         x = nn.Dropout(rate=self.attention_dropout)(x, deterministic=deterministic)
 
         return x + res
+
+
 # TE_FUSED_LAYER_END
 
 
@@ -425,7 +455,7 @@ time_te_fused_fp8 = speedometer(
     x,
     forward_kwargs={"deterministic": True},
     autocast_kwargs={"enabled": True, "recipe": recipe, "mesh_resource": mesh_resource},
-    label="te_fused_fp8"
+    label="te_fused_fp8",
 )
 # BENCHMARK_TE_FUSED_FP8_END
 print("# BENCHMARK_TE_FUSED_FP8_OUTPUT_END\n")
@@ -442,14 +472,14 @@ te_transformer_layer = te_flax.TransformerLayer(
     mlp_hidden_size=ffn_hidden_size,
     num_attention_heads=num_attention_heads,
     mlp_activations=("gelu",),
-    self_attn_mask_type='causal',
+    self_attn_mask_type="causal",
     layernorm_epsilon=1e-5,
     use_bias=True,
     attention_dropout=0.0,
     intermediate_dropout=0.0,
     hidden_dropout=0.0,
     enable_relative_embedding=False,
-    self_attn_bias_type='no_bias',
+    self_attn_bias_type="no_bias",
     dtype=jnp.bfloat16,
     transpose_batch_sequence=False,
 )
@@ -464,7 +494,7 @@ time_te_transformer_layer = speedometer(
     x,
     forward_kwargs={"deterministic": True},
     autocast_kwargs={"enabled": True, "recipe": recipe, "mesh_resource": mesh_resource},
-    label="te_transformer_layer"
+    label="te_transformer_layer",
 )
 # BENCHMARK_TE_TRANSFORMER_LAYER_END
 print("# BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_END\n")
@@ -474,8 +504,20 @@ with open("getting_started_jax_summary.csv", "w") as f:
     f.write("Implementation,Time (ms),Speedup\n")
     f.write(f"Baseline Flax,{time_baseline:.2f},1.00x\n")
     f.write(f"TE Unfused,{time_te_unfused:.2f},{time_baseline/time_te_unfused:.2f}x\n")
-    f.write(f"TE Unfused + TE Attention,{time_te_unfused_attn:.2f},{time_baseline/time_te_unfused_attn:.2f}x\n")
-    f.write(f"TE Unfused + TE Attention + FP8,{time_te_unfused_fp8:.2f},{time_baseline/time_te_unfused_fp8:.2f}x\n")
-    f.write(f"TE Fused + TE Attention + FP8,{time_te_fused_fp8:.2f},{time_baseline/time_te_fused_fp8:.2f}x\n")
-    f.write(f"TE TransformerLayer + FP8,{time_te_transformer_layer:.2f},{time_baseline/time_te_transformer_layer:.2f}x\n")
+    f.write(
+        "TE Unfused + TE"
+        f" Attention,{time_te_unfused_attn:.2f},{time_baseline/time_te_unfused_attn:.2f}x\n"
+    )
+    f.write(
+        "TE Unfused + TE Attention +"
+        f" FP8,{time_te_unfused_fp8:.2f},{time_baseline/time_te_unfused_fp8:.2f}x\n"
+    )
+    f.write(
+        "TE Fused + TE Attention +"
+        f" FP8,{time_te_fused_fp8:.2f},{time_baseline/time_te_fused_fp8:.2f}x\n"
+    )
+    f.write(
+        "TE TransformerLayer +"
+        f" FP8,{time_te_transformer_layer:.2f},{time_baseline/time_te_transformer_layer:.2f}x\n"
+    )
 print("\nSummary written to getting_started_jax_summary.csv")

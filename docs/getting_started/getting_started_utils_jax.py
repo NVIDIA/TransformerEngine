@@ -74,4 +74,3 @@ def speedometer(
     avg_time = sum(times) / len(times) * 1000
     print(f"Mean time: {avg_time:.3f} ms")
     return avg_time
-

@@ -122,4 +122,3 @@ class DotProductAttention(torch.nn.Module):
         context = context.view(sq, b, self.projection_size)
 
         return context
-

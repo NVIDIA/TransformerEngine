@@ -34,11 +34,13 @@ x = torch.rand(sequence_length, batch_size, hidden_size).cuda().to(dtype=dtype)
 # Baseline: Pure PyTorch Implementation
 # =============================================================================
 
+
 # BASELINE_MLP_START
 class PyTorchMLP(torch.nn.Module):
     """Feed-forward network in Transformer layer.
     Built with plain PyTorch modules.
     """
+
     hidden_size: int
     ffn_hidden_size: int
 
@@ -54,6 +56,8 @@ class PyTorchMLP(torch.nn.Module):
         x = torch.nn.functional.gelu(x, approximate="tanh")
         x = self.linear2(x)
         return x
+
+
 # BASELINE_MLP_END
 
 
@@ -85,7 +89,9 @@ class PyTorchTransformerLayer(torch.nn.Module):
         self.ln2 = torch.nn.LayerNorm(hidden_size, eps=layernorm_eps)
         self.mlp = PyTorchMLP(hidden_size=hidden_size, ffn_hidden_size=ffn_hidden_size)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         res = x
         x = self.ln1(x)
 
@@ -105,16 +111,22 @@ class PyTorchTransformerLayer(torch.nn.Module):
         x = self.mlp(x)
 
         return x + res
+
+
 # BASELINE_LAYER_END
 
 
 print("# BENCHMARK_BASELINE_OUTPUT_START")
 # BENCHMARK_BASELINE_START
-baseline = PyTorchTransformerLayer(
-    hidden_size=hidden_size,
-    ffn_hidden_size=ffn_hidden_size,
-    num_attention_heads=num_attention_heads,
-).to(dtype=dtype).cuda()
+baseline = (
+    PyTorchTransformerLayer(
+        hidden_size=hidden_size,
+        ffn_hidden_size=ffn_hidden_size,
+        num_attention_heads=num_attention_heads,
+    )
+    .to(dtype=dtype)
+    .cuda()
+)
 
 print("Baseline PyTorch:")
 time_baseline = speedometer(baseline, x, forward_kwargs={"attention_mask": None}, label="baseline")
@@ -126,9 +138,11 @@ print("# BENCHMARK_BASELINE_OUTPUT_END\n")
 # TE Unfused: Basic TE Modules
 # =============================================================================
 
+
 # TE_UNFUSED_MLP_START
 class TEUnfusedMLP(torch.nn.Module):
     """MLP using TE modules."""
+
     hidden_size: int
     ffn_hidden_size: int
 
@@ -141,9 +155,11 @@ class TEUnfusedMLP(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.linear1(x)
-        x = torch.nn.functional.gelu(x, approximate='tanh')
+        x = torch.nn.functional.gelu(x, approximate="tanh")
         x = self.linear2(x)
         return x
+
+
 # TE_UNFUSED_MLP_END
 
 
@@ -158,7 +174,7 @@ class TEUnfusedTransformerLayer(torch.nn.Module):
         num_attention_heads: int,
         layernorm_eps: float = 1e-5,
         attention_dropout: float = 0.1,
-        hidden_dropout: float = 0.1
+        hidden_dropout: float = 0.1,
     ):
         super().__init__()
         self.num_attention_heads = num_attention_heads
@@ -176,7 +192,9 @@ class TEUnfusedTransformerLayer(torch.nn.Module):
         self.mlp = TEUnfusedMLP(hidden_size=hidden_size, ffn_hidden_size=ffn_hidden_size)
         self.dropout2 = torch.nn.Dropout(hidden_dropout)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         res = x
         x = self.ln1(x)
 
@@ -197,19 +215,27 @@ class TEUnfusedTransformerLayer(torch.nn.Module):
         x = self.dropout2(x)
 
         return x + res
+
+
 # TE_UNFUSED_LAYER_END
 
 
 print("# BENCHMARK_TE_UNFUSED_OUTPUT_START")
 # BENCHMARK_TE_UNFUSED_START
-te_unfused = TEUnfusedTransformerLayer(
-    hidden_size=hidden_size,
-    ffn_hidden_size=ffn_hidden_size,
-    num_attention_heads=num_attention_heads,
-).to(dtype=dtype).cuda()
+te_unfused = (
+    TEUnfusedTransformerLayer(
+        hidden_size=hidden_size,
+        ffn_hidden_size=ffn_hidden_size,
+        num_attention_heads=num_attention_heads,
+    )
+    .to(dtype=dtype)
+    .cuda()
+)
 
 print("TE Unfused:")
-time_te_unfused = speedometer(te_unfused, x, forward_kwargs={"attention_mask": None}, label="te_unfused")
+time_te_unfused = speedometer(
+    te_unfused, x, forward_kwargs={"attention_mask": None}, label="te_unfused"
+)
 # BENCHMARK_TE_UNFUSED_END
 print("# BENCHMARK_TE_UNFUSED_OUTPUT_END\n")
 
@@ -217,6 +243,7 @@ print("# BENCHMARK_TE_UNFUSED_OUTPUT_END\n")
 # =============================================================================
 # TE Unfused + TE Attention
 # =============================================================================
+
 
 # TE_UNFUSED_ATTN_LAYER_START
 class TEUnfusedAttnTransformerLayer(torch.nn.Module):
@@ -229,7 +256,7 @@ class TEUnfusedAttnTransformerLayer(torch.nn.Module):
         num_attention_heads: int,
         layernorm_eps: float = 1e-5,
         attention_dropout: float = 0.1,
-        hidden_dropout: float = 0.1
+        hidden_dropout: float = 0.1,
     ):
         super().__init__()
         self.num_attention_heads = num_attention_heads
@@ -240,7 +267,7 @@ class TEUnfusedAttnTransformerLayer(torch.nn.Module):
             num_attention_heads=num_attention_heads,
             kv_channels=self.kv_channels,
             attention_dropout=attention_dropout,
-            attn_mask_type='causal',
+            attn_mask_type="causal",
         )
         self.projection = te.Linear(hidden_size, hidden_size, bias=True)
         self.dropout1 = torch.nn.Dropout(hidden_dropout)
@@ -248,7 +275,9 @@ class TEUnfusedAttnTransformerLayer(torch.nn.Module):
         self.mlp = TEUnfusedMLP(hidden_size=hidden_size, ffn_hidden_size=ffn_hidden_size)
         self.dropout2 = torch.nn.Dropout(hidden_dropout)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         res = x
         x = self.ln1(x)
 
@@ -269,19 +298,27 @@ class TEUnfusedAttnTransformerLayer(torch.nn.Module):
         x = self.dropout2(x)
 
         return x + res
+
+
 # TE_UNFUSED_ATTN_LAYER_END
 
 
 print("# BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_START")
 # BENCHMARK_TE_UNFUSED_ATTN_START
-te_unfused_attn = TEUnfusedAttnTransformerLayer(
-    hidden_size=hidden_size,
-    ffn_hidden_size=ffn_hidden_size,
-    num_attention_heads=num_attention_heads,
-).to(dtype=dtype).cuda()
+te_unfused_attn = (
+    TEUnfusedAttnTransformerLayer(
+        hidden_size=hidden_size,
+        ffn_hidden_size=ffn_hidden_size,
+        num_attention_heads=num_attention_heads,
+    )
+    .to(dtype=dtype)
+    .cuda()
+)
 
 print("TE Unfused + TE Attention:")
-time_te_unfused_attn = speedometer(te_unfused_attn, x, forward_kwargs={"attention_mask": None}, label="te_unfused_attn")
+time_te_unfused_attn = speedometer(
+    te_unfused_attn, x, forward_kwargs={"attention_mask": None}, label="te_unfused_attn"
+)
 # BENCHMARK_TE_UNFUSED_ATTN_END
 print("# BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_END\n")
 
@@ -292,17 +329,17 @@ print("# BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_END\n")
 
 print("# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_START")
 # BENCHMARK_TE_UNFUSED_FP8_START
-recipe = DelayedScaling(
-    fp8_format=Format.HYBRID,
-    amax_history_len=16,
-    amax_compute_algo="max"
-)
+recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max")
 
-te_unfused_fp8 = TEUnfusedAttnTransformerLayer(
-    hidden_size=hidden_size,
-    ffn_hidden_size=ffn_hidden_size,
-    num_attention_heads=num_attention_heads,
-).to(dtype=dtype).cuda()
+te_unfused_fp8 = (
+    TEUnfusedAttnTransformerLayer(
+        hidden_size=hidden_size,
+        ffn_hidden_size=ffn_hidden_size,
+        num_attention_heads=num_attention_heads,
+    )
+    .to(dtype=dtype)
+    .cuda()
+)
 
 print("TE Unfused + TE Attention + FP8:")
 time_te_unfused_fp8 = speedometer(
@@ -310,7 +347,7 @@ time_te_unfused_fp8 = speedometer(
     x,
     forward_kwargs={"attention_mask": None},
     autocast_kwargs={"enabled": True, "recipe": recipe},
-    label="te_unfused_fp8"
+    label="te_unfused_fp8",
 )
 # BENCHMARK_TE_UNFUSED_FP8_END
 print("# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_END\n")
@@ -319,6 +356,7 @@ print("# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_END\n")
 # =============================================================================
 # TE Fused + FP8: Optimized Modules with FP8
 # =============================================================================
+
 
 # TE_FUSED_LAYER_START
 class TEFusedTransformerLayer(torch.nn.Module):
@@ -331,7 +369,7 @@ class TEFusedTransformerLayer(torch.nn.Module):
         num_attention_heads: int,
         layernorm_eps: float = 1e-5,
         attention_dropout: float = 0.1,
-        hidden_dropout: float = 0.1
+        hidden_dropout: float = 0.1,
     ):
         super().__init__()
         self.num_attention_heads = num_attention_heads
@@ -343,7 +381,7 @@ class TEFusedTransformerLayer(torch.nn.Module):
             num_attention_heads=num_attention_heads,
             kv_channels=self.kv_channels,
             attention_dropout=attention_dropout,
-            attn_mask_type='causal',
+            attn_mask_type="causal",
         )
         self.projection = te.Linear(hidden_size, hidden_size, bias=True)
         self.dropout1 = torch.nn.Dropout(hidden_dropout)
@@ -352,7 +390,9 @@ class TEFusedTransformerLayer(torch.nn.Module):
         self.ln_mlp = te.LayerNormMLP(hidden_size, ffn_hidden_size, eps=layernorm_eps, bias=True)
         self.dropout2 = torch.nn.Dropout(hidden_dropout)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         res = x
 
         # Fused LayerNorm + QKV projection
@@ -371,16 +411,22 @@ class TEFusedTransformerLayer(torch.nn.Module):
         x = self.dropout2(x)
 
         return x + res
+
+
 # TE_FUSED_LAYER_END
 
 
 print("# BENCHMARK_TE_FUSED_FP8_OUTPUT_START")
 # BENCHMARK_TE_FUSED_FP8_START
-te_fused_fp8 = TEFusedTransformerLayer(
-    hidden_size=hidden_size,
-    ffn_hidden_size=ffn_hidden_size,
-    num_attention_heads=num_attention_heads,
-).to(dtype=dtype).cuda()
+te_fused_fp8 = (
+    TEFusedTransformerLayer(
+        hidden_size=hidden_size,
+        ffn_hidden_size=ffn_hidden_size,
+        num_attention_heads=num_attention_heads,
+    )
+    .to(dtype=dtype)
+    .cuda()
+)
 
 print("TE Fused + TE Attention + FP8:")
 time_te_fused_fp8 = speedometer(
@@ -388,7 +434,7 @@ time_te_fused_fp8 = speedometer(
     x,
     forward_kwargs={"attention_mask": None},
     autocast_kwargs={"enabled": True, "recipe": recipe},
-    label="te_fused_fp8"
+    label="te_fused_fp8",
 )
 # BENCHMARK_TE_FUSED_FP8_END
 print("# BENCHMARK_TE_FUSED_FP8_OUTPUT_END\n")
@@ -400,16 +446,20 @@ print("# BENCHMARK_TE_FUSED_FP8_OUTPUT_END\n")
 
 print("# BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_START")
 # BENCHMARK_TE_TRANSFORMER_LAYER_START
-te_transformer_layer = te.TransformerLayer(
-    hidden_size=hidden_size,
-    ffn_hidden_size=ffn_hidden_size,
-    num_attention_heads=num_attention_heads,
-    self_attn_mask_type='causal',
-    layernorm_epsilon=1e-5,
-    bias=True,
-    hidden_dropout=0.0,
-    attention_dropout=0.0,
-).to(dtype=dtype).cuda()
+te_transformer_layer = (
+    te.TransformerLayer(
+        hidden_size=hidden_size,
+        ffn_hidden_size=ffn_hidden_size,
+        num_attention_heads=num_attention_heads,
+        self_attn_mask_type="causal",
+        layernorm_epsilon=1e-5,
+        bias=True,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+    )
+    .to(dtype=dtype)
+    .cuda()
+)
 
 print("TE TransformerLayer + FP8:")
 time_te_transformer_layer = speedometer(
@@ -417,7 +467,7 @@ time_te_transformer_layer = speedometer(
     x,
     forward_kwargs={"attention_mask": None},
     autocast_kwargs={"enabled": True, "recipe": recipe},
-    label="te_transformer_layer"
+    label="te_transformer_layer",
 )
 # BENCHMARK_TE_TRANSFORMER_LAYER_END
 print("# BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_END\n")
@@ -428,8 +478,20 @@ with open("getting_started_pytorch_summary.csv", "w") as f:
     f.write("Implementation,Time (ms),Speedup\n")
     f.write(f"Baseline PyTorch,{time_baseline:.2f},1.00x\n")
     f.write(f"TE Unfused,{time_te_unfused:.2f},{time_baseline/time_te_unfused:.2f}x\n")
-    f.write(f"TE Unfused + TE Attention,{time_te_unfused_attn:.2f},{time_baseline/time_te_unfused_attn:.2f}x\n")
-    f.write(f"TE Unfused + TE Attention + FP8,{time_te_unfused_fp8:.2f},{time_baseline/time_te_unfused_fp8:.2f}x\n")
-    f.write(f"TE Fused + TE Attention + FP8,{time_te_fused_fp8:.2f},{time_baseline/time_te_fused_fp8:.2f}x\n")
-    f.write(f"TE TransformerLayer + FP8,{time_te_transformer_layer:.2f},{time_baseline/time_te_transformer_layer:.2f}x\n")
+    f.write(
+        "TE Unfused + TE"
+        f" Attention,{time_te_unfused_attn:.2f},{time_baseline/time_te_unfused_attn:.2f}x\n"
+    )
+    f.write(
+        "TE Unfused + TE Attention +"
+        f" FP8,{time_te_unfused_fp8:.2f},{time_baseline/time_te_unfused_fp8:.2f}x\n"
+    )
+    f.write(
+        "TE Fused + TE Attention +"
+        f" FP8,{time_te_fused_fp8:.2f},{time_baseline/time_te_fused_fp8:.2f}x\n"
+    )
+    f.write(
+        "TE TransformerLayer +"
+        f" FP8,{time_te_transformer_layer:.2f},{time_baseline/time_te_transformer_layer:.2f}x\n"
+    )
 print("\nSummary written to getting_started_pytorch_summary.csv")
