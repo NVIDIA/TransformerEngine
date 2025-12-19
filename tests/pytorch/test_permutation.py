@@ -1651,7 +1651,7 @@ if te.is_bf16_available():
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [7, 16])
 @pytest.mark.parametrize("hidden_size", [4096])
-@pytest.mark.parametrize("topK", [1, 2, 5])
+@pytest.mark.parametrize("topK", [2, 5])
 @pytest.mark.parametrize("num_out_tokens", [None, 2039])
 def test_permutation_index_map(
     te_dtype,
@@ -1680,7 +1680,7 @@ def test_permutation_index_map(
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [7, 16])
 @pytest.mark.parametrize("hidden_size", [4096])
-@pytest.mark.parametrize("topK", [1, 2, 5])
+@pytest.mark.parametrize("topK", [2, 5])
 @pytest.mark.parametrize("num_out_tokens", [None, 2039])
 def test_permutation_mask_map(
     te_dtype,
@@ -1710,12 +1710,18 @@ def test_permutation_mask_map(
 @pytest.mark.parametrize(
     "num_tokens, num_expert, hidden_size, topK",
     [
+<<<<<<< HEAD
         (0, 8, 1280, 2),
         (4096, 64, 1280, 7),
         (4096, 64, 2048, 6),
         (4096, 160, 5120, 6),
         (4096, 256, 7168, 8),
         (4096, 384, 8192, 8),
+=======
+        (4096, 8, 1280, 2),
+        (4096, 64, 4096, 6),
+        (4096, 256, 7168, 6),
+>>>>>>> 5518c80f (change test permutation to reduce test time)
         (4096, 512, 9216, 8),
     ],
 )
@@ -1748,10 +1754,10 @@ def test_permutation_and_padding_mask_map(
 @pytest.mark.parametrize(
     "num_tokens, num_expert, hidden_size, topK",
     [
-        (4096, 64, 1280, 7),
-        (4096, 64, 2048, 6),
-        (4096, 160, 5120, 6),
-        (4096, 256, 7168, 8),
+        (4096, 8, 1280, 2),
+        (4096, 64, 4096, 6),
+        (4096, 256, 7168, 6),
+        (4096, 512, 9216, 8),
     ],
 )
 def test_permutation_and_padding_with_merging_probs(
@@ -1797,9 +1803,9 @@ def test_permutation_mask_map_empty_input(te_dtype):
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [7, 16])
 @pytest.mark.parametrize("hidden_size", [4096])
-@pytest.mark.parametrize("topK", [1, 2, 5])
+@pytest.mark.parametrize("topK", [2, 5])
 @pytest.mark.parametrize("num_out_tokens", [None, 2039])
-@pytest.mark.parametrize("tp_size", [1, 2, 8])
+@pytest.mark.parametrize("tp_size", [1, 2])
 def test_permutation_mask_map_alongside_probs(
     te_dtype,
     num_tokens,
@@ -1849,10 +1855,10 @@ fp8_recipes = [
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("te_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
-@pytest.mark.parametrize("num_tokens", [2048])
+@pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [7, 16])
 @pytest.mark.parametrize("hidden_size", [4096])
-@pytest.mark.parametrize("topK", [1, 2, 5])
+@pytest.mark.parametrize("topK", [2, 5])
 @pytest.mark.parametrize("num_out_tokens", [None, 2039])
 @pytest.mark.parametrize("recipe", fp8_recipes)
 def test_permutation_mask_map_fp8(
@@ -1937,7 +1943,7 @@ def test_permutation_mask_map_topk1_no_probs(
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [7, 16])
-@pytest.mark.parametrize("tp_size", [1, 2, 8])
+@pytest.mark.parametrize("tp_size", [2, 8])
 @pytest.mark.parametrize("hidden_size", [4096])
 def test_chunk_permutation(
     te_dtype,
