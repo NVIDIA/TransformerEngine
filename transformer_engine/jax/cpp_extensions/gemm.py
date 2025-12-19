@@ -583,27 +583,27 @@ class GemmPrimitive(BasePrimitive):
         )
 
         lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
-        lhs_contracting_size = (
-            reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
-            if lhs_transposed
-            else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            lhs_contracting_size,
-            "LHS",
-        )
-        rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
-        rhs_contracting_size = (
-            reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
-            if rhs_transposed
-            else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            rhs_contracting_size,
-            "RHS",
-        )
+        # lhs_contracting_size = (
+        #     reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
+        #     if lhs_transposed
+        #     else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
+        # )
+        # assert_cublas_requirements(
+        #     scaling_mode,
+        #     lhs_contracting_size,
+        #     f"LHS {lhs_aval.shape} with contracting dims {lhs_cdims}",
+        # )
+        # rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
+        # rhs_contracting_size = (
+        #     reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
+        #     if rhs_transposed
+        #     else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
+        # )
+        # assert_cublas_requirements(
+        #     scaling_mode,
+        #     rhs_contracting_size,
+        #     f"RHS {rhs_aval.shape} with contracting dims {rhs_cdims}",
+        # )
 
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta)
         kwargs = {
@@ -818,10 +818,60 @@ class GemmPrimitive(BasePrimitive):
         #         f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
         #     )
 
+        f = partial(GemmPrimitive.outer_impl, 
+                **{
+                "out_dtype": out_dtype,
+                "contracting_dims": contracting_dims,
+                "scaling_mode": scaling_mode,
+                "fuse_bias": fuse_bias,
+                "fuse_gelu": fuse_gelu,
+                "grad": grad,
+                "use_split_accumulator": use_split_accumulator,
+                "collective_op": collective_op,
+                "transpose_batch_sequence": transpose_batch_sequence,
+                "sequence_dim": sequence_dim,
+                "is_outer": is_outer,
+            })
+        
+        lhs_cdims, rhs_cdims = contracting_dims
+        # Calculate output batch dimension based on input batch dims and contracting dims
+        # Both lhs and rhs have batch dimensions that may be at different indices
+        if lhs_bdims is not None and rhs_bdims is not None:
+            # Count non-contracting dimensions in LHS before the batch dimension
+            lhs_non_contracting_before_batch = sum(
+            1 for i in range(lhs_bdims) 
+            if i not in lhs_cdims
+            )
+            # The output batch dimension will be at the position corresponding to
+            # the LHS batch dimension's position among non-contracting dimensions
+            output_bdim = lhs_non_contracting_before_batch
+        elif lhs_bdims is not None:
+            # LHS has a batch dimension - this will be the output batch dimension
+            output_bdim = 0
+        elif rhs_bdims is not None:
+            # RHS has a batch dimension - need to account for LHS non-contracting dims
+            lhs_non_contracting = len([i for i in range(len(batched_args[0].shape)) 
+                        if i not in lhs_cdims and i != lhs_bdims])
+            output_bdim = lhs_non_contracting
+        else:
+            # No batch dimensions in either operand
+            output_bdim = None
+
         # Use general batcher from BasePrimitive
         return GemmPrimitive.batcher_impl(
             batched_args,
-            batch_dims,
+            batch_dims=(
+                lhs_bdims, # lhs
+                0, # lhs_scale_inv
+                rhs_bdims, # rhs
+                0, # rhs_scale_inv
+                *(None for _ in batched_args[4:]), # bias, gelu_input, alpha, beta
+            ),
+            output_bdims=(
+                output_bdim, # output
+                0, # bias_grad
+                0, # pre_gelu_out
+            ),
             static_kwargs={
                 "out_dtype": out_dtype,
                 "contracting_dims": contracting_dims,

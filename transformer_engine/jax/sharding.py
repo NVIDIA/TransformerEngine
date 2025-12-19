@@ -261,8 +261,6 @@ def get_mesh_axis_size(axis, mesh=None):
     if axis is None:
         return 1
 
-    print(mesh)
-
     assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"
     return mesh.shape[axis]
 

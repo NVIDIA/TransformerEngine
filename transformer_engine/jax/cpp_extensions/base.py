@@ -175,6 +175,7 @@ class BasePrimitive(metaclass=ABCMeta):
         batched_args: Sequence[Any],
         batch_dims: Sequence[Union[int, None]],
         static_kwargs: dict,
+        output_bdims: Union[Sequence[Union[int, None]], None] = None,
     ) -> Tuple[Tuple[Any, ...], Tuple[Union[int, None], ...]]:
         """Batcher implementation for JAX primitives.
 
@@ -207,12 +208,20 @@ class BasePrimitive(metaclass=ABCMeta):
                 if batch_dim is None:
                     batch_dim = bdim
                     batch_size = arg.shape[bdim]
-                # elif bdim != batch_dim:
-                #     raise ValueError(
-                #         "All batched arguments must have the same batch dimension. "
-                #         f"Got batch_dims={batch_dims}"
-                #     )
+                elif output_bdims is None and bdim != batch_dim:
+                    raise ValueError(
+                        "All batched arguments must have the same batch dimension. "
+                        f"Got batch_dims={batch_dims}"
+                    )
+                elif arg.shape[bdim] != batch_size:
+                    raise ValueError(
+                        "All batched arguments must have the same batch size. "
+                        f"Got sizes {[arg.shape[bdim] for arg, bdim in zip(batched_args, batch_dims) if bdim is not None]}. "
+                        f"Got batched_args={[arg.shape for arg, bdim in zip(batched_args, batch_dims) if bdim is not None]}."
+                    )
         assert batch_dim is not None and batch_size is not None, "Invalid batching config!"
+
+        print(f"[{cls.__name__}] Batching with size {batch_size}")
 
         # Loop over batch dimension and collect results
         all_results = []
@@ -244,9 +253,14 @@ class BasePrimitive(metaclass=ABCMeta):
         transposed = tuple(zip(*all_results))
 
         # Stack each output along the batch dimension
-        stacked_results = tuple(
-            jnp.stack(list(out_list), axis=batch_dim) for out_list in transposed
-        )
+        if output_bdims is not None:
+            stacked_results = tuple(
+                jnp.stack(list(out_list), axis=out_bdim) for out_list, out_bdim in zip(transposed, output_bdims)
+            )
+        else:
+            stacked_results = tuple(
+                jnp.stack(list(out_list), axis=batch_dim) for out_list in transposed
+            )
 
         # Single output: return unwrapped result
         if len(stacked_results) == 1:
