@@ -262,10 +262,8 @@ def fused_attn_fwd(
     if bottom_right_diagonal is None:
         bottom_right_diagonal = (
             True
-            if attn_mask_type in {
-                "causal_bottom_right",
-                "padding_causal_bottom_right"
-            } else False
+            if attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}
+            else False
         )
 
     if attn_scale is None:
@@ -483,10 +481,8 @@ def fused_attn_bwd(
     if bottom_right_diagonal is None:
         bottom_right_diagonal = (
             True
-            if attn_mask_type in {
-                "causal_bottom_right",
-                "padding_causal_bottom_right"
-            } else False
+            if attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}
+            else False
         )
 
     if attn_scale is None:
