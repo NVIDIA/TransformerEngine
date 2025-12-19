@@ -198,6 +198,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                       "Try recompiling with sm_100a or similar.");
     return;
   }
+  static_assert(kEnableRHTColQuant_ || kEnableRowQuant_,
+                "group_row_col_rht_gemm_device must generate row-wise "
+                "and/or column-wise output.");
 #if !defined(CUTLASS_ARCH_CLC_ENABLED)
   CUTLASS_NOT_IMPLEMENTED();
   return;
@@ -432,6 +435,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       cutlass::PipelineUmmaAsync<AccumulatorPipelineStageCount / EpilogueUnrollFactor,
                                  AtomThrShapeMNK>;
   using AccumulatorPipelineState = typename AccumulatorPipeline::PipelineState;
+  using AccumulatorPipelineInitBarriers = cute::bool_constant<kEnableRHTColQuant>;
 
   AccumulatorPipelineState accumulator_pipe_consumer_state;
   AccumulatorPipelineState accumulator_pipe_producer_state =
@@ -449,10 +453,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
   accumulator_pipeline_params.consumer_arv_count =
       size(AtomThrShapeMNK{}) * NumEpilogueColQuantThreadCount;
   accumulator_pipeline_params.initializing_warp = 1;
-  using IsInitAccumulatorPipeline = cute::conditional_t<kEnableRHTColQuant, cute::true_type, cute::false_type>;
   AccumulatorPipeline accumulator_pipeline(shared_storage.accumulator, accumulator_pipeline_params,
                                            cluster_shape,
-                                           IsInitAccumulatorPipeline{},  // Perform barrier init
+                                           AccumulatorPipelineInitBarriers{},
                                            cute::true_type{});  // Delay mask calculation
   typename SchedPipeline::Params sched_pipeline_params;
   if (is_sched_warp) {
@@ -1420,27 +1423,36 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
     use_stochastic_rounding, kEnableStochasticRounding,
     TRANSFORMER_ENGINE_SWITCH_CONDITION(
-        all_has_col_quant, kEnableRhtColQuant,
+      all_has_col_quant, kEnableRhtColQuant,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+        all_has_row_quant, kEnableRowQuant,
         TRANSFORMER_ENGINE_SWITCH_CONDITION(
-            all_has_row_quant, kEnableRowQuant,
-            TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                use_swizzle_sf_output, kEnableSwizzleSFOutput,
-                TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                    use_fast_math, kEnableFastMath,
+          use_swizzle_sf_output, kEnableSwizzleSFOutput,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+            use_fast_math, kEnableFastMath,
 
-                    detail::group_row_col_rht_gemm_ntt_w_sfc<
-                        kEnableStochasticRounding, kEnableRhtColQuant, kEnableRowQuant,
-                        kEnableSwizzleSFOutput, TA, TB, TQA, TSFA, TD, TSFD, kEnableFastMath>(
-                        /*packed_sequence_length=*/m, /*hidden_size=*/n,
-                        /*A=*/reinterpret_cast<TA const *>(input.dptr),
-                        /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-                        /*QA=*/reinterpret_cast<TQA *>(rowwise_data_base_ptr),
-                        /*SFA=*/reinterpret_cast<TSFA *>(rowwise_scale_inv_base_ptr),
-                        /*args=*/kernel_args,
-                        /*rng_state=*/rng_state, /*sm_count=*/sm_count,
-                        /*stream=*/stream, /*k_tile_size=*/k_tile_size);
+            if constexpr (kEnableRhtColQuant || kEnableRowQuant) {
+              detail::group_row_col_rht_gemm_ntt_w_sfc<
+                  kEnableStochasticRounding,
+                  kEnableRhtColQuant, kEnableRowQuant,
+                  kEnableSwizzleSFOutput,
+                  TA, TB, TQA, TSFA, TD, TSFD,
+                  kEnableFastMath>(
+                  /*packed_sequence_length=*/m, /*hidden_size=*/n,
+                  /*A=*/reinterpret_cast<TA const *>(input.dptr),
+                  /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+                  /*QA=*/reinterpret_cast<TQA *>(rowwise_data_base_ptr),
+                  /*SFA=*/reinterpret_cast<TSFA *>(rowwise_scale_inv_base_ptr),
+                  /*args=*/kernel_args,
+                  /*rng_state=*/rng_state, /*sm_count=*/sm_count,
+                  /*stream=*/stream, /*k_tile_size=*/k_tile_size);
+            } else {
+              NVTE_ERROR("Invalid kernel configuration (kEnableRHTColQuant=",
+                         kEnableRhtColQuant, ", kEnableRowQuant=",
+                         kEnableRowQuant, ").");
+            }
 
-                );););););
+  );););););
 }
 
 }  // namespace transformer_engine
