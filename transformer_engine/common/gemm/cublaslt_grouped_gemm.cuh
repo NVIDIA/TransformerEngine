@@ -15,4 +15,3 @@
 // This header is for internal use only.
 
 #endif  // TRANSFORMER_ENGINE_COMMON_GEMM_CUBLASLT_GROUPED_GEMM_CUH_
-
