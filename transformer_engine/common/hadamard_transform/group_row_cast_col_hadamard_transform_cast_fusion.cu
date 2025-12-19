@@ -50,12 +50,10 @@ namespace detail {
 namespace {
 
 using namespace cute;
-using cute::
-    Tensor;  // Ensure unqualified Tensor refers to cute::Tensor, not transformer_engine::Tensor
 
-struct CLCResponse {
-  uint32_t data[4] = {0};
-};
+// Ensure Tensor refers to cute::Tensor, not transformer_engine::Tensor
+using cute::Tensor;
+
 
 constexpr int kMaxTensorsPerKernel = 64;
 
@@ -151,13 +149,12 @@ struct SharedStorage {
       cutlass::detail::CustomizedPipelineTmaUmmaAsync<MainloopPipelineStageCount, Shape<_1, _1, _1>,
                                                       AtomThrShapeMNK>;
   using MainloopPipelineStorage = typename MainloopPipeline::SharedStorage;
-  using CLCPipeline = cutlass::PipelineCLCFetchAsync<SchedulerPipelineStageCount_, ClusterShape>;
-  using CLCPipelineStorage = typename CLCPipeline::SharedStorage;
-  using CLCThrottlePipeline = cutlass::PipelineAsync<SchedulerPipelineStageCount_>;
-  using CLCThrottlePipelineStorage = typename CLCThrottlePipeline::SharedStorage;
+  using SchedPipeline = cutlass::PipelineCLCFetchAsync<SchedulerPipelineStageCount_, ClusterShape>;
+  using SchedPipelineStorage = typename SchedPipeline::SharedStorage;
+  using SchedThrottlePipeline = cutlass::PipelineAsync<SchedulerPipelineStageCount_>;
+  using SchedThrottlePipelineStorage = typename SchedThrottlePipeline::SharedStorage;
 
   struct TensorStorage : cute::aligned_struct<128, _1> {
-    // cute::array_aligned<ElementA, cute::cosize_v<ASmemLayout>> smem_A;
     cute::array_aligned<ElementA, cute::cosize_v<ASmemLayout>> smem_A;
     cute::array_aligned<ElementB, cute::cosize_v<BSmemLayout>> smem_B;
   } tensors;
@@ -165,11 +162,12 @@ struct SharedStorage {
   alignas(16) AccumulatorPipelineStorage accumulator;
   alignas(16) MainloopPipelineStorage mainloop;
   alignas(16) cute::uint64_t tma_barrier[1];
-  alignas(16) CLCPipelineStorage clc;
-  alignas(16) CLCThrottlePipelineStorage clc_throttle;
-  alignas(16) CLCResponse clc_response[SchedulerPipelineStageCount_];
+  alignas(16) SchedPipelineStorage sched;
+  alignas(16) SchedThrottlePipelineStorage sched_throttle;
+  alignas(16) int32_t atomic_tile_id[SchedulerPipelineStageCount_];
   alignas(16) float global_a_amax[kMaxTensorsPerKernel];
   alignas(16) float global_d_amax[kMaxTensorsPerKernel];
+  uint32_t atomic_tile_counter[SchedulerPipelineStageCount_];
   uint32_t tmem_base_ptr;
 };
 
@@ -187,9 +185,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
     TA const *A, AStride dA, ASmemLayout sAlayout, CUTE_GRID_CONSTANT TmaLoadA const tma_load_a,
     TB const *B, BStride dB, BSmemLayout sBlayout, CUTE_GRID_CONSTANT TmaLoadB const tma_load_b,
     TQA *QA, QAStride dQA, TSFA *SFA, TSFALayout sfa_layout, MultiAmaxHadamardCastFusionArgs args,
+    uint32_t* tile_scheduler_workspace,
     TiledMMA mma,
-    // float const* a_global_amax,
-    // float const* c_global_amax,
     const size_t *rng_state) {
   using namespace cute;
 
@@ -242,12 +239,12 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       cutlass::detail::CustomizedPipelineTmaUmmaAsync<MainloopPipelineStageCount, ClusterShape,
                                                       AtomThrShapeMNK>;
   using MainloopPipelineState = typename MainloopPipeline::PipelineState;
-  using CLCPipeline = cutlass::PipelineCLCFetchAsync<SchedulerPipelineStageCount, ClusterShape>;
-  using CLCPipelineState = typename CLCPipeline::PipelineState;
-  using CLCThrottlePipeline = cutlass::PipelineAsync<SchedulerPipelineStageCount>;
-  using CLCThrottlePipelineState = typename CLCThrottlePipeline::PipelineState;
+  using SchedPipeline = cutlass::PipelineCLCFetchAsync<SchedulerPipelineStageCount, ClusterShape>;
+  using SchedPipelineState = typename SchedPipeline::PipelineState;
+  using SchedThrottlePipeline = cutlass::PipelineAsync<SchedulerPipelineStageCount>;
+  using SchedThrottlePipelineState = typename SchedThrottlePipeline::PipelineState;
 
-  static_assert(ClusterShape{} == Shape<_1, _1, _1>{}, "ClusterShape must be Shape<_1,_1,_1>");
+  static_assert(ClusterShape{} == Shape<_1,_1,_1>{}, "ClusterShape must be Shape<_1,_1,_1>");
 
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   static int constexpr VectorSize = RhtTensorSize;
@@ -269,132 +266,98 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
   // Total number of k-tiles
   int const K_TILE_MAX = min(packed_N, K) / size<2>(epilogue_tiler);
 
-  // Dynamic scheduler for SM100 architecture to support flexible kernel tiling and scheduling.
   struct TileScheduler {
-    // Structure to represent a single work tile's identification and state.
-    struct WorkTileInfo {
-      uint32_t m_idx = 0;
-      uint32_t n_idx = 0;
-      uint32_t l_idx = 0;
-      bool is_valid_tile = false;
-    };
     uint32_t tiles_in_m = 0;
     uint32_t tiles_in_n = 0;
-
+    uint32_t linear_idx = 0;
+    uint32_t next_linear_idx = 0;
+    uint32_t start_idx = 0;
+    uint32_t tile_m_idx = 0;
+    uint32_t tile_n_idx = 0;
     int k_tile_max = 0;
+    uint32_t* atomic_tile_index_;
+    uint32_t* smem_tile_counter;
+    uint32_t atomic_offset;
+    cutlass::FastDivmodU64 divmod_tiles_in_m;
 
-    int wave_cnt = 0;
-    WorkTileInfo work_tile_info;
-    WorkTileInfo next_work_tile_info;
-    CLCResponse *clc_response_ptr_;
-    CUTLASS_DEVICE TileScheduler(uint32_t tiles_m, uint32_t tiles_n, int kmax,
-                                 CLCResponse *clc_response_ptr)
-        : tiles_in_m(tiles_m),
-          tiles_in_n(tiles_n),
-
-          k_tile_max(kmax),
-          work_tile_info(
-              {blockIdx.x, blockIdx.y, blockIdx.z, blockIdx.x < tiles_m && blockIdx.y < tiles_n}),
-          next_work_tile_info(
-              {blockIdx.x, blockIdx.y, blockIdx.z, blockIdx.x < tiles_m && blockIdx.y < tiles_n}),
-          clc_response_ptr_(clc_response_ptr) {}
-
-    CUTLASS_DEVICE uint32_t tile_m() const { return work_tile_info.m_idx; }
+    CUTLASS_DEVICE TileScheduler(uint32_t tiles_m, uint32_t tiles_n, int kmax, uint32_t* atomic_tile_index_, uint32_t* smem_tile_counter)
+      : tiles_in_m(tiles_m),
+        tiles_in_n(tiles_n),
+        linear_idx(blockIdx.x),
+        next_linear_idx(blockIdx.x),
+        start_idx(blockIdx.x),
+        k_tile_max(kmax),
+        atomic_tile_index_(atomic_tile_index_),
+        smem_tile_counter(smem_tile_counter),
+        atomic_offset(gridDim.x),
+        divmod_tiles_in_m(uint64_t(tiles_m)) {
+      update_tile_idx();
+    }
+    CUTLASS_DEVICE void update_tile_idx() {
+      uint64_t q, r;
+      divmod_tiles_in_m(q, r, uint64_t(linear_idx));
+      tile_m_idx = static_cast<uint32_t>(r);
+      tile_n_idx = static_cast<uint32_t>(q) * uint32_t(k_tile_max);
+    }
+    CUTLASS_DEVICE uint32_t tile_m() const {
+      return tile_m_idx;
+    }
     CUTLASS_DEVICE uint32_t tile_n_base() const {
-      return work_tile_info.n_idx * uint32_t(k_tile_max);
+      return tile_n_idx;
     }
-
     CUTLASS_DEVICE uint32_t tiles_m() const { return tiles_in_m; }
-    CUTLASS_DEVICE uint32_t tiles_n() const { return tiles_in_n; }
-    CUTLASS_DEVICE bool is_valid() const {
-      return cute::elem_less(cute::make_coord(work_tile_info.m_idx, work_tile_info.n_idx),
-                             cute::make_coord(tiles_in_m, tiles_in_n)) &&
-             work_tile_info.is_valid_tile;
-    }
-    CUTLASS_DEVICE bool is_first_wave() const { return wave_cnt == 0; }
-    CUTLASS_DEVICE auto advance_to_next_work(CLCPipeline &clc_pipeline,
-                                             CLCPipelineState clc_pipe_producer_state) {
-      uint32_t mbarrier_addr = clc_pipeline.producer_get_barrier(clc_pipe_producer_state);
-      // Wait for clcID buffer to become empty with a flipped phase
-      clc_pipeline.producer_acquire(clc_pipe_producer_state);
 
-      if (cute::elect_one_sync()) {
-        issue_clc_query(clc_pipe_producer_state, mbarrier_addr, clc_response_ptr_);
+    CUTLASS_DEVICE uint32_t tiles_n() const { return tiles_in_n; }
+
+    CUTLASS_DEVICE bool is_valid() const {
+      return cute::elem_less(cute::make_coord(tile_m(), tile_n_base()), cute::make_coord(tiles_in_m, tiles_in_n));
+    }
+
+    CUTLASS_DEVICE bool is_first_wave() const { return linear_idx == start_idx; }
+
+    CUTLASS_DEVICE uint32_t get_linear_tile_idx() const { return linear_idx; }
+
+    // Fetch a new tile_id using atomics.
+    CUTLASS_DEVICE uint32_t fetch_tile_id_counter( int pred ) {
+        uint32_t tile_id_counter = 0;
+        asm volatile( "{\n\t"
+                      ".reg .pred p;\n\t"
+                      "setp.eq.u32 p, %2, 1;\n\t"
+                      "@p atom.global.add.u32 %0, [%1], 1; \n\t"
+                      "}"
+                      : "=r"( tile_id_counter )
+                      : "l"( atomic_tile_index_ ), "r"( pred ) );
+
+        return tile_id_counter;
+    }
+
+    CUTLASS_DEVICE auto fetch_next_work(SchedPipeline& sched_pipeline, SchedPipelineState sched_pipeline_consumer_state) {
+      sched_pipeline.consumer_wait(sched_pipeline_consumer_state);
+      next_linear_idx = smem_tile_counter[sched_pipeline_consumer_state.index()];
+      cutlass::arch::fence_view_async_shared();
+      sched_pipeline.consumer_release(sched_pipeline_consumer_state);
+      return;
+    }
+
+    CUTLASS_DEVICE auto advance_to_next_work(SchedPipeline& sched_pipeline, SchedPipelineState sched_pipeline_producer_state) {
+      uint32_t mbarrier_addr = sched_pipeline.producer_get_barrier(sched_pipeline_producer_state);
+      // Wait for clcID buffer to become empty with a flipped phase
+      sched_pipeline.producer_acquire(sched_pipeline_producer_state);
+      auto is_leading_thread = cute::elect_one_sync();
+      uint32_t tile_id_counter = fetch_tile_id_counter(is_leading_thread) + atomic_offset;
+      uint32_t smem_addr = cute::cast_smem_ptr_to_uint(&smem_tile_counter[sched_pipeline_producer_state.index()]);
+      if (is_leading_thread) {
+        cute::store_shared_remote(tile_id_counter, smem_addr, mbarrier_addr, 0);
       }
 
-      ++clc_pipe_producer_state;
-      return clc_pipe_producer_state;
+      ++sched_pipeline_producer_state;
+      return sched_pipeline_producer_state;
     }
 
-    // Consumer method: fetch information for the next tile of work
-    CUTLASS_DEVICE auto fetch_next_work(CLCPipeline &clc_pipeline,
-                                        CLCPipelineState clc_pipe_producer_state) {
-      clc_pipeline.consumer_wait(clc_pipe_producer_state);
-      uint32_t smem_addr =
-          cute::cast_smem_ptr_to_uint(&clc_response_ptr_[clc_pipe_producer_state.index()]);
-      next_work_tile_info = work_tile_info_from_clc_response(smem_addr);
-      clc_pipeline.consumer_release(clc_pipe_producer_state);
-      wave_cnt++;
-      return;
-    }
-
-    // Updates the current work tile state to the next tile
     CUTLASS_DEVICE auto update_work_tile_info() {
-      work_tile_info = next_work_tile_info;
+      linear_idx = next_linear_idx;
+      update_tile_idx();
       return;
-    }
-
-    // Computes the linear index for the current tile based on m/n indices
-    CUTLASS_DEVICE uint32_t get_linear_tile_idx() const {
-      return work_tile_info.m_idx + work_tile_info.n_idx * tiles_in_m;
-    }
-
-    // Issues a CLC (Cluster Launch Control) query to advance scheduling state machine.
-    CUTLASS_HOST_DEVICE
-    static void issue_clc_query(CLCPipelineState state, uint32_t mbarrier_addr,
-                                CLCResponse *clc_response_ptr) {
-#if defined(CUTLASS_ARCH_CLC_ENABLED)
-      uint32_t result_addr = cute::cast_smem_ptr_to_uint(
-          reinterpret_cast<const void *>(&clc_response_ptr[state.index()]));
-      asm volatile(
-          "{\n\t"
-          "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_tx::bytes."
-          "multicast::cluster::all.b128 [%0], [%1];\n\t"
-          "}\n"
-          :
-          : "r"(result_addr), "r"(mbarrier_addr));
-#else
-      CUTLASS_NOT_IMPLEMENTED();
-#endif
-    }
-
-    // Loads CLC response from shared memory and parses WorkTileInfo from result.
-    CUTLASS_DEVICE
-    static WorkTileInfo work_tile_info_from_clc_response(uint32_t result_addr) {
-      WorkTileInfo work_tile_info;
-      uint32_t valid = 0;
-#if defined(CUTLASS_ARCH_CLC_ENABLED)
-      asm volatile(
-          "{\n"
-          ".reg .pred p1;\n\t"
-          ".reg .b128 clc_result;\n\t"
-          "ld.shared.b128 clc_result, [%4];\n\t"
-          "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, clc_result;\n\t"
-          "selp.u32 %3, 1, 0, p1;\n\t"
-          "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, "
-          "clc_result;\n\t"
-          "}\n"
-          : "=r"(work_tile_info.m_idx), "=r"(work_tile_info.n_idx), "=r"(work_tile_info.l_idx),
-            "=r"(valid)
-          : "r"(result_addr)
-          : "memory");
-
-      cutlass::arch::fence_view_async_shared();
-#else
-      CUTLASS_NOT_IMPLEMENTED();
-#endif
-      work_tile_info.is_valid_tile = (valid == 1);
-      return work_tile_info;
     }
   };
 
@@ -407,10 +370,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
 
   // Compute the number of tiles in M and N after tiling and assign scheduler
   uint32_t tiles_in_m = uint32_t(size(ceil_div(M, size<0>(cluster_tile))));
-  uint32_t tiles_in_n = uint32_t(size(ceil_div(packed_N, size<2>(epilogue_tiler))));
-  TileScheduler scheduler(tiles_in_m, tiles_in_n, K_TILE_MAX, shared_storage.clc_response);
+  uint32_t tiles_in_n = uint32_t(size(ceil_div(args.split_sections_range[args.num_tensors], size<2>(epilogue_tiler))));
 
-  // Get this block's rank within the cluster
+  TileScheduler scheduler(tiles_in_m, tiles_in_n, K_TILE_MAX, tile_scheduler_workspace, shared_storage.atomic_tile_counter);
+
   int block_rank_in_cluster = cute::block_rank_in_cluster();
 
   // Shapes for accumulated tiles in mainloop and epilogue
@@ -444,13 +407,6 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
   bool is_sched_warp = (warp_idx == 2);
   bool is_epilogue_col_quant_warp = (warp_idx >= 4 && warp_idx <= 7);
   bool is_epilogue_row_quant_warp = (warp_idx >= 8 && warp_idx <= 15);
-
-  //   if (is_epilogue_col_quant_warp && elect_one_sync()) {
-  //     cute::prefetch(raw_pointer_cast(c_global_amax));
-  //   }
-  //   if (is_epilogue_row_quant_warp && elect_one_sync()) {
-  //     cute::prefetch(raw_pointer_cast(a_global_amax));
-  //   }
 
   typename MainloopPipeline::Params mainloop_pipeline_params;
   if (is_dma_warp) {
@@ -498,42 +454,38 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                            cluster_shape,
                                            IsInitAccumulatorPipeline{},  // Perform barrier init
                                            cute::true_type{});  // Delay mask calculation
-  // CLC pipeline
-  typename CLCPipeline::Params clc_pipeline_params;
+  typename SchedPipeline::Params sched_pipeline_params;
   if (is_sched_warp) {
-    clc_pipeline_params.role = CLCPipeline::ThreadCategory::ProducerConsumer;
-  } else {
-    clc_pipeline_params.role = CLCPipeline::ThreadCategory::Consumer;
+    sched_pipeline_params.role = SchedPipeline::ThreadCategory::ProducerConsumer;
   }
-  clc_pipeline_params.producer_blockid = 0;
-  clc_pipeline_params.producer_arv_count = 1;
-  clc_pipeline_params.consumer_arv_count =
-      NumSchedThreads +
-      cluster_size * (NumMainloopLoadThreads + NumEpilogueThreads + NumMmaThreadCount);
-  clc_pipeline_params.transaction_bytes = sizeof(CLCResponse);
-  clc_pipeline_params.initializing_warp = 3;
-  CLCPipeline clc_pipeline(shared_storage.clc, clc_pipeline_params, cluster_shape);
-  CLCPipelineState clc_pipeline_consumer_state;
-  CLCPipelineState clc_pipeline_producer_state = cutlass::make_producer_start_state<CLCPipeline>();
+  else {
+    sched_pipeline_params.role = SchedPipeline::ThreadCategory::Consumer;
+  }
+  sched_pipeline_params.producer_blockid = 0;
+  sched_pipeline_params.producer_arv_count = 1;
+  sched_pipeline_params.consumer_arv_count = NumSchedThreads + cluster_size *
+                                                (NumMainloopLoadThreads + NumEpilogueThreads + NumMmaThreadCount);
+  sched_pipeline_params.transaction_bytes = sizeof(uint32_t);
+  sched_pipeline_params.initializing_warp = 3;
+  SchedPipeline sched_pipeline(shared_storage.sched, sched_pipeline_params, cluster_shape);
+  SchedPipelineState sched_pipeline_consumer_state;
+  SchedPipelineState sched_pipeline_producer_state = cutlass::make_producer_start_state<SchedPipeline>();
 
-  // CLC throttle pipeline
-  typename CLCThrottlePipeline::Params clc_throttle_pipeline_params;
+  typename SchedThrottlePipeline::Params sched_throttle_pipeline_params;
   if (is_dma_warp) {
-    clc_throttle_pipeline_params.role = CLCThrottlePipeline::ThreadCategory::Producer;
+    sched_throttle_pipeline_params.role = SchedThrottlePipeline::ThreadCategory::Producer;
   }
   if (is_sched_warp) {
-    clc_throttle_pipeline_params.role = CLCThrottlePipeline::ThreadCategory::Consumer;
+    sched_throttle_pipeline_params.role = SchedThrottlePipeline::ThreadCategory::Consumer;
   }
-  clc_throttle_pipeline_params.producer_arv_count = NumMainloopLoadThreads;
-  clc_throttle_pipeline_params.consumer_arv_count = NumSchedThreads;
-  clc_throttle_pipeline_params.dst_blockid = 0;
-  clc_throttle_pipeline_params.initializing_warp = 4;
+  sched_throttle_pipeline_params.producer_arv_count = NumMainloopLoadThreads;
+  sched_throttle_pipeline_params.consumer_arv_count = NumSchedThreads;
+  sched_throttle_pipeline_params.dst_blockid = 0;
+  sched_throttle_pipeline_params.initializing_warp = 4;
 
-  CLCThrottlePipeline clc_throttle_pipeline(shared_storage.clc_throttle,
-                                            clc_throttle_pipeline_params);
-  CLCThrottlePipelineState clc_pipe_throttle_consumer_state;
-  CLCThrottlePipelineState clc_pipe_throttle_producer_state =
-      cutlass::make_producer_start_state<CLCThrottlePipeline>();
+  SchedThrottlePipeline sched_throttle_pipeline(shared_storage.sched_throttle, sched_throttle_pipeline_params);
+  SchedThrottlePipelineState sched_pipeline_throttle_consumer_state;
+  SchedThrottlePipelineState sched_pipeline_throttle_producer_state = cutlass::make_producer_start_state<SchedThrottlePipeline>();
 
   if (warp_idx == 2 && elect_one_sync()) {
     cute::initialize_barrier(shared_storage.tma_barrier[0], /* num_threads */ 1);
@@ -597,11 +549,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       auto tAgA_mk = tAgA(_, scheduler.tile_m(), _);
       int k_tile = 0;
 
-      // Throttle CLC producer
-      clc_throttle_pipeline.producer_acquire(clc_pipe_throttle_producer_state);
-      clc_throttle_pipeline.producer_commit(clc_pipe_throttle_producer_state);
-      ++clc_pipe_throttle_producer_state;
-
+      sched_throttle_pipeline.producer_acquire(sched_pipeline_throttle_producer_state);
+      sched_throttle_pipeline.producer_commit(sched_pipeline_throttle_producer_state);
+      ++sched_pipeline_throttle_producer_state;
       CUTLASS_PRAGMA_NO_UNROLL
       while (k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n()) {
         int k_tile_idx_n = scheduler.tile_n_base() + k_tile;
@@ -618,10 +568,10 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                tAsA(_, write_stage));
         }
       }
-      // Synchronize using work scheduler.
-      scheduler.fetch_next_work(clc_pipeline, clc_pipeline_consumer_state);
-      ++clc_pipeline_consumer_state;
+      scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
+      ++sched_pipeline_consumer_state;
       scheduler.update_work_tile_info();
+      // scheduler.advance();
     } while (scheduler.is_valid());
     mainloop_pipeline.producer_tail(mainloop_pipe_producer_state);
   } else if (is_mma_warp) {
@@ -653,13 +603,13 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       do {
         uint32_t skip_wait = K_TILE_MAX <= 0;
 
-        auto barrier_token =
-            mainloop_pipeline.consumer_try_wait(mainloop_pipe_consumer_state, skip_wait);
-        scheduler.fetch_next_work(clc_pipeline, clc_pipeline_consumer_state);
-        ++clc_pipeline_consumer_state;
+        auto barrier_token = mainloop_pipeline.consumer_try_wait(
+          mainloop_pipe_consumer_state,
+          skip_wait);
+        scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
+        ++sched_pipeline_consumer_state;
         CUTLASS_PRAGMA_NO_UNROLL
-        for (int k_tile = 0;
-             k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n();) {
+        for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n(); ) {
           mainloop_pipeline.consumer_wait(mainloop_pipe_consumer_state, barrier_token);
           int read_stage = mainloop_pipe_consumer_state.index();
           auto tCrA_mk = tCrA(_, _, _, read_stage);
@@ -697,13 +647,12 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
     // Scheduler warp manages tile assignment and pipeline progress for warps
     cutlass::arch::warpgroup_reg_dealloc<32>();
     do {
-      clc_throttle_pipeline.consumer_wait(clc_pipe_throttle_consumer_state);
-      clc_throttle_pipeline.consumer_release(clc_pipe_throttle_consumer_state);
-      ++clc_pipe_throttle_consumer_state;
-      clc_pipeline_producer_state =
-          scheduler.advance_to_next_work(clc_pipeline, clc_pipeline_producer_state);
-      scheduler.fetch_next_work(clc_pipeline, clc_pipeline_consumer_state);
-      ++clc_pipeline_consumer_state;
+      sched_throttle_pipeline.consumer_wait(sched_pipeline_throttle_consumer_state);
+      sched_throttle_pipeline.consumer_release(sched_pipeline_throttle_consumer_state);
+      ++sched_pipeline_throttle_consumer_state;
+      sched_pipeline_producer_state = scheduler.advance_to_next_work(sched_pipeline, sched_pipeline_producer_state);
+      scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
+      ++sched_pipeline_consumer_state;
       scheduler.update_work_tile_info();
     } while (scheduler.is_valid());
   } else if (is_epilogue_col_quant_warp) {
@@ -797,15 +746,14 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       auto sfc_converter = cutlass::NumericConverter<TSFD, float>{};
 
       do {
-        scheduler.fetch_next_work(clc_pipeline, clc_pipeline_consumer_state);
-        ++clc_pipeline_consumer_state;
+        scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
+        ++sched_pipeline_consumer_state;
         CUTLASS_PRAGMA_NO_UNROLL
-        for (int k_tile = 0;
-             k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n();
-             ++k_tile) {
-          int global_tile_n_offset = (scheduler.tile_n_base() + k_tile) * size<1>(epilogue_tiler);
+        for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n(); ++k_tile) {
+          int global_tile_n_offset = (scheduler.tile_n_base() +k_tile) * size<1>(epilogue_tiler);
 
           int cur_group_idx = GetGroupIdx(&args, global_tile_n_offset);
+
           if (cur_group_idx != group_idx) {
             group_idx = cur_group_idx;
             c_global_amax_val = shared_storage.global_d_amax[group_idx];
@@ -1132,18 +1080,17 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                           compute_frgs_up, acc_scale));
             }
           }
-          // Copy the output quantized data and scaling factors into global memory for later use
           copy(tiled_r2g_QA, tQArQA, tQAgQA_mn);
           copy(tiled_r2g_SFA, filter(tQArSFA), filter(tQAgSFA_mn));
         }
-        // Move to next work tile for row quant warp
-        scheduler.fetch_next_work(clc_pipeline, clc_pipeline_consumer_state);
-        ++clc_pipeline_consumer_state;
+        // scheduler.advance();
+        scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
+        ++sched_pipeline_consumer_state;
         scheduler.update_work_tile_info();
-      } while (scheduler.is_valid());
+      }while (scheduler.is_valid());
     }
+
   } else {
-    // Any extra warpgroup that is not used for anything above gets deallocated here
     cutlass::arch::warpgroup_reg_dealloc<32>();
   }
 } // NOLINT(readability/fn_size)
@@ -1208,37 +1155,32 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
   auto dD = LayoutRight{};      // (dM,dN)
   auto dQA = stride(tensorQA);  // (dM,dK)
   using ClusterShape = Shape<_1, _1, _1>;
-  auto cga_shape = ClusterShape{};
-  auto cga_tile_shape = Shape<_128, Int<RhtTensorSize>, Int<RhtTensorSize>>{};
+  auto cluster_shape = ClusterShape{};
+  auto cluster_tile_shape = Shape<_128,Int<RhtTensorSize>,Int<RhtTensorSize>>{};
   auto cluster_tile_mainloop = Shape<_128, Int<RhtTensorSize>, _128>{};
 
   // Each mainloop / epilogue loads 128 x 64 tiles while each MMA proceeds with 128 x 16 tiles
-  static int constexpr EpilogueUnrollFactor =
-      size<2>(cluster_tile_mainloop) / size<2>(cga_tile_shape);
+  static int constexpr EpilogueUnrollFactor = size<2>(cluster_tile_mainloop) / size<2>(cluster_tile_shape);
   // Construct the MMA
-  auto mma = make_tiled_mma(
-      SM100_MMA_F16BF16_SS<TA, TB, float, size<0>(cga_tile_shape), size<1>(cga_tile_shape),
-                           UMMA::Major::MN, UMMA::Major::MN>{},
-      Layout<Shape<_1, _1>>{});
+  auto mma = make_tiled_mma(SM100_MMA_F16BF16_SS<TA, TB, float,
+                                               size<0>(cluster_tile_shape), size<1>(cluster_tile_shape),
+                                               UMMA::Major::MN, UMMA::Major::MN>{},
+                            Layout<Shape<_1,_1>>{});
+
 
   // Assert that the TiledMMA uses all CTAs in the CGA.
-  CUTE_STATIC_ASSERT_V(size(cga_shape) == size(mma));
-  CUTE_STATIC_ASSERT_V(evenly_divides(cga_tile_shape, tile_shape(mma)));
+  CUTE_STATIC_ASSERT_V(size(cluster_shape) == size(mma));
+  CUTE_STATIC_ASSERT_V(evenly_divides(cluster_tile_shape, tile_shape(mma)));
 
   // Determine the A and B shapes
-  auto mma_shape_B =
-      partition_shape_B(mma, make_shape(size<1>(cga_tile_shape), size<2>(cga_tile_shape)));
+  auto mma_shape_B = partition_shape_B(mma, make_shape(size<1>(cluster_tile_shape), size<2>(cluster_tile_shape)));
 
   using TiledMma = decltype(mma);
   using AtomThrID = typename TiledMma::AtomThrID;
 
-  using SmemShape_M = decltype(shape_div(
-      shape<0>(cga_tile_shape),
-      shape_div(shape<0>(cga_tile_shape), size<0>(cga_tile_shape) / size(AtomThrID{}))));
-  using SmemShape_N = decltype(shape_div(
-      shape<1>(cga_tile_shape),
-      shape_div(shape<1>(cga_tile_shape), size<1>(cga_tile_shape) / size(AtomThrID{}))));
-  using SmemShape_K = decltype(cute::get<2>(cga_tile_shape));
+  using SmemShape_M = decltype(shape_div(shape<0>(cluster_tile_shape), shape_div(shape<0>(cluster_tile_shape), size<0>(cluster_tile_shape) / size(AtomThrID{}))));
+  using SmemShape_N = decltype(shape_div(shape<1>(cluster_tile_shape), shape_div(shape<1>(cluster_tile_shape), size<1>(cluster_tile_shape) / size(AtomThrID{}))));
+  using SmemShape_K = decltype(cute::get<2>(cluster_tile_shape));
 
   using SmemLayoutAtomB =
       decltype(cutlass::gemm::collective::detail::sm100_smem_selector<cute::UMMA::Major::MN, TB,
@@ -1258,21 +1200,20 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
   static uint32_t constexpr Sm100TmemCapacityColumns = 512;
   static uint32_t constexpr TotalTmem = TotalTmemRows * Sm100TmemCapacityColumns;
   static uint32_t constexpr AccumulatorPipelineStageCount =
-      TotalTmem / (cute::size<0>(cga_tile_shape) * cute::size<1>(cga_tile_shape));
+      TotalTmem / (cute::size<0>(cluster_tile_shape) * cute::size<1>(cluster_tile_shape));
 
   // Define the smem layouts (static)
   // Calculate max pipeline stages based on Blackwell SM100's 232KB shared memory
-  constexpr int SchedulerPipelineStageCount = 6;
+  constexpr int SchedulerPipelineStageCount = 4;
   static int constexpr MainloopPipelineBytes = sizeof(
       typename cutlass::detail::CustomizedPipelineTmaUmmaAsync<1, Shape<_1, _1, _1>,
                                                                Shape<_1, _1, _1>>::SharedStorage);
 
-  static int constexpr ClcResponseBytes = sizeof(CLCResponse) * SchedulerPipelineStageCount;
-  static int constexpr CLCThrottlePipelineBytes =
-      sizeof(typename cutlass::PipelineAsync<SchedulerPipelineStageCount>::SharedStorage);
-  static int constexpr CLCPipelineBytes =
-      sizeof(typename cutlass::PipelineCLCFetchAsync<SchedulerPipelineStageCount,
-                                                     ClusterShape>::SharedStorage);
+
+  static int constexpr SchedulerWorkspaceBytes = sizeof(int) * SchedulerPipelineStageCount;
+  static int constexpr SchedulerThrottlePipelineBytes = sizeof(typename cutlass::PipelineAsync<SchedulerPipelineStageCount>::SharedStorage);
+  static int constexpr SchedulerPipelineBytes = sizeof(typename cutlass::PipelineCLCFetchAsync<SchedulerPipelineStageCount, ClusterShape>::SharedStorage);
+
   static int constexpr TmemDeallocBytes = sizeof(cutlass::arch::ClusterBarrier);
   static int constexpr BTensorBytes = cute::size(mma_shape_B) * sizeof(TB);
   static int constexpr AccPipelineBytes = sizeof(
@@ -1282,15 +1223,11 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
   static int constexpr kBlackwellSmemSize = 232448;  // 232KB in bytes
   static int constexpr kBytesPerStage =
       cute::size(mma_shape_A) * sizeof(TA) + MainloopPipelineBytes;
-  static int constexpr kReservedBytes =
-      ClcResponseBytes + CLCThrottlePipelineBytes + TmemBasePtrsBytes + CLCPipelineBytes +
-      TmemDeallocBytes + BTensorBytes + AccPipelineBytes;  // Reserve for barriers and other uses
+  static int constexpr kReservedBytes = SchedulerWorkspaceBytes + SchedulerThrottlePipelineBytes + SchedulerPipelineBytes +
+                                      TmemBasePtrsBytes + TmemDeallocBytes+BTensorBytes + AccPipelineBytes; // Reserve for barriers and other uses
   static int constexpr kMaxStages = (kBlackwellSmemSize - kReservedBytes) / kBytesPerStage;
   auto sP = Int<kMaxStages>{};  // SMEM pipelines
-  // printf("\nmax stages: %d\n", int(kMaxStages));
-  // printf("\nreserved bytes: %d\n", int(kReservedBytes));
-  // printf("\nbytes per stage: %d\n", int(kBytesPerStage));
-  // printf("\nremaining bytes: %d\n", int((kBlackwellSmemSize - kReservedBytes) % kBytesPerStage));
+
   auto sA = UMMA::tile_to_mma_shape(SmemLayoutAtomA{}, append(mma_shape_A, sP),
                                     Step<_2, _1, _3>{});  // (MMA,MMA_M,MMA_K,PIPE)
   auto sB = UMMA::tile_to_mma_shape(SmemLayoutAtomB{},
@@ -1300,26 +1237,24 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
   auto tma_load_a =
       make_tma_copy_A_sm100(SM90_TMA_LOAD{}, tensorA, sA(_, _, _, 0), cluster_tile_mainloop, mma);
   auto tma_load_b =
-      make_tma_copy_B_sm100(SM90_TMA_LOAD{}, tensorB, sB(_, _, _, 0), cga_tile_shape, mma);
+      make_tma_copy_B_sm100(SM90_TMA_LOAD{}, tensorB, sB(_, _, _, 0), cluster_tile_shape, mma);
 
   // Assert checks on tile sizes -- no predication
-  assert(M % size<0>(cga_tile_shape) == 0);
-  assert(N % size<1>(cga_tile_shape) == 0);
+  assert(M % size<0>(cluster_tile_shape) == 0);
+  assert(N % size<1>(cluster_tile_shape) == 0);
 
-  uint32_t tiles_in_m = uint32_t(size(ceil_div(M, size<0>(cga_tile_shape))));
-  uint32_t tiles_in_n = uint32_t(size(ceil_div(N, k_tile_size)));
 
   dim3 dimBlock(512);
-  dim3 dimCluster(size<0>(cga_shape), size<1>(cga_shape), size<2>(cga_shape));
-  dim3 dimGrid(tiles_in_m, tiles_in_n, 1);
+  dim3 dimCluster(size<0>(cluster_shape), size<1>(cluster_shape), size<2>(cluster_shape));
+  dim3 dimGrid(sm_count, 1, 1);
 
   int smem_size = sizeof(
       SharedStorage<TA, TB, decltype(sA), decltype(sB), ClusterShape, AccumulatorPipelineStageCount,
                     EpilogueUnrollFactor, SchedulerPipelineStageCount>);
 
   auto *kernel_ptr = &group_row_col_rht_gemm_device<
-      decltype(M), decltype(N), decltype(k_tile_size), decltype(cga_shape),
-      decltype(cga_tile_shape), TA, decltype(dA), decltype(sA), decltype(tma_load_a), TB,
+      decltype(M), decltype(N), decltype(k_tile_size), decltype(cluster_shape),
+      decltype(cluster_tile_shape), TA, decltype(dA), decltype(sA), decltype(tma_load_a), TB,
       decltype(dB), decltype(sB), decltype(tma_load_b), TD, decltype(dD), decltype(sD), TSFD,
       decltype(sfd_layout), TQA, decltype(dQA), TSFA, decltype(sfa_layout), decltype(mma),
       AccumulatorPipelineStageCount, SchedulerPipelineStageCount, kEnableStochasticRounding,
@@ -1333,11 +1268,17 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
     return;
   }
 
+  void *tile_scheduler_workspace = nullptr;
+  cudaMallocAsync(&tile_scheduler_workspace, sizeof(uint32_t), stream);
+  // reset the tile_scheduler_workspace to 0
+  cudaMemsetAsync(tile_scheduler_workspace, 0, sizeof(uint32_t), stream);
   cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size};
   cutlass::Status status = cutlass::launch_kernel_on_cluster(
-      params, (void const *)kernel_ptr, M, N, k_tile_size, cga_shape, cga_tile_shape, A, dA, sA,
-      tma_load_a, B, dB, sB, tma_load_b, QA, dQA, SFA, sfa_layout, args, mma, rng_state);
+      params, (void const *)kernel_ptr, M, N, k_tile_size, cluster_shape, cluster_tile_shape, A, dA, sA,
+      tma_load_a, B, dB, sB, tma_load_b, QA, dQA, SFA, sfa_layout, args, tile_scheduler_workspace, mma, rng_state);
   // CUTE_CHECK_LAST();
+
+  cudaFreeAsync(tile_scheduler_workspace, stream);
 
   if (status != cutlass::Status::kSuccess) {
     std::cerr << "Error: Failed at kernel Launch" << std::endl;
@@ -1477,27 +1418,29 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
   const bool use_swizzle_sf_output = false;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_stochastic_rounding, kEnableStochasticRounding,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          all_has_row_quant, kEnableRowQuant,
-          TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              all_has_col_quant, kEnableRHTColQuant,
-          TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              use_swizzle_sf_output, kEnableSwizzleSFOutput,
-              TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  use_fast_math, kEnableFastMath,
-                  detail::group_row_col_rht_gemm_ntt_w_sfc<
-                      kEnableStochasticRounding, /*kEnableRhtColQuant=*/kEnableRHTColQuant, kEnableRowQuant,
-                      kEnableSwizzleSFOutput, TA, TB, TQA, TSFA, TD, TSFD, kEnableFastMath>(
-                      /*packed_sequence_length=*/m, /*hidden_size=*/n,
-                      /*A=*/reinterpret_cast<TA const *>(input.dptr),
-                      /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-                      /*QA=*/reinterpret_cast<TQA *>(rowwise_data_base_ptr),
-                      /*SFA=*/reinterpret_cast<TSFA *>(rowwise_scale_inv_base_ptr),
-                      /*args=*/kernel_args,
-                      /*rng_state=*/rng_state, /*sm_count=*/sm_count,
-                      /*stream=*/stream, /*k_tile_size=*/k_tile_size);
-  );););););
+    use_stochastic_rounding, kEnableStochasticRounding,
+    TRANSFORMER_ENGINE_SWITCH_CONDITION(
+        all_has_col_quant, kEnableRhtColQuant,
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(
+            all_has_row_quant, kEnableRowQuant,
+            TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                use_swizzle_sf_output, kEnableSwizzleSFOutput,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                    use_fast_math, kEnableFastMath,
+
+                    detail::group_row_col_rht_gemm_ntt_w_sfc<
+                        kEnableStochasticRounding, kEnableRhtColQuant, kEnableRowQuant,
+                        kEnableSwizzleSFOutput, TA, TB, TQA, TSFA, TD, TSFD, kEnableFastMath>(
+                        /*packed_sequence_length=*/m, /*hidden_size=*/n,
+                        /*A=*/reinterpret_cast<TA const *>(input.dptr),
+                        /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+                        /*QA=*/reinterpret_cast<TQA *>(rowwise_data_base_ptr),
+                        /*SFA=*/reinterpret_cast<TSFA *>(rowwise_scale_inv_base_ptr),
+                        /*args=*/kernel_args,
+                        /*rng_state=*/rng_state, /*sm_count=*/sm_count,
+                        /*stream=*/stream, /*k_tile_size=*/k_tile_size);
+
+                );););););
 }
 
 }  // namespace transformer_engine
