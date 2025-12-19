@@ -148,6 +148,7 @@ model_configs_fused_attn = {
     ),  # MHA
     "cp_1_3": ModelConfig(2, 4096, 12, 128, attn_bias_type="post_scale_bias"),  # MHA
     "cp_1_4": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
+    "cp_1_5": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 512)),  # MHA
     "cp_2_0": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal"),  # GQA
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(
@@ -164,6 +165,9 @@ model_configs_fused_attn = {
     ),  # GQA
     "cp_2_4": ModelConfig(
         2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 0)
+    ),  # GQA
+    "cp_2_5": ModelConfig(
+        2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 512)
     ),  # GQA
     "cp_3_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", head_dim_v=64),  # MLA
     "cp_3_1": ModelConfig(2, 4096, 12, 128, head_dim_v=64),  # MLA
@@ -187,7 +191,7 @@ dtypes = ["bf16", "fp16", "fp8"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_1_0", "cp_1_1", "cp_1_4", "cp_2_0", "cp_2_2", "cp_3_2", "cp_4_2"]
+    configs = ["cp_1_0", "cp_1_1", "cp_1_4", "cp_1_5", "cp_2_0", "cp_2_2", "cp_2_5", "cp_3_2", "cp_4_2"]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]
