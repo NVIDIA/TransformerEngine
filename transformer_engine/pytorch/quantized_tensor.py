@@ -267,6 +267,8 @@ class Quantizer(abc.ABC):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> QuantizedTensor:
         """Construct quantized tensor with uninitialized data"""
         raise NotImplementedError(
@@ -467,6 +469,7 @@ class QuantizedTensor(torch.Tensor):
         # Empty like op
         if func == torch.ops.aten.empty_like.default:
             tensor = args[0]
+            kwargs = kwargs or {}
             device = kwargs.get("device", tensor.device)
             requires_grad = kwargs.get("requires_grad", tensor.requires_grad)
             pin_memory = kwargs.get("pin_memory", False)
