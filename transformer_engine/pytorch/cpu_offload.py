@@ -351,9 +351,7 @@ class OffloadableLayerState:
             self.bwd_gpu_tensor_group
         )
 
-    def push_tensor(
-        self, tensor: torch.Tensor
-    ) -> int | torch.Tensor | tuple[list, list]:
+    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor | tuple[list, list]:
         """
         It is called when a tensor is saved for backward pass.
 
@@ -370,9 +368,7 @@ class OffloadableLayerState:
             # Inline prepare_for_saving logic - QuantizedTensor is a torch.Tensor subclass,
             # so the generic prepare_for_saving would not call tensor.prepare_for_saving()
             saved_tensors, tensor_obj = tensor_copy.prepare_for_saving()
-            push_results = [
-                self.push_tensor(t) if t is not None else None for t in saved_tensors
-            ]
+            push_results = [self.push_tensor(t) if t is not None else None for t in saved_tensors]
             return (push_results, [tensor_obj])
 
         if self._check_if_offload(tensor):

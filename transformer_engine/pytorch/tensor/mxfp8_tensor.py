@@ -138,9 +138,7 @@ class MXFP8Quantizer(Quantizer):
                 shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
             )
             columnwise_scale_inv = torch.empty(
-                round_up_to_nearest_multiple(
-                    math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4
-                ),
+                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
                 device=device,
