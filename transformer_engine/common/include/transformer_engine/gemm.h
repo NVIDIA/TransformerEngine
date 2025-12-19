@@ -234,7 +234,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Grouped matrix multiplication: D = alpha * op(A) @ op(B) + beta * C
  *
- * \note Requires cuBLAS 13.2+ (CUDA 13.2+) and Hopper (SM90) or newer GPU architecture.
+ * \note Requires cuBLAS 13.1+ (CUDA 13.1+) and Hopper (SM90) or newer GPU architecture.
  *       Will error at runtime if compiled with an older cuBLAS version or run on
  *       a pre-Hopper GPU.
  *
@@ -253,7 +253,6 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  *  \param[out] D                Output grouped tensor D.
  *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
  *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
- *  \param[in]  config           Matrix multiplication configuration.
  *  \param[in]  stream           CUDA stream for the operation.
  *  \param[in]  avg_m            Optional hint for average M dimension across all matrices in the
  *                               group. Used by cuBLASLt for algorithm selection heuristics.

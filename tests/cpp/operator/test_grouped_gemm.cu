@@ -137,8 +137,9 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     // cuBLAS requires aligned pointers for vectorized loads
     static std::mt19937 gen(12345);
     std::uniform_int_distribution<int64_t> dist(0, 3);
-    // Calculate elements needed for 16-byte alignment
-    const size_t align_elements = (16 * 8) / typeToNumBits(dtype);  // 16 bytes / element_size
+    // Calculate elements needed for 16-byte alignment in bytes, rounded up
+    const size_t align_elements =
+        std::max<size_t>(1, (16 + elem_size - 1) / elem_size);  // 16 bytes / element_size
     return dist(gen) * static_cast<int64_t>(align_elements);
   };
 
