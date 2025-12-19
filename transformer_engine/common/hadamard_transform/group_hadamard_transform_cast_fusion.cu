@@ -73,7 +73,11 @@ __device__ __forceinline__ float* GetGlobalAmaxPtrByTensorId(MultiAmaxHadamardCa
 }
 
 __device__ __forceinline__ int GetTensorId(MultiAmaxHadamardCastFusionArgs* kernel_args_ptr, int offset){
-  // check the kernel args and get the corresponding id
+  // Check the kernel args and get the corresponding id
+  const int num_tensors = kernel_args_ptr->num_tensors;
+  if (offset >= kernel_args_ptr->split_sections_range[num_tensors]) {
+    return num_tensors - 1;
+  }
   int tensor_id = 0;
   while (kernel_args_ptr->split_sections_range[tensor_id + 1] <= offset) {
     ++tensor_id;
@@ -657,11 +661,6 @@ group_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
         accumulator_pipeline.consumer_release(accumulator_pipe_consumer_state);
 
         ++accumulator_pipe_consumer_state;
-
-        // Cast data from FP32 to BF16 to FP32.
-        // auto convert_accum_to_bf16 = cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator, FragmentSize>{};
-        // auto convert_bf16_to_accum = cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t, FragmentSize>{};
-        // tTR_rAcc_frag(_0{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
 
         auto compute_frgs = reinterpret_cast<cutlass::Array< ElementAccumulator, VectorSize> *>(tTR_rAcc_frag.data());
         auto output_frgs = reinterpret_cast<cutlass::Array< TC, VectorSize> *>(tDrC_frag.data());

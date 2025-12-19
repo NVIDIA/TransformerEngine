@@ -94,7 +94,6 @@ class CustomizedPipelineTmaUmmaAsync {
                   dim3 block_id_in_cluster = cute::block_id_in_cluster()) {
     // Calculate consumer mask
     if (params_.role == ThreadCategory::Consumer) {
-      auto cluster_layout = make_layout(cluster_shape);
       block_id_mask_ = detail::calculate_multicast_mask<McastDirection::kRowCol>(
           cluster_shape, AtomThrShape_MNK{}, block_id_in_cluster);
     }
@@ -104,7 +103,6 @@ class CustomizedPipelineTmaUmmaAsync {
   void init_masks(ClusterShape cluster_shape, McastDirection mcast_direction) {
     // Calculate consumer mask
     dim3 block_id_in_cluster = cute::block_id_in_cluster();
-    auto cluster_layout = make_layout(cluster_shape);
     if (mcast_direction == McastDirection::kRow) {
       block_id_mask_ = detail::calculate_multicast_mask<McastDirection::kRow>(
           cluster_shape, AtomThrShape_MNK{}, block_id_in_cluster);
@@ -215,7 +213,7 @@ class CustomizedPipelineTmaUmmaAsync {
   static constexpr bool is_2sm_mma = size(AtomThrShape_MNK{}) > 1;
 
   // Consumer signalling Producer of completion
-  // Ensures all blocks in the Same Row and Column get notifed.
+  // Ensures all blocks in the Same Row and Column get notified.
   CUTLASS_DEVICE
   void umma_consumer_release(uint32_t stage, uint32_t skip) {
     detail::pipeline_check_is_consumer(params_.role);

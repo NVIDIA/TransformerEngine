@@ -22,7 +22,7 @@
 #include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
-#include "customized_pipeline.hpp"
+#include "customized_pipeline.cuh"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/arch/reg_reconfig.h"
 #include "cutlass/cluster_launch.hpp"
@@ -77,13 +77,12 @@ struct MultiAmaxHadamardCastFusionArgs {
 
 __device__ __forceinline__ int GetGroupIdx(MultiAmaxHadamardCastFusionArgs *kernel_args_ptr,
                                            int offset) {
-  // check the kernel args and get the corresponding id
-  int group_idx = 0;
-  int num_tensors = kernel_args_ptr->num_tensors;
-  int boundary = kernel_args_ptr->split_sections_range[num_tensors];
-  if (offset >= boundary) {
+  // Check the kernel args and get the corresponding id
+  const int num_tensors = kernel_args_ptr->num_tensors;
+  if (offset >= kernel_args_ptr->split_sections_range[num_tensors]) {
     return num_tensors - 1;
   }
+  int group_idx = 0;
   while (kernel_args_ptr->split_sections_range[group_idx + 1] <= offset) {
     ++group_idx;
   }
@@ -283,14 +282,14 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
     uint32_t atomic_offset;
     cutlass::FastDivmodU64 divmod_tiles_in_m;
 
-    CUTLASS_DEVICE TileScheduler(uint32_t tiles_m, uint32_t tiles_n, int kmax, uint32_t* atomic_tile_index_, uint32_t* smem_tile_counter)
+    CUTLASS_DEVICE TileScheduler(uint32_t tiles_m, uint32_t tiles_n, int kmax, uint32_t* atomic_tile_index, uint32_t* smem_tile_counter)
       : tiles_in_m(tiles_m),
         tiles_in_n(tiles_n),
         linear_idx(blockIdx.x),
         next_linear_idx(blockIdx.x),
         start_idx(blockIdx.x),
         k_tile_max(kmax),
-        atomic_tile_index_(atomic_tile_index_),
+        atomic_tile_index_(atomic_tile_index),
         smem_tile_counter(smem_tile_counter),
         atomic_offset(gridDim.x),
         divmod_tiles_in_m(uint64_t(tiles_m)) {
@@ -460,8 +459,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
   typename SchedPipeline::Params sched_pipeline_params;
   if (is_sched_warp) {
     sched_pipeline_params.role = SchedPipeline::ThreadCategory::ProducerConsumer;
-  }
-  else {
+  } else {
     sched_pipeline_params.role = SchedPipeline::ThreadCategory::Consumer;
   }
   sched_pipeline_params.producer_blockid = 0;

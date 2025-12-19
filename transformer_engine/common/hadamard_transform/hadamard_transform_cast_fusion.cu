@@ -478,11 +478,6 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
 
         ++accumulator_pipe_consumer_state;
 
-        // Cast data from FP32 to BF16 to FP32.
-        // auto convert_accum_to_bf16 = cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator, FragmentSize>{};
-        // auto convert_bf16_to_accum = cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t, FragmentSize>{};
-        // tTR_rAcc_frag(_0{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
-
         auto compute_frgs = reinterpret_cast<cutlass::Array< ElementAccumulator, VectorSize> *>(tTR_rAcc_frag.data());
         auto output_frgs = reinterpret_cast<cutlass::Array< TC, VectorSize> *>(tDrC_frag.data());
         CUTLASS_PRAGMA_UNROLL
