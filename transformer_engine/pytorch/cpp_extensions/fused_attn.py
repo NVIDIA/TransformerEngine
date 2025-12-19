@@ -260,11 +260,10 @@ def fused_attn_fwd(
     """
 
     if bottom_right_diagonal is None:
-        bottom_right_diagonal = (
-            True
-            if attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}
-            else False
-        )
+        bottom_right_diagonal = attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right"
+        }
 
     if attn_scale is None:
         d = q.size(-1)
@@ -479,11 +478,10 @@ def fused_attn_bwd(
                 See softmax_type in DotProductAttention for details.
     """
     if bottom_right_diagonal is None:
-        bottom_right_diagonal = (
-            True
-            if attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}
-            else False
-        )
+        bottom_right_diagonal = attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right"
+        }
 
     if attn_scale is None:
         d = q.size(-1)
