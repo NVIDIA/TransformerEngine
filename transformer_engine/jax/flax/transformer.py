@@ -121,7 +121,6 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     attention_dropout: float = 0.0
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
     attn_bias_type: Optional[AttnBiasType] = None
-    dtype: DType = jnp.float32
     float32_logits: bool = False
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = False
@@ -294,7 +293,6 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     attention_dropout: float = 0.0
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
     attn_bias_type: Optional[AttnBiasType] = None
-    dtype: DType = jnp.float32
     qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = False
@@ -600,11 +598,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
         (``'zero sink'`` and ``'learnable sink'``).
-
-    Optimization parameters
-    -----------------------
-    dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used to allocate the initial parameters.
     """
 
     head_dim: int
@@ -613,7 +606,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attention_dropout: float = 0.0
     attn_mask_type: AttnMaskType = "causal"
     attn_bias_type: AttnBiasType = None
-    dtype: DType = jnp.float32
     dropout_rng_name: str = "dropout"
     float32_logits: bool = False
     qkv_layout: str = "bshd_bshd_bshd"
@@ -637,6 +629,24 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             )
             self.transpose_batch_sequence = False
         super().__post_init__()
+
+    def _assert_dtypes(self, query: Array, key: Array, value: Array, qkv_layout: QKVLayout):
+        """Asserts that the dtypes of query, key, and value dtypes are consistent."""
+        if qkv_layout.is_qkvpacked():
+            pass  # No need to check dtypes for key and value since it is packed
+        elif qkv_layout.is_kvpacked():
+            assert (
+                key.dtype == query.dtype
+            ), f"Expected kv dtype={key.dtype} to match query dtype={query.dtype}."
+        elif qkv_layout.is_separate():
+            assert (
+                key.dtype == query.dtype
+            ), f"Expected key dtype={key.dtype} to match query dtype={query.dtype}."
+            assert (
+                value.dtype == query.dtype
+            ), f"Expected value dtype={value.dtype} to match query dtype={query.dtype}."
+        else:
+            raise ValueError(f"Unsupported {qkv_layout=}.")
 
     @nn.compact
     def __call__(
@@ -700,6 +710,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             assert bias is None
         else:
             assert bias is not None
+            bias = bias.astype(input_dtype)
+
+        self._assert_dtypes(query, key, value, qkv_layout)
 
         # Use fused attn (if kernel check below passes) by default
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
@@ -720,8 +733,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         has_fused_attn_kernel = is_fused_attn_kernel_available(
             # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
             not deterministic,
-            self.dtype,
-            self.dtype,
+            input_dtype,
+            # self._assert_dtypes enforces Q, K, V, bias to have the same dtype so using input_dtype as kv dtype is sufficient
+            input_dtype,
             qkv_layout,
             attn_bias_type,
             attn_mask_type,
@@ -743,7 +757,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 "Fused attention is not enabled because there is no available kernel.\n"
                 "Fall back to the unfused attention.\n"
                 "Please try to update the cuDNN and TE to the latest version.\n"
-                f"{self.dtype=}\n{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
+                f"{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
                 f"{self.attention_dropout=}\n{self.num_attention_heads=}\n"
                 f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"
             )
@@ -797,7 +811,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 attention_dropout=self.attention_dropout,
                 attn_mask_type=attn_mask_type,
                 attn_bias_type=attn_bias_type,
-                dtype=self.dtype,
                 float32_logits=self.float32_logits,
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
@@ -817,7 +830,6 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 attention_dropout=self.attention_dropout,
                 attn_mask_type=attn_mask_type,
                 attn_bias_type=attn_bias_type,
-                dtype=self.dtype,
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 qkv_layout=qkv_layout,
@@ -1572,7 +1584,6 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             attn_mask_type=self.attn_mask_type,
             attn_bias_type=self.attn_bias_type,
             attention_dropout=self.attention_dropout,
-            dtype=self.dtype,
             dropout_rng_name=self.dropout_rng_name,
             float32_logits=self.float32_logits,
             qkv_layout=qkv_layout.name,
