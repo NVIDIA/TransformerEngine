@@ -1925,6 +1925,7 @@ class TestGroupedDense:
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
 
+
 @pytest.mark.skipif(not is_fp4_supported, reason=fp4_unsupported_reason)
 class TestFFICompatibility:
 
