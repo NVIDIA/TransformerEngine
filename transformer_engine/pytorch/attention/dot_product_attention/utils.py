@@ -957,9 +957,8 @@ def get_attention_backend(
     ):
         fu_core_attention_bias_type = "post_scale_bias"
         fu_core_attention_bias_requires_grad = False
-        if alibi_slopes_shape is None:
-            fu_core_attention_bias_shape = "1hss"
-        elif len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
+
+        if len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
             fu_core_attention_bias_shape = "1hss"
         elif (
             len(alibi_slopes_shape) == 2
