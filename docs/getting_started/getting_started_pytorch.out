@@ -10,32 +10,32 @@ pyxis: imported docker image: gitlab-master.nvidia.com/dl/transformerengine/tran
   self.m.impl(
 # BENCHMARK_BASELINE_OUTPUT_START
 Baseline PyTorch:
-Mean time: 48.507 ms
+Mean time: 48.280 ms
 # BENCHMARK_BASELINE_OUTPUT_END
 
 # BENCHMARK_TE_UNFUSED_OUTPUT_START
 TE Unfused:
-Mean time: 49.451 ms
+Mean time: 49.342 ms
 # BENCHMARK_TE_UNFUSED_OUTPUT_END
 
 # BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_START
 TE Unfused + TE Attention:
-Mean time: 35.776 ms
+Mean time: 35.709 ms
 # BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_END
 
 # BENCHMARK_TE_UNFUSED_FP8_OUTPUT_START
 TE Unfused + TE Attention + FP8:
-Mean time: 23.460 ms
+Mean time: 23.406 ms
 # BENCHMARK_TE_UNFUSED_FP8_OUTPUT_END
 
 # BENCHMARK_TE_FUSED_FP8_OUTPUT_START
 TE Fused + TE Attention + FP8:
-Mean time: 23.037 ms
+Mean time: 22.964 ms
 # BENCHMARK_TE_FUSED_FP8_OUTPUT_END
 
 # BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_START
 TE TransformerLayer + FP8:
-Mean time: 21.844 ms
+Mean time: 21.670 ms
 # BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_END
 
 
