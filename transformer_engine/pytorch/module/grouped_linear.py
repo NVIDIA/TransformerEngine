@@ -440,11 +440,7 @@ class _GroupedLinear(torch.autograd.Function):
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
                     if ctx.fp8 and not ctx.debug:
-                        inputmats = tex.split_quantize(
-                            inp_view,
-                            ctx.m_splits,
-                            ctx.input_quantizers
-                        )
+                        inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view, ctx.input_quantizers, ctx.m_splits, ctx.activation_dtype
