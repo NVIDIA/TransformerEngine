@@ -487,12 +487,8 @@ class CurrentScalingQuantizerRef(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,  # pylint: disable=unused-argument
-        share_scales: bool = False,
-        like: Optional[QuantizedTensor] = None,  # pylint: disable=unused-argument
     ) -> CurrentScalingTensorRef:
         assert len(shape) == 2, "shape is not 2d"
-        if share_scales:
-            raise ValueError("share_scales is not supported for CurrentScalingTensorRef")
 
         # Canonicalize tensor attributes
         if device is None:

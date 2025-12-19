@@ -151,7 +151,7 @@ class MXFP8Quantizer(Quantizer):
             dtype=dtype,
             fp8_dtype=self.dtype,
             rowwise_data=data,
-            rowwise_scale_inv=rowwise_scale_inv,
+            rowwise_scale_inv=scale_inv,
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
