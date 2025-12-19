@@ -1,0 +1,46 @@
+pyxis: importing docker image: gitlab-master.nvidia.com/dl/transformerengine/transformerengine:main-jax-py3-devel
+pyxis: imported docker image: gitlab-master.nvidia.com/dl/transformerengine/transformerengine:main-jax-py3-devel
+/usr/local/lib/python3.12/dist-packages/transformer_engine/jax/flax/transformer.py:626: UserWarning: transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/transformer_engine/jax/flax/transformer.py:626: UserWarning: transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/transformer_engine/jax/flax/transformer.py:626: UserWarning: transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/transformer_engine/jax/flax/transformer.py:626: UserWarning: transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/transformer_engine/jax/flax/transformer.py:626: UserWarning: transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/transformer_engine/jax/flax/transformer.py:626: UserWarning: transpose_batch_sequence defaults to False in DotProductAttention starting TransformerEngine v2.10
+  warnings.warn(
+# BENCHMARK_BASELINE_OUTPUT_START
+Baseline Flax:
+Mean time: 81.035 ms
+# BENCHMARK_BASELINE_OUTPUT_END
+
+# BENCHMARK_TE_UNFUSED_OUTPUT_START
+TE Unfused:
+Mean time: 42.570 ms
+# BENCHMARK_TE_UNFUSED_OUTPUT_END
+
+# BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_START
+TE Unfused + TE Attention:
+Mean time: 35.017 ms
+# BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_END
+
+# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_START
+TE Unfused + TE Attention + FP8:
+Mean time: 22.778 ms
+# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_END
+
+# BENCHMARK_TE_FUSED_FP8_OUTPUT_START
+TE Fused + TE Attention + FP8:
+Mean time: 24.007 ms
+# BENCHMARK_TE_FUSED_FP8_OUTPUT_END
+
+# BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_START
+TE TransformerLayer + FP8:
+Mean time: 23.004 ms
+# BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_END
+
+
+Summary written to getting_started_jax_summary.csv
