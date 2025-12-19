@@ -334,12 +334,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp8_dtype, nullptr,
+        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{0},
+        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{0}, fp8_dtype, nullptr,
         nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode));
+        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
+        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
   }
 
   return retval;
@@ -481,12 +481,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp8_dtype, nullptr,
+        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{0},
+        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{0}, fp8_dtype, nullptr,
         nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode));
+        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
+        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode));
   }
 
   return retval;
@@ -685,13 +685,13 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       auto tensor_wrapper = makeTransformerEngineTensor(
           rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
           columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-          rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
-          columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp4_dtype,
+          rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{0},
+          columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{0}, fp4_dtype,
           /*amax_ptr=*/nullptr,
           /*scale_ptr=*/nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
           columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-          rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
-          columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode);
+          rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
+          columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode);
 
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {
@@ -761,8 +761,16 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   }
 
   // Stochastic rounding
+  // When both rowwise and columnwise quantization are used,
+  // we need separate RNG states for each to ensure they use different random numbers.
   std::vector<TensorWrapper> te_rng_state_list;
+  std::vector<TensorWrapper> te_rng_state_columnwise_list;
+  std::vector<QuantizationConfigWrapper> quant_config_columnwise_list;
   at::Tensor rng_states_tensor;
+  at::Tensor rng_states_columnwise_tensor;
+  const bool need_separate_columnwise_rng =
+      quantizer.stochastic_rounding && quantizer.with_rht && quantizer.columnwise_usage;
+
   if (quantizer.stochastic_rounding) {
     // TODO(zhongbo): remove the for loop of generating rng states with a single call
     // with rng_elts_per_thread = 1024 * num_tensors
@@ -770,9 +778,18 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
     const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
     auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
     rng_states_tensor = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
+
+    // Allocate columnwise RNG resources when separate RNG is needed
+    if (need_separate_columnwise_rng) {
+      rng_states_columnwise_tensor = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
+      for (size_t i = 0; i < num_tensors; ++i) {
+        quant_config_columnwise_list.emplace_back(QuantizationConfigWrapper());
+      }
+    }
     for (size_t i = 0; i < num_tensors; ++i) {
       auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
           std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+      // Generate RNG state for rowwise quantization
       at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
       int64_t *rng_state_ptr = static_cast<int64_t *>(rng_states_tensor.data_ptr()) + i * 2;
       philox_unpack(philox_args, rng_state_ptr);
@@ -780,6 +797,18 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
           static_cast<void *>(rng_state_ptr), std::vector<size_t>{2}, DType::kInt64));
       quant_config_list[i].set_rng_state(te_rng_state_list[i].data());
       quant_config_list[i].set_stochastic_rounding(true);
+
+      // Generate separate RNG state for columnwise quantization
+      if (need_separate_columnwise_rng) {
+        at::PhiloxCudaState philox_args_columnwise = init_philox_state(gen, rng_elts_per_thread);
+        int64_t *rng_state_columnwise_ptr =
+            static_cast<int64_t *>(rng_states_columnwise_tensor.data_ptr()) + i * 2;
+        philox_unpack(philox_args_columnwise, rng_state_columnwise_ptr);
+        te_rng_state_columnwise_list.push_back(makeTransformerEngineTensor(
+            static_cast<void *>(rng_state_columnwise_ptr), std::vector<size_t>{2}, DType::kInt64));
+        quant_config_columnwise_list[i].set_rng_state(te_rng_state_columnwise_list[i].data());
+        quant_config_columnwise_list[i].set_stochastic_rounding(true);
+      }
     }
   }
 
@@ -864,9 +893,12 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                  out_columnwise_amax.shape);
 
           // RHT + NVFP4 quantize kernel
+          // Use separate RNG state for columnwise to ensure different random numbers than rowwise
+          auto &columnwise_quant_config =
+              need_separate_columnwise_rng ? quant_config_columnwise_list[i] : quant_config_list[i];
           nvte_hadamard_transform_cast_fusion_columnwise(input_list[i].data(), out_transpose.data(),
                                                          rht_matrix_nvte.data(),
-                                                         quant_config_list[i], stream);
+                                                         columnwise_quant_config, stream);
         }
       }
     });
