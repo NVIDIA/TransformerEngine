@@ -16,6 +16,7 @@
 
 #include "../extensions.h"
 #include "common.h"
+#include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -830,11 +831,24 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   // this is true because we have already built grouped kernels for rowwise and colwise quantization with RHT
   bool with_bulk_generate_rng_states = true;
 
+  // Stochastic rounding
   bool need_stochastic_rounding = quantizer.stochastic_rounding;
-
   auto stochastic_rng_state_resources = setup_stochastic_rounding_rng_states_helper(
       num_tensors, need_stochastic_rounding, with_bulk_generate_rng_states,
       need_separate_rng_states, quant_config_list, quant_config_list_colwise);
+
+  // Enable NVFP4 kernels to use math operations that sacrifice
+  // accuracy for performance. These optimizations are experimental
+  // and inconsistently implemented.
+  const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
+  if (use_fast_math) {
+    for (auto &config: quant_config_list) {
+      config.set_use_fast_math(true);
+    }
+    for (auto &config: quant_config_list_colwise) {
+      config.set_use_fast_math(true);
+    }
+  }
 
   auto &quant_config_list_colwise_to_use =
       need_separate_rng_states ? quant_config_list_colwise : quant_config_list;

@@ -179,7 +179,7 @@ template <class MShape, class NShape, class KShape, class ClusterShape, class Cl
           int AccumulatorPipelineStageCount_, int SchedulerPipelineStageCount_,
           bool kEnableStochasticRounding_ = false, bool kEnableRHTColQuant_ = true,
           bool kEnableRowQuant_ = true, bool kEnableSwizzleSFOutput_ = false,
-          bool kEnableFastMath_ = true>
+          bool kUseFastMath_ = false>
 __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
     MShape M, NShape packed_N, KShape K, ClusterShape cluster_shape, ClusterTileShape cluster_tile,
     TA const *A, AStride dA, ASmemLayout sAlayout, CUTE_GRID_CONSTANT TmaLoadA const tma_load_a,
@@ -217,7 +217,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
   static constexpr bool kEnableRHTColQuant = kEnableRHTColQuant_;
   static constexpr bool kEnableRowQuant = kEnableRowQuant_;
   static constexpr bool kEnableSwizzleSFOutput = kEnableSwizzleSFOutput_;
-  static constexpr bool kEnableFastMath = kEnableFastMath_;
+  static constexpr bool kUseFastMath = kUseFastMath_;
 
   // Constant for RHT tensor processing (tile size etc)
   static int constexpr RhtTensorSize = 16;
@@ -733,20 +733,20 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
       static constexpr float fp4_max = 6.0f;
       static constexpr float fp8_max = 448.0f;
-      float const fp4_max_inv = 1.0f / fp4_max;
+      static constexpr float fp4_max_inv = 1.0f / fp4_max;
       float c_global_amax_val = shared_storage.global_d_amax[group_idx];
       float global_encode_scale = c_global_amax_val > 0.0f
                                       ? cutlass::minimum_with_nan_propagation<float>{}(
                                             (fp8_max * fp4_max) / c_global_amax_val,
                                             cutlass::platform::numeric_limits<float>::max())
                                       : 1.0f;
-
       float global_decode_scale = 1.0f / global_encode_scale;
+
+      // Scaling factor for fast math path
       float global_encode_scale_multiplier = 1.0f;
-      if constexpr (kEnableFastMath) {
+      if constexpr (kUseFastMath) {
         global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
       }
-      auto sfc_converter = cutlass::NumericConverter<TSFD, float>{};
 
       do {
         scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
@@ -767,7 +767,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                             cutlass::platform::numeric_limits<float>::max())
                                       : 1.0f;
             global_decode_scale = 1.0f / global_encode_scale;
-            if constexpr (kEnableFastMath) {
+            if constexpr (kUseFastMath) {
               global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
             }
             cur_N = args.split_sections[group_idx];
@@ -844,11 +844,12 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
           }
 
-          // Scale values for quantization depending on fast-math flag
-          if constexpr (kEnableFastMath) {
+          if constexpr (kUseFastMath) {
+            // Fast math: multiply with precomputed reciprocal
             pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
                 vec_maxs, global_encode_scale_multiplier);
           } else {
+            // Accurate math: perform division
             pvscales =
                 cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
             pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
@@ -863,12 +864,12 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
           auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
               qpvscale_ups, global_decode_scale);
           cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
-          if constexpr (kEnableFastMath) {
-            // Fast-math: approximate compute reciprocal instead of divide.
+          if constexpr (kUseFastMath) {
+            // Fast math: compute approximate reciprocal
             acc_scales =
                 cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
           } else {
-            // Regular path: computes using division
+            // Accurate math: compute reciprocal with division
             acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(
                 1.0, qpvscale_scaled);
           }
@@ -975,7 +976,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
       static constexpr float fp4_max = 6.0f;
       static constexpr float fp8_max = 448.0f;
-      float const fp4_max_inv = 1.0f / fp4_max;
+      static constexpr float fp4_max_inv = 1.0f / fp4_max;
       float global_encode_scale = a_global_amax_val > 0.0f
                                       ? cutlass::minimum_with_nan_propagation<float>{}(
                                             (fp8_max * fp4_max) / a_global_amax_val,
@@ -984,7 +985,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
 
       float global_decode_scale = 1.0f / global_encode_scale;
       float global_encode_scale_multiplier = 1.0f;
-      if constexpr (kEnableFastMath) {
+      if constexpr (kUseFastMath) {
         global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
       }
       auto sfa_converter = cutlass::NumericConverter<TSFA, ElementAccumulator>{};
@@ -1005,7 +1006,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                             cutlass::platform::numeric_limits<float>::max())
                                       : 1.0f;
             global_decode_scale = 1.0f / global_encode_scale;
-            if constexpr (kEnableFastMath) {
+            if constexpr (kUseFastMath) {
               global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
             }
           }
@@ -1044,10 +1045,12 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                 cutlass::NumericArrayConverter<ElementAccumulator, TA, VectorSize>{}(
                     compute_frgs[v]);
             amax_view(_0{}, v) = amax_reduction(ElementAccumulator(0), compute_frgs_up);
-            if constexpr (kEnableFastMath) {
+            if constexpr (kUseFastMath) {
+              // Fast math: multiply with precomputed reciprocal
               pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
                   amax_view(_0{}, v), global_encode_scale_multiplier);
             } else {
+              // Accurate math: perform division
               pvscales_view(_0{}, v) =
                   cutlass::divides<ElementAccumulator>{}(amax_view(_0{}, v), fp4_max);
               pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
@@ -1059,12 +1062,12 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
             auto qpvscale_scaled =
                 cutlass::multiplies<ElementAccumulator>{}(qpvscale_ups, global_decode_scale);
             ElementAccumulator acc_scales;
-            if constexpr (kEnableFastMath) {
-              // fast math: use reciprocal approximate to replace div
+            if constexpr (kUseFastMath) {
+              // Fast math: compute approximate reciprocal
               acc_scales =
                   cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
             } else {
-              // regular path for slower math, use divide to replace div
+              // Accurate math: compute reciprocal with division
               acc_scales = cutlass::divides<ElementAccumulator>{}(1.0, qpvscale_scaled);
             }
             auto acc_scale = cutlass::minimum_with_nan_propagation<ElementAccumulator>{}(
@@ -1100,7 +1103,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
 
 template <bool kEnableStochasticRounding, bool kEnableRHTColQuant, bool kEnableRowQuant,
           bool kEnableSwizzleSFOutput, class TA, class TB, class TQA, class TSFA, class TD = TQA,
-          class TSFD = TSFA, bool kEnableFastMath = true>
+          class TSFD = TSFA, bool kUseFastMath = false>
 void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_size, TA const *A,
                                       TB const *B, TQA *QA, TSFA *SFA,
                                       MultiAmaxHadamardCastFusionArgs &args,
@@ -1261,7 +1264,7 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
       decltype(dB), decltype(sB), decltype(tma_load_b), TD, decltype(dD), decltype(sD), TSFD,
       decltype(sfd_layout), TQA, decltype(dQA), TSFA, decltype(sfa_layout), decltype(mma),
       AccumulatorPipelineStageCount, SchedulerPipelineStageCount, kEnableStochasticRounding,
-      kEnableRHTColQuant, kEnableRowQuant, kEnableSwizzleSFOutput, kEnableFastMath>;
+      kEnableRHTColQuant, kEnableRowQuant, kEnableSwizzleSFOutput, kUseFastMath>;
 
   bool status_set_attr =
       cudaFuncSetAttribute(*kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
@@ -1365,8 +1368,10 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
   // Stochastic rounding config
   const bool use_stochastic_rounding = quant_config.stochastic_rounding;
   const size_t *rng_state = nullptr;
-  if (quant_config.rng_state != nullptr) {
-    Tensor &rng_state_tensor = *convertNVTETensor(quant_config.rng_state);
+  if (use_stochastic_rounding) {
+    NVTE_CHECK(quant_config.rng_state != nullptr,
+               "Enabled stochastic rounding without providing RNG state");
+    const Tensor &rng_state_tensor = *convertNVTETensorCheck(quant_config.rng_state);
     NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
                "RNG state should contain 2 64-bit values.");
     NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
@@ -1413,11 +1418,6 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
 
   int k_tile_size = 1024;
 
-  // TODO: haven't decided whether to expose this as a API option or not
-  // use fast math if there is a ENV var NVTE_RHT_CAST_FUSION_USE_FAST_MATH, default to false
-  static const bool use_fast_math =
-      transformer_engine::getenv<bool>("NVTE_RHT_CAST_FUSION_USE_FAST_MATH", false);
-
   const bool use_swizzle_sf_output = false;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
@@ -1429,7 +1429,7 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
         TRANSFORMER_ENGINE_SWITCH_CONDITION(
           use_swizzle_sf_output, kEnableSwizzleSFOutput,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
-            use_fast_math, kEnableFastMath,
+            quant_config.use_fast_math, kUseFastMath,
 
             if constexpr (kEnableRhtColQuant || kEnableRowQuant) {
               detail::group_row_col_rht_gemm_ntt_w_sfc<
@@ -1437,7 +1437,7 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
                   kEnableRhtColQuant, kEnableRowQuant,
                   kEnableSwizzleSFOutput,
                   TA, TB, TQA, TSFA, TD, TSFD,
-                  kEnableFastMath>(
+                  kUseFastMath>(
                   /*packed_sequence_length=*/m, /*hidden_size=*/n,
                   /*A=*/reinterpret_cast<TA const *>(input.dptr),
                   /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
