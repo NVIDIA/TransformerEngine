@@ -43,7 +43,7 @@ Currently two frameworks are supported: PyTorch and JAX.
 Baseline: Pure Framework Implementation
 ---------------------------------------
 
-Let's build a Transformer decoder layer! 
+Let's build a Transformer decoder layer!
 
 We'll create a basic GPT-style layer with causal masking,
 which prevents each position from attending to future positions. This will be our baseline
@@ -83,6 +83,7 @@ Putting it all together:
 .. tabs::
 
    .. tab:: PyTorch
+
       First, define the MLP block:
 
       .. literalinclude:: getting_started_pytorch.py
@@ -254,7 +255,8 @@ TE Unfused + TE Attention
 -------------------------
 
 Now let's also replace the attention mechanism with TE's optimized ``DotProductAttention``.
-This provides Flash Attention and other optimizations.
+TE's attention automatically selects the best available backend — for example, FlashAttention or cuDNN fused attention — based on your hardware and input configuration,
+delivering optimal performance without manual tuning.
 
 .. tabs::
 
@@ -293,7 +295,7 @@ This provides Flash Attention and other optimizations.
 
       Replace Flax's attention with TE's optimized implementation:
 
-      * ``nn.dot_product_attention`` → ``TEDotProductAttention``
+      * ``nn.dot_product_attention`` → ``te_flax.DotProductAttention``
 
       .. literalinclude:: getting_started_jax.py
          :language: python

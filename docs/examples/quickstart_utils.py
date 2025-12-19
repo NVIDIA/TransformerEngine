@@ -213,3 +213,4 @@ def cast_to_representable(inp, scale=1.0, fp8_format="e4m3"):
     ret = quantizer(inp)
     ret = ret.dequantize()
     return ret
+
