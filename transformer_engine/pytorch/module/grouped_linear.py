@@ -349,7 +349,6 @@ class _GroupedLinear(torch.autograd.Function):
                             grad_output_view,
                             ctx.m_splits,
                             ctx.grad_output_quantizers,
-                            disable_bulk_allocation=ctx.cpu_offloading,
                         )
                 else:
                     # Multi-tensor quantize
@@ -357,7 +356,6 @@ class _GroupedLinear(torch.autograd.Function):
                         grad_output_view,
                         ctx.m_splits,
                         ctx.grad_output_quantizers,
-                        disable_bulk_allocation=ctx.cpu_offloading,
                     )
             elif ctx.debug:
                 grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
@@ -445,8 +443,7 @@ class _GroupedLinear(torch.autograd.Function):
                         inputmats = tex.split_quantize(
                             inp_view,
                             ctx.m_splits,
-                            ctx.input_quantizers,
-                            disable_bulk_allocation=ctx.cpu_offloading,
+                            ctx.input_quantizers
                         )
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
