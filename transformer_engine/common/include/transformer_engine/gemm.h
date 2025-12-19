@@ -11,7 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_GEMM_H_
 #define TRANSFORMER_ENGINE_GEMM_H_
 
-#include <cstdint>
+#include <stdint.h>  
 
 #include "transformer_engine.h"
 
@@ -234,6 +234,10 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Grouped matrix multiplication: D = alpha * op(A) @ op(B) + beta * C
  *
+ * \note Requires cuBLAS 13.2+ (CUDA 13.2+) and Hopper (SM90) or newer GPU architecture.
+ *       Will error at runtime if compiled with an older cuBLAS version or run on
+ *       a pre-Hopper GPU.
+ *
  * Performs batched GEMM on a collection of matrices with potentially different shapes.
  * All tensors in the group must have compatible dimensions for matrix multiplication.
  * Uses NVTEGroupedTensor to efficiently handle collections of tensors with contiguous
@@ -262,6 +266,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  *                               heuristics. If NULL, computed automatically from A's logical shape.
  *
  * Requirements:
+ * - cuBLAS 13.2+ (CUDA 13.2+)
+ * - Hopper (SM90) or newer GPU architecture
  * - A, B, C (if provided), D must have the same num_tensors
  * - For each i: D[i] = alpha[i] * op(A[i]) @ op(B[i]) + beta[i] * C[i]
  * - Shape compatibility: if transa=false, transb=false:
@@ -270,8 +276,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVTEGroupedTensor A,
                        const NVTEGroupedTensor B, const NVTETensor beta, const NVTEGroupedTensor C,
                        NVTEGroupedTensor D, NVTETensor workspace_setup, NVTETensor workspace_cublas,
-                       NVTEMatmulConfig config, cudaStream_t stream, const int64_t *avg_m,
-                       const int64_t *avg_n, const int64_t *avg_k);
+                       cudaStream_t stream, const int64_t *avg_m, const int64_t *avg_n,
+                       const int64_t *avg_k);
 
 #ifdef __cplusplus
 }  // extern "C"

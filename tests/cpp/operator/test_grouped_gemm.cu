@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cublasLt.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
@@ -314,9 +315,12 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
 }
 
 void run_grouped_gemm_case(const TestParams& params) {
-  if (params.input_case != InputCase::kBF16 &&
-      getDeviceComputeCapability() < hopperComputeCapability) {
-    GTEST_SKIP() << "FP8 grouped GEMM requires Hopper or newer.";
+#if CUBLAS_VERSION < 130200
+  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.2+, but compile-time cuBLAS version is "
+               << CUBLAS_VERSION << ".";
+#else
+  if (getDeviceComputeCapability() < hopperComputeCapability) {
+    GTEST_SKIP() << "Grouped GEMM requires Hopper (SM90) or newer.";
   }
 
   const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
@@ -451,7 +455,6 @@ void run_grouped_gemm_case(const TestParams& params) {
                     grouped_D.get_handle(),
                     setup_ws.data(),
                     cublas_ws.data(),
-                    nullptr,
                     0,
                     nullptr,
                     nullptr,
@@ -477,6 +480,7 @@ void run_grouped_gemm_case(const TestParams& params) {
                    atol,
                    rtol);
   }
+#endif  // CUBLAS_VERSION >= 130200
 }
 
 class GroupedGemmTest : public ::testing::TestWithParam<TestParams> {};
