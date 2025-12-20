@@ -31,7 +31,7 @@ def main():
         "--comm_type",
         type=str,
         default="sym",
-        help="Comm type: none,nccl,sym,ub,ubnext,ubnext_add,ubnext_rms",
+        help="Comm type: none,nccl,sym,ub,ubnext,ubnext_add_rms",
     )
     parser.add_argument(
         "--sym_type",
@@ -141,7 +141,6 @@ def main():
         sequence_parallel=args.comm_type == "ub",
         ub_overlap_rs=args.comm_type == "ub",
         ub_name="proj" if args.comm_type == "ub" else None,
-        eps=args.eps if args.comm_type == "ubnext_add_rms" else None,
     )
 
     fc1 = te.LayerNormLinear(
@@ -159,15 +158,12 @@ def main():
         normalization="RMSNorm",
         tp_size=tp_size if args.comm_type != "none" else 1,
         parallel_mode="column" if args.comm_type != "none" else None,
+        symmetric_ar_type="ubnext_add_rms" if args.comm_type == "ubnext_add_rms" else None,
         tp_group=torch.distributed.group.WORLD if args.comm_type != "none" else None,
-        skip_layernorm=args.comm_type == "ubnext_add_rms",
         sequence_parallel=args.comm_type == "ub",
         ub_overlap_ag=args.comm_type == "ub",
         ub_name="fc1" if args.comm_type == "ub" else None,
     )
-
-    if args.comm_type == "ubnext_add_rms":
-        proj.layer_norm_weight = fc1.layer_norm_weight.data
     # Create CUDA stream
     stream = torch.cuda.Stream()
     # Check for environment variable to override pool size
@@ -195,9 +191,10 @@ def main():
             out_proj.add_(residual)
             out = fc1(out_proj)
         else:
-            out = fc1(
-                proj(inp, residual=residual)
-            )  # this also allocates distributed internal residual
+            out = proj(inp)
+            out._allocator.residual_global = residual
+            out = fc1(out)
+            # this also allocates distributed internal residual
 
         torch.cuda.synchronize()
         if args.cuda_graph:

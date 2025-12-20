@@ -19,6 +19,9 @@
 #define NVTE_UB_FLAG_NVLS2_SM_SYNC 4
 #define NVTE_UB_FLAG_NVLS2_RS_BAR 5
 #define NVTE_UB_FLAG_NVLS2_AG_BAR 6
+#define NVTE_UB_FLAG_NVLS1_ID 7
+#define NVTE_UB_FLAG_NVLS1_SM_SYNC 8
+#define NVTE_UB_FLAG_NVLS1_BAR 9
 
 #define xhalf __nv_bfloat16
 
@@ -183,25 +186,7 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
       MULTIMEM_ST(val[g], mc_ptr_out + (line + g * loop_step0))
     }
   }
-  /*
-  for (int line = end_aligned; line < end_elem; line += loop_step0) {
-    uint4 val;
-    xhalf *x = reinterpret_cast<xhalf *>(&val);
-    MULTIMEM_LD(val, mc_ptr_in + (line))
 
-    if(residual_in!=nullptr) {
-      uint4 resval = residual_in[line];
-      xhalf *y = reinterpret_cast<xhalf *>(&resval);
-      #pragma unroll
-      for (int j = 0; j < 8; j++)
-          x[j] += y[j];
-        if(residual_out!=nullptr)
-          residual_out[line]=val;
-    }
-
-    MULTIMEM_ST(val, mc_ptr_out + (line))
-  }
-  */
   __syncthreads();
   if (threadIdx.x != 0) return;
 
@@ -485,6 +470,115 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
 
 }  // two-shot NVLS + lamport sync instead of last membar
 
+__global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
+    userbuffers_ag_mc(const int RANKS, const int myrank, const int mylines,
+                                        int *uc_flagptr, int *mc_flagptr, uint4 *uc_ptr_in,
+                                        uint4 *mc_ptr_out) {
+  // flags[7,8,9]: reduce_id, sm_sync-local, flag-barrier
+  int reduce_id;
+
+  if (threadIdx.x == 0) {
+    cudaGridDependencySynchronize();
+    reduce_id = uc_flagptr[NVTE_UB_FLAG_NVLS1_ID] + 1;
+  }
+
+  __syncthreads();
+
+  const int loop_step0 = blockDim.x*gridDim.x;
+  const int start_elem = threadIdx.x + blockDim.x * blockIdx.x;
+  const int end_elem = max(start_elem, mylines);
+
+  for (int line = start_elem; line < end_elem; line += loop_step0)
+    MULTIMEM_ST(uc_ptr_in[line], mc_ptr_out + line);
+
+  __syncthreads();
+  if (threadIdx.x != 0) return;
+
+  __threadfence();
+  const int value_to_add = blockIdx.x == 0 ? NVTE_UB_MAX_SMS - gridDim.x + 1 : 1;
+  const int old_val_sm_sync = atomicAdd(uc_flagptr + NVTE_UB_FLAG_NVLS1_SM_SYNC, value_to_add);
+
+  const int lastSM =
+      (gridDim.x == 1 || old_val_sm_sync + value_to_add == reduce_id * NVTE_UB_MAX_SMS);
+  if (!lastSM) return;
+  __threadfence_system();
+  ATOMIC_MCINC(mc_flagptr + NVTE_UB_FLAG_NVLS1_BAR);
+  uc_flagptr[NVTE_UB_FLAG_NVLS1_ID] = reduce_id;
+  cudaTriggerProgrammaticLaunchCompletion();
+  volatile int *flag = (volatile int *)&(uc_flagptr[NVTE_UB_FLAG_NVLS1_BAR]);
+  const int expected = reduce_id * RANKS;
+
+#ifdef UB_TIMEOUT_ENABLED
+  clock_t s = clock64();
+#endif
+  while (CHECK_IDS(*flag, expected)) {
+#ifdef UB_TIMEOUT_ENABLED
+    if (clock64() - s > TIMEOUT) {
+      printf("NVONLY AGBAR:SM %d [%d]:expecting %d got %d\n", blockIdx.x, threadIdx.x, expected,
+             *flag);
+      break;
+    }
+#endif
+  }
+}  // fp16 out of place MC Allgather kernel
+
+__global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
+    userbuffers_a2a(const int RANKS, const int myrank, const int nlines,const int lineoffset_out, int *uc_flagptr, int *mc_flagptr, uint4 *ptr_in, void** commbuff) {
+  // flags[7,8,9]: reduce_id, sm_sync-local, flag-barrier
+  int reduce_id;
+  
+  const int globalthread = threadIdx.x + blockDim.x * blockIdx.x;
+  const int numwarps = blockDim.x * gridDim.x / 32;
+  const int globalwarp = globalthread / 32;
+  const int mydest = globalwarp % RANKS;
+  const int mywarp = globalwarp / RANKS;
+  uint4* uc_dst_ptr = (uint4*)commbuff[mydest];
+  uc_dst_ptr += lineoffset_out+myrank*nlines;
+  uint4* ptr_in_rank = ptr_in+(mydest*nlines);
+  const int mythreadidx = mywarp * 32 + globalthread % 32;
+  const int myblockdim = (numwarps / RANKS + (mydest<numwarps%RANKS?1:0)) * 32;
+
+  if (threadIdx.x == 0) {
+    cudaGridDependencySynchronize();
+    reduce_id = uc_flagptr[NVTE_UB_FLAG_NVLS1_ID] + 1;
+  }
+
+  __syncthreads();
+
+  for (int line = mythreadidx; line < nlines; line += myblockdim)
+    uc_dst_ptr[line]=ptr_in_rank[line];
+
+  __syncthreads();
+  if (threadIdx.x != 0) return;
+
+  __threadfence();
+  const int value_to_add = blockIdx.x == 0 ? NVTE_UB_MAX_SMS - gridDim.x + 1 : 1;
+  const int old_val_sm_sync = atomicAdd(uc_flagptr + NVTE_UB_FLAG_NVLS1_SM_SYNC, value_to_add);
+
+  const int lastSM =
+      (gridDim.x == 1 || old_val_sm_sync + value_to_add == reduce_id * NVTE_UB_MAX_SMS);
+  if (!lastSM) return;
+  __threadfence_system();
+  ATOMIC_MCINC(mc_flagptr + NVTE_UB_FLAG_NVLS1_BAR);
+  uc_flagptr[NVTE_UB_FLAG_NVLS1_ID] = reduce_id;
+  cudaTriggerProgrammaticLaunchCompletion();
+  volatile int *flag = (volatile int *)&(uc_flagptr[NVTE_UB_FLAG_NVLS1_BAR]);
+  const int expected = reduce_id * RANKS;
+
+#ifdef UB_TIMEOUT_ENABLED
+  clock_t s = clock64();
+#endif
+  while (CHECK_IDS(*flag, expected)) {
+#ifdef UB_TIMEOUT_ENABLED
+    if (clock64() - s > TIMEOUT) {
+      printf("NVONLY AGBAR:SM %d [%d]:expecting %d got %d\n", blockIdx.x, threadIdx.x, expected,
+             *flag);
+      break;
+    }
+#endif
+  }
+}  // out of place UC Alltoall kernel
+
 #define SETUP_LAUNCH_CONFIG(sms, threads, stream, cga_size, pdl_launch)    \
   cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};             \
   cudaLaunchAttribute attribute_ub[3];                                     \
@@ -498,12 +592,10 @@ __global__ void __launch_bounds__(NVTE_UB_MAXTHREADS)
   cfg.attrs = attribute_ub;                                                \
   cfg.numAttrs = 3;
 
-namespace transformer_engine {
-
 #define split_tokens(x)                                                              \
   const int elements = bytes / sizeof(half);                                         \
   const int elements_per_thread = sizeof(uint4) / sizeof(half);                      \
-  int nthreads = 1024, nlines = 4;                                                   \
+  int nthreads = 128, nlines = 1;                                                   \
   size_t total_bytes = bytes / ranks, start_bytes = myrank * total_bytes;            \
   int sms = x;                                                                       \
   if (hidden_size) {                                                                 \
@@ -532,13 +624,13 @@ namespace transformer_engine {
   bool residual_in_global = residual_in != nullptr && residual_in != residual_out && \
                             residual_out != nullptr;  // out residual is always local
 
-extern "C" void allreduce_2shot_mc(int ranks, int myrank, void *uc0ptr, void *mc0ptr,
+extern "C" void ubnext_allreduce_2shot_mc(int ranks, int myrank, void *uc0ptr, void *mc0ptr,
                                    void *mcptr_in, void *mcptr_out, size_t bytes, void *residual_in,
                                    void *residual_out, bool fuse_layernorm, void *gamma, float eps,
-                                   const int hidden_size, cudaStream_t stream) {
-  split_tokens(32);
-
-  SETUP_LAUNCH_CONFIG(sms, nthreads, stream, 4, 1);
+                                   const int hidden_size, int smlimit, int cgasize,int nchunk, bool multi_kernel, cudaStream_t stream) {
+  split_tokens(64);
+  if (smlimit && sms>smlimit) sms = smlimit;
+  SETUP_LAUNCH_CONFIG(sms, nthreads, stream, (cgasize?cgasize:1), 1);
 
   int arg1 = ranks, arg2 = myrank, arg3 = total_bytes / sizeof(uint4);
   void *arg4 = uc0ptr + (ranks * 8), *arg5 = mc0ptr + (ranks * 8), *arg6 = mcptr_in + start_bytes,
@@ -564,11 +656,15 @@ extern "C" void allreduce_2shot_mc(int ranks, int myrank, void *uc0ptr, void *mc
   call_mc_kernel(4, true);
 }
 
-extern "C" void allreduce_2shot_uc(int ranks, int myrank, void *uc0ptr, void *ucptr_in,
+extern "C" void ubnext_allreduce_2shot_uc(int ranks, int myrank, void *uc0ptr, void *ucptr_in,
                                    void *ucptr_out, size_t bytes, void *residual_in,
                                    void *residual_out, bool fuse_layernorm, void *gamma, float eps,
-                                   const int hidden_size, cudaStream_t stream) {
-  SETUP_LAUNCH_CONFIG(64, 1024, stream, 4, 1);
+                                   const int hidden_size, int smlimit, int cgasize, int nchunk, bool multi_kernel, cudaStream_t stream) {
+  
+  int sms = 64;
+  int nthreads = 1024;
+  if (smlimit && sms>smlimit) sms = smlimit;
+  SETUP_LAUNCH_CONFIG(sms, nthreads, stream, (cgasize?cgasize:1), 1);
 
   int arg1 = myrank, arg2 = bytes / 16, arg3 = (int4 *)ucptr_in - (int4 *)uc0ptr,
       arg4 = (int4 *)ucptr_out - (int4 *)uc0ptr;
@@ -589,12 +685,12 @@ extern "C" void allreduce_2shot_uc(int ranks, int myrank, void *uc0ptr, void *uc
   call_uc_kernel(8);
 }
 
-extern "C" void allreduce_2shot_mc_lamport(int ranks, int myrank, void *uc0ptr, void *mc0ptr,
+extern "C" void ubnext_allreduce_2shot_mc_lamport(int ranks, int myrank, void *uc0ptr, void *mc0ptr,
                                            void *ucptr_out, void *mcptr_in, void *mcptr_out,
                                            void *clear_ptr, size_t bytes, bool poisoned,
                                            void *residual_in, void *residual_out,
                                            bool fuse_layernorm, void *gamma, float eps,
-                                           const int hidden_size, cudaStream_t stream) {
+                                           const int hidden_size, int smlimit, int cgasize, int nchunk, bool multi_kernel, cudaStream_t stream) {
   if (!poisoned) {
     //user tells us destination was not pre-poisoned, so we need to do it before calling allreduce
     int threadsPerBlock = 512;
@@ -603,8 +699,8 @@ extern "C" void allreduce_2shot_mc_lamport(int ranks, int myrank, void *uc0ptr, 
                                                        NVTE_UB_LAMPORT_INT);
   }
   split_tokens(64);
-
-  SETUP_LAUNCH_CONFIG(64, nthreads, stream, 4, 1);
+  if (smlimit && sms>smlimit) sms = smlimit;
+  SETUP_LAUNCH_CONFIG(sms, nthreads, stream, (cgasize?cgasize:1), 1);
 
   int arg1 = ranks, arg2 = myrank, arg3 = total_bytes / sizeof(uint4),
       arg3a = bytes / sizeof(uint4);
@@ -633,4 +729,38 @@ extern "C" void allreduce_2shot_mc_lamport(int ranks, int myrank, void *uc0ptr, 
   call_mc_lamport_kernel(4, true);
 }
 
-}  // namespace transformer_engine
+extern "C" void ubnext_allgather_mc(int ranks, int myrank, void *uc0ptr, void *mc0ptr, void *ptr_in,
+                                void *mcptr_out, size_t bytes, int smlimit, cudaStream_t stream) {
+  int sms = 32;
+  int nthreads = 1024;
+  if (smlimit && sms > smlimit) sms = smlimit;
+  SETUP_LAUNCH_CONFIG(sms, nthreads, stream, 1, 1);
+  //userbuffers_ag_mc(const int RANKS, const int myrank, const int mylines,int *uc_flagptr, int *mc_flagptr, uint4 *uc_ptr_in,uint4 *mc_ptr_out)
+  int arg1 = ranks, arg2 = myrank, arg3 = bytes / sizeof(uint4);
+  void *arg4 = uc0ptr + (ranks * 8), *arg5 = mc0ptr + (ranks * 8), *arg6 = ptr_in,
+       *arg7 = mcptr_out+myrank*bytes;
+
+  void *kernelArgs[] = {(void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg4,
+                        (void *)&arg5, (void *)&arg6, (void *)&arg7};
+
+  CUDACHECK(cudaLaunchKernelExC(&cfg, (void *)(userbuffers_ag_mc), kernelArgs));
+}
+
+extern "C" void ubnext_alltoall(int ranks, int myrank, void *uc0ptr, void *mc0ptr, void *ptr_in,
+                              void *ucptr_out, size_t bytes, int smlimit,
+                              cudaStream_t stream) {
+  int sms = 32;
+  int nthreads = 1024;
+  if (smlimit && sms > smlimit) sms = smlimit;
+  SETUP_LAUNCH_CONFIG(sms, nthreads, stream, 1, 1);
+  //userbuffers_a2a(const int RANKS, const int myrank, const int nlines,const int lineoffset_out, int *uc_flagptr, int *mc_flagptr, uint4 *ptr_in, void** commbuff) {
+  int arg1 = ranks, arg2 = myrank, arg3 = bytes / sizeof(uint4),
+      arg4 = (int4 *)ucptr_out - (int4 *)uc0ptr;
+  void *arg5 = uc0ptr + (ranks * 8), *arg6 = mc0ptr + (ranks * 8), *arg7 = ptr_in,
+       **arg8 = (void **)uc0ptr;
+
+  void *kernelArgs[] = {(void *)&arg1, (void *)&arg2, (void *)&arg3, (void *)&arg4,
+                        (void *)&arg5, (void *)&arg6, (void *)&arg7, (void *)&arg8};
+
+  CUDACHECK(cudaLaunchKernelExC(&cfg, (void *)(userbuffers_a2a), kernelArgs));
+}

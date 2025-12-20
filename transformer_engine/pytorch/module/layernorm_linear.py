@@ -77,6 +77,7 @@ from ..cpp_extensions import (
     ubsymm_request_allocator,
     ubsymm_get_sym_tensor,
     ubsymm_allreduce,
+    ubsymm_restore,
 )
 
 __all__ = ["LayerNormLinear"]
@@ -132,7 +133,6 @@ class _LayerNormLinear(torch.autograd.Function):
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
-        skip_layernorm: bool = False,
         debug: Optional[bool] = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
@@ -208,9 +208,19 @@ class _LayerNormLinear(torch.autograd.Function):
             and not experimental  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
         )
 
-        # Apply normalization
-        if skip_layernorm:
-            ln_out = inputmat
+        # Apply normalization (possibly fused with all-reduce for column parallel)
+        if (
+            symmetric_ar_type is not None
+            and symmetric_ar_type == "ubnext_add_rms"
+            and parallel_mode == "column"
+            and tp_size > 1
+        ):
+            assert normalization == "RMSNorm", "ubnext_add_rms is only supported for RMSNorm"
+            assert not with_quantized_norm, "ubnext_add_rms not implemented yet for quantized norm"
+            assert zero_centered_gamma == False, "ubnext_add_rms is not supported for zero_centered_gamma"
+            assert ln_bias is None, "ubnext_add_rms is not supported for ln_bias"
+            inputmat = ubsymm_restore(inputmat, tp_group)
+            ln_out = ubsymm_allreduce(inputmat,gamma=ln_weight,eps=eps)
             mu = None
             rsigma = None
         else:
@@ -1080,7 +1090,6 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # module
             None,  # skip_fp8_weight_update
             None,  # symmetric_ar_type
-            None,  # skip_layernorm
         )
 
 
@@ -1210,7 +1219,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
-        skip_layernorm: bool = False,
         name: str = None,
     ) -> None:
         super().__init__()
@@ -1335,7 +1343,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
         else:
             self.layer_norm_bias = None
-        self.skip_layernorm = skip_layernorm
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
@@ -1647,7 +1654,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
-                self.skip_layernorm,
                 debug,
             )
             out = fwd_fn(*args)

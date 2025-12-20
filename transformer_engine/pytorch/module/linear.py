@@ -122,9 +122,6 @@ class _Linear(torch.autograd.Function):
         symmetric_ar_type: str,
         save_original_input: bool = False,
         debug: Optional[bool] = False,
-        residual: Optional[torch.Tensor] = None,
-        eps: Optional[float] = None,
-        ln_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -371,9 +368,10 @@ class _Linear(torch.autograd.Function):
             elif tensor_parallel:
                 if symmetric_ar_type is not None:
                     if symm_out is not None:
-                        out = ubsymm_allreduce(
-                            symm_out, residual_global=residual, gamma=ln_weight, eps=eps
-                        )
+                        if symmetric_ar_type=="ubnext":
+                            out = ubsymm_allreduce(symm_out)
+                        else:
+                            out = symm_out
                     else:
                         fallback_symmetric = (
                             "multimem_all_reduce"
@@ -1152,8 +1150,6 @@ class Linear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
         name: Optional[str] = None,
-        eps: Optional[float] = None,
-        ln_weight: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__()
 
@@ -1255,8 +1251,6 @@ class Linear(TransformerEngineBaseModule):
                     ),
                     params_dtype,
                 )
-        self.eps = eps
-        self.layer_norm_weight = ln_weight  # in general expected to be filled with reference to layernorm_weight from next LayerNormLinear later
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
@@ -1422,7 +1416,6 @@ class Linear(TransformerEngineBaseModule):
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
         fp8_grad: Optional[bool] = False,
-        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1535,9 +1528,6 @@ class Linear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
-                residual,
-                self.eps,
-                self.layer_norm_weight,
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:

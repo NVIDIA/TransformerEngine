@@ -440,7 +440,7 @@ def initialize_ub(
                 (
                     shape
                     if name != "ubnext"
-                    else (int(os.environ.get("NVTE_UB_SYMM_POOL_SIZE", 64)), 1024 * 1024)
+                    else (int(os.environ.get("NVTE_UB_SYMM_POOL_SIZE", 128)), 1024 * 1024)
                 ),  # Communication buffer shape
                 buffer_dtype if name != "ubnext" else torch.uint8,  # Communication buffer data type
                 helper,  # Helper for torch.distributed callbacks during bootstrapping

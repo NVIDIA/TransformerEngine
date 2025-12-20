@@ -140,43 +140,60 @@
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
         py::call_guard<py::gil_scoped_release>());                                                 \
   m.def(                                                                                           \
-      "allreduce_2shot_mc",                                                                        \
+      "ubnext_allreduce_2shot_mc",                                                                        \
       [](int ranks, int myrank, void* uc0ptr, void* mc0ptr, void* mcptr_in, void* mcptr_out,       \
          size_t bytes, void* residual_in, void* residual_out, bool fuse_layernorm, void* gamma,    \
-         float eps, const int hidden_size) {                                                       \
-        transformer_engine::allreduce_2shot_mc(                                                    \
+         float eps, const int hidden_size, int smlimit, int cgasize, int nchunk, bool multi_kernel) {                   \
+        ubnext_allreduce_2shot_mc(                                                    \
             ranks, myrank, uc0ptr, mc0ptr, mcptr_in, mcptr_out, bytes, residual_in, residual_out,  \
-            fuse_layernorm, gamma, eps, hidden_size, at::cuda::getCurrentCUDAStream());            \
+            fuse_layernorm, gamma, eps, hidden_size, smlimit, cgasize, nchunk, multi_kernel, at::cuda::getCurrentCUDAStream());            \
       },                                                                                           \
       py::arg("ranks"), py::arg("myrank"), py::arg("uc0ptr"), py::arg("mc0ptr"),                   \
       py::arg("mcptr_in"), py::arg("mcptr_out"), py::arg("bytes"), py::arg("residual_in"),         \
       py::arg("residual_out"), py::arg("fuse_layernorm"), py::arg("gamma"), py::arg("eps"),        \
-      py::arg("hidden_size"));                                                                     \
+      py::arg("hidden_size"), py::arg("smlimit"), py::arg("cgasize"), py::arg("nchunk"), py::arg("multi_kernel"));                                                                     \
   m.def(                                                                                           \
-      "allreduce_2shot_uc",                                                                        \
+      "ubnext_allreduce_2shot_uc",                                                                        \
       [](int ranks, int myrank, void* uc0ptr, void* ucptr_in, void* ucptr_out, size_t bytes,       \
          void* residual_in, void* residual_out, bool fuse_layernorm, void* gamma, float eps,       \
-         const int hidden_size) {                                                                  \
-        transformer_engine::allreduce_2shot_uc(                                                    \
+         const int hidden_size, int smlimit, int cgasize, int nchunk, bool multi_kernel) {                                                                  \
+        ubnext_allreduce_2shot_uc(                                                    \
             ranks, myrank, uc0ptr, ucptr_in, ucptr_out, bytes, residual_in, residual_out,          \
-            fuse_layernorm, gamma, eps, hidden_size, at::cuda::getCurrentCUDAStream());            \
+            fuse_layernorm, gamma, eps, hidden_size, smlimit, cgasize, nchunk, multi_kernel, at::cuda::getCurrentCUDAStream());            \
       },                                                                                           \
       py::arg("ranks"), py::arg("myrank"), py::arg("uc0ptr"), py::arg("ucptr_in"),                 \
       py::arg("ucptr_out"), py::arg("bytes"), py::arg("residual_in"), py::arg("residual_out"),     \
-      py::arg("fuse_layernorm"), py::arg("gamma"), py::arg("eps"), py::arg("hidden_size"));        \
+      py::arg("fuse_layernorm"), py::arg("gamma"), py::arg("eps"), py::arg("hidden_size"),         \
+      py::arg("smlimit"), py::arg("cgasize"), py::arg("nchunk"), py::arg("multi_kernel"));                                  \
   m.def(                                                                                           \
-      "allreduce_2shot_mc_lamport",                                                                \
+      "ubnext_allreduce_2shot_mc_lamport",                                                                \
       [](int ranks, int myrank, void* uc0ptr, void* mc0ptr, void* ucptr_out, void* mcptr_in,       \
          void* mcptr_out, void* clear_ptr, size_t bytes, bool poisoned, void* residual_in,         \
-         void* residual_out, bool fuse_layernorm, void* gamma, float eps, const int hidden_size) { \
-        transformer_engine::allreduce_2shot_mc_lamport(                                            \
+         void* residual_out, bool fuse_layernorm, void* gamma, float eps, const int hidden_size, int smlimit, int cgasize, int nchunk, bool multi_kernel) { \
+        ubnext_allreduce_2shot_mc_lamport(                                            \
             ranks, myrank, uc0ptr, mc0ptr, ucptr_out, mcptr_in, mcptr_out, clear_ptr, bytes,       \
-            poisoned, residual_in, residual_out, fuse_layernorm, gamma, eps, hidden_size,          \
+            poisoned, residual_in, residual_out, fuse_layernorm, gamma, eps, hidden_size, smlimit, cgasize, nchunk, multi_kernel,          \
             at::cuda::getCurrentCUDAStream());                                                     \
       },                                                                                           \
       py::arg("ranks"), py::arg("myrank"), py::arg("uc0ptr"), py::arg("mc0ptr"),                   \
       py::arg("ucptr_out"), py::arg("mcptr_in"), py::arg("mcptr_out"), py::arg("clear_ptr"),       \
       py::arg("bytes"), py::arg("poisoned"), py::arg("residual_in"), py::arg("residual_out"),      \
-      py::arg("fuse_layernorm"), py::arg("gamma"), py::arg("eps"), py::arg("hidden_size"));
+      py::arg("fuse_layernorm"), py::arg("gamma"), py::arg("eps"), py::arg("hidden_size"),         \
+      py::arg("smlimit"), py::arg("cgasize"), py::arg("nchunk"), py::arg("multi_kernel"));                                  \
+m.def(                                                                                           \
+      "ubnext_alltoall",                                                                        \
+      [](int ranks, int myrank, void* uc0ptr, void* mc0ptr, void* ptr_in, void* ucptr_out, size_t bytes, int smlimit) { \
+        ubnext_alltoall(                                                    \
+            ranks, myrank, uc0ptr, mc0ptr, ptr_in, ucptr_out, bytes, smlimit, at::cuda::getCurrentCUDAStream());            \
+      },                                                                                           \
+      py::arg("ranks"), py::arg("myrank"), py::arg("uc0ptr"), py::arg("mc0ptr"), py::arg("ptr_in"), py::arg("ucptr_out"), py::arg("bytes"), py::arg("smlimit"));                                  \
+m.def(                                                                                           \
+      "ubnext_allgather_mc",                                                                        \
+      [](int ranks, int myrank, void* uc0ptr, void* mc0ptr, void* ptr_in, void* mcptr_out, size_t bytes, int smlimit) { \
+        ubnext_allgather_mc(                                                    \
+            ranks, myrank, uc0ptr, mc0ptr, ptr_in, mcptr_out, bytes, smlimit, at::cuda::getCurrentCUDAStream());            \
+      },                                                                                           \
+      py::arg("ranks"), py::arg("myrank"), py::arg("uc0ptr"), py::arg("mc0ptr"), py::arg("ptr_in"), py::arg("mcptr_out"), py::arg("bytes"), py::arg("smlimit"));                                  \
 
-#endif
+
+      #endif

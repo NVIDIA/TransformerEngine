@@ -150,8 +150,6 @@ def main():
             parallel_mode="row",
             tp_group=torch.distributed.group.WORLD,
             symmetric_ar_type=args.sym_type if args.comm_type == "sym" else None,
-            eps=args.eps,
-            ln_weight=ln_weight,
         )
 
     if args.comm_type == "ub":
@@ -167,8 +165,6 @@ def main():
             sequence_parallel=True,
             ub_overlap_rs=True,
             ub_name="proj",
-            eps=args.eps,
-            ln_weight=ln_weight,
         )
 
     # Create CUDA stream
@@ -297,7 +293,7 @@ def main():
         # Warm-up run
         out = modelseq(inp)
         modelnorm(out)
-        modelpar(inp, residual=residual)
+        modelpar(inp)
         torch.cuda.synchronize()
         if args.cuda_graph:
             with torch.cuda.stream(stream):
@@ -310,7 +306,7 @@ def main():
                         output.add_(residual[:batch, : args.out_features])
                         output = modelnorm(output)
                 with torch.cuda.graph(gpar):
-                    output = modelpar(inp, residual=residual)
+                    output = modelpar(inp)
             # Warm-up the graph
             for _ in range(5):
                 gseq.replay()
