@@ -885,10 +885,13 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
           NVTE_ERROR("2D quantization is not supported for group quantize transpose.");
         }
 
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size)
+        );
         kernel<<<grid, block_size, dshmem_size, stream>>>(tensor_map_input, tensor_map_output,
                                                           scales_ptr, noop_ptr, rows, cols,
                                                           scale_stride, rng_state, kernel_args);
+        NVTE_CHECK_CUDA(cudaGetLastError());
       }););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);

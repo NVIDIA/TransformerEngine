@@ -664,14 +664,12 @@ rht_gemm_ntt_w_sfc(int m, int n,
                                   kEnableStochasticRounding,
                                   kUseFastMath>;
 
-  bool status = cudaFuncSetAttribute(*kernel_ptr,
-                                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                smem_size);
+  NVTE_CHECK_CUDA(
+      cudaFuncSetAttribute(*kernel_ptr,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           smem_size)
+  );
 
-  if (status != cudaSuccess) {
-    std::cerr << "Error: Failed to set Shared Memory size." << std::endl;
-    return;
-  }
   (*kernel_ptr)
       <<< dimGrid, dimBlock, smem_size, stream >>>
       (M,  N,  k_tile_size, cga_tile_shape,
@@ -681,6 +679,7 @@ rht_gemm_ntt_w_sfc(int m, int n,
        SFC,
        mma, global_amax,
        rng_state);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 // this function is used to wrap the rht_gemm_ntt_w_sfc function

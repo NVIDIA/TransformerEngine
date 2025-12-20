@@ -1264,30 +1264,24 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
       AccumulatorPipelineStageCount, SchedulerPipelineStageCount, kEnableStochasticRounding,
       kEnableRHTColQuant, kEnableRowQuant, kEnableSwizzleSFOutput, kUseFastMath>;
 
-  bool status_set_attr =
-      cudaFuncSetAttribute(*kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+  NVTE_CHECK_CUDA(
+      cudaFuncSetAttribute(*kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size)
+  );
 
-  if (status_set_attr != cudaSuccess) {
-    std::cerr << "Error: Failed to set Shared Memory size." << std::endl;
-    return;
-  }
-
+  // Allocate workspace and set to zero
   void *tile_scheduler_workspace = nullptr;
-  cudaMallocAsync(&tile_scheduler_workspace, sizeof(uint32_t), stream);
-  // reset the tile_scheduler_workspace to 0
-  cudaMemsetAsync(tile_scheduler_workspace, 0, sizeof(uint32_t), stream);
-  cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size};
+  NVTE_CHECK_CUDA(cudaMallocAsync(&tile_scheduler_workspace, sizeof(uint32_t), stream));
+  NVTE_CHECK_CUDA(cudaMemsetAsync(tile_scheduler_workspace, 0, sizeof(uint32_t), stream));
+
+  // Launch kernel
+  cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size, stream};
   cutlass::Status status = cutlass::launch_kernel_on_cluster(
       params, (void const *)kernel_ptr, M, N, k_tile_size, cluster_shape, cluster_tile_shape, A, dA, sA,
       tma_load_a, B, dB, sB, tma_load_b, QA, dQA, SFA, sfa_layout, args, tile_scheduler_workspace, mma, rng_state);
-  // CUTE_CHECK_LAST();
+  NVTE_CHECK_CUDA(cudaGetLastError());
+  NVTE_CHECK(status == cutlass::Status::kSuccess, "Kernel launch failed.");
 
-  cudaFreeAsync(tile_scheduler_workspace, stream);
-
-  if (status != cutlass::Status::kSuccess) {
-    std::cerr << "Error: Failed at kernel Launch" << std::endl;
-    return;
-  }
+  NVTE_CHECK_CUDA(cudaFreeAsync(tile_scheduler_workspace, stream));
 }
 
 }  // namespace

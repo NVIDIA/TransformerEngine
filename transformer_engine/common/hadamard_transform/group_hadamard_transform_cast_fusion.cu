@@ -21,6 +21,7 @@
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
+#include "common/util/system.h"
 #include "common/utils.cuh"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/cutlass.h"
@@ -30,9 +31,6 @@
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/command_line.h"
 #include "cutlass/util/print_error.hpp"
-
-// include utils for get system env
-#include "../util/system.h"
 
 // clang-format off
 
@@ -851,14 +849,12 @@ group_rht_gemm_ntt_w_sfc(int m, int n,
                                   kEnableStochasticRounding,
                                   kUseFastMath>;
 
-  bool status = cudaFuncSetAttribute(*kernel_ptr,
-                                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                smem_size);
+  NVTE_CHECK_CUDA(
+      cudaFuncSetAttribute(*kernel_ptr,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           smem_size)
+  );
 
-  if (status != cudaSuccess) {
-    std::cerr << "Error: Failed to set Shared Memory size." << std::endl;
-    return;
-  }
   (*kernel_ptr)
       <<< dimGrid, dimBlock, smem_size, stream >>>
       (M,  N,  k_tile_size, cga_tile_shape,
@@ -867,6 +863,7 @@ group_rht_gemm_ntt_w_sfc(int m, int n,
        sC, mma,
        *kernel_args_ptr,
        rng_state);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 // this function is used to wrap the group_rht_gemm_ntt_w_sfc function
