@@ -246,181 +246,21 @@ register_primitive(RowIdMapPass3Primitive)
 
 class PermuteWithMaskMapPrimitive(BasePrimitive):
     """
-    Permute the input tensor based on the row_id_map.
+    Permute the input tensor based on the row_id_map, optionally with fused padding.
     """
 
     name = "te_permute_with_mask_map_triton"
     multiple_results = True
-    # scale, permuted_scale, and pad_offsets are dummy inputs (not used when PERMUTE_SCALE=False, FUSION_PAD=False)
-    # but they need to be in the signature for the kernel call
+    # scale, permuted_scale are dummy inputs (not used when PERMUTE_SCALE=False)
+    # pad_offsets can be shape (0,) when not doing padding, or (num_experts,) when padding
     impl_static_args = (
         6,
         7,
         8,
         9,
         10,
-    )  # num_tokens, num_experts, num_out_tokens, hidden_size, with_probs
-    inner_primitive = None
-    outer_primitive = None
-
-    @staticmethod
-    def abstract(
-        inp_aval,
-        row_id_map_aval,
-        probs_aval,
-        scale_aval,  # dummy, same shape as inp
-        permuted_scale_aval,  # dummy, same shape as inp
-        pad_offsets_aval,  # dummy, not used when FUSION_PAD=False
-        *,
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-        with_probs,
-    ):
-        """Shape/dtype inference for permute."""
-        del row_id_map_aval, scale_aval, permuted_scale_aval, pad_offsets_aval
-        del num_tokens, num_experts
-
-        output_shape = (num_out_tokens, hidden_size)
-        output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
-
-        if with_probs:
-            permuted_probs_aval = jax.core.ShapedArray((num_out_tokens,), probs_aval.dtype)
-        else:
-            permuted_probs_aval = jax.core.ShapedArray((0,), inp_aval.dtype)
-
-        return output_aval, permuted_probs_aval
-
-    @staticmethod
-    def impl(
-        inp,
-        row_id_map,
-        probs,
-        scale,
-        permuted_scale,
-        pad_offsets,
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-        with_probs,
-    ):
-        """Forward to inner primitive."""
-        assert PermuteWithMaskMapPrimitive.inner_primitive is not None
-        return PermuteWithMaskMapPrimitive.inner_primitive.bind(
-            inp,
-            row_id_map,
-            probs,
-            scale,
-            permuted_scale,
-            pad_offsets,
-            num_tokens=num_tokens,
-            num_experts=num_experts,
-            num_out_tokens=num_out_tokens,
-            hidden_size=hidden_size,
-            with_probs=with_probs,
-        )
-
-    @staticmethod
-    def lowering(
-        ctx,
-        inp,
-        row_id_map,
-        probs,
-        scale,
-        permuted_scale,
-        pad_offsets,
-        *,
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-        with_probs,
-    ):
-        """MLIR lowering using triton_call_lowering."""
-        del num_out_tokens
-        inp_stride_token = hidden_size
-        inp_stride_hidden = 1
-        output_stride_token = hidden_size
-        output_stride_hidden = 1
-        row_id_stride_token = num_experts * 2 + 1
-        row_id_stride_expert = 1
-        permuted_probs_stride_token = 1
-
-        if with_probs:
-            # Check if probs is 2D [num_tokens, num_experts] or 1D [num_tokens]
-            probs_aval = ctx.avals_in[2]
-            if len(probs_aval.shape) > 1:
-                probs_stride_token = num_experts
-                probs_stride_expert = 1
-            else:
-                probs_stride_token = 1
-                probs_stride_expert = 1
-        else:
-            probs_stride_token = 0
-            probs_stride_expert = 0
-
-        # Grid function equivalent: (num_tokens, cdiv(hidden_size, BLOCK_SIZE))
-        # Use minimum BLOCK_SIZE from autotune configs to ensure grid covers all elements
-        block_size = _get_min_block_size(_permute_kernel)
-        grid = (num_tokens, triton.cdiv(hidden_size, block_size))
-
-        # Pass all 6 inputs including pad_offsets (even though FUSION_PAD=False)
-        return triton_call_lowering(
-            ctx,
-            _permute_kernel,
-            inp,
-            row_id_map,
-            probs,
-            scale,
-            permuted_scale,
-            pad_offsets,
-            grid=grid,
-            constexprs={
-                "scale_hidden_dim": 0,
-                "stride_row_id_map_token": row_id_stride_token,
-                "stride_row_id_map_expert": row_id_stride_expert,
-                "stride_input_token": inp_stride_token,
-                "stride_input_hidden": inp_stride_hidden,
-                "stride_output_token": output_stride_token,
-                "stride_output_hidden": output_stride_hidden,
-                "stride_probs_token": probs_stride_token,
-                "stride_probs_expert": probs_stride_expert,
-                "stride_scale_token": hidden_size,
-                "stride_scale_hidden": 1,
-                "stride_permuted_probs_token": permuted_probs_stride_token,
-                "stride_permuted_scale_token": hidden_size,
-                "stride_permuted_scale_hidden": 1,
-                "num_experts": num_experts,
-                "hidden_size": hidden_size,
-                "PERMUTE_PROBS": with_probs,
-                "PERMUTE_SCALE": False,
-                "FUSION_PAD": False,
-                "BLOCK_SIZE": block_size,
-            },
-        )
-
-
-register_primitive(PermuteWithMaskMapPrimitive)
-
-
-class PermuteWithMaskMapAndPadPrimitive(BasePrimitive):
-    """
-    Permute the input tensor based on the row_id_map with fused padding.
-    """
-
-    name = "te_permute_with_mask_map_and_pad_triton"
-    multiple_results = True
-    # scale and permuted_scale are dummy inputs (not used when PERMUTE_SCALE=False)
-    # Order must match kernel: inp, row_id_map, probs, scale, permuted_scale, pad_offsets
-    impl_static_args = (
-        6,
-        7,
-        8,
-        9,
-        10,
-    )  # num_tokens, num_experts, num_out_tokens, hidden_size, with_probs
+        11,
+    )  # num_tokens, num_experts, num_out_tokens, hidden_size, with_probs, with_pad
     inner_primitive = None
     outer_primitive = None
 
@@ -438,10 +278,11 @@ class PermuteWithMaskMapAndPadPrimitive(BasePrimitive):
         num_out_tokens,
         hidden_size,
         with_probs,
+        with_pad,
     ):
-        """Shape/dtype inference for permute with padding."""
+        """Shape/dtype inference for permute."""
         del row_id_map_aval, scale_aval, permuted_scale_aval, pad_offsets_aval
-        del num_tokens, num_experts
+        del num_tokens, num_experts, with_pad
 
         output_shape = (num_out_tokens, hidden_size)
         output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
@@ -466,10 +307,11 @@ class PermuteWithMaskMapAndPadPrimitive(BasePrimitive):
         num_out_tokens,
         hidden_size,
         with_probs,
+        with_pad,
     ):
         """Forward to inner primitive."""
-        assert PermuteWithMaskMapAndPadPrimitive.inner_primitive is not None
-        return PermuteWithMaskMapAndPadPrimitive.inner_primitive.bind(
+        assert PermuteWithMaskMapPrimitive.inner_primitive is not None
+        return PermuteWithMaskMapPrimitive.inner_primitive.bind(
             inp,
             row_id_map,
             probs,
@@ -481,6 +323,7 @@ class PermuteWithMaskMapAndPadPrimitive(BasePrimitive):
             num_out_tokens=num_out_tokens,
             hidden_size=hidden_size,
             with_probs=with_probs,
+            with_pad=with_pad,
         )
 
     @staticmethod
@@ -498,6 +341,7 @@ class PermuteWithMaskMapAndPadPrimitive(BasePrimitive):
         num_out_tokens,
         hidden_size,
         with_probs,
+        with_pad,
     ):
         """MLIR lowering using triton_call_lowering."""
         del num_out_tokens
@@ -527,7 +371,6 @@ class PermuteWithMaskMapAndPadPrimitive(BasePrimitive):
         block_size = _get_min_block_size(_permute_kernel)
         grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
-        # Args order must match kernel: inp, row_id_map, probs, scale, permuted_scale, pad_offsets
         return triton_call_lowering(
             ctx,
             _permute_kernel,
@@ -557,13 +400,13 @@ class PermuteWithMaskMapAndPadPrimitive(BasePrimitive):
                 "hidden_size": hidden_size,
                 "PERMUTE_PROBS": with_probs,
                 "PERMUTE_SCALE": False,
-                "FUSION_PAD": True,
+                "FUSION_PAD": with_pad,
                 "BLOCK_SIZE": block_size,
             },
         )
 
 
-register_primitive(PermuteWithMaskMapAndPadPrimitive)
+register_primitive(PermuteWithMaskMapPrimitive)
 
 
 class UnpermuteWithMaskMapPrimitive(BasePrimitive):
@@ -1512,6 +1355,7 @@ def permute_with_mask_map(
         num_out_tokens=num_out_tokens,
         hidden_size=hidden_size,
         with_probs=with_probs,
+        with_pad=False,
     )
 
     if not with_probs:
@@ -1569,8 +1413,7 @@ def permute_with_mask_map_and_pad(
     dummy_scale = inp
     dummy_permuted_scale = inp
 
-    # Args order must match kernel: inp, row_id_map, probs, scale, permuted_scale, pad_offsets
-    output, permuted_probs = PermuteWithMaskMapAndPadPrimitive.outer_primitive.bind(
+    output, permuted_probs = PermuteWithMaskMapPrimitive.outer_primitive.bind(
         inp,
         row_id_map,
         probs,
@@ -1582,6 +1425,7 @@ def permute_with_mask_map_and_pad(
         num_out_tokens=num_out_tokens,
         hidden_size=hidden_size,
         with_probs=with_probs,
+        with_pad=True,
     )
 
     if not with_probs:

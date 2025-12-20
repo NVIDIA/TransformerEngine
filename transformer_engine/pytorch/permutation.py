@@ -620,6 +620,11 @@ def moe_permute_and_pad_with_probs(
     assert (
         tokens_per_expert is not None
     ), "tokens_per_expert must be provided to the fused permute padding function."
+    assert align_size > 0, f"align_size must be positive, got {align_size}"
+
+    # Ensure tokens_per_expert is on the same device as input to avoid device transfers
+    if tokens_per_expert.device != inp.device:
+        tokens_per_expert = tokens_per_expert.to(inp.device)
 
     # Calculate aligned token counts per expert
     target_tokens_per_expert = (torch.ceil(tokens_per_expert / align_size) * align_size).long()
@@ -627,7 +632,7 @@ def moe_permute_and_pad_with_probs(
     if torch.equal(tokens_per_expert, target_tokens_per_expert):
         pad_offsets = None
     else:
-        pad_lengths = (target_tokens_per_expert - tokens_per_expert).to(inp.device)
+        pad_lengths = target_tokens_per_expert - tokens_per_expert
         cum_pad = torch.cumsum(pad_lengths, dim=0)
         pad_offsets = torch.cat(
             [torch.zeros(1, dtype=cum_pad.dtype, device=inp.device), cum_pad[:-1]]
