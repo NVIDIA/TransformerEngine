@@ -143,7 +143,9 @@ class _GroupedLinear(torch.autograd.Function):
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
         if fp8 and not debug:
-            inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
+            inputmats = tex.split_quantize(
+                inp_view, m_splits, input_quantizers, disable_bulk_allocation=cpu_offloading
+            )
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
