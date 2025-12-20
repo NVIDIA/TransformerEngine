@@ -31,9 +31,6 @@
 #include "cutlass/util/command_line.h"
 #include "cutlass/util/print_error.hpp"
 
-// include utils for get system env
-#include "../util/system.h"
-
 // clang-format off
 
 namespace transformer_engine {

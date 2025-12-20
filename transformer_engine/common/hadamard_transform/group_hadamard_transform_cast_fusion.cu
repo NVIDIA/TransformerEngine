@@ -21,7 +21,6 @@
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
-#include "common/util/system.h"
 #include "common/utils.cuh"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/cutlass.h"
@@ -31,8 +30,6 @@
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/command_line.h"
 #include "cutlass/util/print_error.hpp"
-
-// clang-format off
 
 namespace transformer_engine {
 namespace detail {
@@ -908,8 +905,6 @@ group_rht_gemm_ttt_wrapper(int m, int n,
 
 }  // namespace
 }  // namespace detail
-
-// clang-format on
 
 void group_hadamard_transform_cast_fusion_columnwise(
     const Tensor &input_, std::vector<Tensor *> &output_list, const size_t *split_sections,
