@@ -391,27 +391,7 @@ class NVFP4QuantizerRef(Quantizer):
             h = sign_mat @ h
         return h.to(dtype)
 
-    def _supports_rht_cast_fusion(self, x: torch.Tensor) -> bool:
-        """
-        Check if RHT cast fusion is supported for the input tensor.
-
-        When RHT cast fusion is supported, there is no intermediate bf16 tensor for RHT(x) results,
-        which means that we can directly cast from FP32 to FP4 without any intermediate bf16 tensor.
-
-        For example, if x.shape is (128, 128), then RHT cast fusion is supported.
-        If x.shape is (128, 127), then RHT cast fusion is not supported.
-
-        This function is to simulate this behavior in the reference implementation for numerical correctness.
-
-        Args:
-            x: The input tensor.
-
-        Returns:
-            True if RHT cast fusion is supported, False otherwise.
-        """
-        return x.dtype == torch.bfloat16 and x.shape[0] % 64 == 0 and x.shape[1] % 128 == 0
-
-    def _apply_rht(self, x: torch.Tensor, with_rht_cast_fusion: bool = False) -> torch.Tensor:
+    def _apply_rht(self, x: torch.Tensor) -> torch.Tensor:
         """Apply randomized Hadamard transform without random signs (reference path).
 
         This matches the reference used in tests: x_reshaped @ (H * (1/sqrt(g))).
@@ -435,12 +415,6 @@ class NVFP4QuantizerRef(Quantizer):
         x_mat = x.contiguous().view(-1, rht_dim)
         # Random sign matrix is identity in this reference (no sign flipping)
         transform = H * scale
-
-        # If RHT cast fusion is supported, we can directly cast from FP32 to FP4 without any intermediate bf16 tensor.
-        if with_rht_cast_fusion:
-            transform = transform.float()
-            x_mat = x_mat.float()
-
         out = x_mat @ transform
         return out.view(original_shape)
 
@@ -625,10 +599,9 @@ class NVFP4QuantizerRef(Quantizer):
             ), "NVFP4 only supports 1x16 or 16x16 tile shape."
             # Prepare inputs once so we can reuse for both amax and quantization
             # Row-input will always be the original input.
-            with_rht_cast_fusion = self._supports_rht_cast_fusion(tensor)
             row_input = tensor
             col_input = (
-                self._apply_rht(tensor.t().contiguous(), with_rht_cast_fusion)
+                self._apply_rht(tensor.t().contiguous())
                 if self.with_rht
                 else tensor.t().contiguous()
             )
@@ -639,13 +612,6 @@ class NVFP4QuantizerRef(Quantizer):
                 if self.columnwise_usage
                 else global_amax_row
             )
-            # currently the amax of RHT transform still has a fp32 -> bf16 -> fp32 round-trip
-            # this is to simulate that behaviour and we will remove this once the amax of RHT transform is fixed
-            if self.columnwise_usage and with_rht_cast_fusion:
-                # global_amax_col = global_amax_col.to(torch.bfloat16).float()
-                global_amax_col = (
-                    torch.max(torch.abs(col_input.bfloat16())).to(torch.float32).view(1)
-                )
 
         transpose_scales = False
 
