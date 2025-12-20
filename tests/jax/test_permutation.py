@@ -16,7 +16,61 @@ from transformer_engine.jax.permutation import (
     token_combine,
     sort_chunks_by_index,
 )
-from utils import assert_allclose
+from utils import assert_allclose, pytest_parametrize_wrapper
+
+
+# =============================================================================
+# Test parameter definitions with L0 (fast) and L2 (comprehensive) levels
+# =============================================================================
+
+# All dispatch/combine test cases
+ALL_DISPATCH_COMBINE_CASES = [
+    (128,    5,  128, 3),
+    (1024,   8,  128, 8),
+    (4096,  32, 1280, 2),
+    (4096, 256, 4096, 6),
+]
+DISPATCH_COMBINE_CASES = {
+    "L0": ALL_DISPATCH_COMBINE_CASES[0:2],
+    "L2": ALL_DISPATCH_COMBINE_CASES,
+}
+
+# All sort chunks test cases
+ALL_SORT_CHUNKS_CASES = [
+    (8, 4096, 1280),
+    (64, 4096, 4096),
+    (256, 4096, 9216),
+]
+SORT_CHUNKS_CASES = {
+    "L0": ALL_SORT_CHUNKS_CASES[0:2],
+    "L2": ALL_SORT_CHUNKS_CASES,
+}
+
+# All dispatch/combine with padding test cases
+ALL_DISPATCH_COMBINE_PADDING_CASES = [
+    (128,    5,  128, 3,  8),
+    (1024,   8,  128, 8, 16),
+    (4096,  32, 1280, 2, 128),
+    (4096, 256, 4096, 6, 16),
+]
+DISPATCH_COMBINE_PADDING_CASES = {
+    "L0": ALL_DISPATCH_COMBINE_PADDING_CASES[0:2],
+    "L2": ALL_DISPATCH_COMBINE_PADDING_CASES,
+}
+
+# Dtypes for testing
+ALL_DTYPES = [jnp.float32, jnp.bfloat16]
+DTYPES = {
+    "L0": ALL_DTYPES,
+    "L2": ALL_DTYPES,
+}
+
+# With probs options
+ALL_WITH_PROBS = [True, False]
+WITH_PROBS = {
+    "L0": [True],
+    "L2": ALL_WITH_PROBS,
+}
 
 
 def reference_make_row_id_map(
@@ -424,19 +478,105 @@ class TestHighLevelPermutationAPI:
 
         return routing_map
 
+
+    @pytest_parametrize_wrapper(
+        "num_tokens,num_experts,hidden_size,tokens_per_expert",
+        DISPATCH_COMBINE_CASES,
+    )
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("with_probs", WITH_PROBS)
+    def test_token_dispatch(
+        self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype, with_probs
+    ):
+        """
+        Individual test for token_dispatch forward and backward passes.
+
+        This test validates dispatch in isolation to catch errors that might be
+        masked when combined with token_combine in the roundtrip test.
+
+        Uses value_and_grad to validate both forward (via loss comparison) and
+        backward (via gradient comparison) passes against reference implementation.
+        """
+        key = jax.random.PRNGKey(42)
+
+        # Generate routing map
+        routing_map = self.generate_routing_map(num_tokens, num_experts, tokens_per_expert, key)
+        num_out_tokens = int(jnp.sum(routing_map))
+
+        # Generate input data
+        key, inp_key, prob_key = jax.random.split(key, 3)
+        inp = jax.random.uniform(
+            inp_key, (num_tokens, hidden_size), dtype=dtype, minval=-1.0, maxval=1.0
+        )
+
+        # Generate probs if needed (minval > 0 to avoid kernel's special prob==0 handling)
+        probs = None
+        if with_probs:
+            probs = jax.random.uniform(
+                prob_key, (num_tokens, num_experts), dtype=dtype, minval=0.1, maxval=1.0
+            )
+
+        # Generate reference row_id_map for comparison
+        ref_row_id_map = reference_make_row_id_map(routing_map)
+
+        # =====================================================================
+        # Test forward and backward pass using value_and_grad
+        # (value validates forward, grad validates backward)
+        # =====================================================================
+        if with_probs:
+
+            @jax.jit
+            def dispatch_loss(x, p):
+                out, perm_probs, _, _, _ = token_dispatch(x, routing_map, num_out_tokens, probs=p)
+                return jnp.sum(out**2) + jnp.sum(perm_probs**2)
+
+            @jax.jit
+            def ref_dispatch_loss(x, p):
+                out, perm_probs = _reference_permute_impl(x, ref_row_id_map, p, num_out_tokens)
+                return jnp.sum(out**2) + jnp.sum(perm_probs**2)
+
+            loss_val, (inp_grad, probs_grad) = jax.value_and_grad(dispatch_loss, argnums=(0, 1))(
+                inp, probs
+            )
+            ref_loss_val, (ref_inp_grad, ref_probs_grad) = jax.value_and_grad(
+                ref_dispatch_loss, argnums=(0, 1)
+            )(inp, probs)
+
+            # Validate forward loss matches
+            assert_allclose(loss_val, ref_loss_val, dtype=dtype)
+            # Validate gradients
+            assert_allclose(inp_grad, ref_inp_grad, dtype=dtype)
+            assert_allclose(probs_grad, ref_probs_grad, dtype=dtype)
+        else:
+
+            @jax.jit
+            def dispatch_loss_no_probs(x):
+                out, _, _, _, _ = token_dispatch(x, routing_map, num_out_tokens)
+                return jnp.sum(out**2)
+
+            @jax.jit
+            def ref_dispatch_loss_no_probs(x):
+                out, _ = _reference_permute_impl(x, ref_row_id_map, None, num_out_tokens)
+                return jnp.sum(out**2)
+
+            loss_val, inp_grad = jax.value_and_grad(dispatch_loss_no_probs)(inp)
+            ref_loss_val, ref_inp_grad = jax.value_and_grad(ref_dispatch_loss_no_probs)(inp)
+
+            # Validate forward loss matches
+            assert_allclose(loss_val, ref_loss_val, dtype=dtype)
+            # Validate gradients
+            assert_allclose(inp_grad, ref_inp_grad, dtype=dtype)
+
     # =========================================================================
     # Consolidated dispatch + combine tests
     # =========================================================================
 
-    @pytest.mark.parametrize(
+    @pytest_parametrize_wrapper(
         "num_tokens,num_experts,hidden_size,tokens_per_expert",
-        [
-            (4096, 8, 1280, 2),
-            (4096, 256, 4096, 6),
-        ],
+        DISPATCH_COMBINE_CASES,
     )
-    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
-    @pytest.mark.parametrize("with_probs", [True, False])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("with_probs", WITH_PROBS)
     def test_dispatch_and_combine(
         self, num_tokens, num_experts, hidden_size, tokens_per_expert, dtype, with_probs
     ):
@@ -584,15 +724,11 @@ class TestHighLevelPermutationAPI:
     # sort_chunks_by_index tests
     # =========================================================================
 
-    @pytest.mark.parametrize(
+    @pytest_parametrize_wrapper(
         "num_splits,total_tokens,hidden_size",
-        [
-            (8, 4096, 1280),
-            (64, 4096, 4096),
-            (256, 4096, 9216),
-        ],
+        SORT_CHUNKS_CASES,
     )
-    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_sort_chunks_by_index(self, num_splits, total_tokens, hidden_size, dtype):
         """Test sort_chunks_by_index forward and backward pass against reference"""
         key = jax.random.PRNGKey(42)
@@ -643,15 +779,12 @@ class TestHighLevelPermutationAPI:
     # Consolidated dispatch + combine with padding tests
     # =========================================================================
 
-    @pytest.mark.parametrize(
+    @pytest_parametrize_wrapper(
         "num_tokens,num_experts,hidden_size,topk,align_size",
-        [
-            (4096, 8, 1280, 2, 16),
-            (4096, 256, 4096, 6, 16),
-        ],
+        DISPATCH_COMBINE_PADDING_CASES,
     )
-    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
-    @pytest.mark.parametrize("with_probs", [True, False])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("with_probs", WITH_PROBS)
     def test_dispatch_and_combine_with_padding(
         self, num_tokens, num_experts, hidden_size, topk, align_size, dtype, with_probs
     ):

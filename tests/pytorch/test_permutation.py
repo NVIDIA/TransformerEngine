@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import os
 import random
 
 import torch
@@ -1962,6 +1963,10 @@ def test_chunk_permutation_empty_input(te_dtype):
     )
 
 
+@pytest.mark.skipif(
+    os.getenv("RUN_BENCHMARK_TESTS", "0") != "1",
+    reason="Benchmark test - run with: RUN_BENCHMARK_TESTS=1 pytest -k single_case",
+)
 def test_permutation_single_case():
     print("GPU:", torch.cuda.get_device_name(0))
 
@@ -2125,7 +2130,12 @@ def benchmark_single_case(
     torch.cuda.nvtx.range_pop()
 
 
-def benchmark_multiple_cases():
+@pytest.mark.skipif(
+    os.getenv("RUN_BENCHMARK_TESTS", "0") != "1",
+    reason="Benchmark test - run with: RUN_BENCHMARK_TESTS=1 pytest -k benchmark",
+)
+def test_benchmark_multiple_cases():
+    """Benchmark test - skipped by default. Run with: RUN_BENCHMARK_TESTS=1 pytest -k benchmark"""
     print("GPU:", torch.cuda.get_device_name(0))
 
     # te_dtype = tex.DType.kFloat32
@@ -2167,4 +2177,4 @@ def benchmark_multiple_cases():
 
 
 if __name__ == "__main__":
-    benchmark_multiple_cases()
+    test_benchmark_multiple_cases()
