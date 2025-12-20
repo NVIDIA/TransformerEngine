@@ -25,9 +25,9 @@ from utils import assert_allclose, pytest_parametrize_wrapper
 
 # All dispatch/combine test cases
 ALL_DISPATCH_COMBINE_CASES = [
-    (128,    5,  128, 3),
-    (1024,   8,  128, 8),
-    (4096,  32, 1280, 2),
+    (128, 5, 128, 3),
+    (1024, 8, 128, 8),
+    (4096, 32, 1280, 2),
     (4096, 256, 4096, 6),
 ]
 DISPATCH_COMBINE_CASES = {
@@ -48,9 +48,9 @@ SORT_CHUNKS_CASES = {
 
 # All dispatch/combine with padding test cases
 ALL_DISPATCH_COMBINE_PADDING_CASES = [
-    (128,    5,  128, 3,  8),
-    (1024,   8,  128, 8, 16),
-    (4096,  32, 1280, 2, 128),
+    (128, 5, 128, 3, 8),
+    (1024, 8, 128, 8, 16),
+    (4096, 32, 1280, 2, 128),
     (4096, 256, 4096, 6, 16),
 ]
 DISPATCH_COMBINE_PADDING_CASES = {
@@ -477,7 +477,6 @@ class TestHighLevelPermutationAPI:
             routing_map = routing_map.at[token_idx, expert_indices].set(1)
 
         return routing_map
-
 
     @pytest_parametrize_wrapper(
         "num_tokens,num_experts,hidden_size,tokens_per_expert",
