@@ -886,8 +886,7 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
         }
 
         NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size)
-        );
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
         kernel<<<grid, block_size, dshmem_size, stream>>>(tensor_map_input, tensor_map_output,
                                                           scales_ptr, noop_ptr, rows, cols,
                                                           scale_stride, rng_state, kernel_args);
