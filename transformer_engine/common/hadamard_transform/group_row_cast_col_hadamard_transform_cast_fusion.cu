@@ -1041,7 +1041,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
           transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
           if constexpr (kEnableStochasticRounding) {
             const size_t rng_sequence = global_thread_idx + k_tile * 512 +
-                                        scheduler.get_linear_tile_idx() * K_TILE_MAX * 512;
+                                        scheduler.get_linear_tile_idx() * K_TILE_MAX * 512 +
+                                        tiles_in_m * tiles_in_n * K_TILE_MAX * 512;
             rng.init(rng_seed, rng_sequence, rng_offset);
           }
           CUTLASS_PRAGMA_UNROLL
