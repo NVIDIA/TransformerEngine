@@ -986,9 +986,7 @@ def _test_permutation_and_padding_with_merging_probs(
     _tmp_tensor = torch.zeros((num_tokens * num_expert,))
     _tmp_tensor[: int(num_out_tokens)] = 1.0
     _tmp_idx = torch.randperm(num_tokens * num_expert)
-    routing_map = (
-        torch.reshape(_tmp_tensor[_tmp_idx], (num_tokens, num_expert)).bool().cuda()
-    )
+    routing_map = torch.reshape(_tmp_tensor[_tmp_idx], (num_tokens, num_expert)).bool().cuda()
 
     probs = torch.rand(num_tokens, num_expert).cuda() * routing_map
     row_sums = probs.sum(dim=1, keepdim=True)
@@ -997,18 +995,14 @@ def _test_permutation_and_padding_with_merging_probs(
     probs.requires_grad_(True)
 
     tokens_per_expert = routing_map.sum(dim=0).cpu()
-    target_tokens_per_expert = (
-        torch.ceil(tokens_per_expert / align_size) * align_size
-    ).long()
+    target_tokens_per_expert = (torch.ceil(tokens_per_expert / align_size) * align_size).long()
     num_permute_pad_out_tokens = target_tokens_per_expert.sum().item()
 
     permute_pad_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
     permute_pad_bwd_input = torch.rand(
         (num_permute_pad_out_tokens, hidden_size), dtype=dtype
     ).cuda()
-    unpermute_unpad_bwd_input = torch.rand(
-        (num_tokens, hidden_size), dtype=dtype
-    ).cuda()
+    unpermute_unpad_bwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
     permute_pad_fwd_input.requires_grad_(True)
 
     restore_shape = permute_pad_fwd_input.shape
@@ -1071,9 +1065,7 @@ def _test_permutation_and_padding_with_merging_probs(
     )
 
     fusion_permute_pad_bwd_input = permute_pad_bwd_input.detach()
-    fusion_permuted_padded_output.backward(
-        fusion_permute_pad_bwd_input, retain_graph=True
-    )
+    fusion_permuted_padded_output.backward(fusion_permute_pad_bwd_input, retain_graph=True)
 
     # Fused: unpermute with BOTH merging_probs AND pad_offsets
     fusion_unpermute_fwd_input = fusion_permuted_padded_output.detach()
@@ -1140,6 +1132,7 @@ def _test_permutation_and_padding_with_merging_probs(
     #
     ###################################################################################################################################
     if BENCHMARK:
+
         def ref_unpad_unpermute():
             unpaded = fp8_unpadding(ref_unpermute_fwd_input, tokens_per_expert_list)
             return te_unpermute(unpaded, row_id_map, ref_probs, restore_shape=restore_shape)
@@ -1710,18 +1703,9 @@ def test_permutation_mask_map(
 @pytest.mark.parametrize(
     "num_tokens, num_expert, hidden_size, topK",
     [
-<<<<<<< HEAD
-        (0, 8, 1280, 2),
-        (4096, 64, 1280, 7),
-        (4096, 64, 2048, 6),
-        (4096, 160, 5120, 6),
-        (4096, 256, 7168, 8),
-        (4096, 384, 8192, 8),
-=======
         (4096, 8, 1280, 2),
         (4096, 64, 4096, 6),
         (4096, 256, 7168, 6),
->>>>>>> 5518c80f (change test permutation to reduce test time)
         (4096, 512, 9216, 8),
     ],
 )

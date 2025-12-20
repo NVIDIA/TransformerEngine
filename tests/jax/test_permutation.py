@@ -61,9 +61,7 @@ def reference_make_row_id_map(
 
     # Gather the sorted destination rows and expert indices using advanced indexing
     # Create indices for gathering
-    token_idx = jnp.broadcast_to(
-        jnp.arange(num_tokens)[:, None], (num_tokens, num_experts)
-    )
+    token_idx = jnp.broadcast_to(jnp.arange(num_tokens)[:, None], (num_tokens, num_experts))
     sorted_dest_rows = dest_rows_all[token_idx, sorted_expert_indices]
 
     # Build row_id_map: [dest_row_0, ..., dest_row_{E-1}, expert_idx_0, ..., expert_idx_{E-1}, n_routed]
@@ -153,9 +151,9 @@ def _reference_permute_impl(
             # Clamp invalid expert indices to 0 to avoid wraparound indexing with -1
             # The result for invalid entries will be ignored anyway since they target num_out_tokens
             # Cast to int32 explicitly for consistent indexing behavior
-            flat_expert_indices_clamped = jnp.where(
-                flat_valid_mask, flat_expert_indices, 0
-            ).astype(jnp.int32)
+            flat_expert_indices_clamped = jnp.where(flat_valid_mask, flat_expert_indices, 0).astype(
+                jnp.int32
+            )
             flat_probs = probs[flat_token_indices.astype(jnp.int32), flat_expert_indices_clamped]
 
         # Invalid entries target num_out_tokens and get dropped by mode="drop"
@@ -216,9 +214,7 @@ def _reference_unpermute_impl(
     # Apply merging probs if provided
     if merging_probs is not None:
         # Gather the merging weights for each (token, expert) pair using advanced indexing
-        token_idx = jnp.broadcast_to(
-            jnp.arange(num_tokens)[:, None], (num_tokens, num_experts)
-        )
+        token_idx = jnp.broadcast_to(jnp.arange(num_tokens)[:, None], (num_tokens, num_experts))
         weights = merging_probs[token_idx, expert_indices]  # [num_tokens, num_experts]
         gathered_inp = gathered_inp * weights[:, :, None]
 
@@ -230,9 +226,7 @@ def _reference_unpermute_impl(
     if permuted_probs is not None:
         gathered_probs = permuted_probs[src_rows_clamped]  # [num_tokens, num_experts]
         unpermuted_probs = jnp.zeros((num_tokens, num_experts), dtype=permuted_probs.dtype)
-        token_idx = jnp.broadcast_to(
-            jnp.arange(num_tokens)[:, None], (num_tokens, num_experts)
-        )
+        token_idx = jnp.broadcast_to(jnp.arange(num_tokens)[:, None], (num_tokens, num_experts))
         unpermuted_probs = unpermuted_probs.at[token_idx, expert_indices].set(
             jnp.where(valid_mask, gathered_probs, 0.0)
         )
@@ -499,9 +493,9 @@ class TestHighLevelPermutationAPI:
         # Validate row_id_map structure: n_routed column should match routing_map sum
         n_routed_actual = row_id_map[:, -1]
         n_routed_expected = jnp.sum(routing_map, axis=1)
-        assert jnp.array_equal(n_routed_actual, n_routed_expected), (
-            "make_row_id_map n_routed column mismatch"
-        )
+        assert jnp.array_equal(
+            n_routed_actual, n_routed_expected
+        ), "make_row_id_map n_routed column mismatch"
 
         # Compare dispatch output
         assert_allclose(output, ref_output, dtype=dtype)
@@ -515,9 +509,7 @@ class TestHighLevelPermutationAPI:
 
             @jax.jit
             def dispatch_loss(x, p):
-                out, perm_probs, _, _, _ = token_dispatch(
-                    x, routing_map, num_out_tokens, probs=p
-                )
+                out, perm_probs, _, _, _ = token_dispatch(x, routing_map, num_out_tokens, probs=p)
                 return jnp.sum(out**2) + jnp.sum(perm_probs**2)
 
             @jax.jit
@@ -710,10 +702,8 @@ class TestHighLevelPermutationAPI:
         # =====================================================================
         # Test 1: Dispatch with padding - forward pass
         # =====================================================================
-        output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert = (
-            token_dispatch(
-                inp, routing_map, num_out_tokens, probs=probs, align_size=align_size
-            )
+        output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert = token_dispatch(
+            inp, routing_map, num_out_tokens, probs=probs, align_size=align_size
         )
 
         # Check output shape

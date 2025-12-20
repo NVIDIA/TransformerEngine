@@ -627,10 +627,11 @@ def moe_permute_and_pad_with_probs(
     if torch.equal(tokens_per_expert, target_tokens_per_expert):
         pad_offsets = None
     else:
-        pad_lengths = target_tokens_per_expert - tokens_per_expert
+        pad_lengths = (target_tokens_per_expert - tokens_per_expert).to(inp.device)
         cum_pad = torch.cumsum(pad_lengths, dim=0)
-        pad_offsets = torch.cat([torch.zeros(1, dtype=cum_pad.dtype), cum_pad[:-1]])
-        pad_offsets = pad_offsets.to(inp.device)
+        pad_offsets = torch.cat(
+            [torch.zeros(1, dtype=cum_pad.dtype, device=inp.device), cum_pad[:-1]]
+        )
 
     output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
         inp, routing_map, target_tokens_per_expert.sum().item(), probs, pad_offsets

@@ -157,6 +157,8 @@ def permute_with_mask_map(
     scale_hidden_dim : int
         Hidden size of the scale tensor.
     """
+    # Use torch.zeros when pad_offsets is provided to ensure padding regions are zeroed,
+    # since the kernel doesn't write to padding positions.
     alloc = torch.zeros if pad_offsets is not None else torch.empty
     output = alloc((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     permuted_probs = (
@@ -313,9 +315,7 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     # by the kernel. This matches the behavior of Fp8Unpadding.backward which zeros
     # out the padding slots.
     alloc = torch.zeros if pad_offsets is not None else torch.empty
-    act_grad = alloc(
-        (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
-    )
+    act_grad = alloc((num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda")
     merging_probs_grad = torch.empty(
         (num_tokens, num_experts), dtype=merging_probs.dtype, device="cuda"
     )

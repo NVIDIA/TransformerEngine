@@ -219,17 +219,15 @@ def _token_dispatch_fwd_rule(
         tokens_per_expert = jnp.sum(routing_map, axis=0).astype(jnp.int32)
 
         # Calculate aligned token counts per expert
-        target_tokens_per_expert = (
-            jnp.ceil(tokens_per_expert / align_size) * align_size
-        ).astype(jnp.int32)
+        target_tokens_per_expert = (jnp.ceil(tokens_per_expert / align_size) * align_size).astype(
+            jnp.int32
+        )
 
         # Compute pad_offsets: cumulative padding for each expert
         # pad_offsets[i] = sum of (target - actual) for experts 0..i-1
         pad_lengths = target_tokens_per_expert - tokens_per_expert
         cum_pad = jnp.cumsum(pad_lengths)
-        pad_offsets = jnp.concatenate(
-            [jnp.array([0], dtype=cum_pad.dtype), cum_pad[:-1]]
-        )
+        pad_offsets = jnp.concatenate([jnp.array([0], dtype=cum_pad.dtype), cum_pad[:-1]])
 
         # Use worst_case_out_tokens as the output buffer size (compile-time constant)
         # The actual used size is sum(target_tokens_per_expert), which may be smaller.
@@ -451,7 +449,7 @@ def _token_combine_bwd_rule(
     g: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, None, Optional[jnp.ndarray], None]:
     """Backward pass rule for token_combine.
-    
+
     Returns gradients for: (inp, row_id_map, merging_probs, pad_offsets)
     row_id_map and pad_offsets are integer arrays, so their gradients are None.
     """
