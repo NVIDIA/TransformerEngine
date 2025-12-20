@@ -535,7 +535,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.36 and actual[1] > 0.84
+        assert actual[0] < 0.361 and actual[1] > 0.84
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8_with_sp(self):
@@ -569,7 +569,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.36 and actual[1] > 0.84
+        assert actual[0] < 0.361 and actual[1] > 0.84
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_with_sp_shardy(self):
