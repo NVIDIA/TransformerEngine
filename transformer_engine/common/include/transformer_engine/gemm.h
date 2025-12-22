@@ -265,7 +265,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  *                               heuristics. If NULL, computed automatically from A's logical shape.
  *
  * Requirements:
- * - cuBLAS 13.2+ (CUDA 13.2+)
+ * - cuBLAS 13.1+ (CUDA 13.1+)
  * - Blackwell (SM100) or newer GPU architecture
  * - A, B, C (if provided), D must have the same num_tensors
  * - For each i: D[i] = alpha[i] * op(A[i]) @ op(B[i]) + beta[i] * C[i]
