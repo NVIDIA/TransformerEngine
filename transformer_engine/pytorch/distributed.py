@@ -1079,7 +1079,8 @@ def _start_all_gather_fp8_blockwise(
     if quantizer is None or not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
         out = torch.empty(out_shape, dtype=dtype, device=device)
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
-        out = quantizer(out)
+        if quantizer is not None:
+            out = quantizer(out)
         return out, None
 
     # Quantize input tensor if needed
