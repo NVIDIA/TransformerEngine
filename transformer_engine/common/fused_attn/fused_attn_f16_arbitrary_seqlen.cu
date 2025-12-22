@@ -272,10 +272,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       sdpa_options.set_alibi_mask(is_alibi);
 
       if (is_bias) {
-        bias = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                     .set_name("bias")
-                                     .set_dim({bias_b, bias_h, bias_sq, bias_skv})
-                                     .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
+        bias = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("bias")
+                .set_dim({bias_b, bias_h, bias_sq, bias_skv})
+                .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
         sdpa_options.set_bias(bias);
       }
 
@@ -816,14 +817,16 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       sdpa_backward_options.set_alibi_mask(is_alibi);
 
       if (is_bias) {
-        bias = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                     .set_name("bias")
-                                     .set_dim({bias_b, bias_h, bias_sq, bias_skv})
-                                     .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
-        dBias = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                      .set_name("dBias")
-                                      .set_dim({bias_b, bias_h, bias_sq, bias_skv})
-                                      .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
+        bias = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("bias")
+                .set_dim({bias_b, bias_h, bias_sq, bias_skv})
+                .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
+        dBias = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("dBias")
+                .set_dim({bias_b, bias_h, bias_sq, bias_skv})
+                .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
         sdpa_backward_options.set_bias(bias);
         // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s]
         // are not supported for dbias calculation but they are
