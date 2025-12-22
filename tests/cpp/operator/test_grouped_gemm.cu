@@ -482,7 +482,7 @@ void run_grouped_gemm_case(const TestParams& params) {
                    atol,
                    rtol);
   }
-#endif  // CUBLAS_VERSION >= 130200
+#endif  // CUBLAS_VERSION >= 130100
 }
 
 class GroupedGemmTest : public ::testing::TestWithParam<TestParams> {};
