@@ -95,7 +95,8 @@ struct GroupedBuffers {
 size_t grouped_setup_workspace_size(const size_t num_tensors) {
   const size_t ptr_bytes = num_tensors * sizeof(void*);
   const size_t int_bytes = num_tensors * sizeof(int);
-  size_t size = 4 * ptr_bytes + 3 * int_bytes + 2 * ptr_bytes;
+  // Layout: 6 pointer arrays (A, B, C, D, alpha, beta) + 3 int arrays (M, N, K)
+  size_t size = 6 * ptr_bytes + 3 * int_bytes;
   const size_t alignment = 256;
   size = ((size + alignment - 1) / alignment) * alignment;
   return size;
@@ -320,8 +321,8 @@ void run_grouped_gemm_case(const TestParams& params) {
   GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.2+, but compile-time cuBLAS version is "
                << CUBLAS_VERSION << ".";
 #else
-  if (getDeviceComputeCapability() < hopperComputeCapability) {
-    GTEST_SKIP() << "Grouped GEMM requires Hopper (SM90) or newer.";
+  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+    GTEST_SKIP() << "Grouped GEMM requires Blackwell (SM100) or newer.";
   }
 
   const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);

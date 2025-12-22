@@ -503,10 +503,10 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Hopper (SM90) or newer
+  // Grouped GEMM requires Blackwell (SM100) or newer
   const int current_device = cuda::current_device();
-  NVTE_CHECK(cuda::sm_arch(current_device) >= 90,
-             "nvte_grouped_gemm requires Hopper (SM90) or newer architecture.");
+  NVTE_CHECK(cuda::sm_arch(current_device) >= 100,
+             "nvte_grouped_gemm requires Blackwell (SM100) or newer architecture.");
 
   // Convert to internal types
   const GroupedTensor *inputA = convertNVTEGroupedTensorCheck(A);
@@ -589,8 +589,8 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
                        NVTEGroupedTensor D, NVTETensor workspace_setup, NVTETensor workspace_cublas,
                        cudaStream_t stream, const int64_t *avg_m, const int64_t *avg_n,
                        const int64_t *avg_k) {
-  NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.2+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.2 or newer.");
+  NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.1+, but compile-time cuBLAS version is ",
+             CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
 }
 
 #endif  // CUBLAS_VERSION >= 130100
