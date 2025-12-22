@@ -16,7 +16,6 @@ Token Combine (Unpermute):
     - Backward: Permute gradients (scatter to experts)
 """
 
-import warnings
 from functools import partial
 from typing import Optional, Tuple
 
