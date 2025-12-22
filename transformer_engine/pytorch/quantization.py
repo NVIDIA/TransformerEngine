@@ -120,7 +120,7 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
     if recipe.mxfp8():
         return 32
     if recipe.nvfp4():
-        return 64
+        return 128
     return 16
 
 
