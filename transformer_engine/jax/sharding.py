@@ -37,6 +37,15 @@ W_TP_AXES = "nvte_w_tp"
 W_JOINED_AXES = "nvte_w_joined"
 
 
+def _get_mesh():
+    # Handle Mesh's set via `with mesh:`
+    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    if mesh is not None and not mesh.empty:
+        return mesh
+    # Handle Mesh's set via `jax.set_mesh(mesh)`
+    return jax.sharding.get_abstract_mesh()
+
+
 def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
@@ -59,11 +68,19 @@ def _validate_mesh_resource_configuration(mesh_resource):
     )
 
 
+def is_mesh_available() -> bool:
+    """
+    Check if a physical mesh is available.
+    """
+    mesh = _get_mesh()
+    return mesh is not None and not mesh.empty
+
+
 def get_sharding_map_logic_axis_to_mesh_axis():
     """
     Generate a dict to map logical axes to mesh axes.
     """
-    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    mesh = _get_mesh()
     if mesh is None or mesh.empty:
         # If no mesh is defined, return an empty dict and do not require a MeshResource context to be present
         return {}
@@ -122,7 +139,7 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     if pspec is None:
         return x
 
-    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    mesh = _get_mesh()
     if mesh.empty:
         return x
 
@@ -203,7 +220,7 @@ def get_all_mesh_axes():
     """
     Get all name of mesh axes
     """
-    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    mesh = _get_mesh()
     return mesh.axis_names
 
 
@@ -243,7 +260,7 @@ def get_num_devices_in_mesh(mesh=None):
     by the global mesh.
     """
     if mesh is None:
-        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+        mesh = _get_mesh()
     if mesh.empty:
         return 1
     return np.prod(list(mesh.shape.values()))
@@ -256,7 +273,7 @@ def get_mesh_axis_size(axis, mesh=None):
     by the global mesh.
     """
     if mesh is None:
-        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+        mesh = _get_mesh()
 
     if axis is None:
         return 1
