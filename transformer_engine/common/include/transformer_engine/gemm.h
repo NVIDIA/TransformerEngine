@@ -11,6 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_GEMM_H_
 #define TRANSFORMER_ENGINE_GEMM_H_
 
+#include <stdint.h>
+
 #include "transformer_engine.h"
 
 #ifdef __cplusplus
@@ -228,6 +230,54 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             bool transa, bool transb, bool grad, NVTETensor *workspace,
                             bool accumulate, bool use_split_accumulator, int math_sm_count,
                             cudaStream_t stream);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Grouped matrix multiplication: D = alpha * op(A) @ op(B) + beta * C
+ *
+ * \note Requires cuBLAS 13.1+ (CUDA 13.1+) and Blackwell (SM100) or newer GPU architecture.
+ *       Will error at runtime if compiled with an older cuBLAS version or run on
+ *       a pre-Blackwell GPU.
+ *
+ * Performs batched GEMM on a collection of matrices with potentially different shapes.
+ * All tensors in the group must have compatible dimensions for matrix multiplication.
+ * Uses NVTEGroupedTensor to efficiently handle collections of tensors with contiguous
+ * memory layout and shape metadata.
+ *
+ *  \param[in]  transa           Whether to transpose A matrices.
+ *  \param[in]  transb           Whether to transpose B matrices.
+ *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
+ *  \param[in]  A                Input grouped tensor A.
+ *  \param[in]  B                Input grouped tensor B.
+ *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
+ *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
+ *  \param[out] D                Output grouped tensor D.
+ *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
+ *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
+ *  \param[in]  stream           CUDA stream for the operation.
+ *  \param[in]  avg_m            Optional hint for average M dimension across all matrices in the
+ *                               group. Used by cuBLASLt for algorithm selection heuristics.
+ *                               If NULL, computed automatically from D's logical shape.
+ *  \param[in]  avg_n            Optional hint for average N dimension across all matrices in the
+ *                               group. Used by cuBLASLt for algorithm selection heuristics.
+ *                               If NULL, computed automatically from D's logical shape.
+ *  \param[in]  avg_k            Optional hint for average K (reduction) dimension across all
+ *                               matrices in the group. Used by cuBLASLt for algorithm selection
+ *                               heuristics. If NULL, computed automatically from A's logical shape.
+ *
+ * Requirements:
+ * - cuBLAS 13.1+ (CUDA 13.1+)
+ * - Blackwell (SM100) or newer GPU architecture
+ * - A, B, C (if provided), D must have the same num_tensors
+ * - For each i: D[i] = alpha[i] * op(A[i]) @ op(B[i]) + beta[i] * C[i]
+ * - Shape compatibility: if transa=false, transb=false:
+ *   - A[i]: (M[i], K[i]), B[i]: (K[i], N[i]), D[i]: (M[i], N[i])
+ */
+void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVTEGroupedTensor A,
+                       const NVTEGroupedTensor B, const NVTETensor beta, const NVTEGroupedTensor C,
+                       NVTEGroupedTensor D, NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                       cudaStream_t stream, const int64_t *avg_m, const int64_t *avg_n,
+                       const int64_t *avg_k);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

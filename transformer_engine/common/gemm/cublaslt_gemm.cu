@@ -23,6 +23,7 @@
 #include "../util/logging.h"
 #include "../util/multi_stream.h"
 #include "./config.h"
+#include "./cublaslt_grouped_gemm.cuh"
 #include "./cutlass_grouped_gemm.cuh"
 
 namespace {
