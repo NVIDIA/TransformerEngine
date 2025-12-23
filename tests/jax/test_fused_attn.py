@@ -707,7 +707,7 @@ class FusedAttnRunner:
                         (self.segment_ids_q, self.segment_ids_kv),
                         None,
                         is_thd=self.qkv_layout.is_thd(),
-                        is_segment_ids_reordered=False
+                        is_segment_ids_reordered=False,
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")

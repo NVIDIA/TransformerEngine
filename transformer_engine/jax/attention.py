@@ -829,15 +829,18 @@ class SequenceDescriptor:
             # BSHD + load balanced segment_ids are incorrect as BSHD handles reordering within the primitive itself
             if is_segment_ids_reordered:
                 assert not is_thd, (
-                    f"{segment_pos=} default arg is not supported for load balanced reordered (Striped) THD inputs."
-                    " Please pass the load balanced reordered segment_pos and segment_ids explicitly to" 
-                    " {from_segment_ids_and_pos.__qualname__} using convenience function reorder_causal_load_balancing()"
+                    f"{segment_pos=} default arg is not supported for load balanced reordered"
+                    " (Striped) THD inputs. Please pass the load balanced reordered segment_pos"
+                    " and segment_ids explicitly to {from_segment_ids_and_pos.__qualname__}"
+                    " using convenience function reorder_causal_load_balancing()"
                 )
                 assert is_thd, (
-                    f"{segment_pos=} default arg is not supported for load balanced reordered (Dual Chunk) BSHD inputs."
-                    " BSHD segment_pos and segment_ids do not need to be load balanced reordered. The reordering for these"
-                    " is performed within the primitive"
+                    f"{segment_pos=} default arg is not supported for load balanced reordered (Dual"
+                    " Chunk) BSHD inputs. BSHD segment_pos and segment_ids do not need to be load"
+                    " balanced reordered. The reordering for these is performed within the"
+                    " primitive"
                 )
+
             # Generate the default pos for THD and BSHD non-reordered segment_ids
             def generate_default_pos(seg_ids):
                 if is_thd:
