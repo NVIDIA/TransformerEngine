@@ -5,13 +5,9 @@
 import jax
 import jax.numpy as jnp
 import time
-import math
 
 from typing import Callable, Any, Dict, Optional, Tuple
-from flax import linen as nn
 import transformer_engine.jax as te
-import transformer_engine.jax.flax as te_flax
-from transformer_engine.jax.flax.transformer import DotProductAttention as TEDotProductAttention
 
 
 def speedometer(
