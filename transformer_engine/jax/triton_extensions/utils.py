@@ -157,7 +157,7 @@ def compile_triton(
         )
     else:
         kernel = gpu_triton.TritonKernel(
-            compile.name,
+            compiled.name,
             num_warps,
             compiled.metadata.shared,
             compiled.asm["ptx"],
