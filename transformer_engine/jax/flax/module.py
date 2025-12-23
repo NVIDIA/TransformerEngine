@@ -377,6 +377,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         variable_collection: str = None,
         quantization_checkpoint_name: Optional[str] = None,
         fp8_recipe=None,
+        n_groups: int = None,
     ):
         """
         Generate a set of FP8 meta for a GEMM.
@@ -409,6 +410,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             fp8_recipe=fp8_recipe,
             quantize_meta_set=quantize_meta_set,
             checkpoint_name=quantization_checkpoint_name,
+            n_groups=n_groups,
         )
         return quantizer_set
 
@@ -1379,12 +1381,13 @@ def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str]
     class TEWrapper(te.flax.module.TransformerEngineBase):
         """Wrapper Flax module for TransformerEngine quantization support."""
 
-        def generate_quantizer_set(self, postfix: str = ""):
+        def generate_quantizer_set(self, postfix: str = "", n_groups: int = None):
             OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
             return super().generate_quantizer_set(
                 postfix=postfix,
                 variable_collection=OVERWRITE_WITH_GRADIENT,
                 fp8_recipe=quantization_recipe,
+                n_groups=n_groups,
             )
 
         @nn.compact
@@ -1456,8 +1459,6 @@ def make_einsum_cls(quantization_recipe):
           return jax.lax.dot_general(x, kernel, dims, *args, **kwargs)
         
         target_out_shape = jax.lax.dot_general(x, kernel, dims).shape
-        # TODO: add num groups to make grouped quantizer set
-        quantizer_set = generate_quantizer_set()
 
         if x.dtype not in [jnp.float16, jnp.bfloat16, jnp.float32, jnp.float64]:
           # HACK: because x input is bool for dispatch mask
@@ -1496,6 +1497,8 @@ def make_einsum_cls(quantization_recipe):
 
         group_sizes = jnp.array([group_size]*num_groups, dtype=jnp.int32)
 
+        quantizer_set = generate_quantizer_set(n_groups=num_groups)
+
         print(f'{group_sizes=}, {contracting_dims=}, {x.shape=}, {kernel.shape=}, {contracting_dims=}')
 
         contracting_dims = (
@@ -1509,7 +1512,7 @@ def make_einsum_cls(quantization_recipe):
           kernel,
           group_sizes=group_sizes,
           contracting_dims=contracting_dims,
-          # quantizer_set=quantizer_set
+          quantizer_set=quantizer_set
         )
         return out.reshape(target_out_shape)
       return jnp.einsum(s, x, kernel, _dot_general=dot_general, **kwargs)
