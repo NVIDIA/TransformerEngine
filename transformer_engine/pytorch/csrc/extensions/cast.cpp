@@ -334,12 +334,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp8_dtype, nullptr,
+        rowwise_usage ? nvte_make_shape(rowwise_data_shapes[i].data(), rowwise_data_shapes[i].size()) : NVTEShape{},
+        columnwise_usage ? nvte_make_shape(columnwise_data_shapes[i].data(), columnwise_data_shapes[i].size()) : NVTEShape{}, fp8_dtype, nullptr,
         nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
-        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode));
+        rowwise_usage ? nvte_make_shape(rowwise_scale_shapes[i].data(), rowwise_scale_shapes[i].size()) : NVTEShape{},
+        columnwise_usage ? nvte_make_shape(columnwise_scale_shapes[i].data(), columnwise_scale_shapes[i].size()) : NVTEShape{}, scaling_mode));
   }
 
   return retval;

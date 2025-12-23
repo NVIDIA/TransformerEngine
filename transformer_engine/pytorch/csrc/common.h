@@ -141,6 +141,13 @@ class NoneQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
                                                      at::Tensor data) const;
 
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
+                                                     DType dtype) const;
+ 
+  /*! @brief Construct a tensor with pre-initialized data */
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype,
+                                                    at::Tensor data) const;
+                                                      
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
@@ -340,6 +347,8 @@ class NVFP4Quantizer : public Quantizer {
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
 NVTEShape getTensorShape(const at::Tensor& t);
+
+std::vector<size_t> getTensorShapeVector(const at::Tensor& t);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);

@@ -26,8 +26,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
   // Grad output tensor
   auto grad_output_torch = grad_output.contiguous();
   const TensorWrapper &grad_output_nvte = makeTransformerEngineTensor(grad_output_torch);
-  const auto shape_nvte = getTensorShape(grad_output_torch);
-  const auto shape = convertShape(shape_nvte);
+  const auto shape = getTensorShapeVector(grad_output_torch);
   auto grad_output_dtype = GetTransformerEngineDType(grad_output_torch.scalar_type());
 
   // Construct grad bias tensor
@@ -117,13 +116,11 @@ std::vector<py::object> dact_dbias(
   // Grad output and activation input tensors
   grad_output_torch = grad_output_torch.contiguous();
   const TensorWrapper &grad_output_nvte = makeTransformerEngineTensor(grad_output_torch);
-  const auto output_shape_nvte = getTensorShape(grad_output_torch);
-  const auto output_shape = convertShape(output_shape_nvte);
+  const auto output_shape = getTensorShapeVector(grad_output_torch);
   auto grad_output_dtype = GetTransformerEngineDType(grad_output_torch.scalar_type());
   act_input_torch = act_input_torch.contiguous();
   const TensorWrapper &act_input_nvte = makeTransformerEngineTensor(act_input_torch);
-  const auto input_shape_nvte = getTensorShape(act_input_torch);
-  const auto input_shape = convertShape(input_shape_nvte);
+  const auto input_shape = getTensorShapeVector(act_input_torch);
 
   // Construct tensors
   auto quantizer_cpp = convert_quantizer(quantizer_py);

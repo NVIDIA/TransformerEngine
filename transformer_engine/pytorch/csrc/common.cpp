@@ -26,7 +26,17 @@ std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape
   return ret;
 }
 
-NVTEShape getTensorShape(const at::Tensor& t) { return convertTorchShape(t.sizes()); }
+NVTEShape getTensorShape(const at::Tensor& t) {
+  return convertTorchShape(t.sizes());
+}
+
+std::vector<size_t> getTensorShapeVector(const at::Tensor& t) {
+  std::vector<size_t> shape;
+  for (auto s : t.sizes()) {
+    shape.push_back(s);
+  }
+  return shape;
+}
 
 NVTEShape convertTorchShape(const c10::IntArrayRef& torch_shape) {
   NVTEShape ret;
@@ -113,10 +123,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor) {
   transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
-  std::vector<size_t> shape;
-  for (auto s : tensor.sizes()) {
-    shape.push_back(s);
-  }
+  NVTEShape shape = getTensorShape(tensor);
   return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
 }
 
@@ -179,7 +186,9 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   TensorWrapper ret(scaling_mode);
   ret.set_rowwise_data(data_ptr, type, shape);
   const size_t meta_shape_data[1] = {1};
-  const NVTEShape meta_shape = nvte_make_shape(meta_shape_data, 1);
+  NVTEShape meta_shape;
+  meta_shape.ndim = 1;
+  meta_shape.data[0] = 1;
   ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
   ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
   auto scale_inv_dtype =
@@ -194,8 +203,9 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
     NVTEScalingMode scaling_mode) {
   TensorWrapper ret(scaling_mode);
   ret.set_rowwise_data(data_ptr, type, shape);
-  const size_t meta_shape_data[1] = {1};
-  const NVTEShape meta_shape = nvte_make_shape(meta_shape_data, 1);
+  NVTEShape meta_shape;
+  meta_shape.ndim = 1;
+  meta_shape.data[0] = 1;
   ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
   ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
   auto scale_inv_dtype =
@@ -234,8 +244,9 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   TensorWrapper ret(scaling_mode);
   ret.set_rowwise_data(data_ptr, type, shape);
   ret.set_columnwise_data(columnwise_data_ptr, type, columnwise_shape);
-  const size_t meta_shape_data[1] = {1};
-  const NVTEShape meta_shape = nvte_make_shape(meta_shape_data, 1);
+  NVTEShape meta_shape;
+  meta_shape.ndim = 1;
+  meta_shape.data[0] = 1;
   ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
   ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
   auto scale_inv_dtype = (scaling_mode == NVTE_MXFP8_1D_SCALING)   ? DType::kFloat8E8M0

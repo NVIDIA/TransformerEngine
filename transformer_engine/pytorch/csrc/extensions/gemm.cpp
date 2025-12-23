@@ -40,8 +40,8 @@ bool is_low_precision(const DType type) {
   return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2;
 }
 
-std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool transa,
-                                       const NVTEShape& B_shape, const bool transb) {
+NVTEShape getGemmOutputShape(const NVTEShape& A_shape, const bool transa,
+                              const NVTEShape& B_shape, const bool transb) {
   // Flatten outer dims to get 2D matrices
   const size_t A0 = product(A_shape, 0, A_shape.ndim - 1);
   const size_t A1 = A_shape.data[A_shape.ndim - 1];
@@ -53,27 +53,29 @@ std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool tran
              A0, ",", A1, "), transa=", transa, ", B=(", B0, ",", B1, "), transb=", transb, ")");
 
   // Construct output dims
-  std::vector<size_t> ret;
+  NVTEShape ret;
+  size_t idx = 0;
   if (transb) {
-    ret.emplace_back(B1);
+    ret.data[idx++] = B1;
   } else {
     // Unflatten B0
     for (size_t i = 0; i < B_shape.ndim - 1; ++i) {
-      ret.emplace_back(B_shape.data[i]);
+      ret.data[idx++] = B_shape.data[i];
     }
   }
   if (transa) {
-    ret.emplace_back(A0);
+    ret.data[idx++] = A0;
   } else {
-    ret.emplace_back(A1);
+    ret.data[idx++] = A1;
   }
+  ret.ndim = idx;
   return ret;
 }
 
-bool checkGemmShape(const std::vector<size_t>& expected, const NVTEShape& actual) {
-  if (expected.size() != actual.ndim) return false;
-  for (size_t i = 0; i < expected.size(); ++i) {
-    if (expected[i] != actual.data[i]) return false;
+bool checkGemmShape(const NVTEShape& expected, const NVTEShape& actual) {
+  if (expected.ndim != actual.ndim) return false;
+  for (size_t i = 0; i < expected.ndim; ++i) {
+    if (expected.data[i] != actual.data[i]) return false;
   }
   return true;
 }
@@ -117,7 +119,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
   const auto& B_shape = B_tensor.shape();
-  const auto& D_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
+  const NVTEShape D_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
   NVTE_CHECK(A_shape.ndim >= 1, "Tensor A needs to have at least 1 dimension");
   NVTE_CHECK(B_shape.ndim >= 1, "Tensor B needs to have at least 1 dimension");
 
@@ -138,7 +140,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // Output tensor
   TensorWrapper D_tensor;
   if (D.is_none()) {
-    std::tie(D_tensor, D) = createOutputTensor(D_shape, output_dtype, quantizer);
+    std::tie(D_tensor, D) = createOutputTensor(convertShape(D_shape), output_dtype, quantizer);
   } else {
     D_tensor = makeTransformerEngineTensor(D, quantizer);
     NVTE_CHECK(detail::checkGemmShape(D_shape, D_tensor.shape()),
@@ -168,7 +170,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   if (unfused_quantization_needed) {
     NoneQuantizer q{none};
-    std::tie(unquantized_D_tensor, unquantized_out) = q.create_tensor(D_shape, output_dtype);
+    std::tie(unquantized_D_tensor, unquantized_out) = q.create_tensor(convertShape(D_shape), output_dtype);
   }
   TensorWrapper& out_tensor = unfused_quantization_needed ? unquantized_D_tensor : D_tensor;
 
@@ -197,8 +199,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       auto dtype = GetATenDType(gelu_type);
       auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
       std::vector<int64_t> torch_shape;
-      for (auto v : D_shape) {
-        torch_shape.push_back(v);
+      for (size_t i = 0; i < D_shape.ndim; ++i) {
+        torch_shape.push_back(static_cast<int64_t>(D_shape.data[i]));
       }
       pre_gelu_out = at::empty(torch_shape, opts);
     } else {
@@ -207,14 +209,21 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
     }
   }
-  const auto gelu_shape = gelu ? D_shape : std::vector<size_t>{0};
+  NVTEShape gelu_shape;
+  gelu_shape.ndim = 1;
+  gelu_shape.data[0] = 0;
+  if (gelu) {
+    gelu_shape = D_shape;
+  }
 
   auto te_pre_gelu_out =
       makeTransformerEngineTensor(get_data_ptr(pre_gelu_out), gelu_shape, gelu_type);
 
   // Workspace
-  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
-                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
+  NVTEShape workspace_shape;
+  workspace_shape.ndim = 1;
+  workspace_shape.data[0] = workspaceSize;
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(), workspace_shape, DType::kByte);
 
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
@@ -263,8 +272,10 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       if (extra_output.has_value()) {
         extra_output_tensor = makeTransformerEngineTensor(*extra_output);
       } else {
+        NVTEShape extra_output_shape;
+        extra_output_shape.ndim = 0;
         extra_output_tensor =
-            makeTransformerEngineTensor(nullptr, std::vector<size_t>{0}, DType::kByte);
+            makeTransformerEngineTensor(nullptr, extra_output_shape, DType::kByte);
       }
 
       // Direct GEMM call to the correct overlap
@@ -367,28 +378,47 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
 
   const size_t A_shape_data[2] = {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))};
   const NVTEShape A_shape = nvte_make_shape(A_shape_data, 2);
-  auto te_A = makeTransformerEngineTensor(A.data_ptr(), A_shape, A_type, nullptr, nullptr,
-                                          A_scale_inverse.data_ptr(),
-                                          getTensorShape(A_scale_inverse), nvte_scaling_modeA);
+  auto te_A = makeTransformerEngineTensor(
+      A.data_ptr(), A_shape, A_type,
+      nullptr, nullptr, A_scale_inverse.data_ptr(), getTensorShape(A_scale_inverse),
+      nvte_scaling_modeA);
   const size_t B_shape_data[2] = {static_cast<size_t>(B.size(0)), static_cast<size_t>(B.size(1))};
   const NVTEShape B_shape = nvte_make_shape(B_shape_data, 2);
-  auto te_B = makeTransformerEngineTensor(B.data_ptr(), B_shape, B_type, nullptr, nullptr,
-                                          B_scale_inverse.data_ptr(),
-                                          getTensorShape(B_scale_inverse), nvte_scaling_modeB);
+  auto te_B = makeTransformerEngineTensor(
+      B.data_ptr(), B_shape, B_type,
+      nullptr, nullptr, B_scale_inverse.data_ptr(), getTensorShape(B_scale_inverse),
+      nvte_scaling_modeB);
   // TODO: D_scale_inv cannot be nullptr when D_type is FP8.
+  NVTEShape D_shape, D_scale_inv_shape;
+  D_shape.ndim = 2;
+  D_scale_inv_shape.ndim = 1;
+  D_scale_inv_shape.data[0] = 1;
+  D_shape.data[0] = static_cast<size_t>(D.size(0));
+  D_shape.data[1] = static_cast<size_t>(D.size(1));
   auto te_D = makeTransformerEngineTensor(
       D.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,
-      D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
+      D_shape, D_type,
+      D_amax.data_ptr(), D_scale.data_ptr(), nullptr, D_scale_inv_shape);
+  NVTEShape bias_shape;
+  bias_shape.ndim = 1;
+  bias_shape.data[0] = static_cast<size_t>(bias.size(0));
   auto te_bias = makeTransformerEngineTensor(
-      bias.data_ptr(), std::vector<size_t>{static_cast<size_t>(bias.size(0))}, bias_type);
+      bias.data_ptr(), bias_shape, bias_type);
+  NVTEShape counter_shape;
+  counter_shape.ndim = 1;
+  counter_shape.data[0] = static_cast<size_t>(counter.size(0));
   auto te_counter = makeTransformerEngineTensor(
-      counter.data_ptr(), std::vector<size_t>{static_cast<size_t>(counter.size(0))}, DType::kInt32);
+      counter.data_ptr(), counter_shape, DType::kInt32);
 
-  const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr
-                              ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}
-                              : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
-                                                    static_cast<size_t>(pre_gelu_out.size(1))};
+  NVTEShape gelu_shape;
+  if (pre_gelu_out.data_ptr() == nullptr) {
+    gelu_shape.ndim = 1;
+    gelu_shape.data[0] = static_cast<size_t>(pre_gelu_out.size(0));
+  } else {
+    gelu_shape.ndim = 2;
+    gelu_shape.data[0] = static_cast<size_t>(pre_gelu_out.size(0));
+    gelu_shape.data[1] = static_cast<size_t>(pre_gelu_out.size(1));
+  }
   auto te_pre_gelu_out = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
   auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
@@ -432,12 +462,13 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
     // if there is single output
     at::Tensor out_tensor;
-    auto size_t_shape =
+    const NVTEShape nvte_D_shape =
         pytorch::detail::getGemmOutputShape(te_A.shape(), transa, te_B.shape(), transb);
     bool D_numel_is_zero = false;
     std::vector<int64_t> D_shape;
-    for (size_t t : size_t_shape) {
-      D_shape.push_back(t);
+    for (size_t j = 0; j < nvte_D_shape.ndim; ++j) {
+      const size_t t = nvte_D_shape.data[j];
+      D_shape.push_back(static_cast<int64_t>(t));
       if (t == 0) {
         D_numel_is_zero = true;
       }
