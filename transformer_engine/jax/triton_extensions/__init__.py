@@ -33,7 +33,7 @@ Environment Variables:
     NVTE_USE_PYTORCH_TRITON: If set to "1", acknowledge using pytorch-triton
         for JAX Triton kernels (suppresses compatibility warnings). Set this
         when both JAX and PyTorch are installed in the same environment.
-        
+
         Example:
             export NVTE_USE_PYTORCH_TRITON=1
 
@@ -49,7 +49,7 @@ Usage:
 
     # Use permutation functions
     from transformer_engine.jax.triton_extensions import make_row_id_map, permute_with_mask_map
-    
+
     # Check Triton package info
     from transformer_engine.jax.triton_extensions import get_triton_info
     info = get_triton_info()
