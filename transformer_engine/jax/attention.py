@@ -791,7 +791,6 @@ class SequenceDescriptor:
         q_offsets, kv_offsets = cls._expand_to_pair(seq_offsets)
         return cls(seqlens=(q_seqlens, kv_seqlens), seq_offsets=(q_offsets, kv_offsets))
 
-    # TODO(KshitijLakhani), TODO(mgoldfarb-nvidia): Consider adding support for THD layout (non load balanced).
     @classmethod
     def from_segment_ids_and_pos(
         cls,
@@ -803,7 +802,7 @@ class SequenceDescriptor:
     ) -> SequenceDescriptor:
         """
         Experimental factory method for inputs with segment IDs and optional positions.
-        segment_pos = None to be used only for : BSHD without load balancing
+        segment_pos = None to be used only for : BSHD and THD without load balancing
         Args:
             segment_ids(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_ids, kv_segment_ids):
                 - q_segment_ids (jnp.ndarray):
