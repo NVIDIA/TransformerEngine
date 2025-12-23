@@ -1443,7 +1443,8 @@ def make_einsum_cls(quantization_recipe):
     import functools
     import jax
     def te_einsum(generate_quantizer_set, s, x, kernel, **kwargs):
-      quantizer_set = generate_quantizer_set()
+    #   with open("/tmp/te_einsum_log.txt", "a") as f:
+    #     f.write(f"{(s, x.shape, kernel.shape)}\n")
       def dot_general(x, kernel, dims, *args, **kwargs):
         # print(f"TE dot_general called with dims: {dims}, args: {args}, kwargs: {kwargs}")
         contracting_dims, batch_dims = dims
@@ -1453,6 +1454,10 @@ def make_einsum_cls(quantization_recipe):
         if x_bdim != 0 or k_bdim != 0:
           print(f"{x_bdim=}, {k_bdim=}")
           return jax.lax.dot_general(x, kernel, dims, *args, **kwargs)
+        
+        quantizer_set = generate_quantizer_set()
+        print(f'{quantizer_set=}')
+        # import pdb; pdb.set_trace()
 
         if x.dtype not in [jnp.float16, jnp.bfloat16, jnp.float32, jnp.float64]:
           # HACK: because x input is bool for dispatch mask

@@ -1974,3 +1974,44 @@ class TestGroupedDense:
         assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
+
+class TestEinsum:
+
+    def _te_einsum(self, eqn, a, b, quantization_recipe):
+        from transformer_engine.jax.flax import make_einsum_cls
+
+        te_einsum = make_einsum_cls(quantization_recipe=quantization_recipe)
+        var_collect = te_einsum.init(jax.random.PRNGKey(0), eqn, a, b)
+        return te_einsum.apply(var_collect, eqn, a, b)
+
+    def _ref_einsum(self, eqn, a, b):
+        return jnp.einsum(eqn, a, b)
+
+    @pytest_parametrize_wrapper('eqn,a_shape,b_shape', [
+        # ('ij,jk->ik', (64, 32), (32, 128)),
+        # ('bij,bjk->bik', (8, 64, 32), (8, 32, 128)),
+        # ('abc,cde->abde', (4, 8, 16), (16, 32, 64)),
+        ('BSM,BSEC->EBCM', (2, 4096, 4096), (2, 4096, 8, 1024)),                            
+        ('EBCM,EMH->EBCH', (8, 2, 1024, 4096), (8, 4096, 14336)) ,                           
+        ('EBCM,EMH->EBCH', (8, 2, 1024, 4096), (8, 4096, 14336)),
+        ('EBCH,EHM->EBCM', (8, 2, 1024, 14336), (8, 14336, 4096)),
+        ('EBCM,BSEC->BSM', (8, 2, 1024, 4096), (2, 4096, 8, 1024)),
+    ])
+    @pytest_parametrize_wrapper('dtype', [jnp.bfloat16])
+    @pytest_parametrize_wrapper('quantization_recipe', supported_recipes)
+    def test_einsum(self, eqn, a_shape, b_shape, dtype, quantization_recipe):
+        from transformer_engine.common.recipe import Float8CurrentScaling
+        import functools
+
+        if not isinstance(quantization_recipe, Float8CurrentScaling):
+            pytest.skip("Einsum currently only supports Float8CurrentScaling recipe.")
+            return
+        key = jax.random.PRNGKey(0)
+        subkeys = jax.random.split(key, 2)
+        a = jax.random.uniform(subkeys[0], a_shape, dtype=dtype)
+        b = jax.random.uniform(subkeys[1], b_shape, dtype=dtype)
+
+        te_out = jax.jit(functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe))(a, b)
+        ref_out = jax.jit(functools.partial(self._ref_einsum, eqn))(a, b)
+
+        assert_allclose(te_out, ref_out, dtype=dtype)
