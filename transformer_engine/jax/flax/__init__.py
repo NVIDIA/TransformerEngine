@@ -4,7 +4,7 @@
 """Transformer Engine bindings for JAX"""
 from .module import DenseGeneral, LayerNorm
 from .module import LayerNormDenseGeneral, LayerNormMLP
-from .module import wrap_function_in_te_state_module, make_dot_general_cls
+from .module import wrap_function_in_te_state_module, make_dot_general_cls, make_einsum_cls
 from .transformer import extend_logical_axis_rules
 from .transformer import DotProductAttention, MultiHeadAttention, RelativePositionBiases
 from .transformer import TransformerLayer, TransformerLayerType
@@ -16,6 +16,7 @@ __all__ = [
     "LayerNormMLP",
     "wrap_function_in_te_state_module",
     "make_dot_general_cls",
+    "make_einsum_cls",
     "extend_logical_axis_rules",
     "DotProductAttention",
     "MultiHeadAttention",

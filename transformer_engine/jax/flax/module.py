@@ -1438,3 +1438,65 @@ def make_dot_general_cls(quantization_recipe):
         )
 
     return wrap_function_in_te_state_module(te_dot_general, quantization_recipe, "dot_general")
+
+def make_einsum_cls(quantization_recipe):
+    import functools
+    import jax
+    def te_einsum(generate_quantizer_set, s, x, kernel, **kwargs):
+      quantizer_set = generate_quantizer_set()
+      def dot_general(x, kernel, dims, *args, **kwargs):
+        # print(f"TE dot_general called with dims: {dims}, args: {args}, kwargs: {kwargs}")
+        contracting_dims, batch_dims = dims
+        ((x_bdim,), (k_bdim,)) = batch_dims
+        batch_dims = (x_bdim, k_bdim)
+
+        if x_bdim != 0 or k_bdim != 0:
+          print(f"{x_bdim=}, {k_bdim=}")
+          return jax.lax.dot_general(x, kernel, dims, *args, **kwargs)
+
+        if x.dtype not in [jnp.float16, jnp.bfloat16, jnp.float32, jnp.float64]:
+          # HACK: because x input is bool for dispatch mask
+          x = x.astype(kernel.dtype)
+
+        # Adjust for unbatched
+        contracting_dims = tuple(
+          tuple(dim - (1 if dim > bdim else 0) for dim in cdims) 
+          for bdim, cdims in zip(batch_dims, contracting_dims))
+
+        f = functools.partial(
+          dense,
+          contracting_dims=contracting_dims,
+          quantizer_set=quantizer_set)
+        return jax.vmap(f, in_axes=(x_bdim, k_bdim))(
+          x,
+          kernel,
+        )
+
+        group_sizes = None
+
+        # assuming x batch dim is axis 0, squash dims so we have (B*M, K)
+        # import math
+        # num_groups = x.shape[0]
+        # group_size = math.prod(x.shape[1:-1])
+        # x_orig_ndim = x.ndim
+        # # FIXME: breaks partitioning
+        # x = x.reshape(x.shape[0] * group_size, x.shape[-1])
+        # contracting_dims = (
+        #   tuple([c - (x_orig_ndim - x.ndim) for c in contracting_dims[0]]),
+        #   *contracting_dims[1:],
+        # )
+
+        # group_sizes = jnp.array([group_size]*num_groups, dtype=jnp.int32)
+
+        # print(f'{group_sizes=}, {contracting_dims=}, {x.shape=}, {kernel.shape=}, {contracting_dims=}')
+
+        # return transformer_engine.jax.dense.grouped_dense(
+        #   x,
+        #   kernel,
+        #   group_sizes=group_sizes,
+        #   contracting_dims=contracting_dims,
+        #   # quantizer_set=quantizer_set
+        # )
+      return jnp.einsum(s, x, kernel, _dot_general=dot_general, **kwargs)
+  
+    return wrap_function_in_te_state_module(te_einsum, quantization_recipe, "einsum")()
