@@ -827,8 +827,11 @@ class SequenceDescriptor:
         # Using defaults. segment pos has to be generated.
         if segment_pos is None:
             # Segment pos is not calculated implicitly Load balancing cases
-            assert not is_load_balanced, (f"{segment_pos=} default arg is not supported for load balanced inputs. " 
-            "Please pass the load balanced segment_pos and segment_ids using helper function reorder_causal_load_balancing()")
+            assert not is_load_balanced, (
+                f"{segment_pos=} default arg is not supported for load balanced inputs. Please pass"
+                " the load balanced segment_pos and segment_ids using helper function"
+                " reorder_causal_load_balancing()"
+            )
 
             def generate_default_pos(seg_ids):
                 if is_thd:
@@ -836,31 +839,47 @@ class SequenceDescriptor:
                     # Assume that the first token belongs to a segment and is not a padded token
                     first_is_segment = jnp.full((batch_size, 1), True, dtype=bool)
                     # Get segment start positions
-                    segment_start = jnp.concatenate([
+                    segment_start = jnp.concatenate(
+                        [
                             first_is_segment,  # First valid element starts a segment
-                            (seg_ids[..., 1:] != seg_ids[..., :-1]) & (seg_ids[..., 1:] != 0)
-                        ], axis=-1)
+                            (seg_ids[..., 1:] != seg_ids[..., :-1]) & (seg_ids[..., 1:] != 0),
+                        ],
+                        axis=-1,
+                    )
                     # Get offset for location where new segment starts
-                    segment_start_idx = jax.vmap(lambda row: jnp.arange(row.size) * row)(segment_start)
-                    segment_start_offsets = jax.vmap(lambda row: jnp.maximum.accumulate(row))(segment_start_idx)
+                    segment_start_idx = jax.vmap(lambda row: jnp.arange(row.size) * row)(
+                        segment_start
+                    )
+                    segment_start_offsets = jax.vmap(lambda row: jnp.maximum.accumulate(row))(
+                        segment_start_idx
+                    )
 
                     # Get the last non-zero index - after this everything is padding
                     # (B,)
-                    last_nonzero_idx = jax.vmap(lambda segids_row: jnp.max(jnp.where(segids_row != 0, jnp.arange(seq_size), -1)))(seg_ids)
+                    last_nonzero_idx = jax.vmap(
+                        lambda segids_row: jnp.max(
+                            jnp.where(segids_row != 0, jnp.arange(seq_size), -1)
+                        )
+                    )(seg_ids)
                     seg_pos_no_thd = jnp.arange(seq_size)
                     # Get a mask which can be used to zero out all the padding at the end (after the non-zero index)
                     mask = seg_pos_no_thd <= last_nonzero_idx[:, None]
 
                     # Get the unmasked seg_pos for the THD sequence
-                    seg_pos = jnp.broadcast_to(jnp.arange(seq_size), seg_ids.shape) - segment_start_offsets
+                    seg_pos = (
+                        jnp.broadcast_to(jnp.arange(seq_size), seg_ids.shape)
+                        - segment_start_offsets
+                    )
 
                     # Use the mask to zero out the padding at the end (after the non-zero index)
-                    segment_pos = jax.vmap(lambda pos_row, mask_row: jnp.where(mask_row, pos_row, 0))(seg_pos, mask)
+                    segment_pos = jax.vmap(
+                        lambda pos_row, mask_row: jnp.where(mask_row, pos_row, 0)
+                    )(seg_pos, mask)
                     return segment_pos
                 else:
                     seqlen = segment_ids.shape[-1]
                     return jnp.broadcast_to(jnp.arange(seqlen), segment_ids.shape)
-                
+
             q_seg_pos = generate_default_pos(q_seg_ids)
             kv_seg_pos = generate_default_pos(kv_seg_ids)
             segment_pos = (q_seg_pos, kv_seg_pos)
