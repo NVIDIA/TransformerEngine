@@ -877,8 +877,8 @@ class SequenceDescriptor:
                     )(seg_pos, mask)
                     return segment_pos
                 else:
-                    seqlen = segment_ids.shape[-1]
-                    return jnp.broadcast_to(jnp.arange(seqlen), segment_ids.shape)
+                    seqlen = seg_ids.shape[-1]
+                    return jnp.broadcast_to(jnp.arange(seqlen), seg_ids.shape)
 
             q_seg_pos = generate_default_pos(q_seg_ids)
             kv_seg_pos = generate_default_pos(kv_seg_ids)
