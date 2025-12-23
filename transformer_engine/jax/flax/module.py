@@ -17,7 +17,7 @@ from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
 
-from ..dense import dense
+from ..dense import dense, grouped_dense
 
 from ..layernorm import canonicalize_norm_type
 from ..layernorm import layernorm
@@ -1455,9 +1455,9 @@ def make_einsum_cls(quantization_recipe):
           print(f"{x_bdim=}, {k_bdim=}")
           return jax.lax.dot_general(x, kernel, dims, *args, **kwargs)
         
+        target_out_shape = jax.lax.dot_general(x, kernel, dims).shape
+        # TODO: add num groups to make grouped quantizer set
         quantizer_set = generate_quantizer_set()
-        print(f'{quantizer_set=}')
-        # import pdb; pdb.set_trace()
 
         if x.dtype not in [jnp.float16, jnp.bfloat16, jnp.float32, jnp.float64]:
           # HACK: because x input is bool for dispatch mask
@@ -1468,40 +1468,50 @@ def make_einsum_cls(quantization_recipe):
           tuple(dim - (1 if dim > bdim else 0) for dim in cdims) 
           for bdim, cdims in zip(batch_dims, contracting_dims))
 
-        f = functools.partial(
-          dense,
-          contracting_dims=contracting_dims,
-          quantizer_set=quantizer_set)
-        return jax.vmap(f, in_axes=(x_bdim, k_bdim))(
+        group_sizes = None
+        print(f'{x.shape=}, {kernel.shape=}, {dims=}')
+
+        def reorder_lhs_for_grouped_gemm(tensor, cdims):
+            # (B*M, K)
+            assert len(cdims) == 1, f"Only support single contracting dim for now, got {cdims}"
+            cdim = cdims[0] + 1 # account for batch dim at front
+            out = jnp.transpose(tensor, tuple(range(cdim)) + tuple(range(cdim + 1, tensor.ndim)) + (cdim,))
+            return out.reshape((-1, out.shape[-1]))
+        
+        
+        def reorder_rhs_for_grouped_gemm(tensor, bdims, cdims):
+            # (B, K, N)
+            assert len(bdims) == 1 and len(cdims) == 1, f"Only support single batch and contracting dim for now, got {bdims}, {cdims}"
+            bdim = bdims[0]
+            assert bdim == 0, f"Only support batch dim 0 for now, got {bdim}"
+            cdim = cdims[0] + 1 # account for batch dim at front
+            out = jnp.transpose(tensor, (bdim, cdim) + tuple(i for i in range(tensor.ndim) if i != bdim and i != cdim))
+            return out.reshape((*out.shape[:2], -1))
+        
+        x = reorder_lhs_for_grouped_gemm(x, contracting_dims[0])
+        kernel = reorder_rhs_for_grouped_gemm(kernel, (batch_dims[1],), contracting_dims[1])
+
+        num_groups = kernel.shape[0]
+        group_size = x.shape[0] // num_groups
+
+        group_sizes = jnp.array([group_size]*num_groups, dtype=jnp.int32)
+
+        print(f'{group_sizes=}, {contracting_dims=}, {x.shape=}, {kernel.shape=}, {contracting_dims=}')
+
+        contracting_dims = (
+            # (B*M, K)
+            (1,),
+            # (B, K, N)
+            (1,),
+        )
+        out = grouped_dense(
           x,
           kernel,
+          group_sizes=group_sizes,
+          contracting_dims=contracting_dims,
+          # quantizer_set=quantizer_set
         )
-
-        group_sizes = None
-
-        # assuming x batch dim is axis 0, squash dims so we have (B*M, K)
-        # import math
-        # num_groups = x.shape[0]
-        # group_size = math.prod(x.shape[1:-1])
-        # x_orig_ndim = x.ndim
-        # # FIXME: breaks partitioning
-        # x = x.reshape(x.shape[0] * group_size, x.shape[-1])
-        # contracting_dims = (
-        #   tuple([c - (x_orig_ndim - x.ndim) for c in contracting_dims[0]]),
-        #   *contracting_dims[1:],
-        # )
-
-        # group_sizes = jnp.array([group_size]*num_groups, dtype=jnp.int32)
-
-        # print(f'{group_sizes=}, {contracting_dims=}, {x.shape=}, {kernel.shape=}, {contracting_dims=}')
-
-        # return transformer_engine.jax.dense.grouped_dense(
-        #   x,
-        #   kernel,
-        #   group_sizes=group_sizes,
-        #   contracting_dims=contracting_dims,
-        #   # quantizer_set=quantizer_set
-        # )
+        return out.reshape(target_out_shape)
       return jnp.einsum(s, x, kernel, _dot_general=dot_general, **kwargs)
   
     return wrap_function_in_te_state_module(te_einsum, quantization_recipe, "einsum")()
