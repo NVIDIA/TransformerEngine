@@ -7,7 +7,27 @@ Triton utilities for JAX primitives.
 This module provides utility functions for integrating Triton kernels into
 JAX primitives. Triton is only imported when this module is used.
 
-Triton Package Compatibility --> see __init__.py
+Triton Package Compatibility:
+    There are two Triton packages that can be used:
+    
+    1. 'triton' (from OpenAI/PyPI): Standard package, works with JAX out of the box.
+       Install with: pip install triton
+       
+    2. 'pytorch-triton' (from PyTorch's index): Bundled with PyTorch, includes
+       PyTorch-specific patches. Version format: "3.0.0+<commit_sha>"
+       
+       IMPORTANT: The 'pytorch-triton' package on PyPI (version 0.0.1) is a 
+       placeholder that will NOT work. The real pytorch-triton is only available
+       from PyTorch's package index and is auto-installed with PyTorch:
+           pip install torch --index-url https://download.pytorch.org/whl/cu121
+       
+       pytorch-triton has been tested to work with JAX Triton kernels.
+
+Environment Variables:
+    NVTE_USE_PYTORCH_TRITON: If set to "1", explicitly acknowledge using 
+        pytorch-triton for JAX Triton kernels (suppresses warnings). This is 
+        useful when both JAX and PyTorch are installed in the same environment.
+        Default is "0".
 """
 
 import hashlib
@@ -59,7 +79,19 @@ def _detect_triton_package():
 
 
 def _check_triton_compatibility():
-    """Check Triton package compatibility and emit warnings if necessary."""
+    """Check Triton package compatibility and emit warnings if necessary.
+    
+    This function handles the case where both JAX and PyTorch may be installed,
+    each expecting different Triton packages:
+    - JAX typically uses the standard 'triton' package from OpenAI
+    - PyTorch uses 'pytorch-triton' which is versioned with commit SHAs
+    
+    The NVTE_USE_PYTORCH_TRITON environment variable can be used to explicitly
+    acknowledge using pytorch-triton with JAX (suppresses warnings).
+    
+    Raises:
+        ImportError: If triton is not installed or the placeholder package is detected.
+    """
     triton_version, is_pytorch_triton, is_placeholder = _detect_triton_package()
     
     # Handle placeholder package from PyPI
@@ -147,6 +179,13 @@ def get_triton_info():
             - is_openai_triton (bool): True if using standard triton from OpenAI/PyPI
             - env_acknowledged (bool): True if NVTE_USE_PYTORCH_TRITON=1 is set
             - source (str): "pytorch" or "openai" indicating the package source
+            
+    Example:
+        from transformer_engine.jax.triton_extensions import get_triton_info
+        info = get_triton_info()
+        print(f"Triton version: {info['version']} (from {info['source']})")
+        if info['is_pytorch_triton']:
+             print("Using pytorch-triton - compatible with both PyTorch and JAX")
     """
     use_pytorch_triton_env = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0").lower()
     env_acknowledged = use_pytorch_triton_env in ("1", "true", "yes")
@@ -266,11 +305,7 @@ def compile_triton(
     )
 
     # Create kernel object for JAX
-<<<<<<< HEAD
     # From jax/jaxlib/gpu/triton_kernels.cc:
-=======
-   # From jax/jaxlib/gpu/triton_kernels.cc:
->>>>>>> de40a714 (Add triton version detection logic, and NVTE_USE_PYTORCH_TRITON knob for jax)
     from packaging import version
 
     if version.parse(jax.__version__) >= version.parse("0.8.2"):
@@ -285,11 +320,7 @@ def compile_triton(
         )
     else:
         kernel = gpu_triton.TritonKernel(
-<<<<<<< HEAD
             compiled.name,
-=======
-            compile.name,
->>>>>>> de40a714 (Add triton version detection logic, and NVTE_USE_PYTORCH_TRITON knob for jax)
             num_warps,
             compiled.metadata.shared,
             compiled.asm["ptx"],
