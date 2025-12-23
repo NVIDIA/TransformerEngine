@@ -798,7 +798,7 @@ class SequenceDescriptor:
         segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
         *,
         is_thd: bool,
-        is_load_balanced: bool,
+        is_segment_ids_reordered: bool,
     ) -> SequenceDescriptor:
         """
         Experimental factory method for inputs with segment IDs and optional positions.
@@ -817,21 +817,28 @@ class SequenceDescriptor:
                 - kv_segment_pos (jnp.ndarray):
                   The position inside each segment for key, value, with shape [batch, max_seqlen].
             is_thd(bool): If True, QKVLayout is of type THD, else it is BSHD
-            is_load_balanced(bool): If True, CP is being used and the inputs have been load balanced.
+            is_segment_ids_reordered(bool): If True, the segment ids have been reordered for load balancing
         Return:
             A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
         q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
 
-        # Using defaults. segment pos has to be generated.
+        # Using defaults : segment pos has to be generated.
         if segment_pos is None:
-            # Segment pos is not calculated implicitly Load balancing cases
-            assert not is_load_balanced, (
-                f"{segment_pos=} default arg is not supported for load balanced inputs. Please pass"
-                " the load balanced segment_pos and segment_ids using helper function"
-                " reorder_causal_load_balancing()"
-            )
-
+            # THD + load balanced segment_ids are not supported in this function
+            # BSHD + load balanced segment_ids are incorrect as BSHD handles reordering within the primitive itself
+            if is_segment_ids_reordered:
+                assert not is_thd, (
+                    f"{segment_pos=} default arg is not supported for load balanced reordered (Striped) THD inputs."
+                    " Please pass the load balanced reordered segment_pos and segment_ids explicitly to" 
+                    " {from_segment_ids_and_pos.__qualname__} using convenience function reorder_causal_load_balancing()"
+                )
+                assert is_thd, (
+                    f"{segment_pos=} default arg is not supported for load balanced reordered (Dual Chunk) BSHD inputs."
+                    " BSHD segment_pos and segment_ids do not need to be load balanced reordered. The reordering for these"
+                    " is performed within the primitive"
+                )
+            # Generate the default pos for THD and BSHD non-reordered segment_ids
             def generate_default_pos(seg_ids):
                 if is_thd:
                     batch_size, seq_size = seg_ids.shape

@@ -678,7 +678,7 @@ class FusedAttnRunner:
                             self.cp_reorder_fn(self.segment_pos_kv),
                         ),
                         is_thd=self.qkv_layout.is_thd(),
-                        is_load_balanced=self.cp_size > 1 and self.cp_load_balanced,
+                        is_segment_ids_reordered=True,
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
@@ -707,7 +707,7 @@ class FusedAttnRunner:
                         (self.segment_ids_q, self.segment_ids_kv),
                         None,
                         is_thd=self.qkv_layout.is_thd(),
-                        is_load_balanced=self.cp_size > 1 and self.cp_load_balanced,
+                        is_segment_ids_reordered=False
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
