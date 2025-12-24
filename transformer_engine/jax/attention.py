@@ -861,9 +861,7 @@ class SequenceDescriptor:
                     segment_start_idx = jax.vmap(lambda row: jnp.arange(row.size) * row)(
                         segment_start
                     )
-                    segment_start_offsets = jax.vmap(jnp.maximum.accumulate)(
-                        segment_start_idx
-                    )
+                    segment_start_offsets = jax.vmap(jnp.maximum.accumulate)(segment_start_idx)
 
                     # Get the last non-zero index - after this everything is padding
                     # (B,)
@@ -887,7 +885,7 @@ class SequenceDescriptor:
                         lambda pos_row, mask_row: jnp.where(mask_row, pos_row, 0)
                     )(seg_pos, mask)
                     return segment_pos
-                
+
                 seqlen = seg_ids.shape[-1]
                 return jnp.broadcast_to(jnp.arange(seqlen), seg_ids.shape)
 
