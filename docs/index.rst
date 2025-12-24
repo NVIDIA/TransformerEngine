@@ -39,6 +39,15 @@ Transformer Engine documentation
    api/common
    api/framework
 
+
+.. toctree::
+   :hidden:
+   :caption: Features
+
+   features/low_precision_training/index.rst
+   features/other_optimizations/index.rst
+
+
 .. toctree::
    :hidden:
    :caption: Examples and Tutorials
