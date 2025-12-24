@@ -658,7 +658,7 @@ class SequenceDescriptor:
     - SequenceDescriptor.from_seqlens_and_offsets
       For THD (packed) cases, where each batch may have not only 1 sequence.
     - SequenceDescriptor.from_segment_ids_and_pos
-      Experimental feature for THD (packed) cases with context parallelism.
+      Experimental feature for BSHD (with and without reordering) and THD (packed) cases without reordering
     """
 
     seqlens: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
@@ -802,7 +802,8 @@ class SequenceDescriptor:
     ) -> SequenceDescriptor:
         """
         Experimental factory method for inputs with segment IDs and optional positions.
-        segment_pos = None to be used only for : BSHD and THD without load balancing
+        segment_pos = None to be used only for: BSHD with or without load balancing and,
+                                                THD without load balancing
         Args:
             segment_ids(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_ids, kv_segment_ids):
                 - q_segment_ids (jnp.ndarray):
@@ -817,7 +818,8 @@ class SequenceDescriptor:
                 - kv_segment_pos (jnp.ndarray):
                   The position inside each segment for key, value, with shape [batch, max_seqlen].
             is_thd(bool): If True, QKVLayout is of type THD, else it is BSHD
-            is_segment_ids_reordered(bool): If True, the segment ids have been reordered for load balancing
+            is_segment_ids_reordered(bool): If True, the segment ids have been reordered for load balancing.
+            Only THD with load balancing is expected to have this flag set to True
         Return:
             A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
