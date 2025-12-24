@@ -12,7 +12,7 @@ from jax._src.sharding_impls import UNSPECIFIED as _UNSPECIFIED
 
 from transformer_engine.jax.sharding import MeshResource
 
-from utils import assert_allclose, is_devices_enough
+from utils import assert_allclose, is_devices_enough, is_devices_equal
 
 
 def generate_configs():
@@ -49,7 +49,10 @@ def generate_context_parallel_configs_for_attn():
     TP_sizes = (1, 2)
     for dp, cp, tp in product(DP_sizes, CP_sizes, TP_sizes):
         ndev = cp * tp * dp
-        if is_devices_enough(ndev):
+        # Run only those dp,cp,tp combinations which require exactly ndev GPUs. 
+        # For e.g., if ndev=8 and num GPUs is 8, thent hose combinations will be picked.
+        # However, if ndev=4, but num GPUs is 8, then those combinations will not be picked. To pick such a combination, one can set CUDA_VISIBLE_DEVICES=0,1,2,3.
+        if is_devices_equal(ndev):
             # Do not run cp1 case in L1 as that is already covered in TestDistributedSelfAttn and TestDistributedCrossAttn (as these do not have any cp combinations)
             if cp != 1:
                 configsL1.append(
