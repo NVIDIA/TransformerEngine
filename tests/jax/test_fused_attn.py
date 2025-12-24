@@ -668,6 +668,8 @@ class FusedAttnRunner:
                         (self.offsets_q, self.offsets_kv),
                     )
                 case SeqDescFormat.SegmentIDs:
+                    # Exercise the path to generate the in segment_pos in from_segment_ids_and_pos() 
+                    # if no CP, else explicitly pass the segment_pos
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (
                             self.cp_reorder_fn(self.segment_ids_q),
@@ -676,9 +678,9 @@ class FusedAttnRunner:
                         (
                             self.cp_reorder_fn(self.segment_pos_q),
                             self.cp_reorder_fn(self.segment_pos_kv),
-                        ),
+                        ) if self.cp_size > 1 and self.cp_load_balanced else None,
                         is_thd=self.qkv_layout.is_thd(),
-                        is_segment_ids_reordered=True,
+                        is_segment_ids_reordered=True if self.cp_size > 1 and self.cp_load_balanced else False,
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
