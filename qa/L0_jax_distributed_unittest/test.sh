@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
 function error_exit() {
     echo "Error: $1"
@@ -15,6 +16,8 @@ function test_fail() {
 
 RET=0
 FAILED_CASES=""
+
+export NVTE_JAX_TEST_TIMING=1
 
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}

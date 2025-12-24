@@ -19,6 +19,7 @@
 #include "../core/common.cuh"
 #include "../fp8/quantize_fp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
+#include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 
@@ -317,6 +318,70 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
     }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
+  }
+}
+
+template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
+void group_quantize_fwd_helper(const NVTETensor input, NVTETensor *outputs,
+                               const size_t *split_sections, const size_t num_tensors,
+                               const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+  using namespace detail;
+
+  const Tensor *input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor *> output_tensors;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_tensors.push_back(convertNVTETensorCheck(outputs[i]));
+  }
+
+  // Quantization config
+  QuantizationConfig quant_config_cpp;
+  if (quant_config != nullptr) {
+    quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
+  }
+
+  // Noop flag
+  Tensor dummy_tensor;
+  Tensor *noop_tensor = &dummy_tensor;
+  if (quant_config_cpp.noop_tensor != nullptr) {
+    noop_tensor = convertNVTETensorCheck(quant_config_cpp.noop_tensor);
+  }
+
+  // Check for unsupported options
+  if (quant_config_cpp.stochastic_rounding) {
+    NVTE_CHECK(output_tensors[0]->scaling_mode == NVTE_NVFP4_1D_SCALING,
+               "Stochastic rounding is only supported for NVFP4 quantization.");
+  }
+
+  // Take the scaling mode of the first output tensor
+  auto scaling_mode = output_tensors[0]->scaling_mode;
+
+  // Dispatch to quantization kernel depending on data format
+  switch (scaling_mode) {
+    case NVTE_NVFP4_1D_SCALING: {
+      NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
+
+      // Check tensors
+      CheckNoopTensor(*noop_tensor, "cast_noop");
+      CheckInputTensor(*input_tensor, "input");
+      // Skip checking output tensor list
+      // output list here is allowed to have empty tensor
+
+      // Choose kernel
+      int32_t rows = input_tensor->flat_first_dim();
+      int32_t cols = input_tensor->flat_last_dim();
+      auto dtype = input_tensor->dtype();
+
+      NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                 "2D quantization is not supported for group quantize.");
+
+      // Launch NVFP4 group quantize kernel
+      nvfp4::group_quantize_transpose</*use_2d_quantization*/ false>(
+          *input_tensor, noop_tensor, output_tensors, split_sections, num_tensors,
+          &quant_config_cpp, stream);
+      break;
+    }
+    default:
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
   }
 }
 

@@ -1,8 +1,11 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
 set -xe
+
+export NVTE_JAX_TEST_TIMING=1
 
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}

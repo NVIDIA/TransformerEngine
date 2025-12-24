@@ -26,7 +26,7 @@ from transformer_engine.jax.attention import (
     CPStrategy,
     SequenceDescriptor,
 )
-from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES
+from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES, is_mesh_available
 
 from .base import BasePrimitive, register_primitive
 from .misc import (
@@ -73,6 +73,7 @@ __all__ = [
         "context_parallel_load_balanced",
         "cp_axis",
         "cp_striped_window_size",
+        "stripe_size",
     ],
 )
 @dataclass(frozen=True)
@@ -92,7 +93,10 @@ class _FusedAttnConfig:
     window_size: Tuple[int, int]
     context_parallel_load_balanced: bool
     cp_axis: str
-    cp_striped_window_size: Tuple[int, int]  # Only for CP + Ring + THD + SWA
+    cp_striped_window_size: Tuple[int, int]  # Only for CP + Ring P2P + THD + SWA
+    stripe_size: (
+        int | None
+    )  # Only for CP + Striped. For Ring P2P, stripe_size=1 only.For AG, stripe_size>=1.
 
 
 @dataclass(frozen=True)
@@ -527,7 +531,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             segment_ids=(_q_segment_ids, _kv_segment_ids),
             segment_pos=(_q_segment_pos, _kv_segment_pos),
         )
-
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
             sequence_descriptor.get_seqlens_and_offsets(
                 config.attn_mask_type,
@@ -536,7 +539,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 config.max_segments_per_seq,
             )
         )
-
         if config.qkv_layout.is_thd():
 
             def _fix_len_take(x, condition, fill_value=-1):
@@ -1234,31 +1236,38 @@ def reorder_causal_dual_chunk_swap(tensor, cp_size: int, seq_dim: int, to_contig
     return combined.reshape(ori_tensor_shape)
 
 
-def reorder_causal_striped(tensor, cp_size: int, seq_dim: int, is_inverse: bool):
+def reorder_causal_striped(
+    tensor, cp_size: int, seq_dim: int, is_inverse: bool, stripe_size: int = 1
+):
     """Reorders a tensor for load balancing with striped pattern"""
     origin_shape = tensor.shape
-    if origin_shape[seq_dim] % cp_size != 0:
+    if stripe_size <= 0:
         raise ValueError(
-            "Expected origin_shape[seq_dim] is multiple of cp_size but got"
-            f" {origin_shape[seq_dim]=} and {cp_size=}"
+            f"Incorrect value for CP reordering {stripe_size=}. stripe_size must be a positive"
+            " integer"
+        )
+    if origin_shape[seq_dim] % (cp_size * stripe_size) != 0:
+        raise ValueError(
+            "Expected origin_shape[seq_dim] is multiple of cp_size*stripe_size but got"
+            f" {origin_shape[seq_dim]=}, {cp_size=}, {stripe_size=}, {cp_size*stripe_size=}"
         )
 
     if not is_inverse:
         new_shape = [
             *origin_shape[:seq_dim],
-            *[origin_shape[seq_dim] // cp_size, cp_size],
+            *[origin_shape[seq_dim] // (cp_size * stripe_size), cp_size, stripe_size],
             *origin_shape[seq_dim + 1 :],
         ]
     else:
         new_shape = [
             *origin_shape[:seq_dim],
-            *[cp_size, origin_shape[seq_dim] // cp_size],
+            *[cp_size, origin_shape[seq_dim] // (cp_size * stripe_size), stripe_size],
             *origin_shape[seq_dim + 1 :],
         ]
 
-    chunked_tensor = tensor.reshape(new_shape)
-    reordered_chunked_tensor = jnp.swapaxes(chunked_tensor, seq_dim, seq_dim + 1)
-    return reordered_chunked_tensor.reshape(origin_shape)
+    striped_tensor = tensor.reshape(new_shape)
+    reordered_striped_tensor = jnp.swapaxes(striped_tensor, seq_dim, seq_dim + 1)
+    return reordered_striped_tensor.reshape(origin_shape)
 
 
 @dataclass(frozen=True)
@@ -1272,26 +1281,47 @@ class _FusedAttnCPWithAllGatherHelper:
         """Checks if the context parallel implementation is supported by the given arguments."""
         header = "Context parallel fused attention"
 
-        allowed_layouts = [QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD]
+        allowed_layouts = [
+            QKVLayout.BSHD_BS2HD,
+            QKVLayout.BSHD_BSHD_BSHD,
+            QKVLayout.THD_T2HD,
+            QKVLayout.THD_THD_THD,
+        ]
         if self.config.qkv_layout not in allowed_layouts:
             raise ValueError(
                 f"{header} only supports layouts:"
                 f" {','.join(map(str, allowed_layouts))} got: {self.config.qkv_layout}"
             )
 
+        if (not self.config.qkv_layout.is_thd() and self.config.stripe_size is not None) or (
+            self.config.qkv_layout.is_thd() and self.config.stripe_size is None
+        ):
+            raise ValueError(
+                f"{header} only supports Dual Chunk load balancing with BSHD layouts and Striped"
+                " load balancing with THD layouts"
+            )
+
         if self.config.attn_bias_type != AttnBiasType.NO_BIAS:
             raise ValueError(f"{header} does not support bias got: {self.config.attn_bias_type}")
 
         allowed_masks = [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]
+        if self.config.qkv_layout.is_thd():
+            allowed_masks.append(AttnMaskType.PADDING_CAUSAL_MASK)
         if self.config.attn_mask_type not in allowed_masks:
             raise ValueError(
                 f"{header} only supports masking types: "
                 f" {','.join(map(str, allowed_masks))} got: {self.config.attn_mask_type}"
             )
+        # Do not allow CP + AG + THD + Striped with NO_MASK
+        if (
+            self.config.attn_mask_type is not AttnMaskType.PADDING_CAUSAL_MASK
+            and self.config.qkv_layout.is_thd()
+        ):
+            raise ValueError(f"{header} only supports PADDING_CAUSAL_MASK for THD types")
 
-        if self.config.max_segments_per_seq != 1:
+        if self.config.max_segments_per_seq != 1 and (not self.config.qkv_layout.is_thd):
             raise ValueError(
-                f"{header} only supports max_segments_per_seq == 1 got:"
+                f"{header} only supports max_segments_per_seq == 1 for BSHD layouts, got:"
                 f" {self.config.max_segments_per_seq}"
             )
 
@@ -1305,9 +1335,24 @@ class _FusedAttnCPWithAllGatherHelper:
 
     def get_adjusted_mask(self):
         """Converts the mask for context parallelism."""
-        if self.config.attn_mask_type == AttnMaskType.CAUSAL_MASK:
+        if (
+            self.config.attn_mask_type == AttnMaskType.CAUSAL_MASK
+            and not self.config.qkv_layout.is_thd()
+        ):  # BSHD AG case only
             return AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK
+        if (
+            self.config.attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK
+            and self.config.qkv_layout.is_thd()
+        ):  # THD AG case only
+            return AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK
         return self.config.attn_mask_type
+
+    def get_adjusted_max_segments_per_seq(self, max_seqlen, cp_size):
+        """Converts the max segments per seq for context parallelism AG + THD."""
+        # Estimating adjusted max segments per seq
+        return (
+            max_seqlen // (self.config.stripe_size * cp_size)
+        ) + self.config.max_segments_per_seq
 
     def get_step_config(self) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call to fused attention."""
@@ -1324,10 +1369,29 @@ class _FusedAttnCPWithAllGatherHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
+            stripe_size=self.config.stripe_size,
+        )
+
+    def get_step_config_for_striped(self, max_seqlen, cp_size) -> _FusedAttnConfig:
+        """Returns a _FusedAttnConfig for single CP step call (made via a striped AG primitive) to fused attention."""
+        return _FusedAttnConfig(
+            attn_bias_type=self.config.attn_bias_type,
+            attn_mask_type=self.get_adjusted_mask(),
+            softmax_type=self.config.softmax_type,
+            qkv_layout=self.config.qkv_layout,
+            scaling_factor=self.config.scaling_factor,
+            dropout_probability=self.config.dropout_probability,
+            is_training=self.config.is_training,
+            max_segments_per_seq=self.get_adjusted_max_segments_per_seq(max_seqlen, cp_size),
+            window_size=self.config.window_size,
+            context_parallel_load_balanced=self.config.context_parallel_load_balanced,
+            cp_axis=self.config.cp_axis,
+            cp_striped_window_size=None,
+            stripe_size=self.config.stripe_size,
         )
 
     def all_gather_kv(self, k, v):
-        """Performs a all-gather of k and v over context parallel ranks."""
+        """Performs an all-gather of k and v over context parallel ranks."""
 
         def ag(x):
             x = lax_paral_op(
@@ -1335,7 +1399,10 @@ class _FusedAttnCPWithAllGatherHelper:
             )
             if self.config.context_parallel_load_balanced:
                 cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
-                x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=True)
+                if self.config.qkv_layout.is_thd():
+                    x = reorder_causal_striped(x, cp_size, 1, True, self.config.stripe_size)
+                else:
+                    x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=True)
             return x
 
         if self.config.qkv_layout.is_kvpacked():
@@ -1345,13 +1412,36 @@ class _FusedAttnCPWithAllGatherHelper:
 
         return k, v  # fall through
 
+    def all_gather_segment_ids_and_pos(self, kv_segment_ids, kv_segment_pos):
+        """Performs an all-gather of kv segment ids and kv segment pos over context parallel ranks."""
+        kv_segment_ids = lax_paral_op(
+            kv_segment_ids, lax.all_gather, self.config.cp_axis, mesh=self.mesh, axis=1, tiled=True
+        )
+        kv_segment_pos = lax_paral_op(
+            kv_segment_pos, lax.all_gather, self.config.cp_axis, mesh=self.mesh, axis=1, tiled=True
+        )
+        if self.config.context_parallel_load_balanced:
+            cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
+            if self.config.qkv_layout.is_thd():
+                kv_segment_ids_ag = reorder_causal_striped(
+                    kv_segment_ids, cp_size, 1, True, self.config.stripe_size
+                )
+                kv_segment_pos_ag = reorder_causal_striped(
+                    kv_segment_pos, cp_size, 1, True, self.config.stripe_size
+                )
+                return kv_segment_ids_ag, kv_segment_pos_ag
+        return kv_segment_ids, kv_segment_pos  # fall through
+
     def reduce_scatter_dkv(self, dk, dv):
         """Performs a reduce-scatter of dk and dv over context parallel ranks."""
 
         def rs(x):
             if self.config.context_parallel_load_balanced:
                 cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
-                x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=False)
+                if self.config.qkv_layout.is_thd():
+                    x = reorder_causal_striped(x, cp_size, 1, False, self.config.stripe_size)
+                else:
+                    x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=False)
 
             return lax_paral_op(
                 x,
@@ -1423,6 +1513,227 @@ class _FusedAttnCPWithAllGatherHelper:
             return pad(dk, npad), pad(dv, npad)
 
         return dk, dv  # fall through
+
+    # Below are the sharded post AG q seg ids and pos for a given rank:
+    # q_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
+    # q_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
+    # max_segments_per_seq = 7
+    # Below are some intermediate representations:
+    # non_zero_indices = [[ 0,  1,  2,  3,  8,  9, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1]]
+    # segment_changes = [[ True, False, False, False,  True, False, False, False,  True, False, False, False,  True,  True,  True,  True]]
+    # seqlens_pre = [[1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 0, 0, 0, 0]]
+    # seqlens_all_pad_neg = [[ 4,  4,  4, -1, -1, -1, -1]]
+    def q_seqlens_for_striped_for_rank(self, q_segment_ids, q_segment_pos, max_segments_per_seq):
+        """Extract the q seqlens for striped primitive (post AG) from the sharded q seg ids and seg pos"""
+        # Create mask for non-zero seg ids and get the non-zero indices associated with the same
+        non_zero_mask = q_segment_ids != 0
+        max_size = q_segment_ids.shape[-1]
+        non_zero_indices = jax.vmap(
+            lambda mask_row: jnp.where(mask_row, size=max_size, fill_value=-1)[0]
+        )(non_zero_mask)
+
+        # Pick non-zero seg ids and seg pos using take_along_axis to index within the seg ids and pos
+        # Clip -1 to 0 for safe indexing
+        clipped_indices = jnp.clip(non_zero_indices, 0, None)
+        valid_segment_ids = jnp.where(
+            non_zero_indices >= 0, jnp.take_along_axis(q_segment_ids, clipped_indices, axis=-1), 0
+        )
+        valid_segment_pos = jnp.where(
+            non_zero_indices >= 0, jnp.take_along_axis(q_segment_pos, clipped_indices, axis=-1), 0
+        )
+        # Create a mask for actual valid entries (not padding)
+        actual_valid = valid_segment_ids != 0
+        # First element is True only if it's actually valid
+        first_is_segment = actual_valid[..., 0:1]
+
+        # Detect segment breaks in the valid tokens only (not full seq)
+        # Padding will always be true as the segment change condition is being applied
+        # on the valid segments (which have padding at the end so they'll always trigger True)
+        segment_changes = jnp.concatenate(
+            [
+                first_is_segment,  # First valid element starts a segment
+                (valid_segment_ids[..., 1:] != valid_segment_ids[..., :-1])
+                | (valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1),
+            ],
+            axis=-1,
+        )
+        new_segment_ids = jnp.cumsum(segment_changes, axis=-1)
+        seqlens_pre = jax.vmap(
+            lambda av_row, nsi_row: jnp.where(av_row, nsi_row, 0).astype(jnp.int32)
+        )(actual_valid, new_segment_ids)
+        seqlens_all = jax.vmap(
+            lambda sp_row: jnp.bincount(sp_row, length=max_segments_per_seq + 1)[1:]
+        )(seqlens_pre)
+        seqlens_all_pad_neg = jnp.where(seqlens_all == 0, -1, seqlens_all)
+        return seqlens_all_pad_neg
+
+    # Below are the sharded post AG q seg ids and pos for a given rank:
+    # q_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
+    # q_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
+    # max_segments_per_seq = 7
+    # Below are some intermediate representations:
+    # segment_changes = [[ True, False, False, False,  True, False, False, False,  True, False, False, False,  True, False, False, False]]
+    # segment_changes_masked = [[ True, False, False, False, False, False, False, False,  True, False, False, False,  True, False, False, False]]
+    # seq_offsets =  [[ 0,  8, 12, -1, -1, -1, -1, -1]]
+    def q_seqoffsets_for_striped_for_rank(self, q_segment_ids, q_segment_pos, max_segments_per_seq):
+        """Extract the q seqoffets for striped primitive (post AG) from the sharded q seg ids and seg pos"""
+        segment_changes = jnp.concatenate(
+            [
+                jnp.full(
+                    (q_segment_pos.shape[0], 1), True, dtype=bool
+                ),  # First valid element starts a segment
+                (q_segment_pos[..., 1:] != q_segment_pos[..., :-1] + 1),  # Segment pos changed
+            ],
+            axis=-1,
+        )
+        # Remove any padded region segment changes
+        segment_changes_masked = jnp.where(q_segment_ids != 0, segment_changes, False)
+        # Get the indices for segment changes (these are the offsets)
+        seq_offsets = jax.vmap(
+            lambda scm_row: jnp.where(scm_row, size=max_segments_per_seq, fill_value=-1)[0]
+        )(segment_changes_masked)
+        return seq_offsets
+
+    # Below are the sharded post AG q seg ids and pos for a given rank:
+    # kv_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
+    # kv_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
+    # max_segments_per_seq = 7
+    # Below are some intermediate representations:
+    # non_zero_mask = [[ True,  True,  True,  True, False, False, False, False,  True, True,  True,  True,  True,  True,  True,  True]]
+    # non_zero_indices = [[ 0,  1,  2,  3,  8,  9, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1]]
+    # segment_changes = [[False, False, False,  True, False, False, False,  True, False, False, False,  True,  True,  True,  True, False]]
+    # selected_values = [[ 4, 15, 31, -1, -1, -1, -1, -1]]
+    def kv_seqlens_for_striped_for_rank(self, kv_segment_ids, kv_segment_pos, max_segments_per_seq):
+        """Extract the kv seqlens for striped primitive (post AG) from the sharded kv seg ids and seg pos"""
+        # Create mask for non-zero seg ids and get the non-zero indices associated with the same
+        non_zero_mask = kv_segment_ids != 0
+        max_size = kv_segment_ids.shape[-1]
+        non_zero_indices = jax.vmap(
+            lambda mask_row: jnp.where(mask_row, size=max_size, fill_value=-1)[0]
+        )(non_zero_mask)
+
+        # Pick non zero seg ids and seg pos using take_along_axis
+        # Clip -1 to 0 for safe indexing
+        clipped_indices = jnp.clip(non_zero_indices, 0, None)
+        valid_segment_ids = jnp.where(
+            non_zero_indices >= 0, jnp.take_along_axis(kv_segment_ids, clipped_indices, axis=-1), 0
+        )
+        valid_segment_pos = jnp.where(
+            non_zero_indices >= 0, jnp.take_along_axis(kv_segment_pos, clipped_indices, axis=-1), 0
+        )
+        actual_valid = valid_segment_ids != 0
+
+        # Detect segment breaks (only for non-zero segments)
+        segment_changes = jnp.concatenate(
+            [
+                (
+                    (valid_segment_ids[..., 1:] != valid_segment_ids[..., :-1])
+                    & actual_valid[..., 1:]
+                )
+                | (valid_segment_pos[..., 1:] != valid_segment_pos[..., :-1] + 1),
+                actual_valid[..., -1:],
+            ],
+            axis=-1,
+        )
+        # Get the indices for segment changes
+        segment_changes_valid = jax.vmap(
+            lambda sc_row, av_row: jnp.where(
+                sc_row & av_row, size=max_segments_per_seq, fill_value=-1
+            )[0]
+        )(segment_changes, actual_valid)
+        safe_indices = jnp.maximum(segment_changes_valid, 0)
+        # Select values using take_along_axis per row
+        selected_values = jnp.where(
+            segment_changes_valid >= 0,
+            jnp.take_along_axis(valid_segment_pos, safe_indices, axis=-1) + 1,
+            -1,
+        )
+        return selected_values
+
+    # Below are the sharded post AG q seg ids and pos for a given rank:
+    # kv_segment_ids = [[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2]]
+    # kv_segment_pos = [[0, 1, 2, 3, 16, 17, 18, 19, 11, 12, 13, 14, 27, 28, 29, 30]]
+    # kv_segment_ids_ag = [[1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    #                       2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    #                       2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+    # kv_segment_pos_ag = [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+    #                       18, 19, 20, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    #                       15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    #                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]
+    # max_segments_per_seq = 7
+    # Below are some intermediate representations:
+    # segment_changes_first_true_masked = [[ True, False, False, False, False, False, False, False, True,
+    #                                       False, False, False,  True, False, False, False]]
+    # segment_changes_indices = [[ 0,  8, 12, -1, -1, -1, -1, -1, -1]]
+    # segment_ids = [[ 1,  2,  2, -1, -1, -1, -1, -1, -1]]
+    # segment_changes_ag_first_true_masked = [[ True, False, False, False, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False, False, False,  True, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False, False, False, False, False, False, False, False, False,
+    #                                               False]
+    # segment_changes_ag_indices = [[ 0, 21, -1, -1, -1, -1, -1, -1, -1]]
+    # seq_offsets = [[ 0, 21, 21, -1, -1, -1, -1, -1, -1]]
+    def kv_seqoffsets_for_striped_for_rank(
+        self,
+        kv_segment_pos,
+        kv_segment_ids,
+        kv_segment_pos_ag,
+        kv_segment_ids_ag,
+        max_segments_per_seq,
+    ):
+        """Extract the kv seqoffsets for striped primitive (post AG) from the sharded kv seg ids and seg pos,
+        AG kv seg ids and seg pos."""
+        # Calculate the segment pos change mask
+        segment_changes_first_true = jnp.concatenate(
+            [
+                jnp.full(
+                    (kv_segment_pos.shape[0], 1), True, dtype=bool
+                ),  # Assume valid element starts a segment and mask afterwards
+                (kv_segment_pos[..., 1:] != kv_segment_pos[..., :-1] + 1),  # Segment pos changed
+            ],
+            axis=-1,
+        )
+        segment_changes_first_true_masked = jnp.where(
+            kv_segment_ids != 0, segment_changes_first_true, False
+        )
+
+        # Get segment change indices for rank
+        segment_changes_indices = jax.vmap(
+            lambda sc_row: jnp.where(sc_row, size=max_segments_per_seq, fill_value=-1)[0]
+        )(segment_changes_first_true_masked)
+        # Get segment ids associated with the segment_changes_indices for rank
+        segment_ids = jax.vmap(
+            lambda sci_row, ksi_row: jnp.where(sci_row >= 0, ksi_row[sci_row], -1)
+        )(segment_changes_indices, kv_segment_ids)
+
+        # Get segment change indices for AG
+        segment_changes_ag_first_true = jnp.concatenate(
+            [
+                jnp.full(
+                    (kv_segment_pos.shape[0], 1), True, dtype=bool
+                ),  # Assume valid element starts a segment and mask afterwards
+                (
+                    kv_segment_pos_ag[..., 1:] != kv_segment_pos_ag[..., :-1] + 1
+                ),  # Segment pos changed
+            ],
+            axis=-1,
+        )
+        segment_changes_ag_first_true_masked = jnp.where(
+            kv_segment_ids_ag != 0, segment_changes_ag_first_true, False
+        )
+        # Get segment change indices for AG
+        segment_changes_ag_indices = jax.vmap(
+            lambda scag_row: jnp.where(scag_row, size=max_segments_per_seq, fill_value=-1)[0]
+        )(segment_changes_ag_first_true_masked)
+
+        # Use the segment ids picked per rank to get the offsets from the AG indices
+        seq_offsets = jax.vmap(
+            lambda si_row, sca_row: jnp.where(si_row > 0, sca_row[si_row - 1], -1)
+        )(segment_ids, segment_changes_ag_indices)
+        return seq_offsets
 
 
 class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
@@ -1501,7 +1812,6 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                     q_seqlen_for_step = q_seqlen / (cp_size * 2)
                     num_kv_chunks = kv_max_seqlen // kv_seqlens_for_rank[sub_idx]
                     kv_seqlen_for_step = (kv_seqlen / (cp_size * 2)) * num_kv_chunks
-
                     output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
                         q_split[sub_idx],
                         k_unmasked,
@@ -1722,6 +2032,314 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
 register_primitive(FusedAttnCPWithAllGatherBwdPrimitive)
 
 
+class FusedAttnCPStripedWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
+    """
+    Fused Attention Forward with Context Parallelism and Striped Load Balancing Primitive
+
+    This context parallel implementation uses all-gather to collect KV inputs from context parallel ranks.
+    """
+
+    @staticmethod
+    def partition(config, mesh, arg_infos, result_infos):
+        # Call base implementation for non-context parallel mesh to avoid unecessary work.
+        is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
+        if not is_context_parallel:
+            return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+
+        helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
+        helper.check_supported()
+
+        out_sharding = result_infos[0].sharding
+        softmax_aux_sharding = result_infos[1].sharding
+        rng_state_sharding = seed_sharding = NamedSharding(
+            mesh, PartitionSpec(get_all_mesh_axes(), None)
+        )
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings[5] = seed_sharding
+        arg_shardings = tuple(arg_shardings)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+
+        def impl(
+            q,
+            k,
+            v,
+            bias,
+            softmax_offset,
+            seed,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+        ):  # pylint: disable=unused-argument
+            cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
+
+            # cuDNN does not support right-aligned masking with dynamic sequence length padding.
+            # Therefore we must explicitly instantiate each CP rank slicing and use a runtime switch
+            # to select the appropriate computation. Each case generates a [..., SEQ/CP, ..] tensor
+            # meeting the expectation of the SPMD model.
+            # TODO(mgoldfarb-nvidia): When cuDNN supports we should be able to make use of a padding
+            # mask/sequence length tensor to avoid this unrolled loop.
+
+            # Each rank receives the ag k and v along with the ag kv seg ids and kv seg offsets
+            # Each rank sees the sharded view for 5 tensors -> q, _q_segment_ids, _q_segment_pos,
+            # _kv_segment_ids, _kv_segment_pos -> Note these have also been reordered before passing in.
+            def _cross_attn(
+                q, k, v, bias, softmax_offset, kv_segment_ids_ag, kv_segment_pos_ag, seed
+            ):
+                # Helper generates the seqlens and offsets for q and kv and then pass them down to the FusedAttnFwdPrimitive
+                # Unset the segment_ids and segment_pos by passing placeholders so that the seqlens_from_segment_ids_pos()
+                # does not go down that route but instead just picks the pre-computed seqlens and offsets passed onto it
+
+                kv_max_seqlen = k.shape[1]
+                # Estimate an adjusted max_segments_per_seq per rank based on the global max_segments_per_seq
+                adjusted_max_segments_per_seq = helper.get_adjusted_max_segments_per_seq(
+                    max_seqlen=kv_max_seqlen, cp_size=cp_size
+                )
+                q_seqlens_for_rank = helper.q_seqlens_for_striped_for_rank(
+                    _q_segment_ids, _q_segment_pos, adjusted_max_segments_per_seq
+                )
+                q_seq_offsets_for_rank = helper.q_seqoffsets_for_striped_for_rank(
+                    q_segment_ids=_q_segment_ids,
+                    q_segment_pos=_q_segment_pos,
+                    max_segments_per_seq=adjusted_max_segments_per_seq,
+                )
+                kv_seqlens_for_rank = helper.kv_seqlens_for_striped_for_rank(
+                    kv_segment_ids=_kv_segment_ids,
+                    kv_segment_pos=_kv_segment_pos,
+                    max_segments_per_seq=adjusted_max_segments_per_seq,
+                )
+                kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(
+                    kv_segment_pos=_kv_segment_pos,
+                    kv_segment_ids=_kv_segment_ids,
+                    kv_segment_pos_ag=kv_segment_pos_ag,
+                    kv_segment_ids_ag=kv_segment_ids_ag,
+                    max_segments_per_seq=adjusted_max_segments_per_seq,
+                )
+
+                output, softmax_aux, rng_state = FusedAttnFwdPrimitive.impl(
+                    q,  # sharded for rank
+                    k,  # ag
+                    v,  # ag
+                    bias,
+                    softmax_offset,
+                    seed,
+                    q_seqlens_for_rank,
+                    kv_seqlens_for_rank,
+                    q_seq_offsets_for_rank,
+                    kv_seq_offsets_for_rank,
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    config=helper.get_step_config_for_striped(
+                        max_seqlen=kv_max_seqlen, cp_size=cp_size
+                    ),
+                )
+                return output, softmax_aux, rng_state
+
+            # AG the k, v, kv_segment_ids and kv_segment_pos
+            k_ag, v_ag = helper.all_gather_kv(k, v)
+            _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(
+                _kv_segment_ids, _kv_segment_pos
+            )
+            functions = [
+                partial(
+                    _cross_attn,
+                    q,
+                    k_ag,
+                    v_ag,
+                    bias,
+                    softmax_offset,
+                    _kv_segment_ids_ag,
+                    _kv_segment_pos_ag,
+                    seed,
+                )
+                for _ in range(cp_size)
+            ]
+            return lax.switch(cp_rank, functions)
+
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(FusedAttnCPStripedWithAllGatherFwdPrimitive)
+
+
+class FusedAttnCPStripedWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
+    """
+    Fused Attention Backward with Context Parallelism and Striped Load Balancing Primitive.
+
+    This context parallel implementation uses all-gather to collect KV and dKV inputs from context parallel ranks.
+    The gradients are subsequently reduce-scattered back to each context parallel rank.
+    """
+
+    @staticmethod
+    def partition(config, mesh, arg_infos, result_infos):
+        # Call base implementation for non-context parallel mesh to avoid unecessary work.
+        is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
+        if not is_context_parallel:
+            return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
+
+        # Ensure we can support this configuration with context parallelism.
+        helper = _FusedAttnCPWithAllGatherHelper(mesh, config)
+        helper.check_supported()
+
+        del result_infos
+        q_spec = get_padded_spec(arg_infos[0])
+        k_spec = get_padded_spec(arg_infos[1])
+        v_spec = get_padded_spec(arg_infos[2])
+        bias_spec = get_padded_spec(arg_infos[3])
+        softmax_offset_spec = get_padded_spec(arg_infos[4])
+        dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+        dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
+        dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
+        dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
+        dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_shardings = (
+            dq_sharding,
+            dk_sharding,
+            dv_sharding,
+            dbias_sharding,
+            dsoftmax_offset_sharding,
+        )
+
+        def impl(
+            q,
+            k,
+            v,
+            bias,
+            softmax_offset,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+        ):  # pylint: disable=unused-argument
+            cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
+
+            # See comment in FusedAttnCPFwdPrimitive.partition for why we define this function.
+            def _cross_attn_bwd(
+                q,
+                k,
+                v,
+                bias,
+                softmax_offset,
+                softmax_aux,
+                rng_state,
+                output,
+                doutput,
+                _q_segment_ids,
+                kv_segment_ids_ag,
+                _q_segment_pos,
+                kv_segment_pos_ag,
+            ):
+                # Helper generates the seqlens and offsets for q and kv and then pass them down to the FusedAttnFwdPrimitive
+                # Unset the segment_ids and segment_pos by passing placeholders so that the seqlens_from_segment_ids_pos()
+                # does not go down that route but instead just picks the pre-computed seqlens and offsets passed onto it
+
+                kv_max_seqlen = k.shape[1]
+                # Estimate an adjusted max_segments_per_seq per rank based on the global max_segments_per_seq
+                adjusted_max_segments_per_seq = helper.get_adjusted_max_segments_per_seq(
+                    max_seqlen=kv_max_seqlen, cp_size=cp_size
+                )
+                q_seqlens_for_rank = helper.q_seqlens_for_striped_for_rank(
+                    _q_segment_ids, _q_segment_pos, adjusted_max_segments_per_seq
+                )
+                q_seq_offsets_for_rank = helper.q_seqoffsets_for_striped_for_rank(
+                    q_segment_ids=_q_segment_ids,
+                    q_segment_pos=_q_segment_pos,
+                    max_segments_per_seq=adjusted_max_segments_per_seq,
+                )
+                kv_seqlens_for_rank = helper.kv_seqlens_for_striped_for_rank(
+                    kv_segment_ids=_kv_segment_ids,
+                    kv_segment_pos=_kv_segment_pos,
+                    max_segments_per_seq=adjusted_max_segments_per_seq,
+                )
+                kv_seq_offsets_for_rank = helper.kv_seqoffsets_for_striped_for_rank(
+                    kv_segment_pos=_kv_segment_pos,
+                    kv_segment_ids=_kv_segment_ids,
+                    kv_segment_pos_ag=kv_segment_pos_ag,
+                    kv_segment_ids_ag=kv_segment_ids_ag,
+                    max_segments_per_seq=adjusted_max_segments_per_seq,
+                )
+
+                dq_local, dk_local, dv_local, dbias_local, _ = FusedAttnBwdPrimitive.impl(
+                    q,  # sharded for rank
+                    k,  # ag
+                    v,  # ag
+                    bias,
+                    softmax_offset,
+                    softmax_aux,
+                    rng_state,
+                    output,
+                    doutput,
+                    q_seqlens_for_rank,
+                    kv_seqlens_for_rank,
+                    q_seq_offsets_for_rank,
+                    kv_seq_offsets_for_rank,
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    jnp.zeros(0),
+                    config=helper.get_step_config_for_striped(
+                        max_seqlen=kv_max_seqlen, cp_size=cp_size
+                    ),
+                )
+                return dq_local, dk_local, dv_local, dbias_local
+
+            # AG the k, v, kv_segment_ids and kv_segment_pos
+            k_ag, v_ag = helper.all_gather_kv(k, v)
+            _kv_segment_ids_ag, _kv_segment_pos_ag = helper.all_gather_segment_ids_and_pos(
+                _kv_segment_ids, _kv_segment_pos
+            )
+
+            functions = [
+                partial(
+                    _cross_attn_bwd,
+                    q,
+                    k_ag,
+                    v_ag,
+                    bias,
+                    softmax_offset,
+                    softmax_aux,
+                    rng_state,
+                    output,
+                    doutput,
+                    _q_segment_ids,
+                    _kv_segment_ids_ag,
+                    _q_segment_pos,
+                    _kv_segment_pos_ag,
+                )
+                for _ in range(cp_size)
+            ]
+
+            dq, dk_local, dv_local, dbias = lax.switch(cp_rank, functions)
+            # RS the dk and dv
+            dk, dv = helper.reduce_scatter_dkv(dk_local, dv_local)
+
+            # Return dummy dsoftmax_offset for arity matching (all-gather CP doesn't use it)
+            dummy_dsoftmax_offset = jnp.empty_like(softmax_offset)
+            return dq, dk, dv, dbias, dummy_dsoftmax_offset
+
+        return mesh, impl, out_shardings, arg_shardings
+
+
+register_primitive(FusedAttnCPStripedWithAllGatherBwdPrimitive)
+
+
 @dataclass(frozen=True)
 class _FusedAttnCPWithP2PHelper:
     """Helper class to assist with running the P2P ring strategy for CP attention."""
@@ -1732,7 +2350,8 @@ class _FusedAttnCPWithP2PHelper:
     @staticmethod
     def use_scanloop():
         """Returns true if the implementation will use a scan loop for iteration."""
-        use_scan = bool(int(os.getenv("NVTE_FUSED_RING_ATTENTION_USE_SCAN", "1")))
+        # TODO(KshitijLakhani): Reset default to 1, once the extra kv permute op issue is resolved
+        use_scan = bool(int(os.getenv("NVTE_FUSED_RING_ATTENTION_USE_SCAN", "0")))
         return use_scan
 
     def check_supported(self):
@@ -1777,13 +2396,15 @@ class _FusedAttnCPWithP2PHelper:
                 f"{header} only supports VANILLA_SOFTMAX, got: {self.config.softmax_type}"
             )
 
-        # We want to encourage use of scan loop to minimize unrolling and ensure more
-        # predictable scheduling from XLA. The unrolled flavor will be supported but
-        # not the prefered implementation.
-        if not self.use_scanloop():
+        # TODO(KshitijLakhani): Flip the condition to check for disabled scan loop and warn
+        # against using unrolled loops once the scan issue is resolved.
+        # We want to discourage the use of scan loop as additional kv permute op observed.
+        # The scan loop flavor will be supported but not the prefered implementation until
+        # a resolution for the additional kv permute op, which degrades perf, is found.
+        if self.use_scanloop():
             warnings.warn(
-                "Scan loop is disabled for fused ring attention. To enable set"
-                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment"
+                "Scan loop is enabled for fused ring attention. To disable set"
+                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=0 in your environment"
             )
 
         # If using scanloop, idx in scan_kv_block() will be a traced device value, but
@@ -1811,6 +2432,7 @@ class _FusedAttnCPWithP2PHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
+            stripe_size=self.config.stripe_size,
         )
 
     def stack_kv(self, k, v):
@@ -2666,7 +3288,7 @@ register_primitive(FusedRingAttnStripedBwdPrimitive)
 
 
 def _maybe_context_parallel_axis(cp_axis: str):
-    if not cp_axis:
+    if not cp_axis and is_mesh_available():
         gmr = global_mesh_resource()
         if gmr is not None:
             cp_axis = gmr.cp_resource
@@ -2693,6 +3315,7 @@ def fused_attn_fwd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    stripe_size: int | None = None,
 ) -> jnp.ndarray:
     """
     Perform the forward pass of with cuDNN fused attention implementations.
@@ -2731,6 +3354,7 @@ def fused_attn_fwd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
+        stripe_size (int | None): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
     """
@@ -2796,12 +3420,16 @@ def fused_attn_fwd(
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
+        stripe_size=stripe_size,
     )
 
     primitive = None
     match context_parallel_strategy:
         case CPStrategy.DEFAULT | CPStrategy.ALL_GATHER:
-            primitive = FusedAttnCPWithAllGatherFwdPrimitive.outer_primitive
+            if qkv_layout.is_thd():
+                primitive = FusedAttnCPStripedWithAllGatherFwdPrimitive.outer_primitive
+            else:
+                primitive = FusedAttnCPWithAllGatherFwdPrimitive.outer_primitive
         case CPStrategy.RING:
             # We must use stripe attention for THD-RING
             if qkv_layout.is_thd():
@@ -2843,6 +3471,7 @@ def fused_attn_bwd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    stripe_size: int | None = None,
 ):
     """
     Perform the backward pass of the cuDNN fused attention implementations.
@@ -2882,6 +3511,7 @@ def fused_attn_bwd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
+        stripe_size (int | None): Indicates the striping height to be used for ReorderStrategy.Striped Load Balancing
     Returns:
         Tuple[jnp.ndarray, ...], jnp.ndarray:
         - The first tuple contains the gradients with respect to the input `qkv` tensors in the
@@ -2954,12 +3584,16 @@ def fused_attn_bwd(
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
+        stripe_size=stripe_size,
     )
 
     primitive = None
     match context_parallel_strategy:
         case CPStrategy.DEFAULT | CPStrategy.ALL_GATHER:
-            primitive = FusedAttnCPWithAllGatherBwdPrimitive.outer_primitive
+            if qkv_layout.is_thd():
+                primitive = FusedAttnCPStripedWithAllGatherBwdPrimitive.outer_primitive
+            else:
+                primitive = FusedAttnCPWithAllGatherBwdPrimitive.outer_primitive
         case CPStrategy.RING:
             if qkv_layout.is_thd():
                 primitive = FusedRingAttnStripedBwdPrimitive.outer_primitive

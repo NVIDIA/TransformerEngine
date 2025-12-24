@@ -13,9 +13,16 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import (
     Float8Quantizer,
-    Float8Tensor,
     Float8CurrentScalingQuantizer,
+    Float8BlockQuantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+    Float8Tensor,
+    MXFP8Tensor,
+    NVFP4Tensor,
+    QuantizedTensor,
 )
+
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
@@ -44,8 +51,22 @@ def _to_list(x: Union[Iterable, Any]) -> List:
 # Types that can be interpreted as tensor dims
 DimsType = Union[Iterable[int], int]
 
-# Check if FP8 is supported
+# Supported quantization recipes
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
+)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
+_quantization_list: List[str] = []
+if fp8_available:
+    _quantization_list.append("fp8")
+if fp8_block_scaling_available:
+    _quantization_list.append("fp8_blockwise")
+if mxfp8_available:
+    _quantization_list.append("mxfp8")
+if nvfp4_available:
+    _quantization_list.append("nvfp4")
 
 
 # delayed scaling
@@ -84,6 +105,79 @@ def to_float8_CS(
     else:
         quantizer.set_usage(rowwise=True, columnwise=False)
     return quantizer(tensor)
+
+
+@torch.no_grad()
+def make_reference_and_test_tensors(
+    shape: int | Iterable[int],
+    quantization: Optional[str] = None,
+    ref_dtype: torch.dtype = torch.float64,
+    ref_device: torch.device = "cpu",
+    test_dtype: torch.dtype = torch.float32,
+    test_device: torch.device = "cuda",
+    requires_grad: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Construct tensors with the same values
+
+    The reference tensor is intended for use in plain PyTorch
+    operations in high precision. The test tensor is intended for use
+    in Transformer Engine operations.
+
+    If a quantization scheme is provided, the tensor values are
+    quantized so that they are representable.
+
+    """
+
+    # Random reference tensor
+    ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
+
+    # Construct test tensor from reference tensor
+    test = ref.to(device=test_device, dtype=test_dtype)
+    if quantization is None:
+        if test.data_ptr() == ref.data_ptr():
+            test = test.clone()
+    elif quantization in ("fp8", "fp8_delayed_scaling"):
+        quantizer = Float8Quantizer(
+            scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
+            amax=torch.zeros(1, dtype=torch.float32, device=test_device),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+        test = quantizer(test)
+    elif quantization == "fp8_current_scaling":
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=test_device,
+        )
+        test = quantizer(test)
+    elif quantization == "fp8_blockwise":
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=True,
+            force_pow_2_scales=True,
+            amax_epsilon=0.0,
+            block_scaling_dim=1,
+        )
+        test = quantizer(test)
+    elif quantization == "mxfp8":
+        test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
+    elif quantization == "nvfp4":
+        test = NVFP4Quantizer(
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )(test)
+    else:
+        raise ValueError(f"Unsupported quantization scheme ({quantization})")
+
+    # Make sure reference and test tensors match each other
+    ref.copy_(test)
+
+    ref.requires_grad_(requires_grad)
+    test.requires_grad_(requires_grad)
+    return ref, test
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -452,3 +546,113 @@ class TestCurrentScalingFloat8Tensor:
         # Make sure we are not trivially passing the test
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8_dequantized, -x_hp, **_tols[fp8_dtype])
+
+
+class TestQuantizedTensor:
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("op", ("clone", "view", "reshape", "contiguous"))
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_identity_op(
+        self,
+        *,
+        op: str,
+        quantization: str,
+        shape: Iterable[int] = (128, 128),
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test operations that do not affect tensor values.
+
+        These operations are must produce outputs that are bit-wise
+        equivalent to the inputs. They must support autograd.
+
+        """
+
+        # Create reference and quantized tensor
+        x_ref, x_test = make_reference_and_test_tensors(
+            shape=shape,
+            quantization=quantization,
+            test_dtype=dtype,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            shape=shape,
+            test_dtype=dtype,
+            requires_grad=False,
+        )
+
+        # Apply identity operation
+        if op == "clone":
+            y_ref = x_ref.clone()
+            y_test = x_test.clone()
+        elif op == "view":
+            y_ref = x_ref.view(shape)
+            y_test = x_test.view(shape)
+        elif op == "reshape":
+            y_ref = x_ref.reshape(shape)
+            y_test = x_test.reshape(shape)
+        elif op == "contiguous":
+            y_ref = x_ref.contiguous()
+            y_test = x_test.contiguous()
+
+        # Check autograd
+        y_test.backward(dy_test)
+        assert x_test.grad is not None
+
+        # Check values
+        tols = dict(rtol=0, atol=0)
+        if isinstance(y_test, QuantizedTensor):
+            y_test = y_test.dequantize()
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dx_ref = dy_ref
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, dx_ref, **tols)
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("dim", [0, 1])
+    def test_chunk(
+        self,
+        *,
+        quantization: str,
+        dim: int,
+        shape: Iterable[int] = (128, 128),
+        chunks: int = 2,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+    ) -> None:
+
+        # Create reference and quantized tensor
+        x_ref, x_test = make_reference_and_test_tensors(
+            shape=shape,
+            quantization=quantization,
+            test_dtype=dtype,
+        )
+
+        # Chunk tensors
+        ys_ref = torch.chunk(x_ref, chunks, dim=dim)
+        ys_test = torch.chunk(x_test, chunks, dim=dim)
+
+        # Check splits
+        for y_ref, y_test in zip(ys_ref, ys_test):
+
+            # Check split shapes
+            assert y_ref.size() == y_test.size()
+
+            # Check that splits are quantized when expected
+            if quantization == "fp8":
+                assert isinstance(y_test, Float8Tensor)
+                y_test = y_test.dequantize()
+            elif quantization == "mxfp8" and dim == 0:
+                assert isinstance(y_test, MXFP8Tensor)
+                y_test = y_test.dequantize()
+
+            # Check values
+            tols = dict(rtol=0, atol=0)  # Chunking is exact
+            y_test = y_test.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(y_test, y_ref, **tols)
