@@ -21,7 +21,8 @@
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
-#include "transformer_engine/comm_gemm_overlap.h"
+#include "transformer_engine/comm_gemm.h"          // cuBlasMp-based overlap
+#include "transformer_engine/comm_gemm_overlap.h"  // Userbuffer-based overlap
 
 namespace transformer_engine {
 namespace jax {
@@ -156,6 +157,19 @@ class CommunicatorHandler {
   std::vector<std::string> _nccl_id_file_name;
 };
 
+struct CollectiveGemmPlan {
+  NVTECommGemmCtx *cublasmp_context;
+  std::unique_ptr<CommOverlapCore> userbuffers_context;
+
+  CollectiveGemmPlan(void *ctx);
+
+  CollectiveGemmPlan(ncclComm_t comm, int nranks, int rank);
+
+  ~CollectiveGemmPlan();
+
+  void *get_context();
+};
+
 // Plan registry for caching collective GEMM executors
 class CollectiveGemmPlanRegistry {
  public:
@@ -164,15 +178,15 @@ class CollectiveGemmPlanRegistry {
     return instance;
   }
 
-  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype,
-                                JAXX_Collective_Op collective_op);
+  CollectiveGemmPlan *get_plan(std::vector<size_t> buffer_shape, DType dtype,
+                               JAXX_Collective_Op collective_op);
 
  private:
   CollectiveGemmPlanRegistry() {}
   CollectiveGemmPlanRegistry(const CollectiveGemmPlanRegistry &) = delete;
   CollectiveGemmPlanRegistry &operator=(const CollectiveGemmPlanRegistry &) = delete;
 
-  std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_map;
+  std::unordered_map<int64_t, std::unique_ptr<CollectiveGemmPlan>> plan_map;
 };
 
 // Function declarations
