@@ -478,10 +478,14 @@ std::vector<py::object> fused_attn_bwd(
     auto cu_seqlens_kv_padded_sizes = cu_seqlens_kv_padded.value().sizes().vec();
     std::vector<size_t> cu_seqlens_kv_padded_shape{cu_seqlens_kv_padded_sizes.begin(),
                                                    cu_seqlens_kv_padded_sizes.end()};
-    te_cu_seqlens_q_padded = makeTransformerEngineTensor(cu_seqlens_q_padded.value().data_ptr(),
-                                                         nvte_make_shape(cu_seqlens_q_padded_shape.data(), cu_seqlens_q_padded_shape.size()), DType::kInt32);
+    te_cu_seqlens_q_padded = makeTransformerEngineTensor(
+        cu_seqlens_q_padded.value().data_ptr(),
+        nvte_make_shape(cu_seqlens_q_padded_shape.data(), cu_seqlens_q_padded_shape.size()),
+        DType::kInt32);
     te_cu_seqlens_kv_padded = makeTransformerEngineTensor(
-        cu_seqlens_kv_padded.value().data_ptr(), nvte_make_shape(cu_seqlens_kv_padded_shape.data(), cu_seqlens_kv_padded_shape.size()), DType::kInt32);
+        cu_seqlens_kv_padded.value().data_ptr(),
+        nvte_make_shape(cu_seqlens_kv_padded_shape.data(), cu_seqlens_kv_padded_shape.size()),
+        DType::kInt32);
   }
 
   // convert auxiliary tensors from forward to NVTETensors

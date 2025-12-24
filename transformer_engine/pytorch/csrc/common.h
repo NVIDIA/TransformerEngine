@@ -141,13 +141,12 @@ class NoneQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
                                                      at::Tensor data) const;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
-                                                     DType dtype) const;
- 
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype) const;
+
   /*! @brief Construct a tensor with pre-initialized data */
   std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype,
-                                                    at::Tensor data) const;
-                                                      
+                                                     at::Tensor data) const;
+
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,

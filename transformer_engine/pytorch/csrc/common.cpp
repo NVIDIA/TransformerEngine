@@ -26,9 +26,7 @@ std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape
   return ret;
 }
 
-NVTEShape getTensorShape(const at::Tensor& t) {
-  return convertTorchShape(t.sizes());
-}
+NVTEShape getTensorShape(const at::Tensor& t) { return convertTorchShape(t.sizes()); }
 
 std::vector<size_t> getTensorShapeVector(const at::Tensor& t) {
   std::vector<size_t> shape;
