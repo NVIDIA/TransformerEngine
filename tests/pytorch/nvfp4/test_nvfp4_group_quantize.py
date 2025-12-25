@@ -198,7 +198,7 @@ def check_group_quantization_nvfp4_versus_reference(
 
         for i in range(len(x_qx)):
             if split_sections[i] == 0:
-                # then just assert the same same and dtype because the buffer won't be zero out
+                # then just assert the same shape and dtype because the buffer won't be zero out
                 assert_same_shape_and_dtype(x_amax_rowwise[i], x_amax_rowwise_ref[i])
                 assert_same_shape_and_dtype(x_qx[i], x_qx_ref[i])
                 assert_same_shape_and_dtype(x_sx[i], x_sx_ref[i])
@@ -221,7 +221,7 @@ def check_group_quantization_nvfp4_versus_reference(
         # assert with zero tolerance
         for i in range(len(x_qx_t)):
             if split_sections[i] == 0:
-                # then just assert the same same and dtype because the buffer won't be zero out
+                # then just assert the same shape and dtype because the buffer won't be zero out
                 assert_same_shape_and_dtype(x_amax_colwise[i], x_amax_colwise_ref[i])
                 assert_same_shape_and_dtype(x_qx_t[i], x_qx_t_ref[i])
                 assert_same_shape_and_dtype(x_sx_t[i], x_sx_t_ref[i])
@@ -247,6 +247,7 @@ def check_group_quantization_nvfp4_versus_reference(
         (1024, 256),
         # larger sizes
         (8192, 1024),
+        (16384, 8192),
         (16384, 16384),
     ],
 )

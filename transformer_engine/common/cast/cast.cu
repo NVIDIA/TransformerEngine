@@ -100,3 +100,18 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
   }
 }
+
+// Group quantize assumes contiguous inputs and outputs in memory allocation
+// TODO (zhongbo): find a better way to make it a more generalized API
+void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *outputs,
+                                         const size_t *split_sections, const size_t num_tensors,
+                                         const NVTEQuantizationConfig quant_config,
+                                         cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_nvfp4_quantize_with_amax);
+  using namespace transformer_engine;
+
+  constexpr bool IS_ACT = false;
+
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, outputs, split_sections,
+                                                              num_tensors, quant_config, stream);
+}

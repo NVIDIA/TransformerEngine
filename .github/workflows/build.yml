@@ -24,11 +24,14 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: recursive
+      - name: ccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: pip install --no-build-isolation . -v
+        run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: none
           MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
         run: python3 -c "import transformer_engine"
         working-directory: /
@@ -94,11 +97,15 @@ jobs:
         uses: actions/checkout@v3
         with:
           submodules: recursive
+      - name: ccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: pip install --no-build-isolation . -v
+        run: |
+          NVTE_CCACHE_BIN=sccache NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
         run: python3 tests/jax/test_sanity_import.py
   all:
@@ -140,7 +147,6 @@ jobs:
             pip install pybind11[global] einops onnxscript && \
             pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130
           '
-
       - name: 'Build'
         run: docker exec builder bash -c 'pip install --no-cache-dir --no-build-isolation . -v --no-deps'
         env:

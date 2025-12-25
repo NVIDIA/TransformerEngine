@@ -63,12 +63,6 @@ int main(int argc, char* argv[]) {
   return ret;
 }
 
-bool IsMulticastSupported(int device_id) {
-  int supported = 0;
-  CHECK_CU(cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, device_id));
-  return supported;
-}
-
 int GetDeviceComputeCapability(int device_id) {
   int major{};
   int minor{};
@@ -368,11 +362,6 @@ struct GemmAr : public CommGemmFixure {
                 cudaStream_t stream) override {
     nvte_gemm_all_reduce(ctx_, m, n, k, a, b, d, bias, pre_act_out, transa, transb, grad,
                          accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
-  }
-
-  void SetUp() override {
-    if (!IsMulticastSupported(rank_))
-      GTEST_SKIP() << "Multicast is not supported on device " << rank_;
   }
 };
 

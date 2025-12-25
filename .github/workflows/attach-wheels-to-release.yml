@@ -96,7 +96,7 @@ jobs:
 
       - name: Get Release with tag
         id: get_current_release
-        uses: joutvhu/get-release@v1
+        uses: joutvhu/get-release@9a8271732adc3299a22f8ad09b0a67eb3aa836ac
         if: ${{ github.event_name == 'workflow_dispatch' }}
         with:
           tag_name: ${{ inputs.release-version }}
