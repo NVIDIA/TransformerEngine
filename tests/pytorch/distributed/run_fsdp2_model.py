@@ -15,6 +15,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     MXFP8BlockScaling,
 )
+from transformer_engine.pytorch.optimizers.fused_adam import FusedAdam
 
 import torch
 import torch.distributed as dist
@@ -83,6 +84,10 @@ def _parse_args(argv=None, namespace=None):
         type=int,
         nargs="+",
         help='FSDP/HSDP sharding dimensions ("replicate", "shard")',
+    )
+    parser.add_argument(
+        "--adam", type=str, choices=["fused", "torch"], default="fused",
+        help="Optimizer type."
     )
     args = parser.parse_args(argv, namespace)
     if args.sharding_dims:
@@ -322,7 +327,10 @@ def _train(args):
         f"FSDP2 model in cuda, memory allocated: {torch.cuda.memory_allocated(device)/1e6} MB"
     )
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    if args.adam == "fused":
+        optimizer = FusedAdam(model.parameters(), lr=1e-3)
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     for iteration in range(args.iter):
         # Zero the parameter gradients

@@ -16,7 +16,7 @@ mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 NUM_PROCS: int = torch.cuda.device_count()
 
 
-def _run_test(fp_init, sharding_dims, recipe, layer_type):
+def _run_test(fp_init, sharding_dims, recipe, layer_type, optim_type="fused"):
     test_path = Path(__file__).parent.resolve() / "run_fsdp2_model.py"
     test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(test_path)]
 
@@ -31,6 +31,7 @@ def _run_test(fp_init, sharding_dims, recipe, layer_type):
         assert False
     test_cmd += ["--recipe", recipe]
     test_cmd += ["--layer-type", layer_type]
+    test_cmd += ["--adam", optim_type]
 
     result = subprocess.run(test_cmd, env=os.environ, check=True)
 
@@ -42,7 +43,8 @@ def _run_test(fp_init, sharding_dims, recipe, layer_type):
 @pytest.mark.parametrize("fp8_init", (False, True))
 @pytest.mark.parametrize("recipe", ("delayed_scaling", "current_scaling", "mx_fp8_block_scaling"))
 @pytest.mark.parametrize("layer_type", ("LayerNormLinear", "TransformerLayer"))
-def test_distributed(fp8_init, sharding_dims, recipe, layer_type):
+@pytest.mark.parametrize("optim_type", ("fused", "torch"))
+def test_distributed(fp8_init, sharding_dims, recipe, layer_type, optim_type):
 
     # Skip invalid configurations
     if torch.cuda.device_count() < 4:
@@ -53,7 +55,7 @@ def test_distributed(fp8_init, sharding_dims, recipe, layer_type):
     elif not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
-    _run_test(fp8_init, sharding_dims, recipe, layer_type)
+    _run_test(fp8_init, sharding_dims, recipe, layer_type, optim_type)
 
 
 def test_dummy() -> None:
