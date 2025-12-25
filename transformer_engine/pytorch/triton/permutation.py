@@ -165,7 +165,7 @@ def permute_with_mask_map(
         alloc((num_out_tokens,), dtype=probs.dtype, device="cuda") if probs is not None else None
     )
     permuted_scale = (
-        torch.empty((num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda")
+        alloc((num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda")
         if scale is not None
         else None
     )
