@@ -45,7 +45,6 @@ def _run_test(fp_init, sharding_dims, recipe, layer_type, optim_type="fused"):
 @pytest.mark.parametrize("layer_type", ("LayerNormLinear", "TransformerLayer"))
 @pytest.mark.parametrize("optim_type", ("fused", "torch"))
 def test_distributed(fp8_init, sharding_dims, recipe, layer_type, optim_type):
-
     # Skip invalid configurations
     if torch.cuda.device_count() < 4:
         pytest.skip("FSDP2 test requires at least 4 GPUs")
@@ -54,6 +53,10 @@ def test_distributed(fp8_init, sharding_dims, recipe, layer_type, optim_type):
         pytest.skip(reason_for_no_mxfp8)
     elif not fp8_available:
         pytest.skip(reason_for_no_fp8)
+
+    # Skip incompatible optimizer + recipe combinations
+    if optim_type == "fused" and recipe in ["mx_fp8_block_scaling"] and fp8_init:
+        pytest.skip("Fused Adam does not support FP8 with MX FP8 Block Scaling")
 
     _run_test(fp8_init, sharding_dims, recipe, layer_type, optim_type)
 

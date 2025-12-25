@@ -86,7 +86,7 @@ def _parse_args(argv=None, namespace=None):
         help='FSDP/HSDP sharding dimensions ("replicate", "shard")',
     )
     parser.add_argument(
-        "--adam", type=str, choices=["fused", "torch"], default="fused",
+        "--adam", type=str, choices=["fused", "torch"], default="torch",
         help="Optimizer type."
     )
     args = parser.parse_args(argv, namespace)
