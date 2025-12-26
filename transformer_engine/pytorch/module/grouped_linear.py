@@ -44,6 +44,7 @@ from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
 
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
@@ -143,7 +144,12 @@ class _GroupedLinear(torch.autograd.Function):
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
         if fp8 and not debug:
-            inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
+            if isinstance(inp_view, Float8BlockwiseQTensor):
+                inputmats = inp_view.split_scaling_aware_fp8_transpose(
+                    m_splits, input_quantizers
+                )
+            else:
+                inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
@@ -343,18 +349,28 @@ class _GroupedLinear(torch.autograd.Function):
                         # Unfused bias grad and multi-tensor quantize
                         for i in range(ctx.num_gemms):
                             grad_biases[i] = grad_output_mats[i].sum(dim=0)
+                        if isinstance(grad_output_view, Float8BlockwiseQTensor):
+                            grad_output = grad_output_view.split_scaling_aware_fp8_transpose(
+                                ctx.m_splits, ctx.grad_output_quantizers
+                            )
+                        else:
+                            grad_output = tex.split_quantize(
+                                grad_output_view,
+                                ctx.m_splits,
+                                ctx.grad_output_quantizers,
+                            )
+                else:
+                    # Multi-tensor quantize
+                    if isinstance(grad_output_view, Float8BlockwiseQTensor):
+                        grad_output = grad_output_view.split_scaling_aware_fp8_transpose(
+                            ctx.m_splits, ctx.grad_output_quantizers
+                        )
+                    else:
                         grad_output = tex.split_quantize(
                             grad_output_view,
                             ctx.m_splits,
                             ctx.grad_output_quantizers,
                         )
-                else:
-                    # Multi-tensor quantize
-                    grad_output = tex.split_quantize(
-                        grad_output_view,
-                        ctx.m_splits,
-                        ctx.grad_output_quantizers,
-                    )
             elif ctx.debug:
                 grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                 for i in range(ctx.num_gemms):
@@ -781,9 +797,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         """
         debug = self.is_debug_iter()
 
-        assert not isinstance(
-            inp, QuantizedTensorStorage
-        ), "GroupedLinear doesn't support input tensor in FP8."
+        if not isinstance(inp, Float8BlockwiseQTensor):
+            assert not isinstance(
+                inp, QuantizedTensorStorage
+            ), "GroupedLinear doesn't support input tensor in FP8."
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
 
         is_grad_enabled = torch.is_grad_enabled()
