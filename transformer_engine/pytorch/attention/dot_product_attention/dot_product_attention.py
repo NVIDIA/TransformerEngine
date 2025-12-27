@@ -482,6 +482,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         self.register_load_state_dict_post_hook(remove_extra_states_check)
 
+        self._default_setattr = self._warning_setattr
+
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):
@@ -1000,7 +1002,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             cases. It is ignored for other backends and when context parallelism is enabled.
         """
 
-        with self.prepare_forward(
+        with self.prepare_forward_ctx(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
