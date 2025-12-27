@@ -62,11 +62,16 @@ class DebugQuantizer(Quantizer):
         self.tp_group = tp_group  # used in inspect_tensor calls
         self.iteration = TEDebugState.get_iteration()
 
-        # .internal = True is slightly faster, but results
-        # in errors when caching the weights.
-        # Setting .internal = False is safer.
+        # Configure parent quantizer
         if parent_quantizer is not None:
+            # .internal = True is slightly faster, but results
+            # in errors when caching the weights.
+            # Setting .internal = False is safer.
             parent_quantizer.internal = False
+
+            # .optimize_for_gemm = True is not supported because debug
+            # quantizers perform non-GEMM operations.
+            parent_quantizer.optimize_for_gemm = False
 
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 

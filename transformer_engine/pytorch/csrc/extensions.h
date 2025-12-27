@@ -7,7 +7,12 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <map>
 #include <optional>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "common.h"
 
@@ -77,11 +82,6 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
     float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
     int64_t window_size_right, bool return_max_logit, bool cuda_graph);
-
-std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
-                                                      const std::vector<size_t> &shape, DType dtype,
-                                                      bool create_hp_tensor_for_cs,
-                                                      std::optional<at::Tensor> data);
 
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
@@ -474,6 +474,13 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
 void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
                                std::vector<size_t> input_row_list,
                                std::vector<size_t> unpadded_input_row_list);
+
+/***************************************************************************************************
+ * Scale swizzling for GEMM
+ **************************************************************************************************/
+
+void inplace_swizzle_scale_for_gemm(py::handle &tensor);
+
 /***************************************************************************************************
  * NVSHMEM APIs
  **************************************************************************************************/
