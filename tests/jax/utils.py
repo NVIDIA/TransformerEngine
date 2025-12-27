@@ -47,6 +47,13 @@ def is_devices_enough(required):
     return len(jax.devices()) >= required
 
 
+def is_devices_equal(required):
+    """
+    Check if the available GPUs is exactly equal
+    """
+    return len(jax.devices()) == required
+
+
 def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[int]:
     # Generate broadcast dims for drop_path.
     drop_path_shape = list(range(0, len(shape)))
