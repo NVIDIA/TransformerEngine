@@ -34,7 +34,7 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
         input_row_list[tensor_id] * input.size(1) * input.element_size();
     input_char_ptr += input_dptr_offset;
     d_input_ptr = reinterpret_cast<void*>(input_char_ptr);
-
+    NVTEShape input_shape = {input_row_list[tensor_id], static_cast<size_t>(input.size(1))};
     input_shape_list.push_back({input_row_list[tensor_id], static_cast<size_t>(input.size(1))});
     input_type_list.push_back(GetTransformerEngineDType(input.scalar_type()));
 

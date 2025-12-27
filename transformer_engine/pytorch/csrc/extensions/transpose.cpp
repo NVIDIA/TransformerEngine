@@ -19,7 +19,8 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
   init_extension();
 
   // Tensor dimensions
-  const auto shape = getTensorShape(input);
+  const auto shape_nvte = getTensorShape(input);
+  const auto shape = convertShape(shape_nvte);
   std::vector<int64_t> transpose_shape_int64;
   if (shape.size() > 0) {
     transpose_shape_int64.push_back(shape.back());
@@ -60,7 +61,8 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
 
   // Allocate output tensor if needed
   if (!out) {
-    auto in_shape = getTensorShape(input);
+    const auto in_shape_nvte = getTensorShape(input);
+    const auto in_shape = convertShape(in_shape_nvte);
     NVTE_CHECK(in_shape.size() >= 2, "Invalid input tensor dimensions (shape=", in_shape, ")");
     std::vector<int64_t> out_shape_int64(in_shape.begin(), in_shape.end());
     out_shape_int64[0] = static_cast<int64_t>(in_shape[1]);

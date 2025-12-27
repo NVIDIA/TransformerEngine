@@ -26,7 +26,9 @@ std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape
   return ret;
 }
 
-std::vector<size_t> getTensorShape(const at::Tensor& t) {
+NVTEShape getTensorShape(const at::Tensor& t) { return convertTorchShape(t.sizes()); }
+
+std::vector<size_t> getTensorShapeVector(const at::Tensor& t) {
   std::vector<size_t> shape;
   for (auto s : t.sizes()) {
     shape.push_back(s);
@@ -34,7 +36,7 @@ std::vector<size_t> getTensorShape(const at::Tensor& t) {
   return shape;
 }
 
-NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
+NVTEShape convertTorchShape(const c10::IntArrayRef& torch_shape) {
   NVTEShape ret;
   ret.ndim = torch_shape.size();
   constexpr int max_dimensions = sizeof(ret.data) / sizeof(size_t);
@@ -119,10 +121,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor) {
   transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
-  std::vector<size_t> shape;
-  for (auto s : tensor.sizes()) {
-    shape.push_back(s);
-  }
+  NVTEShape shape = getTensorShape(tensor);
   return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
 }
 
@@ -179,6 +178,41 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 }
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, const NVTEShape& shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
+    NVTEScalingMode scaling_mode) {
+  TensorWrapper ret(scaling_mode);
+  ret.set_rowwise_data(data_ptr, type, shape);
+  const size_t meta_shape_data[1] = {1};
+  NVTEShape meta_shape;
+  meta_shape.ndim = 1;
+  meta_shape.data[0] = 1;
+  ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
+  ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
+  auto scale_inv_dtype =
+      (scaling_mode == NVTE_MXFP8_1D_SCALING) ? DType::kFloat8E8M0 : DType::kFloat32;
+  ret.set_rowwise_scale_inv(scale_inv_ptr, scale_inv_dtype, scale_inv_shape);
+  return ret;
+}
+
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
+    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
+    NVTEScalingMode scaling_mode) {
+  TensorWrapper ret(scaling_mode);
+  ret.set_rowwise_data(data_ptr, type, shape);
+  NVTEShape meta_shape;
+  meta_shape.ndim = 1;
+  meta_shape.data[0] = 1;
+  ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
+  ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
+  auto scale_inv_dtype =
+      (scaling_mode == NVTE_MXFP8_1D_SCALING) ? DType::kFloat8E8M0 : DType::kFloat32;
+  ret.set_rowwise_scale_inv(scale_inv_ptr, scale_inv_dtype, scale_inv_shape);
+  return ret;
+}
+
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, void* columnwise_data_ptr, const std::vector<size_t>& shape,
     const std::vector<size_t>& columnwise_shape, const transformer_engine::DType type,
     void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
@@ -188,6 +222,29 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   ret.set_rowwise_data(data_ptr, type, shape);
   ret.set_columnwise_data(columnwise_data_ptr, type, columnwise_shape);
   const std::vector<size_t> meta_shape{1};
+  ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
+  ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
+  auto scale_inv_dtype = (scaling_mode == NVTE_MXFP8_1D_SCALING)   ? DType::kFloat8E8M0
+                         : (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat8E4M3
+                                                                   : DType::kFloat32;
+  ret.set_rowwise_scale_inv(scale_inv_ptr, scale_inv_dtype, scale_inv_shape);
+  ret.set_columnwise_scale_inv(columnwise_scale_inv_ptr, scale_inv_dtype,
+                               columnwise_scale_inv_shape);
+  return ret;
+}
+
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, void* columnwise_data_ptr, const NVTEShape& shape,
+    const NVTEShape& columnwise_shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
+    const NVTEShape& scale_inv_shape, const NVTEShape& columnwise_scale_inv_shape,
+    NVTEScalingMode scaling_mode) {
+  TensorWrapper ret(scaling_mode);
+  ret.set_rowwise_data(data_ptr, type, shape);
+  ret.set_columnwise_data(columnwise_data_ptr, type, columnwise_shape);
+  NVTEShape meta_shape;
+  meta_shape.ndim = 1;
+  meta_shape.data[0] = 1;
   ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
   ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
   auto scale_inv_dtype = (scaling_mode == NVTE_MXFP8_1D_SCALING)   ? DType::kFloat8E8M0
