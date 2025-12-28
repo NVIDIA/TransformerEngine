@@ -61,8 +61,7 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
 
   // Allocate output tensor if needed
   if (!out) {
-    const auto in_shape_nvte = getTensorShape(input);
-    const auto in_shape = convertShape(in_shape_nvte);
+    const auto in_shape = getTensorShapeVector(input);
     NVTE_CHECK(in_shape.size() >= 2, "Invalid input tensor dimensions (shape=", in_shape, ")");
     std::vector<int64_t> out_shape_int64(in_shape.begin(), in_shape.end());
     out_shape_int64[0] = static_cast<int64_t>(in_shape[1]);

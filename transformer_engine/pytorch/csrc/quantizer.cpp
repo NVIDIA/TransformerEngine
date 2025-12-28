@@ -135,12 +135,19 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   at::Tensor scale_inv = at::empty(std::vector<int64_t>{1}, opts);
   return create_tensor(shape, dtype, std::nullopt, std::nullopt, std::move(scale_inv));
 }
+std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
+    const NVTEShape& shape, DType dtype) const {
+      std::vector<size_t> shape_vec;
+      for (size_t i = 0; i < shape.ndim; ++i) {
+        shape_vec.push_back(shape.data[i]);
+      }
+      return create_tensor(shape_vec, dtype);
+}
 
 std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data,
     std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv) const {
   using namespace pybind11::literals;
-
   int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
   // Initialize data tensor
   const bool with_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
@@ -205,8 +212,9 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
 std::pair<TensorWrapper, py::object> Float8Quantizer::convert_and_update_tensor(
     py::object tensor) const {
   NVTE_CHECK(detail::IsFloat8Tensor(tensor.ptr()), "Float8Quantizer must output to Float8Tensor.");
-  int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
+
   // Expected buffers
+  int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
   const bool need_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
   const bool need_transpose = columnwise_usage && !is_non_tn_fp8_gemm_supported;
   NVTE_CHECK(need_data || need_transpose, "Invalid usages for Float8Quantizer.");
@@ -341,7 +349,14 @@ void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tenso
   tensor->set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
                    getTensorShape(amax));
 }
-
+std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
+    const NVTEShape& shape, DType dtype) const {
+      std::vector<size_t> shape_vec;
+      for (size_t i = 0; i < shape.ndim; ++i) {
+        shape_vec.push_back(shape.data[i]);
+      }
+      return create_tensor(shape_vec, dtype);
+}
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype) const {
   using namespace pybind11::literals;
@@ -427,8 +442,9 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::convert_and_
     py::object tensor) const {
   NVTE_CHECK(detail::IsFloat8Tensor(tensor.ptr()),
              "Float8CurrentScalingQuantizer must output to Float8Tensor.");
-  int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
+
   // Expected buffers
+  int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
   const bool need_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
   const bool need_transpose = columnwise_usage && !is_non_tn_fp8_gemm_supported;
   NVTE_CHECK(need_data || need_transpose, "Invalid quantizer usages.");
@@ -580,6 +596,15 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
 }
 
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
+
+std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
+    const NVTEShape& shape, DType dtype) const {
+      std::vector<size_t> shape_vec;
+      for (size_t i = 0; i < shape.ndim; ++i) {
+        shape_vec.push_back(shape.data[i]);
+      }
+      return create_tensor(shape_vec, dtype);
+}
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype) const {
@@ -923,6 +948,15 @@ MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantize
 
 void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
+std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
+    const NVTEShape& shape, DType dtype) const {
+      std::vector<size_t> shape_vec;
+      for (size_t i = 0; i < shape.ndim; ++i) {
+        shape_vec.push_back(shape.data[i]);
+      }
+      return create_tensor(shape_vec, dtype);
+}
+
 std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::vector<size_t>& shape,
                                                                    DType dtype) const {
   using namespace pybind11::literals;
@@ -1189,7 +1223,14 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
   tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
                               columnwise_data.shape);
 }
-
+std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
+    const NVTEShape& shape, DType dtype) const {
+      std::vector<size_t> shape_vec;
+      for (size_t i = 0; i < shape.ndim; ++i) {
+        shape_vec.push_back(shape.data[i]);
+      }
+      return create_tensor(shape_vec, dtype);
+}
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::vector<size_t>& shape,
                                                                    DType dtype) const {
   using namespace pybind11::literals;

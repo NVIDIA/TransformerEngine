@@ -82,7 +82,7 @@ bool checkGemmShape(const NVTEShape& expected, const NVTEShape& actual) {
 
 }  // namespace detail
 
-std::pair<TensorWrapper, py::object> createOutputTensor(const std::vector<size_t>& shape,
+std::pair<TensorWrapper, py::object> createOutputTensor(const NVTEShape& shape,
                                                         DType dtype, py::handle quantizer) {
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
   return my_quantizer->create_tensor(shape, dtype);
@@ -119,7 +119,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
   const auto& B_shape = B_tensor.shape();
-  const NVTEShape D_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
+  const auto& D_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
   NVTE_CHECK(A_shape.ndim >= 1, "Tensor A needs to have at least 1 dimension");
   NVTE_CHECK(B_shape.ndim >= 1, "Tensor B needs to have at least 1 dimension");
 
@@ -140,7 +140,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // Output tensor
   TensorWrapper D_tensor;
   if (D.is_none()) {
-    std::tie(D_tensor, D) = createOutputTensor(convertShape(D_shape), output_dtype, quantizer);
+    std::tie(D_tensor, D) = createOutputTensor(D_shape, output_dtype, quantizer);
   } else {
     D_tensor = makeTransformerEngineTensor(D, quantizer);
     NVTE_CHECK(detail::checkGemmShape(D_shape, D_tensor.shape()),
@@ -171,7 +171,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   if (unfused_quantization_needed) {
     NoneQuantizer q{none};
     std::tie(unquantized_D_tensor, unquantized_out) =
-        q.create_tensor(convertShape(D_shape), output_dtype);
+        q.create_tensor(D_shape, output_dtype);
   }
   TensorWrapper& out_tensor = unfused_quantization_needed ? unquantized_D_tensor : D_tensor;
 

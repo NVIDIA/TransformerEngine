@@ -102,7 +102,8 @@ class Quantizer {
   /*! @brief Construct a tensor with uninitialized data */
   virtual std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                              DType dtype) const = 0;
-
+  virtual std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
+                                                             DType dtype) const = 0;
   /*! @brief Convert a PyTorch tensor into a Transformer Engine C++ tensor
    *
    * The PyTorch tensor's attributes are modified to match the
@@ -141,7 +142,7 @@ class NoneQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
                                                      at::Tensor data) const;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype) const;
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype) const override;
 
   /*! @brief Construct a tensor with pre-initialized data */
   std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype,
@@ -168,7 +169,8 @@ class Float8Quantizer : public Quantizer {
 
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
-
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
+                                                     DType dtype) const override;
   /*! @brief Construct a tensor with pre-initialized data */
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
                                                      std::optional<at::Tensor> data,
@@ -200,7 +202,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
-
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
+                                                     DType dtype) const override;
   /*! @brief Construct an unquantized tensor that shares the quantizer's amax pointer.
    *
    * The amax is zeroed out. Most TE kernels that output amax expect
@@ -259,6 +262,8 @@ class Float8BlockQuantizer : public Quantizer {
   // and optionally columnwise usage.
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
+                                                     DType dtype) const override;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
@@ -279,6 +284,8 @@ class MXFP8Quantizer : public Quantizer {
   void set_quantization_params(TensorWrapper* tensor) const override;
 
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
                                                      DType dtype) const override;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
@@ -314,7 +321,8 @@ class NVFP4Quantizer : public Quantizer {
 
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
-
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
+                                                     DType dtype) const override;
   /*! @brief Construct an unquantized tensor that shares NVFP4 tensor's amax pointer
    *
    * The amax is zeroed out. Most TE kernels that output amax expect
