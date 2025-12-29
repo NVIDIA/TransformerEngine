@@ -18,6 +18,31 @@ import sysconfig
 from typing import Optional, Tuple
 
 
+def skip_cuda_build() -> bool:
+    """Check if CUDA build was skipped (FL-only mode).
+
+    First checks environment variable (for runtime override),
+    then falls back to build-time configuration.
+    """
+    # Environment variable takes precedence (allows runtime override)
+    if os.environ.get("TE_FL_SKIP_CUDA"):
+        return bool(int(os.environ.get("TE_FL_SKIP_CUDA", "0")))
+
+    # Fall back to build-time configuration
+    try:
+        from transformer_engine.plugin.core._build_config import SKIP_CUDA_BUILD
+        return SKIP_CUDA_BUILD
+    except ImportError:
+        # If build config doesn't exist, default to False
+        return False
+
+# Load plugin system - this handles module registration and backend initialization
+# The _module_setup inside core will:
+# 1. Register modules under both full and short names for relative imports
+# 2. Load all available backends (flagos, reference, vendor/cuda, etc.)
+# 3. Register transformer_engine_torch module from the selected backend
+import transformer_engine.plugin.core  # noqa: F401
+
 @functools.lru_cache(maxsize=None)
 def _is_package_installed(package) -> bool:
     """Check if the given package is installed via pip."""
@@ -146,46 +171,36 @@ def get_te_core_package_info() -> Tuple[bool, str, str]:
 @functools.lru_cache(maxsize=None)
 def load_framework_extension(framework: str) -> None:
     """
-    Load shared library with Transformer Engine framework bindings
-    and check verify correctness if installed via PyPI.
+    Load shared library with Transformer Engine framework bindings.
+
+    For PyTorch: The native module is now named transformer_engine_torch_nv,
+    and transformer_engine_torch is provided by the plugin system.
+    This function is kept for backward compatibility but does nothing for torch.
     """
+
+    # Skip loading native extensions if CUDA build was skipped (FL-only mode)
+    if skip_cuda_build():
+        return
 
     # Supported frameworks.
     assert framework in ("jax", "torch"), f"Unsupported framework {framework}"
 
-    # Name of the framework extension library.
+    # For torch: plugin system already handles transformer_engine_torch
+    # The native module is transformer_engine_torch_nv (imported by NVIDIA backend)
+    if framework == "torch":
+        return  # Nothing to do, plugin system handles this
+
+    # For jax: load the native module as before
     module_name = f"transformer_engine_{framework}"
 
-    # Name of the pip extra dependency for framework extensions from PyPI.
-    extra_dep_name = module_name
-    if framework == "torch":
-        extra_dep_name = "pytorch"
+    # Skip if already loaded
+    if module_name in sys.modules:
+        return
 
-    # Find the TE packages. The core and framework packages can only be installed via PyPI.
-    # For the `transformer-engine` package, we need to check explicity.
-    te_core_installed, te_core_package_name, te_core_version = get_te_core_package_info()
-    te_framework_installed = _is_package_installed(module_name)
     te_installed = _is_package_installed("transformer_engine")
-    te_installed_via_pypi = _is_package_installed_from_wheel("transformer_engine")
-
     assert te_installed, "Could not find `transformer_engine`."
 
-    # If the framework extension pip package is installed, it means that TE is installed via
-    # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
-    # extension are all installed via PyPI and have matching versions.
-    if te_framework_installed:
-        assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
-        assert te_core_installed, "Could not find TE core package `transformer-engine-cu*`."
-
-        assert version(module_name) == version("transformer-engine") == te_core_version, (
-            "Transformer Engine package version mismatch. Found"
-            f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and {te_core_package_name}"
-            f" v{te_core_version}. Install transformer-engine using "
-            f"'pip3 install --no-build-isolation transformer-engine[{extra_dep_name}]==VERSION'"
-        )
-
-    # After all checks are completed, load the shared object file.
+    # Load the shared object file for jax
     spec = importlib.util.spec_from_file_location(module_name, _get_shared_object_file(framework))
     solib = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = solib
@@ -194,6 +209,10 @@ def load_framework_extension(framework: str) -> None:
 
 def sanity_checks_for_pypi_installation() -> None:
     """Ensure that package is installed correctly if using PyPI."""
+
+    # Skip sanity checks if CUDA build was skipped (FL-only mode)
+    if skip_cuda_build():
+        return
 
     te_core_installed, te_core_package_name, te_core_version = get_te_core_package_info()
     te_installed = _is_package_installed("transformer_engine")
@@ -390,13 +409,16 @@ def _load_core_library():
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
     sanity_checks_for_pypi_installation()
-    _CUDNN_LIB_CTYPES = _load_cudnn()
-    _NVRTC_LIB_CTYPES = _load_nvrtc()
-    _CURAND_LIB_CTYPES = _load_curand()
-    _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cublas")
-    _CUDART_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
-    _TE_LIB_CTYPES = _load_core_library()
 
-    # Needed to find the correct headers for NVRTC kernels.
-    if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and _nvidia_cudart_include_dir():
-        os.environ["NVTE_CUDA_INCLUDE_DIR"] = _nvidia_cudart_include_dir()
+    # Skip loading CUDA libraries if CUDA build was skipped (FL-only mode)
+    if not skip_cuda_build():
+        _CUDNN_LIB_CTYPES = _load_cudnn()
+        _NVRTC_LIB_CTYPES = _load_nvrtc()
+        _CURAND_LIB_CTYPES = _load_curand()
+        _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cublas")
+        _CUDART_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
+        _TE_LIB_CTYPES = _load_core_library()
+
+        # Needed to find the correct headers for NVRTC kernels.
+        if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and _nvidia_cudart_include_dir():
+            os.environ["NVTE_CUDA_INCLUDE_DIR"] = _nvidia_cudart_include_dir()

@@ -252,7 +252,15 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
 
 @functools.lru_cache(maxsize=None)
+def skip_cuda_build() -> bool:
+    """Check if CUDA build should be skipped (for AMD/ROCm or pure FL backend)"""
+    return bool(int(os.getenv("TE_FL_SKIP_CUDA", "0")))
+
+
+@functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
+    if skip_cuda_build():
+        return ""  # Return empty string when skipping CUDA build
     archs = os.getenv("NVTE_CUDA_ARCHS")
     if archs is None:
         version = cuda_version()

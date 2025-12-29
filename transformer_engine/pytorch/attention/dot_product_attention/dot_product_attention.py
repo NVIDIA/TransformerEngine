@@ -58,10 +58,13 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
     UnfusedDotProductAttention,
     FusedAttention,
-    FlashAttention,
+    FlashAttention
 )
 
-from transformer_engine.plugins.backend import backend
+# Save reference to native FlashAttention for fallback
+_FlashAttentionNative = FlashAttention
+# Use plugin system's flash_attention if available, otherwise use native
+FlashAttention = getattr(tex, 'flash_attention', _FlashAttentionNative)
 
 # Setup Attention Logging
 attn_log.setup_logging()
@@ -1390,8 +1393,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
-                return backend.flash_attention(
-                    self.flash_attention,
+                return self.flash_attention(
                     query_layer,
                     key_layer,
                     value_layer,

@@ -26,7 +26,6 @@ from ...utils import (
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, maybe_dequantize
 
-from transformer_engine.plugins.backend import backend
 
 
 class RMSNorm(BasicOperation):
@@ -186,7 +185,7 @@ class RMSNorm(BasicOperation):
 
         # Compute RMSNorm
         sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
-        y, _, rstdevs = backend.rmsnorm_fwd(
+        y, _, rstdevs = rmsnorm_fwd(
             x,
             w,
             self.eps,
@@ -226,7 +225,7 @@ class RMSNorm(BasicOperation):
         dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
-        dx, dw = backend.rmsnorm_bwd(
+        dx, dw = rmsnorm_bwd(
             dy,
             x,
             rstdevs,

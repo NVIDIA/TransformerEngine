@@ -28,6 +28,9 @@ current_file_path = Path(__file__).parent.resolve()
 
 
 from setuptools.command.build_ext import build_ext as BuildExtension
+from setuptools.command.install import install as InstallCommand
+from datetime import datetime
+import platform
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
@@ -39,6 +42,63 @@ elif "jax" in frameworks:
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
 archs = cuda_archs()
+
+
+def generate_build_config(skip_cuda_build):
+    """Generate build-time configuration file."""
+    config_template_path = (
+        current_file_path / "transformer_engine" / "plugin" /
+        "core" / "_build_config.py.template"
+    )
+    config_output_path = (
+        current_file_path / "transformer_engine" / "plugin" /
+        "core" / "_build_config.py"
+    )
+
+    if config_template_path.exists():
+        with open(config_template_path, 'r') as f:
+            template = f.read()
+
+        config_content = template.format(
+            skip_cuda=skip_cuda_build,
+            build_time=datetime.now().isoformat(),
+            platform=platform.platform(),
+        )
+
+        with open(config_output_path, 'w') as f:
+            f.write(config_content)
+
+        print(f"Generated build config: {config_output_path}")
+        print(f"  SKIP_CUDA_BUILD = {skip_cuda_build}")
+    else:
+        # Fallback: create minimal config if template doesn't exist
+        config_content = f"""# Auto-generated build configuration
+SKIP_CUDA_BUILD = {skip_cuda_build}
+BUILD_TIME = "{datetime.now().isoformat()}"
+BUILD_PLATFORM = "{platform.platform()}"
+"""
+        with open(config_output_path, 'w') as f:
+            f.write(config_content)
+        print(f"Generated minimal build config: {config_output_path}")
+
+
+class CustomInstall(InstallCommand):
+    """Custom install command to generate build config."""
+
+    user_options = InstallCommand.user_options + [
+        ('skip-cuda-build', None, 'Skip CUDA build'),
+    ]
+
+    def initialize_options(self):
+        super().initialize_options()
+        self.skip_cuda_build = bool(int(os.getenv("TE_FL_SKIP_CUDA", "0")))
+
+    def run(self):
+        # Run the standard install
+        super().run()
+
+        # Generate build config after installation
+        generate_build_config(self.skip_cuda_build)
 
 
 class TimedBdist(bdist_wheel):
@@ -132,6 +192,14 @@ if __name__ == "__main__":
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
 
+    # Check if we should skip CUDA build (for AMD/ROCm or pure FL backend usage)
+    skip_cuda_build = bool(int(os.getenv("TE_FL_SKIP_CUDA", "0")))
+    if skip_cuda_build:
+        print("=" * 60)
+        print("TE_FL_SKIP_CUDA=1: Skipping CUDA/native backend compilation")
+        print("Only FL (Flag-Gems/Triton) backend will be available")
+        print("=" * 60)
+
     # Settings for building top level empty package for dependency management.
     if bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
         assert bool(
@@ -148,6 +216,13 @@ if __name__ == "__main__":
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         }
+    elif skip_cuda_build:
+        # Skip CUDA build - only install Python packages for FL backend
+        install_requires, test_requires = setup_requirements()
+        ext_modules = []  # No CUDA extensions
+        package_data = {"": ["VERSION.txt"]}
+        include_package_data = True
+        extras_require = {"test": test_requires}
     else:
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
@@ -177,6 +252,9 @@ if __name__ == "__main__":
                     )
                 )
 
+    # Generate build config before setup
+    generate_build_config(skip_cuda_build)
+
     # Configure package
     setuptools.setup(
         name="transformer_engine",
@@ -193,7 +271,11 @@ if __name__ == "__main__":
         long_description=long_description,
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
-        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
+        cmdclass={
+            "build_ext": CMakeBuildExtension,
+            "bdist_wheel": TimedBdist,
+            "install": CustomInstall,
+        },
         python_requires=f">={min_python_version_str()}",
         classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,
