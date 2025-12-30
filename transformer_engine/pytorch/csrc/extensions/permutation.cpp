@@ -60,18 +60,25 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
       {num_tokens * topK}, torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-
+  NVTEShape input_shape, permuted_output_shape, sorted_row_id_cu_shape;
+  input_shape.ndim = 2;
+  permuted_output_shape.ndim = 2;
+  sorted_row_id_cu_shape.ndim = 1;
+  input_shape.data[0] = static_cast<size_t>(input.size(0));
+  input_shape.data[1] = static_cast<size_t>(input.size(1));
+  permuted_output_shape.data[0] = static_cast<size_t>(permuted_output.size(0));
+  permuted_output_shape.data[1] = static_cast<size_t>(permuted_output.size(1));
+  sorted_row_id_cu_shape.data[0] = static_cast<size_t>(num_tokens * topK);
   auto input_cu = makeTransformerEngineTensor(
       input.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(input.size(0)), static_cast<size_t>(num_cols)},
+      input_shape,
       dtype);
   auto permuted_output_cu =
       makeTransformerEngineTensor(permuted_output.data_ptr(),
-                                  std::vector<size_t>{static_cast<size_t>(permuted_output.size(0)),
-                                                      static_cast<size_t>(num_cols)},
+                                  permuted_output_shape,
                                   dtype);
   auto sorted_row_id_cu = makeTransformerEngineTensor(
-      sorted_row_id_ptr, std::vector<size_t>{static_cast<size_t>(num_tokens * topK)},
+      sorted_row_id_ptr, sorted_row_id_cu_shape,
       DType::kInt32);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
 
@@ -97,15 +104,20 @@ at::Tensor moe_unpermute_fwd(at::Tensor input, const DType dtype, at::Tensor row
                    torch::dtype(input.scalar_type()).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-
+  NVTEShape input_shape, unpermuted_output_shape;
+  input_shape.ndim = 2;
+  unpermuted_output_shape.ndim = 2;
+  input_shape.data[0] = static_cast<size_t>(input.size(0));
+  input_shape.data[1] = static_cast<size_t>(input.size(1));
+  unpermuted_output_shape.data[0] = static_cast<size_t>(unpermuted_output.size(0));
+  unpermuted_output_shape.data[1] = static_cast<size_t>(num_cols);
   auto input_cu = makeTransformerEngineTensor(
       input.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(input.size(0)), static_cast<size_t>(num_cols)},
+      input_shape,
       dtype);
   auto unpermuted_output_cu = makeTransformerEngineTensor(
       unpermuted_output.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(unpermuted_output.size(0)),
-                          static_cast<size_t>(num_cols)},
+      unpermuted_output_shape,
       dtype);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
   auto prob_cu = makeTransformerEngineTensor(prob);
@@ -131,18 +143,27 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
       {num_tokens, topK}, torch::dtype(torch::kFloat32).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-
+  NVTEShape input_bwd_shape, act_grad_shape, input_fwd_shape;
+  input_bwd_shape.ndim = 2;
+  act_grad_shape.ndim = 2;
+  input_fwd_shape.ndim = 2;
+  input_bwd_shape.data[0] = static_cast<size_t>(input_bwd.size(0));
+  input_bwd_shape.data[1] = static_cast<size_t>(num_cols);
+  act_grad_shape.data[0] = static_cast<size_t>(act_grad.size(0));
+  act_grad_shape.data[1] = static_cast<size_t>(num_cols);
+  input_fwd_shape.data[0] = static_cast<size_t>(input_fwd.size(0));
+  input_fwd_shape.data[1] = static_cast<size_t>(num_cols);
   auto input_bwd_cu = makeTransformerEngineTensor(
       input_bwd.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(input_bwd.size(0)), static_cast<size_t>(num_cols)},
+      input_bwd_shape,
       dtype);
   auto act_grad_cu = makeTransformerEngineTensor(
       act_grad.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(act_grad.size(0)), static_cast<size_t>(num_cols)},
+      act_grad_shape,
       dtype);
   auto input_fwd_cu = makeTransformerEngineTensor(
       input_fwd.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(input_fwd.size(0)), static_cast<size_t>(num_cols)},
+      input_fwd_shape,
       dtype);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
   auto prob_cu = makeTransformerEngineTensor(prob);

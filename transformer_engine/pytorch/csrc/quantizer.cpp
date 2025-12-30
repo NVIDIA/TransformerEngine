@@ -869,12 +869,24 @@ void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& o
 
 std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size_t>& shape,
                                                           bool columnwise) const {
+  return get_scale_shape_impl(shape, columnwise);
+}
+
+NVTEShapeWrapper Float8BlockQuantizer::get_scale_shape(const NVTEShapeWrapper& shape,
+                                                        bool columnwise) const {
+  return get_scale_shape_impl(shape, columnwise);
+}
+
+template <typename ShapeT>
+ShapeT Float8BlockQuantizer::get_scale_shape_impl(const ShapeT& shape, bool columnwise) const {
   size_t numel = 1;
+  size_t k_dim;
+
   for (auto s : shape) {
     numel *= s;
   }
+  k_dim = shape.size() == 0 ? 1u : shape.back();
 
-  size_t k_dim = shape.size() == 0 ? 1u : shape.back();
   size_t m_dim = numel / k_dim;
   constexpr size_t kBlockLen = 128;
 
@@ -882,27 +894,20 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
       (all_gather_usage ? Float8BlockScaleTensorFormat::COMPACT
                         : Float8BlockScaleTensorFormat::GEMM_READY);
 
-  std::vector<size_t> scale_shape;
-
+  size_t sinv0 = 0;
+  size_t sinv1 = 0;
   bool rowwise_usage = !columnwise;
 
   if (rowwise_usage) {
-    // rowwise scaling factor shape
-    size_t sinv0 = 0;
-    size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
-      // 2D scaling is always GEMM_READY for now
       NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
                  "2D scaling is always GEMM_READY for now.");
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = roundup((k_dim + kBlockLen - 1) / kBlockLen, 4);
     } else if (block_scaling_dim == 1) {
-      // 1D scaling can be GEMM_READY or COMPACT
       bool rowwise_compact = data_format == Float8BlockScaleTensorFormat::COMPACT;
-      // default rowwise scaling factor shape already transpose the scaling factor so it's GEMM_READY
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = rowwise_compact ? m_dim : roundup(m_dim, 4);
-      // if the rowwise format is compact, the scaling factor is not be transposed
       if (rowwise_compact) {
         std::swap(sinv0, sinv1);
       }
@@ -912,13 +917,8 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
                  "Expected 1 or 2. Got ",
                  block_scaling_dim);
     }
-    scale_shape = {sinv0, sinv1};
   } else {
-    // columnwise scaling factor shape
-    size_t sinv0 = 0;
-    size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
-      // 2D scaling is always GEMM_READY for now
       NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
                  "2D scaling is always GEMM_READY for now.");
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
@@ -937,9 +937,12 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
                  "Expected 1 or 2. Got ",
                  block_scaling_dim);
     }
-    scale_shape = {sinv0, sinv1};
   }
-  return scale_shape;
+  ShapeT result;
+  result.resize(2);
+  result[0] = sinv0;
+  result[1] = sinv1;
+  return result;
 }
 
 MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
@@ -1159,33 +1162,45 @@ void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
 
 std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& shape,
                                                     bool columnwise) const {
+  return get_scale_shape_impl(shape, columnwise);
+}
+
+NVTEShapeWrapper MXFP8Quantizer::get_scale_shape(const NVTEShapeWrapper& shape,
+                                                  bool columnwise) const {
+  return get_scale_shape_impl(shape, columnwise);
+}
+
+template <typename ShapeT>
+ShapeT MXFP8Quantizer::get_scale_shape_impl(const ShapeT& shape, bool columnwise) const {
   size_t numel = 1;
+  size_t last_dim;
+
   for (auto s : shape) {
     numel *= s;
   }
-
-  auto last_dim = shape.back();
+  last_dim = shape.back();
 
   NVTE_CHECK(last_dim % MXFP8_BLOCK_SIZE == 0 && (numel / last_dim) % MXFP8_BLOCK_SIZE == 0,
              "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
              " (got shape=", shape, ")");
 
-  std::vector<size_t> scale_shape;
-
+  size_t sinv0 = 0;
+  size_t sinv1 = 0;
   bool rowwise_usage = !columnwise;
 
   if (rowwise_usage) {
-    // rowwise scaling factor shape
-    size_t sinv0 = roundup(numel / last_dim, 128);
-    size_t sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4);
-    scale_shape = {sinv0, sinv1};
+    sinv0 = roundup(numel / last_dim, 128);
+    sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4);
   } else {
-    // columnwise scaling factor shape
-    size_t sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4);
-    size_t sinv1 = roundup(last_dim, 128);
-    scale_shape = {sinv0, sinv1};
+    sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4);
+    sinv1 = roundup(last_dim, 128);
   }
-  return scale_shape;
+
+  ShapeT result;
+  result.resize(2);
+  result[0] = sinv0;
+  result[1] = sinv1;
+  return result;
 }
 
 NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
@@ -1766,12 +1781,24 @@ void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out
 
 std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& shape,
                                                     bool columnwise) const {
+  return get_scale_shape_impl(shape, columnwise);
+}
+
+NVTEShapeWrapper NVFP4Quantizer::get_scale_shape(const NVTEShapeWrapper& shape,
+                                                  bool columnwise) const {
+  return get_scale_shape_impl(shape, columnwise);
+}
+
+template <typename ShapeT>
+ShapeT NVFP4Quantizer::get_scale_shape_impl(const ShapeT& shape, bool columnwise) const {
   size_t numel = 1;
+  size_t last_dim;
+
   for (auto s : shape) {
     numel *= s;
   }
+  last_dim = shape.back();
 
-  auto last_dim = shape.back();
   auto flat_first_dim = numel / last_dim;
 
   NVTE_CHECK(last_dim % NVFP4_BLOCK_SIZE == 0, "Last dim for NVFP4 must be divisible by ",
@@ -1780,22 +1807,23 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
              "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
              " (got shape=", shape, ")");
 
-  std::vector<size_t> scale_shape;
-
+  size_t sinv0 = 0;
+  size_t sinv1 = 0;
   bool rowwise_usage = !columnwise;
 
   if (rowwise_usage) {
-    // rowwise scaling factor shape
-    size_t sinv0 = roundup(flat_first_dim, 128);
-    size_t sinv1 = roundup(last_dim / NVFP4_BLOCK_SIZE, 4);
-    scale_shape = {sinv0, sinv1};
+    sinv0 = roundup(flat_first_dim, 128);
+    sinv1 = roundup(last_dim / NVFP4_BLOCK_SIZE, 4);
   } else {
-    // columnwise scaling factor shape
-    size_t sinv0 = roundup(last_dim, 128);
-    size_t sinv1 = roundup(flat_first_dim / NVFP4_BLOCK_SIZE, 4);
-    scale_shape = {sinv0, sinv1};
+    sinv0 = roundup(last_dim, 128);
+    sinv1 = roundup(flat_first_dim / NVFP4_BLOCK_SIZE, 4);
   }
-  return scale_shape;
+
+  ShapeT result;
+  result.resize(2);
+  result[0] = sinv0;
+  result[1] = sinv1;
+  return result;
 }
 
 }  // namespace transformer_engine::pytorch

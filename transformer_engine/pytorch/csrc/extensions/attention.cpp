@@ -163,52 +163,52 @@ std::vector<py::object> fused_attn_fwd(
   }
   if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
     auto bias_sizes = Bias.value().sizes().vec();
-    std::vector<size_t> bias_shape{bias_sizes.begin(), bias_sizes.end()};
-    te_Bias = makeTransformerEngineTensor(Bias.value().data_ptr(), bias_shape, DType::kFloat32);
+    NVTEShapeWrapper bias_shape{bias_sizes};
+    te_Bias = makeTransformerEngineTensor(Bias.value().data_ptr(), static_cast<NVTEShape&>(bias_shape), DType::kFloat32);
   }
   auto cu_seqlens_q_sizes = cu_seqlens_q.sizes().vec();
-  std::vector<size_t> cu_seqlens_q_shape{cu_seqlens_q_sizes.begin(), cu_seqlens_q_sizes.end()};
+  NVTEShapeWrapper cu_seqlens_q_shape{cu_seqlens_q_sizes};
   auto cu_seqlens_kv_sizes = cu_seqlens_kv.sizes().vec();
-  std::vector<size_t> cu_seqlens_kv_shape{cu_seqlens_kv_sizes.begin(), cu_seqlens_kv_sizes.end()};
+  NVTEShapeWrapper cu_seqlens_kv_shape{cu_seqlens_kv_sizes};
   te_cu_seqlens_q =
-      makeTransformerEngineTensor(cu_seqlens_q.data_ptr(), cu_seqlens_q_shape, DType::kInt32);
+      makeTransformerEngineTensor(cu_seqlens_q.data_ptr(), static_cast<NVTEShape&>(cu_seqlens_q_shape), DType::kInt32);
   te_cu_seqlens_kv =
-      makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape, DType::kInt32);
+      makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), static_cast<NVTEShape&>(cu_seqlens_kv_shape), DType::kInt32);
 
   if ((cu_seqlens_q_padded.has_value()) && (cu_seqlens_kv_padded.has_value())) {
     auto cu_seqlens_q_padded_sizes = cu_seqlens_q_padded.value().sizes().vec();
-    std::vector<size_t> cu_seqlens_q_padded_shape{cu_seqlens_q_padded_sizes.begin(),
-                                                  cu_seqlens_q_padded_sizes.end()};
+    NVTEShapeWrapper cu_seqlens_q_padded_shape{cu_seqlens_q_padded_sizes};
     auto cu_seqlens_kv_padded_sizes = cu_seqlens_kv_padded.value().sizes().vec();
-    std::vector<size_t> cu_seqlens_kv_padded_shape{cu_seqlens_kv_padded_sizes.begin(),
-                                                   cu_seqlens_kv_padded_sizes.end()};
+    NVTEShapeWrapper cu_seqlens_kv_padded_shape{cu_seqlens_kv_padded_sizes};
     te_cu_seqlens_q_padded = makeTransformerEngineTensor(cu_seqlens_q_padded.value().data_ptr(),
-                                                         cu_seqlens_q_padded_shape, DType::kInt32);
+                                                         static_cast<NVTEShape&>(cu_seqlens_q_padded_shape), DType::kInt32);
     te_cu_seqlens_kv_padded = makeTransformerEngineTensor(
-        cu_seqlens_kv_padded.value().data_ptr(), cu_seqlens_kv_padded_shape, DType::kInt32);
+        cu_seqlens_kv_padded.value().data_ptr(), static_cast<NVTEShape&>(cu_seqlens_kv_padded_shape), DType::kInt32);
   }
-
+  NVTEShape default_scale_inv_shape;
+  default_scale_inv_shape.ndim = 1;
+  default_scale_inv_shape.data[0] = 1;
   if ((page_table_k.has_value()) && (page_table_v.has_value())) {
     auto page_table_k_sizes = page_table_k.value().sizes().vec();
-    std::vector<size_t> page_table_k_shape{page_table_k_sizes.begin(), page_table_k_sizes.end()};
+    NVTEShapeWrapper page_table_k_shape{page_table_k_sizes};
     auto page_table_v_sizes = page_table_v.value().sizes().vec();
-    std::vector<size_t> page_table_v_shape{page_table_v_sizes.begin(), page_table_v_sizes.end()};
+    NVTEShapeWrapper page_table_v_shape{page_table_v_sizes};
     te_page_table_k =
-        makeTransformerEngineTensor(page_table_k.value().data_ptr(), page_table_k_shape,
-                                    DType::kInt32, nullptr, nullptr, nullptr);
+        makeTransformerEngineTensor(page_table_k.value().data_ptr(), static_cast<NVTEShape&>(page_table_k_shape),
+                                    DType::kInt32, nullptr, nullptr, nullptr, default_scale_inv_shape);
     te_page_table_v =
-        makeTransformerEngineTensor(page_table_v.value().data_ptr(), page_table_v_shape,
-                                    DType::kInt32, nullptr, nullptr, nullptr);
+        makeTransformerEngineTensor(page_table_v.value().data_ptr(), static_cast<NVTEShape&>(page_table_v_shape),
+                                    DType::kInt32, nullptr, nullptr, nullptr, default_scale_inv_shape);
   }
 
   // softmax offset
   TensorWrapper te_SoftmaxOffset;
   if ((softmax_type != NVTE_VANILLA_SOFTMAX) && (SoftmaxOffset.has_value())) {
     auto SoftmaxOffset_sizes = SoftmaxOffset.value().sizes().vec();
-    std::vector<size_t> SoftmaxOffset_shape{SoftmaxOffset_sizes.begin(), SoftmaxOffset_sizes.end()};
+    NVTEShapeWrapper SoftmaxOffset_shape{SoftmaxOffset_sizes};
     te_SoftmaxOffset =
-        makeTransformerEngineTensor(SoftmaxOffset.value().data_ptr(), SoftmaxOffset_shape,
-                                    DType::kFloat32, nullptr, nullptr, nullptr);
+        makeTransformerEngineTensor(SoftmaxOffset.value().data_ptr(), static_cast<NVTEShape&>(SoftmaxOffset_shape),
+                                    DType::kFloat32, nullptr, nullptr, nullptr, default_scale_inv_shape);
   }
 
   // extract rng seed and offset
@@ -461,30 +461,31 @@ std::vector<py::object> fused_attn_bwd(
 
   // create cu_seqlens tensorwrappers
   auto cu_seqlens_q_sizes = cu_seqlens_q.sizes().vec();
-  std::vector<size_t> cu_seqlens_q_shape{cu_seqlens_q_sizes.begin(), cu_seqlens_q_sizes.end()};
+  NVTEShapeWrapper cu_seqlens_q_shape{cu_seqlens_q_sizes};
   auto cu_seqlens_kv_sizes = cu_seqlens_kv.sizes().vec();
-  std::vector<size_t> cu_seqlens_kv_shape{cu_seqlens_kv_sizes.begin(), cu_seqlens_kv_sizes.end()};
+  NVTEShapeWrapper cu_seqlens_kv_shape{cu_seqlens_kv_sizes};
+  NVTEShape zero_scale_inv_shape;
+  zero_scale_inv_shape.ndim = 1;
+  zero_scale_inv_shape.data[0] = 0;
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
-  te_cu_seqlens_q = makeTransformerEngineTensor(cu_seqlens_q.data_ptr(), cu_seqlens_q_shape,
-                                                DType::kInt32, nullptr, nullptr, nullptr);
-  te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape,
-                                                 DType::kInt32, nullptr, nullptr, nullptr);
+  te_cu_seqlens_q = makeTransformerEngineTensor(cu_seqlens_q.data_ptr(), static_cast<NVTEShape&>(cu_seqlens_q_shape),
+                                                DType::kInt32, nullptr, nullptr, nullptr, zero_scale_inv_shape);
+  te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), static_cast<NVTEShape&>(cu_seqlens_kv_shape),
+                                                 DType::kInt32, nullptr, nullptr, nullptr, zero_scale_inv_shape);
 
   TensorWrapper te_cu_seqlens_q_padded, te_cu_seqlens_kv_padded;
   if ((cu_seqlens_q_padded.has_value()) && (cu_seqlens_kv_padded.has_value())) {
     auto cu_seqlens_q_padded_sizes = cu_seqlens_q_padded.value().sizes().vec();
-    std::vector<size_t> cu_seqlens_q_padded_shape{cu_seqlens_q_padded_sizes.begin(),
-                                                  cu_seqlens_q_padded_sizes.end()};
+    NVTEShapeWrapper cu_seqlens_q_padded_shape{cu_seqlens_q_padded_sizes};
     auto cu_seqlens_kv_padded_sizes = cu_seqlens_kv_padded.value().sizes().vec();
-    std::vector<size_t> cu_seqlens_kv_padded_shape{cu_seqlens_kv_padded_sizes.begin(),
-                                                   cu_seqlens_kv_padded_sizes.end()};
+    NVTEShapeWrapper cu_seqlens_kv_padded_shape{cu_seqlens_kv_padded_sizes};
     te_cu_seqlens_q_padded = makeTransformerEngineTensor(
         cu_seqlens_q_padded.value().data_ptr(),
-        nvte_make_shape(cu_seqlens_q_padded_shape.data(), cu_seqlens_q_padded_shape.size()),
+        static_cast<NVTEShape&>(cu_seqlens_q_padded_shape),
         DType::kInt32);
     te_cu_seqlens_kv_padded = makeTransformerEngineTensor(
         cu_seqlens_kv_padded.value().data_ptr(),
-        nvte_make_shape(cu_seqlens_kv_padded_shape.data(), cu_seqlens_kv_padded_shape.size()),
+        static_cast<NVTEShape&>(cu_seqlens_kv_padded_shape),
         DType::kInt32);
   }
 
@@ -494,12 +495,12 @@ std::vector<py::object> fused_attn_bwd(
   nvte_aux_tensor_pack.size = Aux_CTX_Tensors.size();
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     const std::vector<int64_t> &signed_shape = Aux_CTX_Tensors[i].sizes().vec();
-    const std::vector<size_t> tmp(signed_shape.begin(), signed_shape.end());
+    NVTEShapeWrapper tmp(signed_shape);
 
     NVTEBasicTensor temp_data = {
         Aux_CTX_Tensors[i].data_ptr(),
         static_cast<NVTEDType>(GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type())),
-        nvte_make_shape(tmp.data(), tmp.size())};
+        static_cast<NVTEShape&>(tmp)};
     nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   }
 

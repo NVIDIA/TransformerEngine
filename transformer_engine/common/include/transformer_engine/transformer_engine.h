@@ -518,6 +518,69 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
  */
 namespace transformer_engine {
 
+/*! \class NVTEShapeWrapper
+ *  \brief C++ wrapper for NVTEShape with container-like interface.
+ */
+class NVTEShapeWrapper {
+ private:
+  NVTEShape data;
+
+ public:
+  // Default constructor
+  NVTEShapeWrapper() {
+    data.ndim = 0;
+  }
+
+  // Constructor from NVTEShape (direct assignment by reference)
+  NVTEShapeWrapper(const NVTEShape& shape) {
+    data = shape;
+  }
+
+  // Constructor from vector (creates a copy)
+  template <typename T> NVTEShapeWrapper(const std::vector<T>& shape_vec) {
+    data.ndim = shape_vec.size();
+    for (size_t i = 0; i < data.ndim; ++i) {
+      data.data[i] = static_cast<size_t>(shape_vec[i]);
+    }
+  }
+
+  operator NVTEShape&() { return data; }
+  operator const NVTEShape&() const { return data; }
+
+  // Iterator support
+  size_t* begin() { return data.data; }
+  const size_t* begin() const { return data.data; }
+  size_t* end() { return data.data + data.ndim; }
+  const size_t* end() const { return data.data + data.ndim; }
+
+  // Index access
+  size_t& operator[](size_t idx) { return data.data[idx]; }
+  const size_t& operator[](size_t idx) const { return data.data[idx]; }
+
+  // Back access
+  size_t& back() { return data.data[data.ndim - 1]; }
+  const size_t& back() const { return data.data[data.ndim - 1]; }
+
+  // Size access
+  size_t size() const { return data.ndim; }
+  bool empty() const { return data.ndim == 0; }
+
+  // Container operations
+  void push_back(size_t value) {
+    if (data.ndim < 15) {
+      data.data[data.ndim++] = value;
+    }
+  }
+
+  void clear() { data.ndim = 0; }
+
+  void resize(size_t new_size) {
+    if (new_size <= 15) {
+      data.ndim = new_size;
+    }
+  }
+};
+
 /*! \enum DType
  *  \brief TE datatype.
  */

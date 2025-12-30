@@ -114,11 +114,6 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   return transformer_engine::TensorWrapper(data_ptr, shape, type);
 }
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type) {
-  return transformer_engine::TensorWrapper(data_ptr, shape, type);
-}
-
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor) {
   transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
   NVTEShape shape = getTensorShape(tensor);
@@ -163,21 +158,6 @@ makeTransformerEngineTensorList(std::vector<std::vector<at::Tensor>> at_tensor_l
 }
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, std::vector<size_t> scale_inv_shape,
-    NVTEScalingMode scaling_mode) {
-  TensorWrapper ret(scaling_mode);
-  ret.set_rowwise_data(data_ptr, type, shape);
-  const std::vector<size_t> meta_shape{1};
-  ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
-  ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
-  auto scale_inv_dtype =
-      (scaling_mode == NVTE_MXFP8_1D_SCALING) ? DType::kFloat8E8M0 : DType::kFloat32;
-  ret.set_rowwise_scale_inv(scale_inv_ptr, scale_inv_dtype, scale_inv_shape);
-  return ret;
-}
-
-transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, const NVTEShape& shape, const transformer_engine::DType type, void* amax_ptr,
     void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
     NVTEScalingMode scaling_mode) {
@@ -195,43 +175,6 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   return ret;
 }
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
-    NVTEScalingMode scaling_mode) {
-  TensorWrapper ret(scaling_mode);
-  ret.set_rowwise_data(data_ptr, type, shape);
-  NVTEShape meta_shape;
-  meta_shape.ndim = 1;
-  meta_shape.data[0] = 1;
-  ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
-  ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
-  auto scale_inv_dtype =
-      (scaling_mode == NVTE_MXFP8_1D_SCALING) ? DType::kFloat8E8M0 : DType::kFloat32;
-  ret.set_rowwise_scale_inv(scale_inv_ptr, scale_inv_dtype, scale_inv_shape);
-  return ret;
-}
-
-transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, void* columnwise_data_ptr, const std::vector<size_t>& shape,
-    const std::vector<size_t>& columnwise_shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
-    const std::vector<size_t>& scale_inv_shape,
-    const std::vector<size_t>& columnwise_scale_inv_shape, NVTEScalingMode scaling_mode) {
-  TensorWrapper ret(scaling_mode);
-  ret.set_rowwise_data(data_ptr, type, shape);
-  ret.set_columnwise_data(columnwise_data_ptr, type, columnwise_shape);
-  const std::vector<size_t> meta_shape{1};
-  ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
-  ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
-  auto scale_inv_dtype = (scaling_mode == NVTE_MXFP8_1D_SCALING)   ? DType::kFloat8E8M0
-                         : (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat8E4M3
-                                                                   : DType::kFloat32;
-  ret.set_rowwise_scale_inv(scale_inv_ptr, scale_inv_dtype, scale_inv_shape);
-  ret.set_columnwise_scale_inv(columnwise_scale_inv_ptr, scale_inv_dtype,
-                               columnwise_scale_inv_shape);
-  return ret;
-}
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, void* columnwise_data_ptr, const NVTEShape& shape,
@@ -287,6 +230,9 @@ template size_t product<size_t>(const std::vector<size_t>& shape);
 template int64_t product<int64_t>(const std::vector<int64_t>& shape);
 
 size_t product(const NVTEShape& shape, size_t begin, size_t end) {
+  if(end == -1) {
+    end = shape.ndim;
+  }
   NVTE_CHECK(begin <= end && end <= shape.ndim, "Attempted to access entries ", begin, " to ", end,
              " in a shape with ", shape.ndim, " entries");
   size_t ret = 1;

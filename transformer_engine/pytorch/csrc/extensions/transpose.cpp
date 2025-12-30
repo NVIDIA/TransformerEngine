@@ -45,9 +45,16 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
     return out;
   }
 
+  NVTEShape input_shape, output_shape;
+  input_shape.ndim = 2;
+  output_shape.ndim = 2;
+  input_shape.data[0] = M;
+  input_shape.data[1] = N;
+  output_shape.data[0] = N;
+  output_shape.data[1] = M;
   // Compute transpose
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), std::vector<size_t>{M, N}, otype);
-  auto output_cu = makeTransformerEngineTensor(out.data_ptr(), std::vector<size_t>{N, M}, otype);
+  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), input_shape, otype);
+  auto output_cu = makeTransformerEngineTensor(out.data_ptr(), output_shape, otype);
   nvte_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return out;

@@ -20,7 +20,7 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
   const auto num_tensors = input_row_list.size();
   // Extract properties from PyTorch tensors
   std::vector<void*> input_dptr_list, output_dptr_list;
-  std::vector<std::vector<size_t>> input_shape_list, output_shape_list;
+  std::vector<NVTEShape> input_shape_list, output_shape_list;
   std::vector<DType> input_type_list;
   void* d_input_ptr = reinterpret_cast<void*>(input.data_ptr());
   void* d_output_ptr = reinterpret_cast<void*>(output.data_ptr());
@@ -34,8 +34,11 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
         input_row_list[tensor_id] * input.size(1) * input.element_size();
     input_char_ptr += input_dptr_offset;
     d_input_ptr = reinterpret_cast<void*>(input_char_ptr);
-    NVTEShape input_shape = {input_row_list[tensor_id], static_cast<size_t>(input.size(1))};
-    input_shape_list.push_back({input_row_list[tensor_id], static_cast<size_t>(input.size(1))});
+    NVTEShape input_shape;
+    input_shape.ndim = 2;
+    input_shape.data[0] = input_row_list[tensor_id];
+    input_shape.data[1] = static_cast<size_t>(input.size(1));
+    input_shape_list.push_back(input_shape);
     input_type_list.push_back(GetTransformerEngineDType(input.scalar_type()));
 
     // Move the output pointer to the next split.
@@ -45,14 +48,17 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
     output_char_ptr += output_dptr_offset;
     d_output_ptr = reinterpret_cast<void*>(output_char_ptr);
 
-    output_shape_list.push_back(
-        {padded_input_row_list[tensor_id], static_cast<size_t>(output.size(1))});
+    NVTEShape output_shape;
+    output_shape.ndim = 2;
+    output_shape.data[0] = padded_input_row_list[tensor_id];
+    output_shape.data[1] = static_cast<size_t>(output.size(1));
+    output_shape_list.push_back(output_shape);
   }
 
   // Construct TE tensors
   std::vector<NVTETensor> nvte_input_list, nvte_output_list;
   std::vector<TensorWrapper> tensor_wrappers;
-  auto make_tensor = [&tensor_wrappers](void* dptr, const std::vector<size_t>& shape,
+  auto make_tensor = [&tensor_wrappers](void* dptr, const NVTEShape& shape,
                                         DType dtype) -> NVTETensor {
     tensor_wrappers.emplace_back(makeTransformerEngineTensor(dptr, shape, dtype));
     return tensor_wrappers.back().data();
@@ -95,7 +101,7 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
   const auto num_tensors = input_row_list.size();
   // Extract properties from PyTorch tensors
   std::vector<void*> input_dptr_list, output_dptr_list;
-  std::vector<std::vector<size_t>> input_shape_list, output_shape_list;
+  std::vector<NVTEShape> input_shape_list, output_shape_list;
   std::vector<transformer_engine::DType> input_type_list;
   void* d_input_ptr = reinterpret_cast<void*>(input.data_ptr());
   void* d_output_ptr = reinterpret_cast<void*>(output.data_ptr());
@@ -109,8 +115,11 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
         input_row_list[tensor_id] * input.size(1) * input.element_size();
     input_char_ptr += input_dptr_offset;
     d_input_ptr = reinterpret_cast<void*>(input_char_ptr);
-
-    input_shape_list.push_back({input_row_list[tensor_id], static_cast<size_t>(input.size(1))});
+    NVTEShape input_shape;
+    input_shape.ndim = 2;
+    input_shape.data[0] = input_row_list[tensor_id];
+    input_shape.data[1] = static_cast<size_t>(input.size(1));
+    input_shape_list.push_back(input_shape);
     input_type_list.push_back(GetTransformerEngineDType(input.scalar_type()));
 
     // Move the output pointer to the next split.
@@ -120,14 +129,17 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
     output_char_ptr += output_dptr_offset;
     d_output_ptr = reinterpret_cast<void*>(output_char_ptr);
 
-    output_shape_list.push_back(
-        {unpadded_input_row_list[tensor_id], static_cast<size_t>(output.size(1))});
+    NVTEShape output_shape;
+    output_shape.ndim = 2;
+    output_shape.data[0] = unpadded_input_row_list[tensor_id];
+    output_shape.data[1] = static_cast<size_t>(output.size(1));
+    output_shape_list.push_back(output_shape);
   }
 
   // Construct TE tensors
   std::vector<NVTETensor> nvte_input_list, nvte_output_list;
   std::vector<transformer_engine::TensorWrapper> tensor_wrappers;
-  auto make_tensor = [&tensor_wrappers](void* dptr, const std::vector<size_t>& shape,
+  auto make_tensor = [&tensor_wrappers](void* dptr, const NVTEShape& shape,
                                         transformer_engine::DType dtype) -> NVTETensor {
     tensor_wrappers.emplace_back(makeTransformerEngineTensor(dptr, shape, dtype));
     return tensor_wrappers.back().data();

@@ -406,7 +406,7 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
   counter_shape.data[0] = static_cast<size_t>(counter.size(0));
   auto te_counter = makeTransformerEngineTensor(counter.data_ptr(), counter_shape, DType::kInt32);
 
-  NVTEShape gelu_shape;
+  NVTEShape gelu_shape, workspace_shape;
   if (pre_gelu_out.data_ptr() == nullptr) {
     gelu_shape.ndim = 1;
     gelu_shape.data[0] = static_cast<size_t>(pre_gelu_out.size(0));
@@ -415,10 +415,12 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
     gelu_shape.data[0] = static_cast<size_t>(pre_gelu_out.size(0));
     gelu_shape.data[1] = static_cast<size_t>(pre_gelu_out.size(1));
   }
+  workspace_shape.ndim = 1;
+  workspace_shape.data[0] = workspaceSize;
   auto te_pre_gelu_out = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
   auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
-                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
+                                                  workspace_shape, DType::kByte);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_cublas_atomic_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
@@ -509,10 +511,14 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     auto te_bias = makeTransformerEngineTensor(bias[i]);
     auto te_pre_gelu_out = makeTransformerEngineTensor(pre_gelu_out[i]);
 
-    const auto gelu_shape = pre_gelu_out[i].data_ptr() == nullptr
-                                ? std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0))}
-                                : std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0)),
-                                                      static_cast<size_t>(te_pre_gelu_out.size(1))};
+    NVTEShape gelu_shape;
+    gelu_shape.data[0] = te_pre_gelu_out.size(0);
+    if (pre_gelu_out[i].data_ptr() == nullptr) {
+      gelu_shape.ndim = 1;
+    } else {
+      gelu_shape.ndim = 2;
+      gelu_shape.data[1] = te_pre_gelu_out.size(1);
+    }
 
     DType gelu_type = bias_type;
     te_pre_gelu_out =
@@ -579,9 +585,12 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
   std::vector<NVTETensor> te_workspace_vector;
   std::vector<TensorWrapper> te_workspace_wrappers;
+  NVTEShape workspace_shape;
+  workspace_shape.ndim = 1;
+  workspace_shape.data[0] = workspaceSize;
   for (size_t i = 0; i < workspace.size(); i++) {
     auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
-                                           std::vector<size_t>{workspaceSize}, DType::kByte);
+                                           workspace_shape, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     te_workspace_wrappers.emplace_back(std::move(wsp));
   }

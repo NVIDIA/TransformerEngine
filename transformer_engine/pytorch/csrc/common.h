@@ -271,6 +271,11 @@ class Float8BlockQuantizer : public Quantizer {
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+  NVTEShapeWrapper get_scale_shape(const NVTEShapeWrapper& shape, bool columnwise) const;
+
+ private:
+  template <typename ShapeT>
+  ShapeT get_scale_shape_impl(const ShapeT& shape, bool columnwise) const;
 };
 
 class MXFP8Quantizer : public Quantizer {
@@ -294,6 +299,11 @@ class MXFP8Quantizer : public Quantizer {
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+  NVTEShapeWrapper get_scale_shape(const NVTEShapeWrapper& shape, bool columnwise) const;
+
+ private:
+  template <typename ShapeT>
+  ShapeT get_scale_shape_impl(const ShapeT& shape, bool columnwise) const;
 };
 
 class NVFP4Quantizer : public Quantizer {
@@ -345,8 +355,11 @@ class NVFP4Quantizer : public Quantizer {
   void quantize_with_amax(TensorWrapper& input, TensorWrapper& out);
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+  NVTEShapeWrapper get_scale_shape(const NVTEShapeWrapper& shape, bool columnwise) const;
 
  private:
+  template <typename ShapeT>
+  ShapeT get_scale_shape_impl(const ShapeT& shape, bool columnwise) const;
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
@@ -439,32 +452,11 @@ inline transformer_engine::DType GetTransformerEngineDType(int DType_value) {
   return static_cast<transformer_engine::DType>(DType_value);
 }
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
-                                                              const std::vector<size_t>& shape,
-                                                              const transformer_engine::DType type);
-
-transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, std::vector<size_t> scale_inv_shape = {1},
-    NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
-
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, const NVTEShape& shape, const transformer_engine::DType type, void* amax_ptr,
     void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
-    NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
-
-transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, void* columnwise_data_ptr, const std::vector<size_t>& shape,
-    const std::vector<size_t>& columnwise_shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
-    const std::vector<size_t>& scale_inv_shape = {1},
-    const std::vector<size_t>& columnwise_scale_inv_shape = {1},
-    NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, void* columnwise_data_ptr, const NVTEShape& shape,
@@ -492,7 +484,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 template <typename T>
 T product(const std::vector<T>& shape);
 
-size_t product(const NVTEShape& shape, size_t begin, size_t end);
+size_t product(const NVTEShape& shape, size_t begin=0, size_t end=-1);
 
 std::vector<size_t> nvte_shape_to_vector(const NVTEShape& nvte_shape);
 
