@@ -507,10 +507,21 @@ class _Linear(torch.autograd.Function):
             origin_weight_python_object = None
             origin_weight_overwrites_main_grad = False
             main_grad = None
-
-
+            if ctx.fuse_wgrad_accumulation and ctx.requires_wgrad:
+                origin_weight_ref = ctx.origin_weight_ref
+                ctx.origin_weight_ref = None
+                origin_weight_python_object = (
+                    origin_weight_ref() if origin_weight_ref is not None else None
+                )
+                origin_weight_overwrites_main_grad = getattr(
+                    origin_weight_python_object, "overwrite_main_grad", False
+                )
+                # Since main_grad can be modified inplace, it should not be a part of saved_tensors
+                main_grad = ctx.main_grad_func()
+                
                 if origin_weight_python_object is not None:
                     origin_weight_python_object.main_grad = main_grad
+
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
