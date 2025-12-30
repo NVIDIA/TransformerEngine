@@ -487,8 +487,8 @@ class GroupedMatmulConfigWrapper {
 
   /*! \brief Set number of streaming multiprocessors to use. */
   void set_sm_count(int sm_count) {
-    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigSMCount,
-                                             &sm_count, sizeof(int));
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigSMCount, &sm_count,
+                                             sizeof(int));
   }
 
  private:

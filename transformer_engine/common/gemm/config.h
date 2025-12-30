@@ -7,9 +7,9 @@
 #ifndef TRANSFORMER_ENGINE_GEMM_CONFIG_H_
 #define TRANSFORMER_ENGINE_GEMM_CONFIG_H_
 
-#include <cstdint>
-
 #include <transformer_engine/transformer_engine.h>
+
+#include <cstdint>
 
 namespace transformer_engine {
 

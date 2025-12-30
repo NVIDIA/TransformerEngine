@@ -319,8 +319,10 @@ inline void init_matrix_layouts(cublasLtMatrixLayoutOpaque_t &descA,
   int *cols_B = B_sel.use_columnwise ? ws.K : (B_sel.trans ? ws.K : ws.N);
   int *ldb_storage = rows_B;
 
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descA, A_type, num_tensors, rows_A, cols_A, lda_storage));
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descB, B_type, num_tensors, rows_B, cols_B, ldb_storage));
+  NVTE_CHECK_CUBLAS(
+      cublasLtGroupedMatrixLayoutInit(&descA, A_type, num_tensors, rows_A, cols_A, lda_storage));
+  NVTE_CHECK_CUBLAS(
+      cublasLtGroupedMatrixLayoutInit(&descB, B_type, num_tensors, rows_B, cols_B, ldb_storage));
   NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descC, D_type, num_tensors, ws.M, ws.N, ws.M));
   NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descD, D_type, num_tensors, ws.M, ws.N, ws.M));
 }
@@ -578,8 +580,8 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
   const bool is_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   if (is_fp8) {
     int8_t fastAccuMode = 1;  // Always use fast accumulator
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        &matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fastAccuMode, sizeof(fastAccuMode)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
+                                                     &fastAccuMode, sizeof(fastAccuMode)));
   }
 
   // Compute average dimensions for heuristics
