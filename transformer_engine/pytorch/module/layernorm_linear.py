@@ -568,9 +568,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.fuse_wgrad_accumulation and ctx.requires_wgrad:
                 origin_weight_ref = ctx.origin_weight_ref
                 ctx.origin_weight_ref = None
-                origin_weight = (
-                    origin_weight_ref() if origin_weight_ref is not None else None
-                )
+                origin_weight = origin_weight_ref() if origin_weight_ref is not None else None
                 # Since main_grad can be modified inplace, it should not be a part of saved_tensors
                 main_grad = ctx.main_grad_func() if weight is not None else None
                 if origin_weight is not None and main_grad is not None:
@@ -991,10 +989,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
-            if (
-                ctx.fuse_wgrad_accumulation
-                and hasattr(origin_weight, "grad_added_to_main_grad")
-            ):
+            if ctx.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
                 origin_weight.grad_added_to_main_grad = True
                 if getattr(origin_weight, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(

@@ -308,9 +308,7 @@ class _GroupedLinear(torch.autograd.Function):
             if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 origin_weight_refs = ctx.origin_weight_refs
                 ctx.origin_weight_refs = None
-                origin_weights = [
-                    ref() if ref is not None else None for ref in origin_weight_refs
-                ]
+                origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
                 main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
                 for origin_weight, main_grad in zip(origin_weights, main_grads):
                     if origin_weight is not None and main_grad is not None:

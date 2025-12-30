@@ -991,10 +991,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.fc1_weight_python_object_ref = None
                 ctx.fc2_weight_python_object_ref = None
                 fc1_weight_python_object = (
-                    fc1_weight_python_object_ref() if fc1_weight_python_object_ref is not None else None
+                    fc1_weight_python_object_ref()
+                    if fc1_weight_python_object_ref is not None
+                    else None
                 )
                 fc2_weight_python_object = (
-                    fc2_weight_python_object_ref() if fc2_weight_python_object_ref is not None else None
+                    fc2_weight_python_object_ref()
+                    if fc2_weight_python_object_ref is not None
+                    else None
                 )
                 if fc1_weight_python_object is not None and ctx.fc1_weight_requires_grad:
                     fc1_weight_main_grad = ctx.fc1_main_grad_func()
@@ -1584,9 +1588,8 @@ class _LayerNormMLP(torch.autograd.Function):
 
         if ctx.fc1_weight_requires_grad:
             # Handle custom DDP from mcore.
-            if (
-                ctx.fuse_wgrad_accumulation
-                and hasattr(fc1_weight_python_object, "grad_added_to_main_grad")
+            if ctx.fuse_wgrad_accumulation and hasattr(
+                fc1_weight_python_object, "grad_added_to_main_grad"
             ):
                 fc1_weight_python_object.grad_added_to_main_grad = True
                 if getattr(fc1_weight_python_object, "zero_out_wgrad", False):
@@ -1610,9 +1613,8 @@ class _LayerNormMLP(torch.autograd.Function):
 
         if ctx.fc2_weight_requires_grad:
             # Handle custom DDP from mcore.
-            if (
-                ctx.fuse_wgrad_accumulation
-                and hasattr(fc2_weight_python_object, "grad_added_to_main_grad")
+            if ctx.fuse_wgrad_accumulation and hasattr(
+                fc2_weight_python_object, "grad_added_to_main_grad"
             ):
                 fc2_weight_python_object.grad_added_to_main_grad = True
                 if getattr(fc2_weight_python_object, "zero_out_wgrad", False):

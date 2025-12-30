@@ -518,10 +518,9 @@ class _Linear(torch.autograd.Function):
                 )
                 # Since main_grad can be modified inplace, it should not be a part of saved_tensors
                 main_grad = ctx.main_grad_func()
-                
+
                 if origin_weight_python_object is not None:
                     origin_weight_python_object.main_grad = main_grad
-
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -943,9 +942,8 @@ class _Linear(torch.autograd.Function):
 
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
-            if (
-                ctx.fuse_wgrad_accumulation
-                and hasattr(origin_weight_python_object, "grad_added_to_main_grad")
+            if ctx.fuse_wgrad_accumulation and hasattr(
+                origin_weight_python_object, "grad_added_to_main_grad"
             ):
                 origin_weight_python_object.grad_added_to_main_grad = True
                 if getattr(origin_weight_python_object, "zero_out_wgrad", False):
