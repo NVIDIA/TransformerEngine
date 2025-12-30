@@ -143,8 +143,7 @@ void nvte_get_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
 
   // Write to buffer
   NVTE_CHECK(config != nullptr, "Invalid NVTEGroupedMatmulConfig (got NULL)");
-  const auto &config_ =
-      *reinterpret_cast<const transformer_engine::GroupedMatmulConfig *>(config);
+  const auto &config_ = *reinterpret_cast<const transformer_engine::GroupedMatmulConfig *>(config);
   switch (attr) {
     case kNVTEGroupedMatmulConfigAvgM:
       std::memcpy(buf, &config_.avg_m, attr_size);
