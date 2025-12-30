@@ -6,6 +6,7 @@
 from typing import Union, Optional, Callable, Tuple, List
 from itertools import chain
 import warnings
+import weakref
 
 import functools
 import torch
@@ -234,23 +235,9 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 inputmats = [None] * num_gemms
 
-            if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weights[0], "grad_added_to_main_grad")
-
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_objects = []
-                    for weight in weights:
-                        ctx.weight_objects.append(weight)
-
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
                 *weights_fp8,
-                *weights,
                 *biases,
             )
             ctx.save_for_backward(*tensors_to_save)
@@ -262,6 +249,9 @@ class _GroupedLinear(torch.autograd.Function):
 
             ctx.weights_requires_grad = weights[0].requires_grad
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                # Keep weakrefs to weights to preserve attributes like main_grad
+                # when we need to modify the weight python objects
+                ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -272,8 +262,6 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.main_grad_funcs = [
                         lambda j=i: weights[j].main_grad for i in range(num_gemms)
                     ]
-            else:
-                ctx.main_grad_funcs = [lambda: None for i in range(num_gemms)]
             ctx.device = device
             ctx.output_quantizers = output_quantizers
             ctx.m_splits = m_splits
@@ -310,19 +298,23 @@ class _GroupedLinear(torch.autograd.Function):
             N = ctx.num_gemms
             inputmats = saved_tensors[:N]
             weights = saved_tensors[N : 2 * N]
-            origin_weights = saved_tensors[2 * N : 3 * N]
-            biases = saved_tensors[3 * N : 4 * N]
-            main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+            biases = saved_tensors[2 * N : 3 * N]
 
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    for i, weight in enumerate(ctx.weight_objects):
-                        origin_weights[i] = ctx.weight_objects[i]
-                        ctx.weight_objects[i] = None
-
-            if ctx.fuse_wgrad_accumulation:
-                for i in range(N):
-                    origin_weights[i].main_grad = main_grads[i]
+            # Restore from weakrefs to get original weight python objects
+            # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
+            # Only needed when fuse_wgrad_accumulation is enabled.
+            origin_weights = [None] * N
+            main_grads = [None] * N
+            if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                origin_weight_refs = ctx.origin_weight_refs
+                ctx.origin_weight_refs = None
+                origin_weights = [
+                    ref() if ref is not None else None for ref in origin_weight_refs
+                ]
+                main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+                for origin_weight, main_grad in zip(origin_weights, main_grads):
+                    if origin_weight is not None and main_grad is not None:
+                        origin_weight.main_grad = main_grad
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
@@ -477,7 +469,7 @@ class _GroupedLinear(torch.autograd.Function):
                     # Deallocate input tensor
                     clear_tensor_data(*inputmats)
 
-                def handle_custom_ddp_from_mcore(weight, wgrad):
+                def handle_custom_ddp_from_mcore(weight, main_grad, wgrad):
                     if ctx.weights_requires_grad:
                         # Handle custom DDP from mcore.
                         if ctx.fuse_wgrad_accumulation and hasattr(
@@ -486,14 +478,14 @@ class _GroupedLinear(torch.autograd.Function):
                             weight.grad_added_to_main_grad = True
                             if getattr(weight, "zero_out_wgrad", False):
                                 wgrad = get_dummy_wgrad(
-                                    list(weight.main_grad.shape),
-                                    weight.dtype,
+                                    list(main_grad.shape),
+                                    main_grad.dtype,
                                     zero=True,
                                 )
                             else:
                                 wgrad = get_dummy_wgrad(
-                                    list(weight.main_grad.shape),
-                                    weight.dtype,
+                                    list(main_grad.shape),
+                                    main_grad.dtype,
                                 )
                         elif ctx.fuse_wgrad_accumulation:
                             wgrad = None
@@ -502,8 +494,8 @@ class _GroupedLinear(torch.autograd.Function):
                     return wgrad
 
                 wgrad_list = [
-                    handle_custom_ddp_from_mcore(weight, wgrad)
-                    for weight, wgrad in zip(origin_weights, wgrad_list)
+                    handle_custom_ddp_from_mcore(weight, main_grad, wgrad)
+                    for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
                 ]
             else:
                 wgrad_list = [None] * ctx.num_gemms

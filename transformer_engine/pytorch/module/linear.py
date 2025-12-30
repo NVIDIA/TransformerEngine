@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
+import weakref
 
 import torch
 
@@ -417,23 +418,10 @@ class _Linear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_object = weight
-
             mark_not_offload(weight, weightmat, bias)
-            # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
                 weightmat,
-                weight,
                 bias,
             )
             ctx.save_for_backward(*tensors_to_save)
@@ -448,6 +436,9 @@ class _Linear(torch.autograd.Function):
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             if fuse_wgrad_accumulation and weight.requires_grad:
+                # Keep weakref to weight to preserve attributes like main_grad
+                # when we need to modify the weight python object
+                ctx.origin_weight_ref = weakref.ref(weight)
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -502,7 +493,7 @@ class _Linear(torch.autograd.Function):
 
         with get_nvtx_range_context("_Linear_backward"):
             saved_tensors = ctx.saved_tensors
-            inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+            inputmat, weight_fp8, bias = (  # pylint: disable=unbalanced-tuple-unpacking
                 restore_from_saved(ctx.tensor_objects, saved_tensors)
             )
 
@@ -510,18 +501,16 @@ class _Linear(torch.autograd.Function):
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
 
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            main_grad = (
-                ctx.main_grad_func()
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                else None
-            )
+            # Restore from weakref to get original weight python object
+            # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
+            # Only needed when fuse_wgrad_accumulation is enabled.
+            origin_weight_python_object = None
+            origin_weight_overwrites_main_grad = False
+            main_grad = None
 
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    weight = ctx.weight_object
-            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                weight.main_grad = main_grad
+
+                if origin_weight_python_object is not None:
+                    origin_weight_python_object.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -853,7 +842,7 @@ class _Linear(torch.autograd.Function):
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(weight, "overwrite_main_grad", False)
+                        if not origin_weight_overwrites_main_grad
                         else False
                     ),
                     "layout": "NT",
@@ -945,20 +934,19 @@ class _Linear(torch.autograd.Function):
             # Handle custom DDP from mcore.
             if (
                 ctx.fuse_wgrad_accumulation
-                and weight is not None
-                and hasattr(weight, "grad_added_to_main_grad")
+                and hasattr(origin_weight_python_object, "grad_added_to_main_grad")
             ):
-                weight.grad_added_to_main_grad = True
-                if getattr(weight, "zero_out_wgrad", False):
+                origin_weight_python_object.grad_added_to_main_grad = True
+                if getattr(origin_weight_python_object, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(main_grad.shape),
+                        main_grad.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(main_grad.shape),
+                        main_grad.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
@@ -972,7 +960,7 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
-        if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):
+        if ctx.fp8 and not isinstance(origin_weight_python_object, QuantizedTensorStorage):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
