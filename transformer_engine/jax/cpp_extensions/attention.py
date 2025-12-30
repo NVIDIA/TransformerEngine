@@ -26,7 +26,7 @@ from transformer_engine.jax.attention import (
     CPStrategy,
     SequenceDescriptor,
 )
-from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES
+from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES, is_mesh_available
 
 from .base import BasePrimitive, register_primitive
 from .misc import (
@@ -2350,7 +2350,8 @@ class _FusedAttnCPWithP2PHelper:
     @staticmethod
     def use_scanloop():
         """Returns true if the implementation will use a scan loop for iteration."""
-        use_scan = bool(int(os.getenv("NVTE_FUSED_RING_ATTENTION_USE_SCAN", "1")))
+        # TODO(KshitijLakhani): Reset default to 1, once the extra kv permute op issue is resolved
+        use_scan = bool(int(os.getenv("NVTE_FUSED_RING_ATTENTION_USE_SCAN", "0")))
         return use_scan
 
     def check_supported(self):
@@ -2395,13 +2396,15 @@ class _FusedAttnCPWithP2PHelper:
                 f"{header} only supports VANILLA_SOFTMAX, got: {self.config.softmax_type}"
             )
 
-        # We want to encourage use of scan loop to minimize unrolling and ensure more
-        # predictable scheduling from XLA. The unrolled flavor will be supported but
-        # not the prefered implementation.
-        if not self.use_scanloop():
+        # TODO(KshitijLakhani): Flip the condition to check for disabled scan loop and warn
+        # against using unrolled loops once the scan issue is resolved.
+        # We want to discourage the use of scan loop as additional kv permute op observed.
+        # The scan loop flavor will be supported but not the prefered implementation until
+        # a resolution for the additional kv permute op, which degrades perf, is found.
+        if self.use_scanloop():
             warnings.warn(
-                "Scan loop is disabled for fused ring attention. To enable set"
-                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment"
+                "Scan loop is enabled for fused ring attention. To disable set"
+                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=0 in your environment"
             )
 
         # If using scanloop, idx in scan_kv_block() will be a traced device value, but
@@ -3285,7 +3288,7 @@ register_primitive(FusedRingAttnStripedBwdPrimitive)
 
 
 def _maybe_context_parallel_axis(cp_axis: str):
-    if not cp_axis:
+    if not cp_axis and is_mesh_available():
         gmr = global_mesh_resource()
         if gmr is not None:
             cp_axis = gmr.cp_resource

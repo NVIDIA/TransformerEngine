@@ -857,9 +857,10 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
   // Write attribute size
   NVTE_CHECK(attr < kNVTEQuantizationConfigNumAttributes,
              "Invalid NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
-  NVTE_CHECK(size_written != nullptr, "Invalid size_written (got NULL)");
   const auto &attr_size = transformer_engine::QuantizationConfig::attr_sizes[attr];
-  *size_written = attr_size;
+  if (size_written != nullptr) {
+    *size_written = attr_size;
+  }
 
   // Return immediately if buffer is not provided
   if (buf == nullptr) {
@@ -888,6 +889,18 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
       std::memcpy(buf, &config_.float8_block_scale_tensor_format, attr_size);
+      break;
+    case kNVTEQuantizationConfigRNGState:
+      std::memcpy(buf, &config_.rng_state, attr_size);
+      break;
+    case kNVTEQuantizationConfigNVFP42DQuantization:
+      std::memcpy(buf, &config_.nvfp4_2d_quantization, attr_size);
+      break;
+    case kNVTEQuantizationConfigStochasticRounding:
+      std::memcpy(buf, &config_.stochastic_rounding, attr_size);
+      break;
+    case kNVTEQuantizationConfigUseFastMath:
+      std::memcpy(buf, &config_.use_fast_math, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -932,6 +945,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigStochasticRounding:
       std::memcpy(&config_.stochastic_rounding, buf, attr_size);
+      break;
+    case kNVTEQuantizationConfigUseFastMath:
+      std::memcpy(&config_.use_fast_math, buf, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
