@@ -135,13 +135,13 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   at::Tensor scale_inv = at::empty(std::vector<int64_t>{1}, opts);
   return create_tensor(shape, dtype, std::nullopt, std::nullopt, std::move(scale_inv));
 }
-std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
-    const NVTEShape& shape, DType dtype) const {
-      std::vector<size_t> shape_vec;
-      for (size_t i = 0; i < shape.ndim; ++i) {
-        shape_vec.push_back(shape.data[i]);
-      }
-      return create_tensor(shape_vec, dtype);
+std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(const NVTEShape& shape,
+                                                                    DType dtype) const {
+  std::vector<size_t> shape_vec;
+  for (size_t i = 0; i < shape.ndim; ++i) {
+    shape_vec.push_back(shape.data[i]);
+  }
+  return create_tensor(shape_vec, dtype);
 }
 
 std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
@@ -351,11 +351,11 @@ void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tenso
 }
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
     const NVTEShape& shape, DType dtype) const {
-      std::vector<size_t> shape_vec;
-      for (size_t i = 0; i < shape.ndim; ++i) {
-        shape_vec.push_back(shape.data[i]);
-      }
-      return create_tensor(shape_vec, dtype);
+  std::vector<size_t> shape_vec;
+  for (size_t i = 0; i < shape.ndim; ++i) {
+    shape_vec.push_back(shape.data[i]);
+  }
+  return create_tensor(shape_vec, dtype);
 }
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype) const {
@@ -597,13 +597,13 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
 
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
-std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
-    const NVTEShape& shape, DType dtype) const {
-      std::vector<size_t> shape_vec;
-      for (size_t i = 0; i < shape.ndim; ++i) {
-        shape_vec.push_back(shape.data[i]);
-      }
-      return create_tensor(shape_vec, dtype);
+std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(const NVTEShape& shape,
+                                                                         DType dtype) const {
+  std::vector<size_t> shape_vec;
+  for (size_t i = 0; i < shape.ndim; ++i) {
+    shape_vec.push_back(shape.data[i]);
+  }
+  return create_tensor(shape_vec, dtype);
 }
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
@@ -873,7 +873,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
 }
 
 NVTEShapeWrapper Float8BlockQuantizer::get_scale_shape(const NVTEShapeWrapper& shape,
-                                                        bool columnwise) const {
+                                                       bool columnwise) const {
   return get_scale_shape_impl(shape, columnwise);
 }
 
@@ -951,13 +951,13 @@ MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantize
 
 void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
-std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
-    const NVTEShape& shape, DType dtype) const {
-      std::vector<size_t> shape_vec;
-      for (size_t i = 0; i < shape.ndim; ++i) {
-        shape_vec.push_back(shape.data[i]);
-      }
-      return create_tensor(shape_vec, dtype);
+std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const NVTEShape& shape,
+                                                                   DType dtype) const {
+  std::vector<size_t> shape_vec;
+  for (size_t i = 0; i < shape.ndim; ++i) {
+    shape_vec.push_back(shape.data[i]);
+  }
+  return create_tensor(shape_vec, dtype);
 }
 
 std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::vector<size_t>& shape,
@@ -1166,7 +1166,7 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
 }
 
 NVTEShapeWrapper MXFP8Quantizer::get_scale_shape(const NVTEShapeWrapper& shape,
-                                                  bool columnwise) const {
+                                                 bool columnwise) const {
   return get_scale_shape_impl(shape, columnwise);
 }
 
@@ -1238,13 +1238,13 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
   tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
                               columnwise_data.shape);
 }
-std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
-    const NVTEShape& shape, DType dtype) const {
-      std::vector<size_t> shape_vec;
-      for (size_t i = 0; i < shape.ndim; ++i) {
-        shape_vec.push_back(shape.data[i]);
-      }
-      return create_tensor(shape_vec, dtype);
+std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const NVTEShape& shape,
+                                                                   DType dtype) const {
+  std::vector<size_t> shape_vec;
+  for (size_t i = 0; i < shape.ndim; ++i) {
+    shape_vec.push_back(shape.data[i]);
+  }
+  return create_tensor(shape_vec, dtype);
 }
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::vector<size_t>& shape,
                                                                    DType dtype) const {
@@ -1785,7 +1785,7 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
 }
 
 NVTEShapeWrapper NVFP4Quantizer::get_scale_shape(const NVTEShapeWrapper& shape,
-                                                  bool columnwise) const {
+                                                 bool columnwise) const {
   return get_scale_shape_impl(shape, columnwise);
 }
 

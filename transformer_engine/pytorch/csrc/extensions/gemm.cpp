@@ -82,8 +82,8 @@ bool checkGemmShape(const NVTEShape& expected, const NVTEShape& actual) {
 
 }  // namespace detail
 
-std::pair<TensorWrapper, py::object> createOutputTensor(const NVTEShape& shape,
-                                                        DType dtype, py::handle quantizer) {
+std::pair<TensorWrapper, py::object> createOutputTensor(const NVTEShape& shape, DType dtype,
+                                                        py::handle quantizer) {
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
   return my_quantizer->create_tensor(shape, dtype);
 }
@@ -170,8 +170,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   if (unfused_quantization_needed) {
     NoneQuantizer q{none};
-    std::tie(unquantized_D_tensor, unquantized_out) =
-        q.create_tensor(D_shape, output_dtype);
+    std::tie(unquantized_D_tensor, unquantized_out) = q.create_tensor(D_shape, output_dtype);
   }
   TensorWrapper& out_tensor = unfused_quantization_needed ? unquantized_D_tensor : D_tensor;
 
@@ -424,8 +423,8 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
   workspace_shape.data[0] = workspaceSize;
   auto te_pre_gelu_out = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
-  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
-                                                  workspace_shape, DType::kByte);
+  auto te_workspace =
+      makeTransformerEngineTensor(workspace.data_ptr(), workspace_shape, DType::kByte);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_cublas_atomic_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
@@ -594,8 +593,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   workspace_shape.ndim = 1;
   workspace_shape.data[0] = workspaceSize;
   for (size_t i = 0; i < workspace.size(); i++) {
-    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
-                                           workspace_shape, DType::kByte);
+    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(), workspace_shape, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     te_workspace_wrappers.emplace_back(std::move(wsp));
   }
