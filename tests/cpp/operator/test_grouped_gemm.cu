@@ -457,10 +457,8 @@ void run_grouped_gemm_case(const TestParams& params) {
                     grouped_D.get_handle(),
                     setup_ws.data(),
                     cublas_ws.data(),
-                    0,
-                    nullptr,
-                    nullptr,
-                    nullptr);
+                    nullptr,  // config (use defaults)
+                    0);
 
   for (size_t i = 0; i < num_gemms; ++i) {
     Tensor grouped_split("grouped_D" + std::to_string(i),

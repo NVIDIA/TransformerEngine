@@ -31,6 +31,25 @@ struct MatmulConfig {
   };
 };
 
+struct GroupedMatmulConfig {
+  // Average dimension hints for cuBLASLt algorithm selection heuristics.
+  // Value of 0 means "not set" - compute automatically from tensor shapes.
+  int64_t avg_m = 0;
+  int64_t avg_n = 0;
+  int64_t avg_k = 0;
+
+  // Track which attributes have been explicitly set
+  bool avg_m_set = false;
+  bool avg_n_set = false;
+  bool avg_k_set = false;
+
+  static constexpr size_t attr_sizes[] = {
+      sizeof(int64_t),  // avg_m
+      sizeof(int64_t),  // avg_n
+      sizeof(int64_t)   // avg_k
+  };
+};
+
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_GEMM_CONFIG_H_

@@ -16,6 +16,7 @@
 #include "../util/cuda_runtime.h"
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
+#include "./config.h"
 #include "./cublaslt_grouped_gemm.cuh"
 
 namespace {
@@ -498,8 +499,7 @@ inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
 void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVTEGroupedTensor A,
                        const NVTEGroupedTensor B, const NVTETensor beta, const NVTEGroupedTensor C,
                        NVTEGroupedTensor D, NVTETensor workspace_setup, NVTETensor workspace_cublas,
-                       cudaStream_t stream, const int64_t *avg_m, const int64_t *avg_n,
-                       const int64_t *avg_k) {
+                       NVTEGroupedMatmulConfig config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
@@ -517,6 +517,12 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
   const Tensor *beta_tensor = convertNVTETensorCheck(beta);
   Tensor *wspace_setup = convertNVTETensor(workspace_setup);
   Tensor *wspace_cublas = convertNVTETensor(workspace_cublas);
+
+  // Parse config (if provided)
+  GroupedMatmulConfig config_;
+  if (config != nullptr) {
+    config_ = *reinterpret_cast<GroupedMatmulConfig *>(config);
+  }
 
   // Validate inputs and num_tensors
   validate_grouped_gemm_inputs(inputA, inputB, inputC_raw, outputD, alpha_tensor, beta_tensor);
@@ -564,11 +570,11 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
 
   // Compute average dimensions for heuristics
   // K dimension: if transa, K is A's first dim; if not, K is A's last dim
-  int64_t avg_m_val = avg_m ? *avg_m : compute_avg_first_dim(outputD);
-  int64_t avg_n_val = avg_n ? *avg_n : compute_avg_last_dim(outputD);
-  int64_t avg_k_val = avg_k ? *avg_k
-                            : (A_sel.trans ? compute_avg_first_dim(A_sel.tensor)
-                                           : compute_avg_last_dim(A_sel.tensor));
+  int64_t avg_m_val = config_.avg_m_set ? config_.avg_m : compute_avg_first_dim(outputD);
+  int64_t avg_n_val = config_.avg_n_set ? config_.avg_n : compute_avg_last_dim(outputD);
+  int64_t avg_k_val = config_.avg_k_set ? config_.avg_k
+                                        : (A_sel.trans ? compute_avg_first_dim(A_sel.tensor)
+                                                       : compute_avg_last_dim(A_sel.tensor));
 
   // Heuristic selection
   cublasLtMatmulAlgo_t algo = select_grouped_gemm_algo(handle, matmulDesc, descA, descB, descC,
@@ -587,8 +593,7 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
 void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVTEGroupedTensor A,
                        const NVTEGroupedTensor B, const NVTETensor beta, const NVTEGroupedTensor C,
                        NVTEGroupedTensor D, NVTETensor workspace_setup, NVTETensor workspace_cublas,
-                       cudaStream_t stream, const int64_t *avg_m, const int64_t *avg_n,
-                       const int64_t *avg_k) {
+                       NVTEGroupedMatmulConfig config, cudaStream_t stream) {
   NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.1+, but compile-time cuBLAS version is ",
              CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
 }
