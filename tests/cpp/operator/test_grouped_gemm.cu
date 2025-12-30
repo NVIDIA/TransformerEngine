@@ -293,7 +293,8 @@ struct TestParams {
   bool transa;
   bool transb;
   ShapeCase shape_case;
-  bool use_null_c = false;  // When true, pass nullptr for C (valid when beta=0)
+  bool use_null_c = false;           // When true, pass nullptr for C (valid when beta=0)
+  bool use_split_accumulator = false; // Whether to use split accumulator for FP8 GEMM
 };
 
 // Returns a vector of (M, N, K) tuples for each GEMM in the group.
@@ -362,14 +363,16 @@ void run_grouped_gemm_case(const TestParams& params) {
   std::vector<NVTETensor> A_ptrs(num_gemms);
   std::vector<NVTETensor> B_ptrs(num_gemms);
   std::vector<NVTETensor> D_ptrs(num_gemms);
-  std::vector<NVTETensor> bias_ptrs(num_gemms, nullptr);
-  std::vector<NVTETensor> gelu_ptrs(num_gemms, nullptr);
   std::vector<Tensor> workspaces(num_gemms);
   std::vector<NVTETensor> workspace_ptrs(num_gemms, nullptr);
   std::vector<Tensor*> A_views;
   std::vector<Tensor*> B_views;
   A_views.reserve(num_gemms);
   B_views.reserve(num_gemms);
+
+  // Empty bias/gelu arrays for nvte_multi_tensor_gemm (no epilogues)
+  std::vector<NVTETensor> bias_ptrs(num_gemms, nullptr);
+  std::vector<NVTETensor> gelu_ptrs(num_gemms, nullptr);
 
   const size_t cublas_ws_bytes = 32ull * 1024 * 1024;
 
@@ -391,11 +394,11 @@ void run_grouped_gemm_case(const TestParams& params) {
                          static_cast<int>(num_gemms),
                          params.transa,
                          params.transb,
-                         false,
+                         false,  // grad
                          workspace_ptrs.data(),
-                         false,
-                         false,
-                         0,
+                         false,  // accumulate
+                         params.use_split_accumulator,
+                         0,      // sm_count
                          0);
 
   GroupedBuffers grouped_A = build_grouped_tensor(A_views, A_tensors[0].scaling_mode());
@@ -447,6 +450,10 @@ void run_grouped_gemm_case(const TestParams& params) {
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
 
+  // Create config with use_split_accumulator setting
+  transformer_engine::GroupedMatmulConfigWrapper config;
+  config.set_use_split_accumulator(params.use_split_accumulator);
+
   nvte_grouped_gemm(params.transa,
                     params.transb,
                     alpha_tensor.data(),
@@ -457,7 +464,7 @@ void run_grouped_gemm_case(const TestParams& params) {
                     grouped_D.get_handle(),
                     setup_ws.data(),
                     cublas_ws.data(),
-                    nullptr,  // config (use defaults)
+                    config,
                     0);
 
   for (size_t i = 0; i < num_gemms; ++i) {
@@ -495,20 +502,29 @@ std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest
   const std::string layout = std::string("ta") + (info.param.transa ? "T" : "N") +
                              "tb" + (info.param.transb ? "T" : "N");
   const std::string null_c = info.param.use_null_c ? "_NullC" : "";
+  const std::string split_acc = info.param.use_split_accumulator ? "_SplitAcc" : "";
   return std::string(kInputNames[static_cast<int>(info.param.input_case)]) + "_" +
-         kShapeNames[static_cast<int>(info.param.shape_case)] + "_" + layout + null_c;
+         kShapeNames[static_cast<int>(info.param.shape_case)] + "_" + layout + null_c + split_acc;
 }
 
+// TestParams: {input_case, transa, transb, shape_case, use_null_c, use_split_accumulator}
 const std::vector<TestParams> kTestParams = {
-    {InputCase::kFP8Current, true, false, ShapeCase::kAllDifferent, false},
-    {InputCase::kFP8Current, false, true, ShapeCase::kAllDifferent, false},
-    {InputCase::kFP8Current, false, false, ShapeCase::kAllSame, false},
-    {InputCase::kBF16, true, false, ShapeCase::kSameFirst, false},
-    {InputCase::kBF16, false, true, ShapeCase::kSameLast, false},
-    {InputCase::kBF16, false, false, ShapeCase::kAllSame, false},
-    {InputCase::kBF16, true, true, ShapeCase::kAllDifferent, false},
+    // Basic tests (no split accumulator)
+    {InputCase::kFP8Current, true, false, ShapeCase::kAllDifferent, false, false},
+    {InputCase::kFP8Current, false, true, ShapeCase::kAllDifferent, false, false},
+    {InputCase::kFP8Current, false, false, ShapeCase::kAllSame, false, false},
+    {InputCase::kBF16, true, false, ShapeCase::kSameFirst, false, false},
+    {InputCase::kBF16, false, true, ShapeCase::kSameLast, false, false},
+    {InputCase::kBF16, false, false, ShapeCase::kAllSame, false, false},
+    {InputCase::kBF16, true, true, ShapeCase::kAllDifferent, false, false},
     // Test NULL C (valid when beta=0)
-    {InputCase::kBF16, false, false, ShapeCase::kAllSame, true},
+    {InputCase::kBF16, false, false, ShapeCase::kAllSame, true, false},
+
+    // Split accumulator tests
+    {InputCase::kFP8Current, true, false, ShapeCase::kAllDifferent, false, true},
+    {InputCase::kFP8Current, false, true, ShapeCase::kAllDifferent, false, true},
+    {InputCase::kFP8Current, false, false, ShapeCase::kAllSame, false, true},
+    {InputCase::kFP8Current, true, false, ShapeCase::kSameFirst, false, true},
 };
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest,

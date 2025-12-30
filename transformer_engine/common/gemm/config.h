@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_GEMM_CONFIG_H_
 #define TRANSFORMER_ENGINE_GEMM_CONFIG_H_
 
+#include <cstdint>
+
 #include <transformer_engine/transformer_engine.h>
 
 namespace transformer_engine {
@@ -38,6 +40,12 @@ struct GroupedMatmulConfig {
   int64_t avg_n = 0;
   int64_t avg_k = 0;
 
+  // Whether to use split accumulator for FP8 GEMM (more accurate but slower)
+  bool use_split_accumulator = true;
+
+  // Number of streaming multiprocessors to use in GEMM kernel
+  int sm_count = 0;
+
   // Track which attributes have been explicitly set
   bool avg_m_set = false;
   bool avg_n_set = false;
@@ -46,7 +54,9 @@ struct GroupedMatmulConfig {
   static constexpr size_t attr_sizes[] = {
       sizeof(int64_t),  // avg_m
       sizeof(int64_t),  // avg_n
-      sizeof(int64_t)   // avg_k
+      sizeof(int64_t),  // avg_k
+      sizeof(bool),     // use_split_accumulator
+      sizeof(int)       // sm_count
   };
 };
 

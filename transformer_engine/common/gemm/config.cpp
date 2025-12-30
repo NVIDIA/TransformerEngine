@@ -154,6 +154,12 @@ void nvte_get_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
     case kNVTEGroupedMatmulConfigAvgK:
       std::memcpy(buf, &config_.avg_k, attr_size);
       break;
+    case kNVTEGroupedMatmulConfigUseSplitAccumulator:
+      std::memcpy(buf, &config_.use_split_accumulator, attr_size);
+      break;
+    case kNVTEGroupedMatmulConfigSMCount:
+      std::memcpy(buf, &config_.sm_count, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEGroupedMatmulConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -188,6 +194,12 @@ void nvte_set_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
     case kNVTEGroupedMatmulConfigAvgK:
       std::memcpy(&config_.avg_k, buf, attr_size);
       config_.avg_k_set = true;
+      break;
+    case kNVTEGroupedMatmulConfigUseSplitAccumulator:
+      std::memcpy(&config_.use_split_accumulator, buf, attr_size);
+      break;
+    case kNVTEGroupedMatmulConfigSMCount:
+      std::memcpy(&config_.sm_count, buf, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEGroupedMatmulConfigAttribute (got ", static_cast<int>(attr), ")");

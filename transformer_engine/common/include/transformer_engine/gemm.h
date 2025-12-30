@@ -82,6 +82,10 @@ enum NVTEGroupedMatmulConfigAttribute {
    * computed automatically from A's logical shape.
    */
   kNVTEGroupedMatmulConfigAvgK = 2,
+  /*! Whether to use split accumulator for FP8 GEMM. */
+  kNVTEGroupedMatmulConfigUseSplitAccumulator = 3,
+  /*! Number of streaming multiprocessors to use in GEMM kernel. */
+  kNVTEGroupedMatmulConfigSMCount = 4,
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
@@ -481,6 +485,18 @@ class GroupedMatmulConfigWrapper {
   void set_avg_k(int64_t avg_k) {
     nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigAvgK, &avg_k,
                                              sizeof(int64_t));
+  }
+
+  /*! \brief Set whether to use split accumulator for FP8 GEMM. */
+  void set_use_split_accumulator(bool use_split_accumulator) {
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigUseSplitAccumulator,
+                                             &use_split_accumulator, sizeof(bool));
+  }
+
+  /*! \brief Set number of streaming multiprocessors to use. */
+  void set_sm_count(int sm_count) {
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigSMCount,
+                                             &sm_count, sizeof(int));
   }
 
  private:

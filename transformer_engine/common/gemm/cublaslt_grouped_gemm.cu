@@ -568,6 +568,15 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
   init_matmul_desc(matmulDesc, op_A, op_B);
   set_fp8_scale_pointers(matmulDesc, A_sel, B_sel);
 
+  // Set fast accumulation mode for FP8
+  // Fast accumulation: 0 = split accumulator (more accurate), 1 = fast accumulator
+  const bool is_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
+  if (is_fp8) {
+    int8_t fastAccuMode = config_.use_split_accumulator ? 0 : 1;
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        &matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fastAccuMode, sizeof(fastAccuMode)));
+  }
+
   // Compute average dimensions for heuristics
   // K dimension: if transa, K is A's first dim; if not, K is A's last dim
   int64_t avg_m_val = config_.avg_m_set ? config_.avg_m : compute_avg_first_dim(outputD);
