@@ -142,7 +142,8 @@ class NoneQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
                                                      at::Tensor data) const;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
+                                                     DType dtype) const override;
 
   /*! @brief Construct a tensor with pre-initialized data */
   std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype,
@@ -457,7 +458,6 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
-
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, void* columnwise_data_ptr, const NVTEShape& shape,
     const NVTEShape& columnwise_shape, const transformer_engine::DType type, void* amax_ptr,
@@ -484,7 +484,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 template <typename T>
 T product(const std::vector<T>& shape);
 
-size_t product(const NVTEShape& shape, size_t begin=0, size_t end=-1);
+size_t product(const NVTEShape& shape, size_t begin = 0, size_t end = -1);
 
 std::vector<size_t> nvte_shape_to_vector(const NVTEShape& nvte_shape);
 

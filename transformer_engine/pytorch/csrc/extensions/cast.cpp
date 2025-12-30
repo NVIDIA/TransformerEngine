@@ -336,12 +336,13 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-        rowwise_usage ? static_cast<NVTEShape&>(rowwise_data_shapes[i]) : zero_shape,
-        columnwise_usage ? static_cast<NVTEShape&>(columnwise_data_shapes[i]) : zero_shape, fp8_dtype, nullptr,
-        nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
+        rowwise_usage ? static_cast<NVTEShape &>(rowwise_data_shapes[i]) : zero_shape,
+        columnwise_usage ? static_cast<NVTEShape &>(columnwise_data_shapes[i]) : zero_shape,
+        fp8_dtype, nullptr, nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-        rowwise_usage ? static_cast<NVTEShape&>(rowwise_scale_shapes[i]) : zero_shape,
-        columnwise_usage ? static_cast<NVTEShape&>(columnwise_scale_shapes[i]) : zero_shape, scaling_mode));
+        rowwise_usage ? static_cast<NVTEShape &>(rowwise_scale_shapes[i]) : zero_shape,
+        columnwise_usage ? static_cast<NVTEShape &>(columnwise_scale_shapes[i]) : zero_shape,
+        scaling_mode));
   }
 
   return retval;
@@ -485,12 +486,13 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-        rowwise_usage ? static_cast<NVTEShape&>(rowwise_data_shapes[i]) : zero_shape,
-        columnwise_usage ? static_cast<NVTEShape&>(columnwise_data_shapes[i]) : zero_shape, fp8_dtype, nullptr,
-        nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
+        rowwise_usage ? static_cast<NVTEShape &>(rowwise_data_shapes[i]) : zero_shape,
+        columnwise_usage ? static_cast<NVTEShape &>(columnwise_data_shapes[i]) : zero_shape,
+        fp8_dtype, nullptr, nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-        rowwise_usage ? static_cast<NVTEShape&>(rowwise_scale_shapes[i]) : zero_shape,
-        columnwise_usage ? static_cast<NVTEShape&>(columnwise_scale_shapes[i]) : zero_shape, scaling_mode));
+        rowwise_usage ? static_cast<NVTEShape &>(rowwise_scale_shapes[i]) : zero_shape,
+        columnwise_usage ? static_cast<NVTEShape &>(columnwise_scale_shapes[i]) : zero_shape,
+        scaling_mode));
   }
 
   return retval;
@@ -698,18 +700,19 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       auto tensor_wrapper = makeTransformerEngineTensor(
           rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
           columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-          rowwise_usage ? static_cast<NVTEShape&>(rowwise_data_shapes[i]) : zero_shape,
-          columnwise_usage ? static_cast<NVTEShape&>(columnwise_data_shapes[i]) : zero_shape, fp4_dtype,
+          rowwise_usage ? static_cast<NVTEShape &>(rowwise_data_shapes[i]) : zero_shape,
+          columnwise_usage ? static_cast<NVTEShape &>(columnwise_data_shapes[i]) : zero_shape,
+          fp4_dtype,
           /*amax_ptr=*/nullptr,
           /*scale_ptr=*/nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
           columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-          rowwise_usage ? static_cast<NVTEShape&>(rowwise_scale_shapes[i]) : zero_shape,
-          columnwise_usage ? static_cast<NVTEShape&>(columnwise_scale_shapes[i]) : zero_shape, scaling_mode);
-      
+          rowwise_usage ? static_cast<NVTEShape &>(rowwise_scale_shapes[i]) : zero_shape,
+          columnwise_usage ? static_cast<NVTEShape &>(columnwise_scale_shapes[i]) : zero_shape,
+          scaling_mode);
+
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {
-        tensor_wrapper.set_amax(amax_rowwise_list[i].data_ptr(), DType::kFloat32,
-                                amax_shape);
+        tensor_wrapper.set_amax(amax_rowwise_list[i].data_ptr(), DType::kFloat32, amax_shape);
       }
       if (columnwise_usage) {
         tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
@@ -780,8 +783,8 @@ static StochasticRngStateResources setup_stochastic_rounding_rng_states_helper(
     NVTEShape rng_state_shape;
     rng_state_shape.ndim = 1;
     rng_state_shape.data[0] = 2;
-    res.te_rng_state_list.push_back(makeTransformerEngineTensor(
-        static_cast<void *>(rng_state_ptr), rng_state_shape, DType::kInt64));
+    res.te_rng_state_list.push_back(makeTransformerEngineTensor(static_cast<void *>(rng_state_ptr),
+                                                                rng_state_shape, DType::kInt64));
     quant_config_list_rowwise[i].set_rng_state(res.te_rng_state_list[i].data());
     quant_config_list_rowwise[i].set_stochastic_rounding(true);
 
@@ -1146,7 +1149,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       split_shape.push_back(input_shape[j]);
     }
     void *split_dptr = static_cast<void *>(input_dptr + dim0_offset * dim0_stride);
-    input_list.emplace_back(makeTransformerEngineTensor(split_dptr, static_cast<NVTEShape&>(split_shape), input_dtype));
+    input_list.emplace_back(makeTransformerEngineTensor(
+        split_dptr, static_cast<NVTEShape &>(split_shape), input_dtype));
     dim0_offset += split_sections[i];
   }
 

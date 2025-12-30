@@ -175,7 +175,6 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   return ret;
 }
 
-
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, void* columnwise_data_ptr, const NVTEShape& shape,
     const NVTEShape& columnwise_shape, const transformer_engine::DType type, void* amax_ptr,
@@ -230,7 +229,7 @@ template size_t product<size_t>(const std::vector<size_t>& shape);
 template int64_t product<int64_t>(const std::vector<int64_t>& shape);
 
 size_t product(const NVTEShape& shape, size_t begin, size_t end) {
-  if(end == -1) {
+  if (end == -1) {
     end = shape.ndim;
   }
   NVTE_CHECK(begin <= end && end <= shape.ndim, "Attempted to access entries ", begin, " to ", end,

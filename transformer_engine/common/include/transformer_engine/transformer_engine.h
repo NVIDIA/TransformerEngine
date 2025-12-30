@@ -527,39 +527,36 @@ class NVTEShapeWrapper {
 
  public:
   // Default constructor
-  NVTEShapeWrapper() {
-    data.ndim = 0;
-  }
+  NVTEShapeWrapper() { data.ndim = 0; }
 
   // Constructor from NVTEShape (direct assignment by reference)
-  NVTEShapeWrapper(const NVTEShape& shape) {
-    data = shape;
-  }
+  NVTEShapeWrapper(const NVTEShape &shape) { data = shape; }
 
   // Constructor from vector (creates a copy)
-  template <typename T> NVTEShapeWrapper(const std::vector<T>& shape_vec) {
+  template <typename T>
+  NVTEShapeWrapper(const std::vector<T> &shape_vec) {
     data.ndim = shape_vec.size();
     for (size_t i = 0; i < data.ndim; ++i) {
       data.data[i] = static_cast<size_t>(shape_vec[i]);
     }
   }
 
-  operator NVTEShape&() { return data; }
-  operator const NVTEShape&() const { return data; }
+  operator NVTEShape &() { return data; }
+  operator const NVTEShape &() const { return data; }
 
   // Iterator support
-  size_t* begin() { return data.data; }
-  const size_t* begin() const { return data.data; }
-  size_t* end() { return data.data + data.ndim; }
-  const size_t* end() const { return data.data + data.ndim; }
+  size_t *begin() { return data.data; }
+  const size_t *begin() const { return data.data; }
+  size_t *end() { return data.data + data.ndim; }
+  const size_t *end() const { return data.data + data.ndim; }
 
   // Index access
-  size_t& operator[](size_t idx) { return data.data[idx]; }
-  const size_t& operator[](size_t idx) const { return data.data[idx]; }
+  size_t &operator[](size_t idx) { return data.data[idx]; }
+  const size_t &operator[](size_t idx) const { return data.data[idx]; }
 
   // Back access
-  size_t& back() { return data.data[data.ndim - 1]; }
-  const size_t& back() const { return data.data[data.ndim - 1]; }
+  size_t &back() { return data.data[data.ndim - 1]; }
+  const size_t &back() const { return data.data[data.ndim - 1]; }
 
   // Size access
   size_t size() const { return data.ndim; }
