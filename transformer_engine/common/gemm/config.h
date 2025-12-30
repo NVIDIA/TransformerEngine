@@ -40,9 +40,6 @@ struct GroupedMatmulConfig {
   int64_t avg_n = 0;
   int64_t avg_k = 0;
 
-  // Whether to use split accumulator for FP8 GEMM (more accurate but slower)
-  bool use_split_accumulator = true;
-
   // Number of streaming multiprocessors to use in GEMM kernel
   int sm_count = 0;
 
@@ -55,7 +52,6 @@ struct GroupedMatmulConfig {
       sizeof(int64_t),  // avg_m
       sizeof(int64_t),  // avg_n
       sizeof(int64_t),  // avg_k
-      sizeof(bool),     // use_split_accumulator
       sizeof(int)       // sm_count
   };
 };

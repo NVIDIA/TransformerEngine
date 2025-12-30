@@ -310,15 +310,17 @@ inline void init_matrix_layouts(cublasLtMatrixLayoutOpaque_t &descA,
 
   // For column-major layout: leading dimension is the number of rows in storage.
   // If columnwise data was chosen, storage is already transposed.
-  int *rowa = A_sel.use_columnwise ? ws.M : (A_sel.trans ? ws.K : ws.M);
-  int *cola = A_sel.use_columnwise ? ws.K : (A_sel.trans ? ws.M : ws.K);
-  int *lda = rowa;
-  int *rowb = B_sel.use_columnwise ? ws.N : (B_sel.trans ? ws.N : ws.K);
-  int *colb = B_sel.use_columnwise ? ws.K : (B_sel.trans ? ws.K : ws.N);
-  int *ldb = rowb;
+  // Storage dimensions for A: rows_A x cols_A with leading dimension lda_storage
+  int *rows_A = A_sel.use_columnwise ? ws.M : (A_sel.trans ? ws.K : ws.M);
+  int *cols_A = A_sel.use_columnwise ? ws.K : (A_sel.trans ? ws.M : ws.K);
+  int *lda_storage = rows_A;
+  // Storage dimensions for B: rows_B x cols_B with leading dimension ldb_storage
+  int *rows_B = B_sel.use_columnwise ? ws.N : (B_sel.trans ? ws.N : ws.K);
+  int *cols_B = B_sel.use_columnwise ? ws.K : (B_sel.trans ? ws.K : ws.N);
+  int *ldb_storage = rows_B;
 
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descA, A_type, num_tensors, rowa, cola, lda));
-  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descB, B_type, num_tensors, rowb, colb, ldb));
+  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descA, A_type, num_tensors, rows_A, cols_A, lda_storage));
+  NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descB, B_type, num_tensors, rows_B, cols_B, ldb_storage));
   NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descC, D_type, num_tensors, ws.M, ws.N, ws.M));
   NVTE_CHECK_CUBLAS(cublasLtGroupedMatrixLayoutInit(&descD, D_type, num_tensors, ws.M, ws.N, ws.M));
 }
@@ -442,14 +444,15 @@ __global__ void setup_grouped_gemm_kernel(
       D_meta.offsets ? D_meta.offsets[idx] : (idx * D_meta.uniform_first * D_meta.uniform_last);
 
   // Compute data pointers
+  // Note: const_cast is safe here - cuBLAS requires void** but won't modify A/B/C data
   A_ptrs[idx] = const_cast<char *>(a_base) + a_offset * a_elem_size;
   B_ptrs[idx] = const_cast<char *>(b_base) + b_offset * b_elem_size;
   C_ptrs[idx] = const_cast<char *>(c_base) + c_offset * c_elem_size;
   D_ptrs[idx] = d_base + d_offset * d_elem_size;
 
-  // Compute M, N, K dimensions
-  // Test stores A as {K,M} when !transa, {M,K} when transa
-  // Test stores B as {N,K} when !transb, {K,N} when transb
+  // Compute M, N, K dimensions from tensor shapes
+  // Input A is stored as {K,M} when !transa, {M,K} when transa
+  // Input B is stored as {N,K} when !transb, {K,N} when transb
   M[idx] = static_cast<int>(transa ? a_first : a_last);
   K[idx] = static_cast<int>(transa ? a_last : a_first);
   N[idx] = static_cast<int>(transb ? b_last : b_first);
@@ -570,9 +573,11 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
 
   // Set fast accumulation mode for FP8
   // Fast accumulation: 0 = split accumulator (more accurate), 1 = fast accumulator
+  // Note: cuBLASLt grouped GEMM API does not support configurable split accumulator,
+  // we always use fast accumulator for performance.
   const bool is_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   if (is_fp8) {
-    int8_t fastAccuMode = config_.use_split_accumulator ? 0 : 1;
+    int8_t fastAccuMode = 1;  // Always use fast accumulator
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
         &matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fastAccuMode, sizeof(fastAccuMode)));
   }
