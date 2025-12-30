@@ -99,6 +99,29 @@ at::Tensor nvfp4_transpose(at::Tensor input, std::optional<at::Tensor> output) {
   return out;
 }
 
+void nvfp4_scale_transpose(at::Tensor input, at::Tensor output,
+                           int64_t M_tiles, int64_t K_tiles) {
+  init_extension();
+
+  // Input: rowwise_scale_inv [M_padded, K_tiles], uint8 (E4M3 stored as bytes)
+  // Output: columnwise_scale_inv [K_padded, M_tiles], uint8 (E4M3 stored as bytes)
+  const auto in_shape = getTensorShape(input);
+  const auto out_shape = getTensorShape(output);
+  NVTE_CHECK(in_shape.size() == 2, "NVFP4 scale transpose expects 2D input.");
+  NVTE_CHECK(out_shape.size() == 2, "NVFP4 scale transpose expects 2D output.");
+  NVTE_CHECK(input.scalar_type() == at::kByte, "NVFP4 scale transpose input must be uint8 (E4M3).");
+  NVTE_CHECK(output.scalar_type() == at::kByte, "NVFP4 scale transpose output must be uint8 (E4M3).");
+
+  auto input_cu = makeTransformerEngineTensor(
+      input.data_ptr(), std::vector<size_t>{in_shape[0], in_shape[1]}, DType::kByte);
+  auto output_cu = makeTransformerEngineTensor(
+      output.data_ptr(), std::vector<size_t>{out_shape[0], out_shape[1]}, DType::kByte);
+
+  nvte_nvfp4_scale_transpose(input_cu.data(), output_cu.data(),
+                             static_cast<size_t>(M_tiles), static_cast<size_t>(K_tiles),
+                             at::cuda::getCurrentCUDAStream());
+}
+
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
   init_extension();
 

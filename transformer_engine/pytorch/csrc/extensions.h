@@ -158,6 +158,8 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype,
 
 at::Tensor nvfp4_transpose(at::Tensor input, std::optional<at::Tensor> output = std::nullopt);
 
+void nvfp4_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles, int64_t K_tiles);
+
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
 /***************************************************************************************************

@@ -423,8 +423,94 @@ void nvfp4_transpose(const Tensor input, Tensor output, cudaStream_t stream) {
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * NVFP4 SCALE TRANSPOSE KERNEL
+ *
+ * Transposes tile-level scales from rowwise to columnwise format.
+ * Scale values are stored as E4M3 (fp8) in uint8 tensors.
+ * 
+ * Input (rowwise_scale_inv): [M_padded, K_tiles] where scales are stored
+ *   at every 16th row (i.e., row 0, 16, 32, ... contain the actual scales,
+ *   and each row i within a tile block has the same scale as row (i // 16) * 16).
+ *
+ * Output (columnwise_scale_inv): [K_padded, M_tiles] where scales are
+ *   repeated 16 times per tile row.
+ *
+ * Mapping:
+ *   output[k_tile * 16 + i, m_tile] = input[m_tile * 16, k_tile]
+ *   for i in [0, 16) and valid (k_tile, m_tile) indices.
+ * ---------------------------------------------------------------------------
+ */
+__global__ void nvfp4_scale_transpose_kernel(
+    const uint8_t* __restrict__ input,   // [M_padded, K_tiles], E4M3 stored as uint8
+    uint8_t* __restrict__ output,        // [K_padded, M_tiles], E4M3 stored as uint8
+    const size_t M_tiles,              // Number of M tiles
+    const size_t K_tiles,              // Number of K tiles
+    const size_t input_stride,         // K_tiles (input row stride)
+    const size_t output_stride,        // M_tiles (output row stride)
+    const size_t K_padded              // Output height
+) {
+    // Each thread handles one output element
+    const size_t out_row = blockIdx.y * blockDim.y + threadIdx.y;
+    const size_t out_col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (out_row >= K_padded || out_col >= M_tiles) return;
+    
+    // Determine which tile row this belongs to
+    const size_t k_tile = out_row / kTileDim;
+    
+    // Read from input: row = m_tile * 16 (first row of the tile), col = k_tile
+    // m_tile = out_col
+    if (k_tile < K_tiles) {
+        const size_t in_row = out_col * kTileDim;  // m_tile * 16
+        const uint8_t scale = input[in_row * input_stride + k_tile];
+        output[out_row * output_stride + out_col] = scale;
+    } else {
+        output[out_row * output_stride + out_col] = 0;
+    }
+}
+
+void nvfp4_scale_transpose(const Tensor input, Tensor output, 
+                           size_t M_tiles, size_t K_tiles,
+                           cudaStream_t stream) {
+    NVTE_CHECK(input.dtype() == DType::kByte, "NVFP4 scale transpose input must be uint8 (E4M3).");
+    NVTE_CHECK(output.dtype() == DType::kByte, "NVFP4 scale transpose output must be uint8 (E4M3).");
+    
+    const auto in_shape = input.shape();
+    const auto out_shape = output.shape();
+    NVTE_CHECK(in_shape.size() == 2, "NVFP4 scale transpose expects 2D input.");
+    NVTE_CHECK(out_shape.size() == 2, "NVFP4 scale transpose expects 2D output.");
+    
+    const size_t input_stride = in_shape[1];   // K_tiles
+    const size_t output_stride = out_shape[1]; // M_tiles
+    const size_t K_padded = out_shape[0];
+    
+    if (M_tiles == 0 || K_tiles == 0 || K_padded == 0) return;
+    
+    constexpr int kBlockDim = 16;
+    dim3 block(kBlockDim, kBlockDim);
+    dim3 grid((M_tiles + kBlockDim - 1) / kBlockDim, 
+              (K_padded + kBlockDim - 1) / kBlockDim);
+    
+    nvfp4_scale_transpose_kernel<<<grid, block, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(input.data.dptr),
+        reinterpret_cast<uint8_t*>(output.data.dptr),
+        M_tiles, K_tiles, input_stride, output_stride, K_padded);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 }  // namespace nvfp4_recipe
 }  // namespace transformer_engine
+
+void nvte_nvfp4_scale_transpose(const NVTETensor input, NVTETensor output,
+                                size_t M_tiles, size_t K_tiles, cudaStream_t stream) {
+    NVTE_API_CALL(nvte_nvfp4_scale_transpose);
+    using namespace transformer_engine;
+    nvfp4_recipe::nvfp4_scale_transpose(*convertNVTETensorCheck(input),
+                                        *convertNVTETensorCheck(output),
+                                        M_tiles, K_tiles, stream);
+}
 
 void nvte_nvfp4_transpose(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_nvfp4_transpose);
