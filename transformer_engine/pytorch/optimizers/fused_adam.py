@@ -473,7 +473,7 @@ class FusedAdam(torch.optim.Optimizer):
                     else:
                         self.set_scaled_state(param, name, v[name].float())
 
-    def step(self, closure=None, grad_scaler=None):
+    def original_step(self, closure=None, grad_scaler=None):
         """Performs a single optimization step.
 
         Arguments:
@@ -755,3 +755,328 @@ class FusedAdam(torch.optim.Optimizer):
             del unscaled_lists
 
         return loss
+
+    def _create_m_v_copy_buffer(self):
+        # Get max m, v length to create buffer
+        max_m_v_len = 0
+        for group in self.param_groups:
+            if len(group["params"]) == 0:
+                continue
+
+            m_v_len = 0
+            for p in group["params"]:
+                m_v_len = p.numel()
+                if m_v_len > max_m_v_len:
+                    max_m_v_len = m_v_len
+
+        device = torch.device("cuda")
+        m_buffer = torch.zeros(max_m_v_len, dtype=torch.float32, device=device)
+        v_buffer = torch.zeros(max_m_v_len, dtype=torch.float32, device=device)
+        return m_buffer, v_buffer
+
+    def _bf16_to_fp32_with_buffer(self, param, buffer):
+        numel = param.numel()
+        buf_view = buffer[:numel].view(param.shape)
+        buf_view.copy_(param.float())
+        return buf_view
+
+    def _from_buffer_fp32_to_bf16(self, param, buffer):
+        numel = param.numel()
+        buf_view = buffer[:numel].view(param.shape)
+        param.copy_(buf_view.bfloat16())
+
+    def step_with_buffer_for_bf16_m_v(self, closure=None, grad_scaler=None):
+        """Performs a single optimization step.
+        This method uses two buffers to reduce the overhead of memory allocation and deallocation overhead of bf16-fp32 conversions.
+
+        Arguments:
+            closure (callable, optional): A closure that reevaluates the model
+                and returns the loss.
+            grad_scaler (torch.cuda.amp.GradScaler, optional):
+                gradient scaler (default: None)
+        """
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        m_buffer, v_buffer = self._create_m_v_copy_buffer()
+
+        for group in self.param_groups:
+            if len(group["params"]) == 0:
+                continue
+            device = group["params"][0].device
+            bias_correction = 1 if group["bias_correction"] else 0
+            beta1, beta2 = group["betas"]
+
+            # assume same step across group now to simplify things
+            # per parameter step can be easily support by making it tensor, or pass list into kernel
+            if "step" in group:
+                group["step"] += (
+                    1 if not self.capturable else (self._dummy_overflow_buf != 1).to(torch.int)
+                )
+            else:
+                group["step"] = (
+                    1 if not self.capturable else torch.tensor([1], dtype=torch.int, device=device)
+                )
+
+            # Only used when extra params include fp8 tensors. Otherwise, it doesn't matter what the out_dtype is.
+            out_dtype = tex.DType.kFloat32
+
+            has_fp16 = False
+            has_bf16 = False
+
+            for p in group["params"]:
+                p_main_of_fp8_model = []
+                p_main_of_f16_model = []
+                g_of_fp8_model = []
+                g_of_f16_model = []
+                g_of_f32_model = []
+                m_of_fp8_model = []
+                m_of_f16_model = []
+                m_of_f32_model = []
+                v_of_fp8_model = []
+                v_of_f16_model = []
+                v_of_f32_model = []
+                p_fp8_model = []
+                p_f16_model = []
+                p_f32_model = []
+                # fp8 meta
+                scales = []
+                amaxes = []
+                scale_invs = []
+
+                unscaled_lists = {"exp_avg": [], "exp_avg_sq": [], "master_param": []}
+                scaled_lists = {"exp_avg": [], "exp_avg_sq": [], "master_param": []}
+                state_scales = {"exp_avg": [], "exp_avg_sq": [], "master_param": []}
+
+                state = self.state[p]
+
+                store_param_remainders = self.store_param_remainders and p.dtype == torch.bfloat16
+
+                # State initialization
+                if len(state) == 0:
+                    self.initialize_state(p, store_param_remainders)
+
+                if self.use_decoupled_grad:
+                    p_grad = p.decoupled_grad if hasattr(p, "decoupled_grad") else None
+                else:
+                    p_grad = p.grad
+
+                if p_grad is None:
+                    continue
+                if p_grad.data.is_sparse:
+                    raise RuntimeError("FusedAdam does not support sparse gradients.")
+
+                # Unscaling
+                unscaled_state = {}
+                for name in ["exp_avg", "exp_avg_sq", "master_param"]:
+                    if name in state:
+                        if name == "master_param" and store_param_remainders:
+                            unscaled_state[name] = self.state[p][name]
+                            assert unscaled_state[name].dtype == torch.int16
+                        else:
+                            if name == "exp_avg":
+                                unscaled = self._bf16_to_fp32_with_buffer(self.state[p][name], m_buffer)
+                            else:
+                                unscaled = self._bf16_to_fp32_with_buffer(self.state[p][name], v_buffer)
+                            unscaled_state[name] = unscaled
+                        if self.name_to_dtype_map[name] != torch.float32:
+                            unscaled_lists[name].append(unscaled)
+                            scaled_lists[name].append(state[name])
+                            state_scales[name].append(self._scales[p][name])
+
+                if isinstance(p, Float8Tensor):
+                    out_dtype = p._fp8_dtype
+                    p_fp8_model.append(p._data.data)
+                    scale, amax, scale_inv = get_fp8_meta(p)
+                    scales.append(scale)
+                    amaxes.append(amax)
+                    scale_invs.append(scale_inv)
+                    if self.master_weights:
+                        p_main_of_fp8_model.append(unscaled_state["master_param"].data)
+                    g_of_fp8_model.append(p_grad.data)
+                    m_of_fp8_model.append(unscaled_state["exp_avg"])
+                    v_of_fp8_model.append(unscaled_state["exp_avg_sq"])
+                elif p.dtype in [torch.float16, torch.bfloat16]:
+                    has_fp16 = has_fp16 or p.dtype == torch.float16
+                    has_bf16 = has_bf16 or p.dtype == torch.bfloat16
+                    p_f16_model.append(p.data)
+                    if self.master_weights:
+                        p_main_of_f16_model.append(unscaled_state["master_param"].data)
+                    g_of_f16_model.append(p_grad.data)
+                    m_of_f16_model.append(unscaled_state["exp_avg"])
+                    v_of_f16_model.append(unscaled_state["exp_avg_sq"])
+                elif p.dtype == torch.float32:
+                    p_f32_model.append(p.data)
+                    g_of_f32_model.append(p_grad.data)
+                    m_of_f32_model.append(unscaled_state["exp_avg"])
+                    v_of_f32_model.append(unscaled_state["exp_avg_sq"])
+                else:
+                    raise RuntimeError(
+                        "FusedAdam only support model weights in fp32, fp16, bf16 and fp8"
+                    )
+
+                if self.capturable and len(p_fp8_model) > 0:
+                    raise RuntimeError(
+                        "FusedAdam does not support FP8 model weights with capturable=True."
+                    )
+
+                if has_fp16 and has_bf16:
+                    if self.store_param_remainders:
+                        raise RuntimeError(
+                            "FusedAdam doesn't support a mix of FP16/BF16 weights + Store param"
+                            " remainder."
+                        )
+
+                    # simple to add support for this, but not needed for now
+                    raise RuntimeError(
+                        "FusedAdam does not support a mix of float16 and bfloat16 model weights."
+                    )
+
+                def apply_multi_tensor_adam(adam_func, tensor_lists, inv_scale=None, out_dtype=None):
+                    # Closures defined in a loop can have unexpected
+                    # behavior when called outside the loop. However, this
+                    # function is called in the same loop iteration as it
+                    # is defined.
+                    # pylint: disable=cell-var-from-loop
+                    inv_scale_arg = () if inv_scale is None else (inv_scale,)
+                    out_dtype_arg = () if out_dtype is None else (out_dtype,)
+                    multi_tensor_applier(
+                        adam_func,
+                        self._dummy_overflow_buf,
+                        tensor_lists,
+                        group["lr"],
+                        beta1,
+                        beta2,
+                        group["eps"],
+                        group["step"],
+                        self.adam_w_mode,
+                        bias_correction,
+                        group["weight_decay"],
+                        *inv_scale_arg,
+                        *out_dtype_arg,
+                    )
+
+                if self.capturable:
+                    # If the optimizer is capturable, then if there's a grad scaler it works
+                    # on the GPU + a different multi_tensor_applier should be called
+
+                    # overflow check of gradients
+                    found_inf = (
+                        grad_scaler._check_inf_per_device(self)[device]
+                        if grad_scaler is not None
+                        else torch.zeros((1,), device=device)
+                    )
+                    self._dummy_overflow_buf.copy_(found_inf)
+
+                    # get unscale scale factor
+                    scale, inv_scale = None, None
+                    if grad_scaler:
+                        scale = grad_scaler._get_scale_async()
+                        inv_scale = scale.double().reciprocal().float()
+                    else:
+                        scale = torch.ones((1,), device=device)
+                        inv_scale = torch.ones((1,), device=device)
+
+                    if self.master_weights:
+                        if len(p_f16_model) > 0:
+                            tensor_lists = [
+                                g_of_f16_model,
+                                p_f16_model,
+                                m_of_f16_model,
+                                v_of_f16_model,
+                                p_main_of_f16_model,
+                            ]
+                            apply_multi_tensor_adam(
+                                self.multi_tensor_adam_capturable_master, tensor_lists, inv_scale
+                            )
+                        if len(p_f32_model) > 0:
+                            tensor_lists = [
+                                g_of_f32_model,
+                                p_f32_model,
+                                m_of_f32_model,
+                                v_of_f32_model,
+                            ]
+                            apply_multi_tensor_adam(
+                                self.multi_tensor_adam_capturable, tensor_lists, inv_scale
+                            )
+                    else:
+                        if len(p_f16_model) > 0:
+                            tensor_lists = [g_of_f16_model, p_f16_model, m_of_f16_model, v_of_f16_model]
+                            apply_multi_tensor_adam(
+                                self.multi_tensor_adam_capturable, tensor_lists, inv_scale
+                            )
+                        if len(p_f32_model) > 0:
+                            tensor_lists = [g_of_f32_model, p_f32_model, m_of_f32_model, v_of_f32_model]
+                            apply_multi_tensor_adam(
+                                self.multi_tensor_adam_capturable, tensor_lists, inv_scale
+                            )
+
+                elif self.master_weights:  # and self.capturable=False
+                    if len(p_f16_model) > 0:
+                        tensor_lists = [
+                            g_of_f16_model,
+                            p_f16_model,
+                            m_of_f16_model,
+                            v_of_f16_model,
+                            p_main_of_f16_model,
+                        ]
+                        if self.store_param_remainders and has_bf16 and not has_fp16:
+                            # When you have BF16 params and need FP32 master params, you can reconstruct
+                            # the FP32 master params with BF16 params + int16 remainders
+                            apply_multi_tensor_adam(
+                                self.multi_tensor_adam_param_remainder, tensor_lists
+                            )
+                        else:
+                            apply_multi_tensor_adam(self.multi_tensor_adam, tensor_lists)
+                    if len(p_fp8_model) > 0:
+                        tensor_lists = [
+                            g_of_fp8_model,
+                            p_fp8_model,
+                            m_of_fp8_model,
+                            v_of_fp8_model,
+                            p_main_of_fp8_model,
+                            scales,
+                            amaxes,
+                            scale_invs,
+                        ]
+                        apply_multi_tensor_adam(self.multi_tensor_adam_fp8, tensor_lists, out_dtype)
+                    if len(p_f32_model) > 0:
+                        tensor_lists = [
+                            g_of_f32_model,
+                            p_f32_model,
+                            m_of_f32_model,
+                            v_of_f32_model,
+                        ]
+                        apply_multi_tensor_adam(self.multi_tensor_adam, tensor_lists)
+                else:  # self.master_weights=False and self.capturable=False
+                    if len(p_f16_model) > 0:
+                        tensor_lists = [g_of_f16_model, p_f16_model, m_of_f16_model, v_of_f16_model]
+                        apply_multi_tensor_adam(self.multi_tensor_adam, tensor_lists)
+                    if len(p_f32_model) > 0:
+                        tensor_lists = [g_of_f32_model, p_f32_model, m_of_f32_model, v_of_f32_model]
+                        apply_multi_tensor_adam(self.multi_tensor_adam, tensor_lists)
+
+                # Scaling
+                for name in ["master_param"]:
+                    if len(unscaled_lists[name]) > 0:
+                        for unscaled, scaled, scale in zip(
+                            unscaled_lists[name], scaled_lists[name], state_scales[name]
+                        ):
+                            self._apply_scale(name, unscaled, scaled, scale)
+
+                for name in ["exp_avg", "exp_avg_sq"]:
+                    if len(unscaled_lists[name]) > 0:
+                        if name == "exp_avg":
+                            self._from_buffer_fp32_to_bf16(self.state[p][name], m_buffer)
+                        else:
+                            self._from_buffer_fp32_to_bf16(self.state[p][name], v_buffer)
+
+        return loss
+
+    def step(self, closure=None, grad_scaler=None):
+        step_with_bf16_buffer = os.getenv("USE_BF16_BUFFER", "true").lower() == "true"
+        if step_with_bf16_buffer and self.exp_avg_dtype == torch.bfloat16 and self.exp_avg_sq_dtype == torch.bfloat16:
+            return self.step_with_buffer_for_bf16_m_v(closure, grad_scaler)
+        else:
+            return self.original_step(closure, grad_scaler)
