@@ -876,9 +876,13 @@ class FusedAdam(torch.optim.Optimizer):
                             assert unscaled_state[name].dtype == torch.int16
                         else:
                             if name == "exp_avg":
-                                unscaled = self._bf16_to_fp32_with_buffer(self.state[p][name], m_buffer)
+                                unscaled = self._bf16_to_fp32_with_buffer(
+                                    self.state[p][name], m_buffer
+                                )
                             else:
-                                unscaled = self._bf16_to_fp32_with_buffer(self.state[p][name], v_buffer)
+                                unscaled = self._bf16_to_fp32_with_buffer(
+                                    self.state[p][name], v_buffer
+                                )
                             unscaled_state[name] = unscaled
                         if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
@@ -933,7 +937,9 @@ class FusedAdam(torch.optim.Optimizer):
                         "FusedAdam does not support a mix of float16 and bfloat16 model weights."
                     )
 
-                def apply_multi_tensor_adam(adam_func, tensor_lists, inv_scale=None, out_dtype=None):
+                def apply_multi_tensor_adam(
+                    adam_func, tensor_lists, inv_scale=None, out_dtype=None
+                ):
                     # Closures defined in a loop can have unexpected
                     # behavior when called outside the loop. However, this
                     # function is called in the same loop iteration as it
@@ -1002,12 +1008,22 @@ class FusedAdam(torch.optim.Optimizer):
                             )
                     else:
                         if len(p_f16_model) > 0:
-                            tensor_lists = [g_of_f16_model, p_f16_model, m_of_f16_model, v_of_f16_model]
+                            tensor_lists = [
+                                g_of_f16_model,
+                                p_f16_model,
+                                m_of_f16_model,
+                                v_of_f16_model,
+                            ]
                             apply_multi_tensor_adam(
                                 self.multi_tensor_adam_capturable, tensor_lists, inv_scale
                             )
                         if len(p_f32_model) > 0:
-                            tensor_lists = [g_of_f32_model, p_f32_model, m_of_f32_model, v_of_f32_model]
+                            tensor_lists = [
+                                g_of_f32_model,
+                                p_f32_model,
+                                m_of_f32_model,
+                                v_of_f32_model,
+                            ]
                             apply_multi_tensor_adam(
                                 self.multi_tensor_adam_capturable, tensor_lists, inv_scale
                             )
@@ -1076,7 +1092,11 @@ class FusedAdam(torch.optim.Optimizer):
 
     def step(self, closure=None, grad_scaler=None):
         step_with_bf16_buffer = os.getenv("USE_BF16_BUFFER", "true").lower() == "true"
-        if step_with_bf16_buffer and self.exp_avg_dtype == torch.bfloat16 and self.exp_avg_sq_dtype == torch.bfloat16:
+        if (
+            step_with_bf16_buffer
+            and self.exp_avg_dtype == torch.bfloat16
+            and self.exp_avg_sq_dtype == torch.bfloat16
+        ):
             return self.step_with_buffer_for_bf16_m_v(closure, grad_scaler)
         else:
             return self.original_step(closure, grad_scaler)
