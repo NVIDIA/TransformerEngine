@@ -88,8 +88,7 @@ py::object dequantize(const py::handle &input, transformer_engine::DType otype) 
 
   NoneQuantizer q(none);
 
-  const auto &shape = convertShape(input_tensor.shape());
-
+  NVTEShapeWrapper shape{input_tensor.shape()};
   auto [out_tensor, out] = q.create_tensor(shape, otype);
 
   NVTE_SCOPED_GIL_RELEASE({

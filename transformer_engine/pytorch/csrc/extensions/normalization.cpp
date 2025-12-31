@@ -79,7 +79,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   }
 
   // Tensor dimensions
-  const auto shape = nvte_shape_to_vector(input_nvte.shape());
+  NVTEShapeWrapper shape{input_nvte.shape()};
   const auto outer_size = product(shape) / shape.back();
   const auto inner_size = shape.back();
 
@@ -310,7 +310,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   const TensorWrapper &weight_nvte = makeTransformerEngineTensor(weight, none);
 
   // Tensor dimensions
-  const auto shape = nvte_shape_to_vector(input_nvte.shape());
+  const NVTEShapeWrapper shape{input_nvte.shape()};
   const auto outer_size = product(shape) / shape.back();
   const auto inner_size = shape.back();
 

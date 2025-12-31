@@ -26,7 +26,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
   // Construct output tensor
   auto quantizer_cpp = convert_quantizer(quantizer);
   const auto input_shape = input_nvte.shape();
-  std::vector<size_t> output_shape(input_shape.data, input_shape.data + input_shape.ndim);
+  NVTEShapeWrapper output_shape{input_shape};
   output_shape.back() /= shape_divisor;
   auto fake_dtype = GetTransformerEngineDType(input_tensor.scalar_type());
   auto [out_nvte, out_py] = quantizer_cpp->create_tensor(output_shape, fake_dtype);
@@ -138,8 +138,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
   // Construct grad input tensor
   auto quantizer_cpp = convert_quantizer(quantizer);
   const auto input_shape_te = input_nvte.shape();
-  const std::vector<size_t> input_shape(input_shape_te.data,
-                                        input_shape_te.data + input_shape_te.ndim);
+  const NVTEShapeWrapper& input_shape{input_shape_te};
   auto fake_dtype = GetTransformerEngineDType(input_tensor.scalar_type());
   auto [grad_input_nvte, grad_input_py] = quantizer_cpp->create_tensor(input_shape, fake_dtype);
 

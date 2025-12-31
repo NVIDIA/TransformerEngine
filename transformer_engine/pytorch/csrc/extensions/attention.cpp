@@ -78,15 +78,16 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // current scaling
     auto *T_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(T_quantizer.get());
+    NVTEShapeWrapper nvte_shape_wrapper{shape};
     if (create_hp_tensor_for_cs) {
       if (data.has_value()) {
         std::tie(te_T, py_T) =
-            T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype, data.value());
+            T_quantizer_fp8->create_unquantized_tensor_with_amax(nvte_shape_wrapper, dtype, data.value());
       } else {
-        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype);
+        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(nvte_shape_wrapper, dtype);
       }
     } else {
-      std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
+      std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(nvte_shape_wrapper, dtype);
       NVTE_CHECK(
           !data.has_value(),
           "Float8CurrentScalingQuantizer::create_tensor() does not take data tensor as input!");

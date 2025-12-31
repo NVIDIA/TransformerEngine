@@ -528,17 +528,26 @@ class NVTEShapeWrapper {
  public:
   // Default constructor
   NVTEShapeWrapper() { data.ndim = 0; }
-
+  NVTEShapeWrapper(int ndim) { data.ndim = ndim; }
   // Constructor from NVTEShape (direct assignment by reference)
   NVTEShapeWrapper(const NVTEShape &shape) { data = shape; }
 
-  // Constructor from vector (creates a copy)
+  // Constructor from vector (creates a copy) 
   template <typename T>
   NVTEShapeWrapper(const std::vector<T> &shape_vec) {
     data.ndim = shape_vec.size();
     for (size_t i = 0; i < data.ndim; ++i) {
       data.data[i] = static_cast<size_t>(shape_vec[i]);
     }
+  }
+  // In the NVTEShapeWrapper class definition:
+  template <typename T>
+  NVTEShapeWrapper& operator=(const std::vector<T>& shape_vec) {
+    data.ndim = shape_vec.size();
+    for (size_t i = 0; i < data.ndim; ++i) {
+      data.data[i] = static_cast<size_t>(shape_vec[i]);
+    }
+    return *this;
   }
 
   operator NVTEShape &() { return data; }
@@ -558,6 +567,10 @@ class NVTEShapeWrapper {
   size_t &back() { return data.data[data.ndim - 1]; }
   const size_t &back() const { return data.data[data.ndim - 1]; }
 
+  // Front access
+  size_t &front() { return data.data[0]; }
+  const size_t &front() const { return data.data[0]; }
+
   // Size access
   size_t size() const { return data.ndim; }
   bool empty() const { return data.ndim == 0; }
@@ -576,6 +589,20 @@ class NVTEShapeWrapper {
       data.ndim = new_size;
     }
   }
+
+  // Equality comparison with another NVTEShapeWrapper
+  bool operator==(const NVTEShapeWrapper& other) const {
+    if (data.ndim != other.data.ndim) {
+      return false;
+    }
+    for (size_t i = 0; i < data.ndim; ++i) {
+      if (data.data[i] != other.data.data[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
 };
 
 /*! \enum DType
