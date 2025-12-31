@@ -72,7 +72,7 @@ Float8Quantizer::Float8Quantizer(const py::handle& quantizer) : Quantizer(quanti
 
 template <typename ShapeT>
 std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor_impl(const ShapeT& shape,
-                                                                      DType dtype) const {
+                                                                       DType dtype) const {
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto opts = at::TensorOptions().dtype(GetATenDType(dtype)).device(torch::kCUDA);
   return create_tensor(shape, dtype, at::empty(shape_int64, opts));
@@ -88,7 +88,6 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const NVTEShap
   return create_tensor_impl(shape, dtype);
 }
 
-
 std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vector<size_t>& shape,
                                                                   DType dtype,
                                                                   at::Tensor data) const {
@@ -106,8 +105,6 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const NVTEShap
   set_quantization_params(&out_cpp);
   return {std::move(out_cpp), py::cast(data)};
 }
-
-
 
 std::pair<TensorWrapper, py::object> NoneQuantizer::convert_and_update_tensor(
     py::object tensor) const {
@@ -140,8 +137,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   return create_tensor_impl(shape, dtype, std::nullopt, std::nullopt, std::move(scale_inv));
 }
 
-std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
-    const NVTEShapeWrapper& shape, DType dtype) const {
+std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(const NVTEShapeWrapper& shape,
+                                                                    DType dtype) const {
   const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
   at::Tensor scale_inv = at::empty(std::vector<int64_t>{1}, opts);
   return create_tensor_impl(shape, dtype, std::nullopt, std::nullopt, std::move(scale_inv));
@@ -217,7 +214,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data,
     std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv) const {
   return create_tensor_impl(shape, dtype, std::move(data), std::move(transpose),
-                           std::move(scale_inv));
+                            std::move(scale_inv));
 }
 
 std::pair<TensorWrapper, py::object> Float8Quantizer::convert_and_update_tensor(
@@ -611,7 +608,6 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
 
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
-
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype) const {
   return create_tensor_impl(shape, dtype);
@@ -623,8 +619,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
 }
 
 template <typename ShapeT>
-std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor_impl(
-    const ShapeT& shape, DType dtype) const {
+std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor_impl(const ShapeT& shape,
+                                                                              DType dtype) const {
   using namespace pybind11::literals;
   std::vector<int64_t> torch_shape;
   for (auto s : shape) {
@@ -963,7 +959,6 @@ MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantize
 
 void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
-
 std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::vector<size_t>& shape,
                                                                    DType dtype) const {
   return create_tensor_impl(shape, dtype);
@@ -976,7 +971,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const NVTESha
 
 template <typename ShapeT>
 std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor_impl(const ShapeT& shape,
-                                                                         DType dtype) const {
+                                                                        DType dtype) const {
   using namespace pybind11::literals;
 
   // Tensor dimensions
@@ -1265,7 +1260,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const NVTESha
 
 template <typename ShapeT>
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor_impl(const ShapeT& shape,
-                                                                         DType dtype) const {
+                                                                        DType dtype) const {
   using namespace pybind11::literals;
 
   // Tensor dimensions
@@ -1416,7 +1411,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   if (columnwise_data) {
     shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
     if (rowwise_data) {
-      NVTEShapeWrapper expected_shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
+      NVTEShapeWrapper expected_shape =
+          convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
       NVTE_CHECK(shape == expected_shape, "NVFP4 row-wise data (shape=", expected_shape,
                  ") and column-wise data (shape=", shape, ") do not match");
     }
