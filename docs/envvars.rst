@@ -96,6 +96,12 @@ Optional Dependencies
 CUDA Configuration
 ^^^^^^^^^^^^^^^^^^
 
+.. envvar:: NVTE_CUDA_ARCHS
+
+   :Type: ``str``
+   :Default: Auto-detected based on CUDA version
+   :Description: Semicolon-separated list of CUDA compute architectures to compile for (e.g., ``"80;90"`` for A100 and H100, or ``"75;80;89;90"``). If not set, automatically determined based on the installed CUDA Toolkit version. CUDA 13.0+ defaults to ``"75;80;89;90;100;120"``, CUDA 12.8+ defaults to ``"70;80;89;90;100;120"``, and earlier versions default to ``"70;80;89;90"``. Setting this can significantly reduce build time and binary size by targeting only the GPU architectures you need.
+
 .. envvar:: NVTE_CUDA_INCLUDE_DIR
 
    :Type: ``str``
@@ -184,6 +190,18 @@ FP8 Configuration
    :Type: ``str``
    :Default: Empty (use same as linear layers)
    :Description: Override FP8 recipe for DotProductAttention layers. Valid values: ``"F16"`` (disable FP8), ``"DelayedScaling"``, or ``"Float8CurrentScaling"``. This allows using different FP8 recipes for attention vs. linear layers.
+
+.. envvar:: NVTE_DPA_FP8_RECIPE_DPA
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable FP8 in DotProductAttention when using :envvar:`NVTE_DPA_FP8_RECIPE`. When set to ``1``, the DotProductAttention layer will use the FP8 recipe specified by :envvar:`NVTE_DPA_FP8_RECIPE`. This provides fine-grained control over which attention components use FP8.
+
+.. envvar:: NVTE_DPA_FP8_RECIPE_MHA
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable FP8 in MultiheadAttention (MHA) when using :envvar:`NVTE_DPA_FP8_RECIPE`. When set to ``1``, the MultiheadAttention QKV and output projection layers will use the FP8 recipe specified by :envvar:`NVTE_DPA_FP8_RECIPE`. This provides fine-grained control over which attention components use FP8.
 
 .. envvar:: NVTE_DPA_FP8_FORMAT
 
