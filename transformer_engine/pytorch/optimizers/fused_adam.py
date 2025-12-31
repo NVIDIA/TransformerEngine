@@ -9,6 +9,7 @@ from copy import deepcopy
 from itertools import chain
 from typing import Optional
 import warnings
+import os
 
 import torch
 from torch.distributed._tensor import DTensor
