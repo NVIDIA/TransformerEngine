@@ -164,6 +164,21 @@ Attention Backend Selection
    :Default: ``0``
    :Description: **(JAX only)** Use scan loop for ring attention implementation. When set to ``1``, the fused ring attention will use a scan-based iteration approach.
 
+.. envvar:: NVTE_APPLY_QK_LAYER_SCALING
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Apply QK layer scaling in UnfusedDotProductAttention. This is an FP16 training trick required for certain GPT-like models. When set to ``1`` and a layer number is provided, the softmax scale is divided by the layer number, and the layer number is used as the softmax scale during the softmax operation. Only effective when using FP16 dtype and when the layer number is specified.
+
+Context Parallelism
+^^^^^^^^^^^^^^^^^^^
+
+.. envvar:: NVTE_BATCH_MHA_P2P_COMM
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0`` (or auto-enabled for pre-Blackwell GPUs with CP size 2)
+   :Description: Use batched P2P communication (``batch_isend_irecv``) for KV exchange in context parallel MultiheadAttention. When enabled, send and receive operations are batched together, which can improve communication efficiency. This is automatically enabled for devices with compute capability < 10.0 (pre-Blackwell GPUs) when context parallel size is 2. Setting this to ``1`` forces batched P2P communication regardless of device architecture.
+
 FP8 Configuration
 ^^^^^^^^^^^^^^^^^
 
@@ -310,6 +325,12 @@ GEMM Configuration
    :Type: ``int``
    :Default: Total SM count
    :Description: External SM margin for GEMM operations. Specifies the number of SMs to use for GEMM operations. The actual number of SMs used is ``sm_count - NVTE_EXT_MARGIN_SM``.
+
+.. envvar:: NVTE_AG_P2P_MULTI_ATOMIC
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable multi-atomic mode for AllGather with atomic GEMM using P2P communication. When set to ``1``, uses ``userbuffers_sendrecv_multiatomic`` for communication during atomic GEMM overlap with AllGather operations. This disables copy engine (CE) usage and enables push mode for userbuffers. This is an advanced optimization for tensor-parallel communication-computation overlap.
 
 CPU Offloading
 ^^^^^^^^^^^^^^
@@ -471,11 +492,3 @@ JAX Custom Calls Control
    # Disable specific primitives
    export NVTE_JAX_CUSTOM_CALLS="GemmPrimitive=false,DBiasQuantizePrimitive=false"
    python train_jax.py
-
-See Also
---------
-
-* :doc:`installation` - Installation guide
-* :doc:`getting_started` - Getting started guide
-* :doc:`api/index` - API documentation
-
