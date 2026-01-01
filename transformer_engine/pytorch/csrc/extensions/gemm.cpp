@@ -211,7 +211,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   }
   NVTEShape gelu_shape;
   if (!gelu) {
-    gelu_shape = make_nvte_1d_shape(0);
+    gelu_shape = TensorWrapper::defaultShape;
   } else {
     gelu_shape = D_shape;
   }
@@ -271,7 +271,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
         extra_output_tensor = makeTransformerEngineTensor(*extra_output);
       } else {
         extra_output_tensor =
-            makeTransformerEngineTensor(nullptr, make_nvte_1d_shape(0), DType::kByte);
+            makeTransformerEngineTensor(nullptr, TensorWrapper::emptyShape, DType::kByte);
       }
 
       // Direct GEMM call to the correct overlap
@@ -381,7 +381,7 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
   // TODO: D_scale_inv cannot be nullptr when D_type is FP8.
   auto te_D = makeTransformerEngineTensor(D.data_ptr(), make_nvte_2d_shape(D.size(0), D.size(1)),
                                           D_type, D_amax.data_ptr(), D_scale.data_ptr(), nullptr,
-                                          make_nvte_1d_shape(1));
+                                          TensorWrapper::defaultShape);
   auto te_bias =
       makeTransformerEngineTensor(bias.data_ptr(), make_nvte_1d_shape(bias.size(0)), bias_type);
   auto te_counter = makeTransformerEngineTensor(counter.data_ptr(),

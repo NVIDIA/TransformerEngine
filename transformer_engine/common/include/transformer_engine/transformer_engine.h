@@ -548,6 +548,26 @@ class NVTEShapeWrapper {
       data.data[i++] = val;
     }
   }
+
+  // Copy constructor
+  NVTEShapeWrapper(const NVTEShapeWrapper &other) : data(other.data) {}
+
+  // Move constructor from another NVTEShapeWrapper
+  NVTEShapeWrapper(NVTEShapeWrapper &&other) noexcept : data(other.data) {
+    other.data.ndim = 0;
+  }
+
+  // Move constructor from NVTEShape rvalue reference
+  NVTEShapeWrapper(NVTEShape &&shape) noexcept : data(shape) {}
+
+  // Copy assignment operator
+  NVTEShapeWrapper &operator=(const NVTEShapeWrapper &other) {
+  if (this != &other) {
+      data = other.data;
+    }
+    return *this;
+  }
+
   // In the NVTEShapeWrapper class definition:
   template <typename T>
   NVTEShapeWrapper &operator=(const std::vector<T> &shape_vec) {
@@ -565,6 +585,21 @@ class NVTEShapeWrapper {
     for (const auto &val : shape_list) {
       data.data[i++] = val;
     }
+    return *this;
+  }
+
+  // Move assignment operator from another NVTEShapeWrapper
+  NVTEShapeWrapper &operator=(NVTEShapeWrapper &&other) noexcept {
+    if (this != &other) {
+      data = other.data;
+      other.data.ndim = 0;
+    }
+    return *this;
+  }
+
+  // Move assignment operator from NVTEShape rvalue reference
+  NVTEShapeWrapper &operator=(NVTEShape &&shape) noexcept {
+    data = shape;
     return *this;
   }
 

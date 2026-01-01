@@ -27,10 +27,9 @@ NVTEShape convert_shape_back_from_fp4(const NVTEShape& shape, bool transpose) {
   return static_cast<NVTEShape>(ret);
 }
 
-NVTEShape getTensorShape(const at::Tensor& t) { return convertTorchShape(t.sizes()); }
-
-NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
+NVTEShape getTensorShape(const at::Tensor& t) { 
   NVTEShape ret;
+  const c10::IntArrayRef& torch_shape = t.sizes();
   ret.ndim = torch_shape.size();
   constexpr int max_dimensions = sizeof(ret.data) / sizeof(size_t);
   NVTE_CHECK(ret.ndim < max_dimensions,
@@ -41,7 +40,7 @@ NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
     ret.data[i] = static_cast<size_t>(v);
   }
   return ret;
-}
+ }
 
 template <typename T>
 NVTEShape make_nvte_1d_shape(T dim0) {
@@ -174,11 +173,8 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   TensorWrapper ret(scaling_mode);
   ret.set_rowwise_data(data_ptr, type, shape);
   const size_t meta_shape_data[1] = {1};
-  NVTEShape meta_shape;
-  meta_shape.ndim = 1;
-  meta_shape.data[0] = 1;
-  ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
-  ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
+  ret.set_amax(amax_ptr, DType::kFloat32, TensorWrapper::defaultShape);
+  ret.set_scale(scale_ptr, DType::kFloat32, TensorWrapper::defaultShape);
   auto scale_inv_dtype =
       (scaling_mode == NVTE_MXFP8_1D_SCALING) ? DType::kFloat8E8M0 : DType::kFloat32;
   ret.set_rowwise_scale_inv(scale_inv_ptr, scale_inv_dtype, scale_inv_shape);
@@ -194,11 +190,8 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   TensorWrapper ret(scaling_mode);
   ret.set_rowwise_data(data_ptr, type, shape);
   ret.set_columnwise_data(columnwise_data_ptr, type, columnwise_shape);
-  NVTEShape meta_shape;
-  meta_shape.ndim = 1;
-  meta_shape.data[0] = 1;
-  ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
-  ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
+  ret.set_amax(amax_ptr, DType::kFloat32, TensorWrapper::defaultShape);
+  ret.set_scale(scale_ptr, DType::kFloat32, TensorWrapper::defaultShape);
   auto scale_inv_dtype = (scaling_mode == NVTE_MXFP8_1D_SCALING)   ? DType::kFloat8E8M0
                          : (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat8E4M3
                                                                    : DType::kFloat32;
