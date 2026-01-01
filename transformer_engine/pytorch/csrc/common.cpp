@@ -172,7 +172,6 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
     NVTEScalingMode scaling_mode) {
   TensorWrapper ret(scaling_mode);
   ret.set_rowwise_data(data_ptr, type, shape);
-  const size_t meta_shape_data[1] = {1};
   ret.set_amax(amax_ptr, DType::kFloat32, TensorWrapper::defaultShape);
   ret.set_scale(scale_ptr, DType::kFloat32, TensorWrapper::defaultShape);
   auto scale_inv_dtype =
