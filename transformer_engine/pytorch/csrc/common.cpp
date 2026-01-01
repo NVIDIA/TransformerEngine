@@ -43,14 +43,16 @@ NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
   return ret;
 }
 
-template<typename T> NVTEShape make_nvte_1d_shape(T dim0) {
+template <typename T>
+NVTEShape make_nvte_1d_shape(T dim0) {
   NVTEShape shape;
   shape.ndim = 1;
   shape.data[0] = static_cast<size_t>(dim0);
   return shape;
 }
 
-template<typename T, typename U> NVTEShape make_nvte_2d_shape(T dim0, U dim1) {
+template <typename T, typename U>
+NVTEShape make_nvte_2d_shape(T dim0, U dim1) {
   NVTEShape shape;
   shape.ndim = 2;
   shape.data[0] = static_cast<size_t>(dim0);

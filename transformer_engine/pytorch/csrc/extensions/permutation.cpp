@@ -60,15 +60,13 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
       {num_tokens * topK}, torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(),
-                                              make_nvte_2d_shape(input.size(0), input.size(1)),
-                                              dtype);
+  auto input_cu = makeTransformerEngineTensor(
+      input.data_ptr(), make_nvte_2d_shape(input.size(0), input.size(1)), dtype);
   auto permuted_output_cu = makeTransformerEngineTensor(
       permuted_output.data_ptr(),
       make_nvte_2d_shape(permuted_output.size(0), permuted_output.size(1)), dtype);
-  auto sorted_row_id_cu =
-      makeTransformerEngineTensor(sorted_row_id_ptr, make_nvte_1d_shape(num_tokens * topK),
-                                  DType::kInt32);
+  auto sorted_row_id_cu = makeTransformerEngineTensor(
+      sorted_row_id_ptr, make_nvte_1d_shape(num_tokens * topK), DType::kInt32);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
 
   nvte_permute(input_cu.data(), permuted_output_cu.data(), sorted_row_id_cu.data(),
