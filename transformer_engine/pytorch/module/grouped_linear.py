@@ -711,6 +711,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                     if name in (f"weight{i}", f"bias{i}"):
                         param.skip_backward_post_hook = True
 
+        self._default_setattr = self._warning_setattr
+
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
@@ -788,60 +790,62 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         is_grad_enabled = torch.is_grad_enabled()
 
-        with self.prepare_forward(inp, num_gemms=self.num_gemms) as inp:
-            weight_tensors = self._get_weight_tensors()
-            bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
+        inp = self.prepare_forward(inp, num_gemms=self.num_gemms)
+        weight_tensors = self._get_weight_tensors()
+        bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
-            quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
+        quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
 
-            if debug:
-                if self.no_debug_features_active(list(chain(*quantizers))):
-                    debug = False
-                    quantizers = self._get_quantizers()
+        if debug:
+            if self.no_debug_features_active(list(chain(*quantizers))):
+                debug = False
+                quantizers = self._get_quantizers()
 
-                if isinstance(weight_tensors, QuantizedTensorStorage):
-                    raise RuntimeError("FP8 weights are not supported in debug mode.")
+            if isinstance(weight_tensors, QuantizedTensorStorage):
+                raise RuntimeError("FP8 weights are not supported in debug mode.")
 
-            (
-                input_quantizers,
-                weight_quantizers,
-                output_quantizers,
-                grad_input_quantizers,
-                grad_weight_quantizers,
-                grad_output_quantizers,
-            ) = quantizers
+        (
+            input_quantizers,
+            weight_quantizers,
+            output_quantizers,
+            grad_input_quantizers,
+            grad_weight_quantizers,
+            grad_output_quantizers,
+        ) = quantizers
 
-            if is_grad_enabled:
-                linear_fn = _GroupedLinear.apply
-                autograd_ctx = []
-            else:
-                linear_fn = _GroupedLinear.forward
-                autograd_ctx = [None]
+        if is_grad_enabled:
+            linear_fn = _GroupedLinear.apply
+            autograd_ctx = []
+        else:
+            linear_fn = _GroupedLinear.forward
+            autograd_ctx = [None]
 
-            non_tensor_args = (
-                m_splits,
-                self.apply_bias,
-                is_first_microbatch,
-                self.fp8,
-                self.fp8_calibration,
-                self.wgrad_store,
-                input_quantizers,
-                weight_quantizers,
-                output_quantizers,
-                grad_input_quantizers,
-                grad_weight_quantizers,
-                grad_output_quantizers,
-                self.fuse_wgrad_accumulation,
-                is_cpu_offload_enabled(),
-                self.sequence_parallel,
-                self.activation_dtype,
-                is_grad_enabled,
-                self,
-                None,  # skip_fp8_weight_update
-                self.save_original_input,
-                debug,
-            )
-            out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
+        non_tensor_args = (
+            m_splits,
+            self.apply_bias,
+            is_first_microbatch,
+            self.fp8,
+            self.fp8_calibration,
+            self.wgrad_store,
+            input_quantizers,
+            weight_quantizers,
+            output_quantizers,
+            grad_input_quantizers,
+            grad_weight_quantizers,
+            grad_output_quantizers,
+            self.fuse_wgrad_accumulation,
+            is_cpu_offload_enabled(),
+            self.sequence_parallel,
+            self.activation_dtype,
+            is_grad_enabled,
+            self,
+            None,  # skip_fp8_weight_update
+            self.save_original_input,
+            debug,
+        )
+        out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
+
+        self.end_forward()
 
         if self.return_bias:
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
