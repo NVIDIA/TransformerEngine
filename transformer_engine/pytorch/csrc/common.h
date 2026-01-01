@@ -133,7 +133,6 @@ class NoneQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override {}
 
-
   std::pair<TensorWrapper, py::object> create_tensor(const NVTEShapeWrapper& shape,
                                                      DType dtype) const override;
 
@@ -145,7 +144,6 @@ class NoneQuantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
-
 };
 
 class Float8Quantizer : public Quantizer {
@@ -173,7 +171,6 @@ class Float8Quantizer : public Quantizer {
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
-
 };
 
 class Float8CurrentScalingQuantizer : public Quantizer {
@@ -338,7 +335,6 @@ class NVFP4Quantizer : public Quantizer {
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
   NVTEShapeWrapper get_scale_shape(const NVTEShapeWrapper& shape, bool columnwise) const;
-
 
   template <typename ShapeT>
   ShapeT get_scale_shape_impl(const ShapeT& shape, bool columnwise) const;
