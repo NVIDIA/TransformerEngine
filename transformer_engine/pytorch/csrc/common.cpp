@@ -27,7 +27,7 @@ NVTEShape convert_shape_back_from_fp4(const NVTEShape& shape, bool transpose) {
   return static_cast<NVTEShape>(ret);
 }
 
-NVTEShape getTensorShape(const at::Tensor& t) { 
+NVTEShape getTensorShape(const at::Tensor& t) {
   NVTEShape ret;
   const c10::IntArrayRef& torch_shape = t.sizes();
   ret.ndim = torch_shape.size();
@@ -40,7 +40,7 @@ NVTEShape getTensorShape(const at::Tensor& t) {
     ret.data[i] = static_cast<size_t>(v);
   }
   return ret;
- }
+}
 
 template <typename T>
 NVTEShape make_nvte_1d_shape(T dim0) {

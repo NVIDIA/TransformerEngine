@@ -553,16 +553,14 @@ class NVTEShapeWrapper {
   NVTEShapeWrapper(const NVTEShapeWrapper &other) : data(other.data) {}
 
   // Move constructor from another NVTEShapeWrapper
-  NVTEShapeWrapper(NVTEShapeWrapper &&other) noexcept : data(other.data) {
-    other.data.ndim = 0;
-  }
+  NVTEShapeWrapper(NVTEShapeWrapper &&other) noexcept : data(other.data) { other.data.ndim = 0; }
 
   // Move constructor from NVTEShape rvalue reference
   NVTEShapeWrapper(NVTEShape &&shape) noexcept : data(shape) {}
 
   // Copy assignment operator
   NVTEShapeWrapper &operator=(const NVTEShapeWrapper &other) {
-  if (this != &other) {
+    if (this != &other) {
       data = other.data;
     }
     return *this;
