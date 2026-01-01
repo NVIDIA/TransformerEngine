@@ -92,7 +92,8 @@ at::Tensor moe_unpermute_fwd(at::Tensor input, const DType dtype, at::Tensor row
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTEShapeWrapper input_shape = make_nvte_2d_shape(input.size(0), input.size(1));
-  NVTEShapeWrapper unpermuted_output_shape = make_nvte_2d_shape(unpermuted_output.size(0), unpermuted_output.size(1));
+  NVTEShapeWrapper unpermuted_output_shape =
+      make_nvte_2d_shape(unpermuted_output.size(0), unpermuted_output.size(1));
   auto input_cu = makeTransformerEngineTensor(input.data_ptr(), input_shape, dtype);
   auto unpermuted_output_cu =
       makeTransformerEngineTensor(unpermuted_output.data_ptr(), unpermuted_output_shape, dtype);
@@ -121,12 +122,12 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-  auto input_bwd_cu = makeTransformerEngineTensor(input_bwd.data_ptr(),
-    make_nvte_2d_shape(input_bwd.size(0), num_cols), dtype);
-  auto act_grad_cu = makeTransformerEngineTensor(act_grad.data_ptr(),
-    make_nvte_2d_shape(act_grad.size(0), num_cols), dtype);
-  auto input_fwd_cu = makeTransformerEngineTensor(input_fwd.data_ptr(), 
-    make_nvte_2d_shape(input_fwd.size(0), num_cols), dtype);
+  auto input_bwd_cu = makeTransformerEngineTensor(
+      input_bwd.data_ptr(), make_nvte_2d_shape(input_bwd.size(0), num_cols), dtype);
+  auto act_grad_cu = makeTransformerEngineTensor(
+      act_grad.data_ptr(), make_nvte_2d_shape(act_grad.size(0), num_cols), dtype);
+  auto input_fwd_cu = makeTransformerEngineTensor(
+      input_fwd.data_ptr(), make_nvte_2d_shape(input_fwd.size(0), num_cols), dtype);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
   auto prob_cu = makeTransformerEngineTensor(prob);
   auto prob_grad_cu = makeTransformerEngineTensor(prob_grad);
