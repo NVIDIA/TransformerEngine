@@ -209,12 +209,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
     }
   }
-  NVTEShape gelu_shape;
-  if (!gelu) {
-    gelu_shape = TensorWrapper::defaultShape;
-  } else {
-    gelu_shape = D_shape;
-  }
+  const auto gelu_shape = gelu ? D_shape : TensorWrapper::emptyShape;
 
   auto te_pre_gelu_out =
       makeTransformerEngineTensor(get_data_ptr(pre_gelu_out), gelu_shape, gelu_type);
@@ -387,12 +382,9 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
   auto te_counter = makeTransformerEngineTensor(counter.data_ptr(),
                                                 make_nvte_1d_shape(counter.size(0)), DType::kInt32);
 
-  NVTEShape gelu_shape;
-  if (pre_gelu_out.data_ptr() == nullptr) {
-    gelu_shape = make_nvte_1d_shape(pre_gelu_out.size(0));
-  } else {
-    gelu_shape = make_nvte_2d_shape(pre_gelu_out.size(0), pre_gelu_out.size(1));
-  }
+  const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr ? make_nvte_1d_shape(pre_gelu_out.size(0))
+                                                              : make_nvte_2d_shape(pre_gelu_out.size(0),
+                                                                                   pre_gelu_out.size(1));
   auto te_pre_gelu_out = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
   auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
@@ -559,9 +551,8 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
   std::vector<NVTETensor> te_workspace_vector;
   std::vector<TensorWrapper> te_workspace_wrappers;
-  const NVTEShape& workspace_shape = make_nvte_1d_shape(workspaceSize);
   for (size_t i = 0; i < workspace.size(); i++) {
-    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(), workspace_shape, DType::kByte);
+    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(), make_nvte_1d_shape(workspaceSize), DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     te_workspace_wrappers.emplace_back(std::move(wsp));
   }

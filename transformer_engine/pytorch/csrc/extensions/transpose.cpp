@@ -19,8 +19,7 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
   init_extension();
 
   // Tensor dimensions
-  const auto shape_nvte = getTensorShape(input);
-  const auto shape = convertShape(shape_nvte);
+  const NVTEShapeWrapper shape = getTensorShape(input);
   std::vector<int64_t> transpose_shape_int64;
   if (shape.size() > 0) {
     transpose_shape_int64.push_back(shape.back());

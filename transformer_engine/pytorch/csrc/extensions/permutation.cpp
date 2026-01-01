@@ -91,13 +91,8 @@ at::Tensor moe_unpermute_fwd(at::Tensor input, const DType dtype, at::Tensor row
                    torch::dtype(input.scalar_type()).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  NVTEShape input_shape, unpermuted_output_shape;
-  input_shape.ndim = 2;
-  unpermuted_output_shape.ndim = 2;
-  input_shape.data[0] = static_cast<size_t>(input.size(0));
-  input_shape.data[1] = static_cast<size_t>(input.size(1));
-  unpermuted_output_shape.data[0] = static_cast<size_t>(unpermuted_output.size(0));
-  unpermuted_output_shape.data[1] = static_cast<size_t>(num_cols);
+  NVTEShapeWrapper input_shape = make_nvte_2d_shape(input.size(0), input.size(1));
+  NVTEShapeWrapper unpermuted_output_shape = make_nvte_2d_shape(unpermuted_output.size(0), unpermuted_output.size(1));
   auto input_cu = makeTransformerEngineTensor(input.data_ptr(), input_shape, dtype);
   auto unpermuted_output_cu =
       makeTransformerEngineTensor(unpermuted_output.data_ptr(), unpermuted_output_shape, dtype);
@@ -125,19 +120,13 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
       {num_tokens, topK}, torch::dtype(torch::kFloat32).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  NVTEShape input_bwd_shape, act_grad_shape, input_fwd_shape;
-  input_bwd_shape.ndim = 2;
-  act_grad_shape.ndim = 2;
-  input_fwd_shape.ndim = 2;
-  input_bwd_shape.data[0] = static_cast<size_t>(input_bwd.size(0));
-  input_bwd_shape.data[1] = static_cast<size_t>(num_cols);
-  act_grad_shape.data[0] = static_cast<size_t>(act_grad.size(0));
-  act_grad_shape.data[1] = static_cast<size_t>(num_cols);
-  input_fwd_shape.data[0] = static_cast<size_t>(input_fwd.size(0));
-  input_fwd_shape.data[1] = static_cast<size_t>(num_cols);
-  auto input_bwd_cu = makeTransformerEngineTensor(input_bwd.data_ptr(), input_bwd_shape, dtype);
-  auto act_grad_cu = makeTransformerEngineTensor(act_grad.data_ptr(), act_grad_shape, dtype);
-  auto input_fwd_cu = makeTransformerEngineTensor(input_fwd.data_ptr(), input_fwd_shape, dtype);
+
+  auto input_bwd_cu = makeTransformerEngineTensor(input_bwd.data_ptr(),
+    make_nvte_2d_shape(input_bwd.size(0), num_cols), dtype);
+  auto act_grad_cu = makeTransformerEngineTensor(act_grad.data_ptr(),
+    make_nvte_2d_shape(act_grad.size(0), num_cols), dtype);
+  auto input_fwd_cu = makeTransformerEngineTensor(input_fwd.data_ptr(), 
+    make_nvte_2d_shape(input_fwd.size(0), num_cols), dtype);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
   auto prob_cu = makeTransformerEngineTensor(prob);
   auto prob_grad_cu = makeTransformerEngineTensor(prob_grad);
