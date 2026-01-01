@@ -391,6 +391,8 @@ std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
 NVTEShape getTensorShape(const at::Tensor& t);
 
+template<typename T> NVTEShape make_nvte_1d_shape(T dim0);
+template<typename T, typename U> NVTEShape make_nvte_2d_shape(T dim0, U dim1);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
@@ -527,8 +529,7 @@ size_t roundup(const size_t value, const size_t multiple);
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 
-template <typename T>
-T convert_shape_back_from_fp4(const T& shape, bool transpose);
+NVTEShape convert_shape_back_from_fp4(const NVTEShape& shape, bool transpose);
 
 // unpack the PhiloxCudaState into CUDA tensor
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr);

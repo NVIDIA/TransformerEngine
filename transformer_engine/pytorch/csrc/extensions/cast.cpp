@@ -328,9 +328,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     tensor_py_list.emplace_back(Float8BlockwiseQTensorClass(
         rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, fp8_dtype,
         quantizer_py_list[i], is_2D_scaled, Float8BlockScaleTensorFormat::GEMM_READY));
-    NVTEShape zero_shape;
-    zero_shape.ndim = 1;
-    zero_shape.data[0] = 0;
+    const NVTEShape& zero_shape = make_nvte_1d_shape(0);
     // Construct C++ tensor
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
@@ -478,9 +476,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
                                                  columnwise_scale, fp8_dtype,
                                                  quantizer_py_list[i]));
-    NVTEShape zero_shape;
-    zero_shape.ndim = 1;
-    zero_shape.data[0] = 0;
+    const NVTEShape& zero_shape = make_nvte_1d_shape(0);
     // Construct C++ tensor
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
@@ -591,9 +587,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
         at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    NVTEShape amax_shape;
-    amax_shape.ndim = 1;
-    amax_shape.data[0] = 1;
+    const NVTEShape& amax_shape = make_nvte_1d_shape(1);
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
       rowwise_data_list.emplace_back(make_torch_view(buffer, to_fp4_shape(rowwise_data_shapes[i]),
@@ -655,9 +649,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
         at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    NVTEShape amax_shape;
-    amax_shape.ndim = 1;
-    amax_shape.data[0] = 1;
+    const NVTEShape& amax_shape = make_nvte_1d_shape(1);
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
       columnwise_data_list.emplace_back(make_torch_view(
@@ -690,11 +682,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
     // then set the amax and amax_columnwise values.
-    NVTEShape zero_shape, amax_shape;
-    zero_shape.ndim = 1;
-    amax_shape.ndim = 1;
-    zero_shape.data[0] = 0;
-    amax_shape.data[0] = 1;
+    const NVTEShape zero_shape = make_nvte_1d_shape(0);
+    const NVTEShape amax_shape = make_nvte_1d_shape(1);
     {
       auto tensor_wrapper = makeTransformerEngineTensor(
           rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
@@ -779,9 +768,7 @@ static StochasticRngStateResources setup_stochastic_rounding_rng_states_helper(
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
     int64_t *rng_state_ptr = static_cast<int64_t *>(res.rng_states_tensor.data_ptr()) + i * 2;
     philox_unpack(philox_args, rng_state_ptr);
-    NVTEShape rng_state_shape;
-    rng_state_shape.ndim = 1;
-    rng_state_shape.data[0] = 2;
+    const NVTEShape rng_state_shape = make_nvte_1d_shape(2);
     res.te_rng_state_list.push_back(makeTransformerEngineTensor(static_cast<void *>(rng_state_ptr),
                                                                 rng_state_shape, DType::kInt64));
     quant_config_list_rowwise[i].set_rng_state(res.te_rng_state_list[i].data());
@@ -1013,9 +1000,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
   // Note that the multi compute amax API expects rowwise amax pointer to be not null
   // So we need to set the pointer accordingly to make colwise-only quantization work
   std::vector<void *> orig_amax_ptr_list;
-  NVTEShape amax_shape;
-  amax_shape.ndim = 1;
-  amax_shape.data[0] = 1;
+  const NVTEShape& amax_shape = make_nvte_1d_shape(1);
   for (size_t i = 0; i < num_tensors; i++) {
     auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
     orig_amax_ptr_list.push_back(rowwise_amax_ptr);

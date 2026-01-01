@@ -540,12 +540,30 @@ class NVTEShapeWrapper {
       data.data[i] = static_cast<size_t>(shape_vec[i]);
     }
   }
+  // Constructor from initializer list
+  NVTEShapeWrapper(const std::initializer_list<size_t>& shape_list) {
+    data.ndim = shape_list.size();
+    size_t i = 0;
+    for (const auto& val : shape_list) {
+      data.data[i++] = val;
+    }
+  }
   // In the NVTEShapeWrapper class definition:
   template <typename T>
   NVTEShapeWrapper& operator=(const std::vector<T>& shape_vec) {
     data.ndim = shape_vec.size();
     for (size_t i = 0; i < data.ndim; ++i) {
       data.data[i] = static_cast<size_t>(shape_vec[i]);
+    }
+    return *this;
+  }
+
+  // Assignment operator from initializer list
+  NVTEShapeWrapper& operator=(const std::initializer_list<size_t>& shape_list) {
+    data.ndim = shape_list.size();
+    size_t i = 0;
+    for (const auto& val : shape_list) {
+      data.data[i++] = val;
     }
     return *this;
   }

@@ -13,18 +13,18 @@
 namespace transformer_engine::pytorch {
 
 /*! convert fp4 data shape back to original shape */
-template <typename T>
-T convert_shape_back_from_fp4(const T& shape, bool transpose) {
-  std::vector<size_t> ret;
+NVTEShape convert_shape_back_from_fp4(const NVTEShape& shape, bool transpose) {
+  NVTEShapeWrapper ret;
+  const NVTEShapeWrapper input_shape(shape);
   size_t start_idx = (transpose) ? 1 : 0;
-  for (size_t i = start_idx; i < shape.size() - 1; ++i) {
-    ret.push_back(shape[i]);
+  for (size_t i = start_idx; i < input_shape.size() - 1; ++i) {
+    ret.push_back(input_shape[i]);
   }
-  ret.push_back(shape.back() * 2);
+  ret.push_back(input_shape.back() * 2);
   if (transpose) {
-    ret.push_back(shape.front());
+    ret.push_back(input_shape.front());
   }
-  return ret;
+  return static_cast<NVTEShape>(ret);
 }
 
 NVTEShape getTensorShape(const at::Tensor& t) { return convertTorchShape(t.sizes()); }
@@ -41,6 +41,21 @@ NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
     ret.data[i] = static_cast<size_t>(v);
   }
   return ret;
+}
+
+template<typename T> NVTEShape make_nvte_1d_shape(T dim0) {
+  NVTEShape shape;
+  shape.ndim = 1;
+  shape.data[0] = static_cast<size_t>(dim0);
+  return shape;
+}
+
+template<typename T, typename U> NVTEShape make_nvte_2d_shape(T dim0, U dim1) {
+  NVTEShape shape;
+  shape.ndim = 2;
+  shape.data[0] = static_cast<size_t>(dim0);
+  shape.data[1] = static_cast<size_t>(dim1);
+  return shape;
 }
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer) {
@@ -316,5 +331,16 @@ at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_pe
   philox_args = gen->philox_cuda_state(elts_per_thread);
   return philox_args;
 }
+
+// Explicit template instantiations for make_nvte_1d_shape
+template NVTEShape make_nvte_1d_shape<int>(int dim0);
+template NVTEShape make_nvte_1d_shape<int64_t>(int64_t dim0);
+template NVTEShape make_nvte_1d_shape<size_t>(size_t dim0);
+
+// Explicit template instantiations for make_nvte_2d_shape
+template NVTEShape make_nvte_2d_shape<int64_t, int64_t>(int64_t dim0, int64_t dim1);
+template NVTEShape make_nvte_2d_shape<size_t, size_t>(size_t dim0, size_t dim1);
+template NVTEShape make_nvte_2d_shape<int64_t, size_t>(int64_t dim0, size_t dim1);
+template NVTEShape make_nvte_2d_shape<size_t, int64_t>(size_t dim0, int64_t dim1);
 
 }  // namespace transformer_engine::pytorch

@@ -34,10 +34,7 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
         input_row_list[tensor_id] * input.size(1) * input.element_size();
     input_char_ptr += input_dptr_offset;
     d_input_ptr = reinterpret_cast<void*>(input_char_ptr);
-    NVTEShape input_shape;
-    input_shape.ndim = 2;
-    input_shape.data[0] = input_row_list[tensor_id];
-    input_shape.data[1] = static_cast<size_t>(input.size(1));
+    auto input_shape = make_nvte_2d_shape(input_row_list[tensor_id], input.size(1));
     input_shape_list.push_back(input_shape);
     input_type_list.push_back(GetTransformerEngineDType(input.scalar_type()));
 
@@ -48,10 +45,7 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
     output_char_ptr += output_dptr_offset;
     d_output_ptr = reinterpret_cast<void*>(output_char_ptr);
 
-    NVTEShape output_shape;
-    output_shape.ndim = 2;
-    output_shape.data[0] = padded_input_row_list[tensor_id];
-    output_shape.data[1] = static_cast<size_t>(output.size(1));
+    auto output_shape = make_nvte_2d_shape(padded_input_row_list[tensor_id], output.size(1));
     output_shape_list.push_back(output_shape);
   }
 
@@ -115,10 +109,7 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
         input_row_list[tensor_id] * input.size(1) * input.element_size();
     input_char_ptr += input_dptr_offset;
     d_input_ptr = reinterpret_cast<void*>(input_char_ptr);
-    NVTEShape input_shape;
-    input_shape.ndim = 2;
-    input_shape.data[0] = input_row_list[tensor_id];
-    input_shape.data[1] = static_cast<size_t>(input.size(1));
+    auto input_shape = make_nvte_2d_shape(input_row_list[tensor_id], input.size(1));
     input_shape_list.push_back(input_shape);
     input_type_list.push_back(GetTransformerEngineDType(input.scalar_type()));
 
@@ -129,10 +120,7 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
     output_char_ptr += output_dptr_offset;
     d_output_ptr = reinterpret_cast<void*>(output_char_ptr);
 
-    NVTEShape output_shape;
-    output_shape.ndim = 2;
-    output_shape.data[0] = unpadded_input_row_list[tensor_id];
-    output_shape.data[1] = static_cast<size_t>(output.size(1));
+    auto output_shape = make_nvte_2d_shape(unpadded_input_row_list[tensor_id], output.size(1));
     output_shape_list.push_back(output_shape);
   }
 
