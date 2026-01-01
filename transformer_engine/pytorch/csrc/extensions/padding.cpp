@@ -44,7 +44,8 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
     output_char_ptr += output_dptr_offset;
     d_output_ptr = reinterpret_cast<void*>(output_char_ptr);
 
-    output_shape_list.push_back(make_nvte_2d_shape(padded_input_row_list[tensor_id], output.size(1)));
+    output_shape_list.push_back(
+        make_nvte_2d_shape(padded_input_row_list[tensor_id], output.size(1)));
   }
 
   // Construct TE tensors
@@ -117,7 +118,8 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
     output_char_ptr += output_dptr_offset;
     d_output_ptr = reinterpret_cast<void*>(output_char_ptr);
 
-    output_shape_list.push_back(make_nvte_2d_shape(unpadded_input_row_list[tensor_id], output.size(1)));
+    output_shape_list.push_back(
+        make_nvte_2d_shape(unpadded_input_row_list[tensor_id], output.size(1)));
   }
 
   // Construct TE tensors
