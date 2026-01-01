@@ -541,10 +541,10 @@ class NVTEShapeWrapper {
     }
   }
   // Constructor from initializer list
-  NVTEShapeWrapper(const std::initializer_list<size_t>& shape_list) {
+  NVTEShapeWrapper(const std::initializer_list<size_t> &shape_list) {
     data.ndim = shape_list.size();
     size_t i = 0;
-    for (const auto& val : shape_list) {
+    for (const auto &val : shape_list) {
       data.data[i++] = val;
     }
   }
@@ -559,10 +559,10 @@ class NVTEShapeWrapper {
   }
 
   // Assignment operator from initializer list
-  NVTEShapeWrapper& operator=(const std::initializer_list<size_t>& shape_list) {
+  NVTEShapeWrapper &operator=(const std::initializer_list<size_t> &shape_list) {
     data.ndim = shape_list.size();
     size_t i = 0;
-    for (const auto& val : shape_list) {
+    for (const auto &val : shape_list) {
       data.data[i++] = val;
     }
     return *this;
