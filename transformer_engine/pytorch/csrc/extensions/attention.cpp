@@ -81,10 +81,11 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
     NVTEShapeWrapper nvte_shape_wrapper{shape};
     if (create_hp_tensor_for_cs) {
       if (data.has_value()) {
-        std::tie(te_T, py_T) =
-            T_quantizer_fp8->create_unquantized_tensor_with_amax(nvte_shape_wrapper, dtype, data.value());
+        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(
+            nvte_shape_wrapper, dtype, data.value());
       } else {
-        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(nvte_shape_wrapper, dtype);
+        std::tie(te_T, py_T) =
+            T_quantizer_fp8->create_unquantized_tensor_with_amax(nvte_shape_wrapper, dtype);
       }
     } else {
       std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(nvte_shape_wrapper, dtype);
