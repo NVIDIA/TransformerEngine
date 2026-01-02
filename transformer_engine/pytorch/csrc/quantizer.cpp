@@ -207,7 +207,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   TensorWrapper out_cpp(this->get_scaling_mode());
   if (with_data) {
     out_cpp.set_rowwise_data(data->data_ptr(), this->dtype, shape);
-    out_cpp.set_rowwise_scale_inv(scale_inv->data_ptr(), DType::kFloat32, TensorWrapper::defaultShape);
+    out_cpp.set_rowwise_scale_inv(scale_inv->data_ptr(), DType::kFloat32,
+                                  TensorWrapper::defaultShape);
   }
   if (with_transpose) {
     const auto& transpose_shape = make_transpose_nvte_shape(shape);
