@@ -990,19 +990,18 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
   // Note that the multi compute amax API expects rowwise amax pointer to be not null
   // So we need to set the pointer accordingly to make colwise-only quantization work
   std::vector<void *> orig_amax_ptr_list;
-  const NVTEShape &amax_shape = make_nvte_1d_shape(1);
   for (size_t i = 0; i < num_tensors; i++) {
     auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
     orig_amax_ptr_list.push_back(rowwise_amax_ptr);
     auto columnwise_amax_ptr = output_list[i].get_columnwise_amax().data_ptr;
     void *amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
     NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
-    output_list[i].set_amax(amax_ptr, DType::kFloat32, amax_shape);
+    output_list[i].set_amax(amax_ptr, DType::kFloat32, TensorWrapper::defaultShape);
   }
   nvte_group_amax(input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
                   split_sections.data(), num_tensors, stream);
   for (size_t i = 0; i < num_tensors; i++) {
-    output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, amax_shape);
+    output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, TensorWrapper::defaultShape);
   }
 
   // Quantize tensors individually

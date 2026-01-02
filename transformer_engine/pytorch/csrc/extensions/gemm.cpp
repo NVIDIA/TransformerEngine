@@ -199,10 +199,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     if (!grad) {
       auto dtype = GetATenDType(gelu_type);
       auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
-      std::vector<int64_t> torch_shape;
-      for (size_t i = 0; i < D_shape.ndim; ++i) {
-        torch_shape.push_back(static_cast<int64_t>(D_shape.data[i]));
-      }
+      std::vector<int64_t> torch_shape(D_shape.data, D_shape.data + D_shape.ndim);
       pre_gelu_out = at::empty(torch_shape, opts);
     } else {
       if (gelu_in.has_value()) {
