@@ -50,23 +50,6 @@ NVTEShape getTensorShape(const at::Tensor& t) {
   return ret;
 }
 
-template <typename T>
-NVTEShape make_nvte_1d_shape(T dim0) {
-  NVTEShape shape;
-  shape.ndim = 1;
-  shape.data[0] = static_cast<size_t>(dim0);
-  return shape;
-}
-
-template <typename T, typename U>
-NVTEShape make_nvte_2d_shape(T dim0, U dim1) {
-  NVTEShape shape;
-  shape.ndim = 2;
-  shape.data[0] = static_cast<size_t>(dim0);
-  shape.data[1] = static_cast<size_t>(dim1);
-  return shape;
-}
-
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer) {
   init_extension();
   if (quantizer.is_none()) {
@@ -334,17 +317,5 @@ at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_pe
   return philox_args;
 }
 
-// Explicit template instantiations for make_nvte_1d_shape
-template NVTEShape make_nvte_1d_shape<int>(int dim0);
-template NVTEShape make_nvte_1d_shape<int64_t>(int64_t dim0);
-template NVTEShape make_nvte_1d_shape<size_t>(size_t dim0);
-
-// Explicit template instantiations for make_nvte_2d_shape
-template NVTEShape make_nvte_2d_shape<int64_t, int64_t>(int64_t dim0, int64_t dim1);
-template NVTEShape make_nvte_2d_shape<size_t, size_t>(size_t dim0, size_t dim1);
-template NVTEShape make_nvte_2d_shape<int64_t, size_t>(int64_t dim0, size_t dim1);
-template NVTEShape make_nvte_2d_shape<size_t, int64_t>(size_t dim0, int64_t dim1);
-template NVTEShape make_nvte_2d_shape<int64_t, int>(int64_t dim0, int dim1);
-// template NVTEShape make_nvte_2d_shape<long, long>(long dim0, long dim1);
 
 }  // namespace transformer_engine::pytorch

@@ -352,9 +352,21 @@ std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 NVTEShape getTensorShape(const at::Tensor& t);
 
 template <typename T>
-NVTEShape make_nvte_1d_shape(T dim0);
+inline NVTEShape make_nvte_1d_shape(T dim0) {
+  NVTEShape shape;
+  shape.ndim = 1;
+  shape.data[0] = static_cast<size_t>(dim0);
+  return shape;
+}
+
 template <typename T, typename U>
-NVTEShape make_nvte_2d_shape(T dim0, U dim1);
+inline NVTEShape make_nvte_2d_shape(T dim0, U dim1) {
+  NVTEShape shape;
+  shape.ndim = 2;
+  shape.data[0] = static_cast<size_t>(dim0);
+  shape.data[1] = static_cast<size_t>(dim1);
+  return shape;
+}
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
