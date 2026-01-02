@@ -17,20 +17,20 @@ NVTEShape convert_shape_back_from_fp4(const NVTEShape& shape, bool transpose) {
   NVTEShape ret;
   size_t start_idx = (transpose) ? 1 : 0;
   size_t out_idx = 0;
-  
+
   // Copy dimensions from start_idx to ndim-1
   for (size_t i = start_idx; i < shape.ndim - 1; ++i) {
     ret.data[out_idx++] = shape.data[i];
   }
-  
+
   // Last dimension multiplied by 2
   ret.data[out_idx++] = shape.data[shape.ndim - 1] * 2;
-  
+
   // If transpose, add the first dimension
   if (transpose) {
     ret.data[out_idx++] = shape.data[0];
   }
-  
+
   ret.ndim = out_idx;
   return ret;
 }

@@ -330,17 +330,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_data_shapes[i]
-                      : TensorWrapper::emptyShape,
-        columnwise_usage ? columnwise_data_shapes[i]
-                         : TensorWrapper::emptyShape,
-        fp8_dtype, nullptr, nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
+        rowwise_usage ? rowwise_data_shapes[i] : TensorWrapper::emptyShape,
+        columnwise_usage ? columnwise_data_shapes[i] : TensorWrapper::emptyShape, fp8_dtype,
+        nullptr, nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_scale_shapes[i]
-                      : TensorWrapper::emptyShape,
-        columnwise_usage ? columnwise_scale_shapes[i]
-                         : TensorWrapper::emptyShape,
-        scaling_mode));
+        rowwise_usage ? rowwise_scale_shapes[i] : TensorWrapper::emptyShape,
+        columnwise_usage ? columnwise_scale_shapes[i] : TensorWrapper::emptyShape, scaling_mode));
   }
 
   return retval;
@@ -481,17 +476,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
         rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_data_shapes[i]
-                      : TensorWrapper::emptyShape,
-        columnwise_usage ? columnwise_data_shapes[i]
-                         : TensorWrapper::emptyShape,
-        fp8_dtype, nullptr, nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
+        rowwise_usage ? rowwise_data_shapes[i] : TensorWrapper::emptyShape,
+        columnwise_usage ? columnwise_data_shapes[i] : TensorWrapper::emptyShape, fp8_dtype,
+        nullptr, nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
         columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-        rowwise_usage ? rowwise_scale_shapes[i]
-                      : TensorWrapper::emptyShape,
-        columnwise_usage ? columnwise_scale_shapes[i]
-                         : TensorWrapper::emptyShape,
-        scaling_mode));
+        rowwise_usage ? rowwise_scale_shapes[i] : TensorWrapper::emptyShape,
+        columnwise_usage ? columnwise_scale_shapes[i] : TensorWrapper::emptyShape, scaling_mode));
   }
 
   return retval;
@@ -689,15 +679,13 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       auto tensor_wrapper = makeTransformerEngineTensor(
           rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
           columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-          rowwise_usage ? rowwise_data_shapes[i]: TensorWrapper::emptyShape,
-          columnwise_usage ? columnwise_data_shapes[i]: TensorWrapper::emptyShape,
-          fp4_dtype,
+          rowwise_usage ? rowwise_data_shapes[i] : TensorWrapper::emptyShape,
+          columnwise_usage ? columnwise_data_shapes[i] : TensorWrapper::emptyShape, fp4_dtype,
           /*amax_ptr=*/nullptr,
           /*scale_ptr=*/nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
           columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-          rowwise_usage ? rowwise_scale_shapes[i]: TensorWrapper::emptyShape,
-          columnwise_usage ? columnwise_scale_shapes[i]: TensorWrapper::emptyShape,
-          scaling_mode);
+          rowwise_usage ? rowwise_scale_shapes[i] : TensorWrapper::emptyShape,
+          columnwise_usage ? columnwise_scale_shapes[i] : TensorWrapper::emptyShape, scaling_mode);
 
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {
@@ -1125,7 +1113,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   const size_t dim0_stride =
       input_shape.data[0] == 0 ? 0 : input_py.element_size() * input_size / input_shape.data[0];
   for (size_t i = 0; i < num_splits; ++i) {
-    NVTE_CHECK(dim0_offset + split_sections[i] <= input_shape.data[0],  
+    NVTE_CHECK(dim0_offset + split_sections[i] <= input_shape.data[0],
                "Attempted to split tensor with dim 0 shape=", input_shape.data[0],
                " with split_section size =", split_sections[i]);
     split_shapes.emplace_back();
@@ -1136,8 +1124,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       split_shape.data[j] = input_shape.data[j];
     }
     void *split_dptr = static_cast<void *>(input_dptr + dim0_offset * dim0_stride);
-    input_list.emplace_back(makeTransformerEngineTensor(
-        split_dptr, split_shape, input_dtype));
+    input_list.emplace_back(makeTransformerEngineTensor(split_dptr, split_shape, input_dtype));
     dim0_offset += split_sections[i];
   }
 
