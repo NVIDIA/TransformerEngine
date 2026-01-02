@@ -14,17 +14,25 @@ namespace transformer_engine::pytorch {
 
 /*! convert fp4 data shape back to original shape */
 NVTEShape convert_shape_back_from_fp4(const NVTEShape& shape, bool transpose) {
-  NVTEShapeWrapper ret;
-  const NVTEShapeWrapper input_shape(shape);
+  NVTEShape ret;
   size_t start_idx = (transpose) ? 1 : 0;
-  for (size_t i = start_idx; i < input_shape.size() - 1; ++i) {
-    ret.push_back(input_shape[i]);
+  size_t out_idx = 0;
+  
+  // Copy dimensions from start_idx to ndim-1
+  for (size_t i = start_idx; i < shape.ndim - 1; ++i) {
+    ret.data[out_idx++] = shape.data[i];
   }
-  ret.push_back(input_shape.back() * 2);
+  
+  // Last dimension multiplied by 2
+  ret.data[out_idx++] = shape.data[shape.ndim - 1] * 2;
+  
+  // If transpose, add the first dimension
   if (transpose) {
-    ret.push_back(input_shape.front());
+    ret.data[out_idx++] = shape.data[0];
   }
-  return static_cast<NVTEShape>(ret);
+  
+  ret.ndim = out_idx;
+  return ret;
 }
 
 NVTEShape getTensorShape(const at::Tensor& t) {
@@ -336,5 +344,7 @@ template NVTEShape make_nvte_2d_shape<int64_t, int64_t>(int64_t dim0, int64_t di
 template NVTEShape make_nvte_2d_shape<size_t, size_t>(size_t dim0, size_t dim1);
 template NVTEShape make_nvte_2d_shape<int64_t, size_t>(int64_t dim0, size_t dim1);
 template NVTEShape make_nvte_2d_shape<size_t, int64_t>(size_t dim0, int64_t dim1);
+template NVTEShape make_nvte_2d_shape<int64_t, int>(int64_t dim0, int dim1);
+// template NVTEShape make_nvte_2d_shape<long, long>(long dim0, long dim1);
 
 }  // namespace transformer_engine::pytorch
