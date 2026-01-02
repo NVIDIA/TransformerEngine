@@ -252,7 +252,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) &&
-      (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
       !requires_64bit_ragged_offset && (softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) &&
       // 9.10.0: known bugs with SDPA FP8
       (cudnn_runtime_version != 91000) && !return_max_logit) {
@@ -539,7 +538,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
     h = input_QKV->data.shape[ndim - 3];
   } else {
     NVTE_ERROR("nvte_fused_attn_fwd_qkvpacked only supports H3D and 3HD layouts!");
-  }
+  } 
   size_t d = input_QKV->data.shape[ndim - 1];
   size_t t = 0;
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);

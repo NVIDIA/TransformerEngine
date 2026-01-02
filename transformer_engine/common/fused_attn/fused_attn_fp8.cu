@@ -2474,7 +2474,8 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   size_t workspace_size = 0;
 
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
-  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)
+  || (qkv_format == NVTE_QKV_Format::NVTE_THD)) {
     fused_attn::fused_attn_fp8_fwd_impl_v1(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, is_training,
         attn_scale, p_dropout, qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrM,
@@ -2482,16 +2483,8 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
         devPtrScaleS, devPtrScaleO, devPtrAmaxO, devPtrAmaxS, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
         devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
         get_cudnn_fe_dtype(O_type), workspace->data.dptr, &workspace_size, stream, handle);
-  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
-    fused_attn::fused_attn_fp8_fwd_impl(
-        batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim, is_training, attn_scale,
-        p_dropout, qkv_layout, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv, devPtrO,
-        devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO,
-        devPtrAmaxO, devPtrAmaxS, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed,
-        devPtrDropoutOffset, get_cudnn_dtype(QKV_type), workspace->data.dptr, &workspace_size,
-        stream, handle);
   } else {
-    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
+    NVTE_ERROR("FP8 fused attention only supports qkv_format=bshd/sbhd/thd. \n");
   }
 
   if (workspace_size > 0) {
@@ -2569,7 +2562,8 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   size_t workspace_size = 0;
 
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
-  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+  if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)
+  || (qkv_format == NVTE_QKV_Format::NVTE_THD)) {
     fused_attn::fused_attn_fp8_bwd_impl_v1(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, attn_scale,
         p_dropout, qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv,
@@ -2580,17 +2574,8 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
         devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
         get_cudnn_fe_dtype(O_type), get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type),
         workspace->data.dptr, &workspace_size, stream, handle);
-  } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
-    fused_attn::fused_attn_fp8_bwd_impl(
-        batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim, attn_scale, p_dropout,
-        qkv_layout, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv, devPtrO, devPtrdO, devPtrdQ,
-        devPtrdK, devPtrdV, devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV, devPtrDescaleO,
-        devPtrDescaledO, devPtrDescaleS, devPtrDescaledP, devPtrScaleS, devPtrScaledP,
-        devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP, devPtrAmaxdQ, devPtrAmaxdK,
-        devPtrAmaxdV, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset,
-        get_cudnn_dtype(QKV_type), workspace->data.dptr, &workspace_size, stream, handle);
   } else {
-    NVTE_ERROR("FP8 fused attention only supports qkv_layout=t3hd or qkv_format=bshd/sbhd. \n");
+    NVTE_ERROR("FP8 fused attention only supports qkv_format=bshd/sbhd/thd. \n");
   }
 
   if (workspace_size > 0) {
