@@ -26,25 +26,23 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
   const auto nvfp4 = input.scaling_mode() == NVTE_NVFP4_1D_SCALING;
 
   NVTEBasicTensor scale_inv;
-  NVTEShape nvte_input_shape;
+  NVTEShape input_shape;
   if (rowwise) {
-    nvte_input_shape = input.shape();
+    input_shape = input.shape();
     scale_inv = input.get_rowwise_scale_inv();
   } else {
-    nvte_input_shape = input.get_columnwise_data().shape;
+    input_shape = input.get_columnwise_data().shape;
     scale_inv = input.get_columnwise_scale_inv();
   }
 
-  auto input_shape = nvte_shape_to_vector(nvte_input_shape);
-  auto scale_inv_shape = nvte_shape_to_vector(scale_inv.shape);
-
-  NVTE_CHECK(input_shape.size() >= 2, "Wrong ndims for swizzle input shape.");
+  auto& scale_inv_shape = scale_inv.shape;
+  NVTE_CHECK(input_shape.ndim >= 2, "Wrong ndims for swizzle input shape.");
 
   // Allocate memory for swizzled output.
   auto options = at::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
   std::vector<int64_t> scale_inv_shape_int;
-  for (size_t i = 0; i < scale_inv_shape.size(); ++i) {
-    scale_inv_shape_int.push_back(static_cast<int64_t>(scale_inv_shape[i]));
+  for (size_t i = 0; i < scale_inv_shape.ndim; ++i) {
+    scale_inv_shape_int.push_back(static_cast<int64_t>(scale_inv_shape.data[i]));
   }
   auto swizzled_scale_inv = at::empty(scale_inv_shape_int, options);
   void* scale_inv_dptr = scale_inv.data_ptr;
@@ -59,24 +57,24 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
       (nvfp4) ? transformer_engine::DType::kFloat8E4M3 : transformer_engine::DType::kFloat8E8M0;
 
   if (rowwise) {
-    input_cu.set_rowwise_data(input.dptr(), input_dtype, nvte_input_shape);
-    input_cu.set_rowwise_scale_inv(scale_inv_dptr, scale_inv_dtype, scale_inv.shape);
-    output_cu.set_rowwise_data(input.dptr(), input_dtype, nvte_input_shape);
-    output_cu.set_rowwise_scale_inv(swizzled_scale_inv_dptr, scale_inv_dtype, scale_inv.shape);
+    input_cu.set_rowwise_data(input.dptr(), input_dtype, input_shape);
+    input_cu.set_rowwise_scale_inv(scale_inv_dptr, scale_inv_dtype, scale_inv_shape);
+    output_cu.set_rowwise_data(input.dptr(), input_dtype, input_shape);
+    output_cu.set_rowwise_scale_inv(swizzled_scale_inv_dptr, scale_inv_dtype, scale_inv_shape);
   } else {
-    input_cu.set_columnwise_data(input.columnwise_dptr(), input_dtype, nvte_input_shape);
-    input_cu.set_columnwise_scale_inv(scale_inv_dptr, scale_inv_dtype, scale_inv.shape);
-    output_cu.set_columnwise_data(input.columnwise_dptr(), input_dtype, nvte_input_shape);
-    output_cu.set_columnwise_scale_inv(swizzled_scale_inv_dptr, scale_inv_dtype, scale_inv.shape);
+    input_cu.set_columnwise_data(input.columnwise_dptr(), input_dtype, input_shape);
+    input_cu.set_columnwise_scale_inv(scale_inv_dptr, scale_inv_dtype, scale_inv_shape);
+    output_cu.set_columnwise_data(input.columnwise_dptr(), input_dtype, input_shape);
+    output_cu.set_columnwise_scale_inv(swizzled_scale_inv_dptr, scale_inv_dtype, scale_inv_shape);
   }
 
   // Launch kernel
   nvte_swizzle_scaling_factors(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
 
   if (rowwise) {
-    input.set_rowwise_scale_inv(swizzled_scale_inv_dptr, scale_inv_dtype, scale_inv.shape);
+    input.set_rowwise_scale_inv(swizzled_scale_inv_dptr, scale_inv_dtype, scale_inv_shape);
   } else {
-    input.set_columnwise_scale_inv(swizzled_scale_inv_dptr, scale_inv_dtype, scale_inv.shape);
+    input.set_columnwise_scale_inv(swizzled_scale_inv_dptr, scale_inv_dtype, scale_inv_shape);
   }
 
   return swizzled_scale_inv;

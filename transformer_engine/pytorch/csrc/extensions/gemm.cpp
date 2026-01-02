@@ -100,7 +100,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace.device());
+  auto device = workspace.device();
+  at::cuda::CUDAGuard device_guard(device);
 
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
@@ -220,7 +221,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
-  const int device_id = at::cuda::current_device();
+  const int device_id = device.index();
   const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
