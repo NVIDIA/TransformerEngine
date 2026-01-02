@@ -112,7 +112,7 @@ class TestDeferredInit:
                 param_stats[name]["mean"],
                 atol=1e-3,
                 rtol=1e-3,
-                msg=lambda msg: f"{name} mean changed after reset_parameters: {msg}",
+                msg=f"{name} mean changed after reset_parameters",
             )
             torch.testing.assert_close(
                 stats["std"],
