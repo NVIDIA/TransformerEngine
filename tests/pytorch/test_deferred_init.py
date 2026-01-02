@@ -119,7 +119,7 @@ class TestDeferredInit:
                 param_stats[name]["std"],
                 atol=1e-3,
                 rtol=1e-3,
-                msg=lambda msg: f"{name} std changed after reset_parameters: {msg}",
+                msg=f"{name} std changed after reset_parameters",
             )
 
         del module
