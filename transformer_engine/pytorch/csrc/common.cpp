@@ -317,5 +317,4 @@ at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_pe
   return philox_args;
 }
 
-
 }  // namespace transformer_engine::pytorch
