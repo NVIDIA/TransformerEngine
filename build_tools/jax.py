@@ -34,11 +34,7 @@ def test_requirements() -> List[str]:
 
             Note: Do NOT install pytorch-triton from PyPI directly - that's a placeholder.
     """
-    use_pytorch_triton = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    use_pytorch_triton = bool(int(os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")))
 
     triton_package = "pytorch-triton" if use_pytorch_triton else "triton"
 
