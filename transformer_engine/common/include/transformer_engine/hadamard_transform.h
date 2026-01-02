@@ -49,6 +49,7 @@ void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int
 /*! \brief Perform the columnwise hadamard transform cast fusion.
  *
  *  This function is experimental and the API is not stable.
+ *  This function will later be deprecated and replaced by nvte_hadamard_transform_cast_fusion
  *
  *  \param[in]      input           Input tensor to apply Hadamard transform.
  *  \param[in,out]  output          Output tensor.
@@ -60,6 +61,21 @@ void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTE
                                                     const NVTETensor hadamard_matrix,
                                                     const NVTEQuantizationConfig quant_config,
                                                     cudaStream_t stream);
+
+/*! \brief Perform the regular rowwise cast and columnwise hadamard transform cast fusion.
+ *
+ *  This function is experimental and the API is not stable.
+ *
+ *  \param[in]      input           Input tensor to apply Hadamard transform.
+ *  \param[in,out]  output          Output tensor.
+ *  \param[in]      hadamard_matrix Hadamard matrix.
+ *  \param[in]      quant_config    Quantization configuration.
+ *  \param[in]      stream          CUDA stream used for the operation.
+ */
+ void nvte_hadamard_transform_cast_fusion(const NVTETensor input, NVTETensor output,
+    const NVTETensor hadamard_matrix,
+    const NVTEQuantizationConfig quant_config,
+    cudaStream_t stream);
 
 /*! \brief Split a tensor along dimension 0 and compute RHT amaxes for each split.
  *
