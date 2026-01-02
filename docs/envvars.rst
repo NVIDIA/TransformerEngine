@@ -339,7 +339,7 @@ CPU Offloading
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable version 1 of CPU offloading implementation. This is an experimental feature for offloading activations to CPU memory.
+   :Description: Enable legacy version of CPU offloading implementation. 
 
 Debugging and Profiling
 ^^^^^^^^^^^^^^^^^^^^^^^^
