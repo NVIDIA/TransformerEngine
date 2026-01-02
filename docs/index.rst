@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -56,5 +56,6 @@ Transformer Engine documentation
 
    api/c/index
    debug
+   envvars
    examples/attention/attention.ipynb
    examples/attention/cp_ag_thd_dpa_jax_deep_dive.ipynb
