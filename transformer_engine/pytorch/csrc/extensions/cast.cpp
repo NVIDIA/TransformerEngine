@@ -1098,7 +1098,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   uint8_t *input_dptr = reinterpret_cast<uint8_t *>(input_py.data_ptr());
   auto input_dtype = GetTransformerEngineDType(input_py.scalar_type());
   NVTEShape input_shape;
-  input_shape.ndim=0;
+  input_shape.ndim = 0;
   size_t input_size = 1;
   for (const auto &d : input_py.sizes()) {
     input_shape.data[input_shape.ndim++] = static_cast<size_t>(d);
