@@ -40,7 +40,8 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
 
   // Allocate memory for swizzled output.
   auto options = at::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
-  std::vector<int64_t> scale_inv_shape_int(scale_inv_shape.data, scale_inv_shape.data + scale_inv_shape.ndim);
+  std::vector<int64_t> scale_inv_shape_int(scale_inv_shape.data,
+                                           scale_inv_shape.data + scale_inv_shape.ndim);
   auto swizzled_scale_inv = at::empty(scale_inv_shape_int, options);
   void* scale_inv_dptr = scale_inv.data_ptr;
   void* swizzled_scale_inv_dptr = getDataPtr(swizzled_scale_inv, 0);
