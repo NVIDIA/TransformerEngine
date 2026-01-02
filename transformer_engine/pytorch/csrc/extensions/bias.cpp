@@ -26,11 +26,11 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
   // Grad output tensor
   auto grad_output_torch = grad_output.contiguous();
   const TensorWrapper &grad_output_nvte = makeTransformerEngineTensor(grad_output_torch);
-  const auto shape = getTensorShape(grad_output_torch);
+  const NVTEShape &shape = getTensorShape(grad_output_torch);
   auto grad_output_dtype = GetTransformerEngineDType(grad_output_torch.scalar_type());
 
   // Construct grad bias tensor
-  const int64_t bias_size = static_cast<int64_t>(shape.back());
+  const int64_t bias_size = static_cast<int64_t>(shape.data[shape.ndim - 1]);
   auto grad_bias_torch = allocateTorchTensor(bias_size, grad_output_dtype);
   auto grad_bias_nvte = makeTransformerEngineTensor(grad_bias_torch);
 
@@ -116,17 +116,17 @@ std::vector<py::object> dact_dbias(
   // Grad output and activation input tensors
   grad_output_torch = grad_output_torch.contiguous();
   const TensorWrapper &grad_output_nvte = makeTransformerEngineTensor(grad_output_torch);
-  const auto output_shape = getTensorShape(grad_output_torch);
+  const NVTEShape &output_shape = getTensorShape(grad_output_torch);
   auto grad_output_dtype = GetTransformerEngineDType(grad_output_torch.scalar_type());
   act_input_torch = act_input_torch.contiguous();
   const TensorWrapper &act_input_nvte = makeTransformerEngineTensor(act_input_torch);
-  const auto input_shape = getTensorShape(act_input_torch);
+  const NVTEShape &input_shape = getTensorShape(act_input_torch);
 
   // Construct tensors
   auto quantizer_cpp = convert_quantizer(quantizer_py);
   auto [grad_input_nvte, grad_input_py] =
       quantizer_cpp->create_tensor(input_shape, grad_output_dtype);
-  const int64_t bias_size = static_cast<int64_t>(input_shape.back());
+  const int64_t bias_size = static_cast<int64_t>(input_shape.data[input_shape.ndim - 1]);
   auto grad_bias_torch = allocateTorchTensor(bias_size, grad_output_dtype);
   auto grad_bias_nvte = makeTransformerEngineTensor(grad_bias_torch);
 
