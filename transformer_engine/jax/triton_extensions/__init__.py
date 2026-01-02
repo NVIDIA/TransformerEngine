@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -20,6 +20,10 @@ Usage:
     @staticmethod
     def lowering(ctx, x, **kwargs):
         return triton_call_lowering(ctx, my_kernel, x, ...)
+
+    # Use permutation functions
+    from transformer_engine.jax.triton_extensions import make_row_id_map, permute_with_mask_map
 """
 
 from .utils import *
+from .permutation import *

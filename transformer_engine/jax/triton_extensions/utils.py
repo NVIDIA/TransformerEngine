@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -142,17 +142,31 @@ def compile_triton(
     )
 
     # Create kernel object for JAX
-    kernel = gpu_triton.TritonKernel(
-        compiled.name,
-        num_warps,
-        compiled.metadata.shared,
-        compiled.asm["ptx"],
-        "",  # ttir
-        compute_capability,
-        1,
-        1,
-        1,  # cluster_dims
-    )
+    # From jax/jaxlib/gpu/triton_kernels.cc:
+    from packaging import version
+
+    if version.parse(jax.__version__) >= version.parse("0.8.2"):
+        kernel = gpu_triton.TritonKernel(
+            compiled.name,  # arg0: kernel_name (str)
+            num_warps,  # arg1: num_warps (int)
+            num_ctas,  # arg2: num_ctas (int)
+            compiled.metadata.shared,  # arg3: shared_mem_bytes (int)
+            compiled.asm["ptx"],  # arg4: ptx (str)
+            "",  # arg5: ttir (str) - empty
+            compute_capability,  # arg6: compute_capability (int)
+        )
+    else:
+        kernel = gpu_triton.TritonKernel(
+            compiled.name,
+            num_warps,
+            compiled.metadata.shared,
+            compiled.asm["ptx"],
+            "",  # ttir
+            compute_capability,
+            1,
+            1,
+            1,
+        )
 
     _TRITON_KERNEL_CACHE[cache_key] = kernel
     return kernel
@@ -176,7 +190,9 @@ def triton_call_lowering(
         *array_args: Input arrays (from ctx)
         grid: Grid dimensions (int or tuple)
         input_output_aliases: Mapping of input to output aliases
-        constexprs: Compile-time constants for the kernel
+        constexprs: Compile-time constants for the kernel. This includes both
+                    tl.constexpr arguments AND scalar runtime arguments (like
+                    num_tokens, strides) that are known at JAX trace time.
 
     Returns:
         MLIR lowering result
@@ -189,8 +205,10 @@ def triton_call_lowering(
             return triton_call_lowering(
                 ctx, my_kernel, x,
                 grid=(triton.cdiv(n, block_size),),
-                n_elements=n,
-                BLOCK_SIZE=block_size
+                constexprs={
+                    "n_elements": n,  # scalar arg (not tl.constexpr in kernel)
+                    "BLOCK_SIZE": block_size,  # tl.constexpr arg
+                },
             )
     """
     # Get compute capability using gpu_triton
@@ -203,9 +221,13 @@ def triton_call_lowering(
     else:
         arg_names = kernel_fn.arg_names
 
-    # Build signature for inputs + outputs
+    # Build signature for tensor arguments only (inputs + outputs)
+    # Scalar arguments should be passed via constexprs and will be
+    # specialized into the kernel at compile time
     all_avals = list(ctx.avals_in) + list(ctx.avals_out)
-    signature = {arg_names[i]: get_triton_dtype(aval) for i, aval in enumerate(all_avals)}
+    constexpr_names = set(constexprs.keys()) if constexprs else set()
+    tensor_arg_names = [n for n in arg_names if n not in constexpr_names]
+    signature = {n: get_triton_dtype(a) for n, a in zip(tensor_arg_names, all_avals)}
 
     # Normalize grid to 3D
     if isinstance(grid, int):

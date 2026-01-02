@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -269,6 +269,20 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
                                 const NVTEQuantizationConfig quant_config, const size_t num_tensors,
                                 cudaStream_t stream);
+
+/*! \brief Casts grouped input tensor to quantized output tensors.
+ *
+ *  \param[in]      input           Input tensor to be cast.
+ *  \param[in,out]  outputs          Output quantized tensors.
+ *  \param[in]      split_sections   Split sections of the input tensor.
+ *  \param[in]      num_tensors      Number of output tensors.
+ *  \param[in]      quant_config    (Optional) Quantization configurations.
+ *  \param[in]      stream           CUDA stream used for the operation.
+ */
+void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *outputs,
+                                         const size_t *split_sections, size_t num_tensors,
+                                         const NVTEQuantizationConfig quant_config,
+                                         cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

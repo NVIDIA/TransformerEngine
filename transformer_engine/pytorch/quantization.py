@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -120,7 +120,7 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
     if recipe.mxfp8():
         return 32
     if recipe.nvfp4():
-        return 64
+        return 128
     return 16
 
 

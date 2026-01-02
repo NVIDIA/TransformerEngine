@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for amax calculation"""
@@ -73,7 +73,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
         transpose_batch_sequence,
     ):
         """
-        amax calcuation abstract
+        amax calculation abstract
         """
         del amax_scope, transpose_batch_sequence
 
@@ -251,7 +251,7 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
         flatten_axis,
     ):
         """
-        amax calcuation implementation
+        amax calculation implementation
         """
         assert RHTAmaxCalculationPrimitive.inner_primitive is not None
         (

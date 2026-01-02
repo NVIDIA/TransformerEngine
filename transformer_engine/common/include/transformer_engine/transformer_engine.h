@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -337,6 +337,12 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigNVFP42DQuantization = 5,
   /*! Whether to enable stochastic rounding */
   kNVTEQuantizationConfigStochasticRounding = 6,
+  /*! Whether to enable fast math operations with reduced accuracy.
+   *
+   *  Optimizations are kernel-specific and they may be applied
+   *  inconsistently between kernels.
+   */
+  kNVTEQuantizationConfigUseFastMath = 7,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -995,6 +1001,12 @@ class QuantizationConfigWrapper {
   void set_stochastic_rounding(bool stochastic_rounding) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
                                            &stochastic_rounding, sizeof(bool));
+  }
+
+  /*! \brief Set whether to enable fast math operations */
+  void set_use_fast_math(bool use_fast_math) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath,
+                                           &use_fast_math, sizeof(bool));
   }
 
  private:
