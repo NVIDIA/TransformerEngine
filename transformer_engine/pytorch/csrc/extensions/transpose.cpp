@@ -56,12 +56,13 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
   init_extension();
 
   // Make sure input is contiguous
-  const auto &input = tensor.contiguous();
+  const auto& input = tensor.contiguous();
 
   // Allocate output tensor if needed
   if (!out) {
     const NVTEShape& in_shape = getTensorShape(input);
-    NVTE_CHECK(in_shape.ndim >= 2, "Invalid input tensor dimensions with ", in_shape.ndim, " number of dimensions");
+    NVTE_CHECK(in_shape.ndim >= 2, "Invalid input tensor dimensions with ", in_shape.ndim,
+               " number of dimensions");
     std::vector<int64_t> out_shape_int64(in_shape.data, in_shape.data + in_shape.ndim);
     out_shape_int64[0] = static_cast<int64_t>(in_shape.data[1]);
     out_shape_int64[1] = static_cast<int64_t>(in_shape.data[0]);

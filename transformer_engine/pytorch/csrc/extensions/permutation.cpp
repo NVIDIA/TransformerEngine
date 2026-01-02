@@ -91,11 +91,11 @@ at::Tensor moe_unpermute_fwd(at::Tensor input, const DType dtype, at::Tensor row
                    torch::dtype(input.scalar_type()).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(),
-    make_nvte_2d_shape(input.size(0), input.size(1)), dtype);
-  auto unpermuted_output_cu =
-      makeTransformerEngineTensor(unpermuted_output.data_ptr(),
-        make_nvte_2d_shape(unpermuted_output.size(0), unpermuted_output.size(1)), dtype);
+  auto input_cu = makeTransformerEngineTensor(
+      input.data_ptr(), make_nvte_2d_shape(input.size(0), input.size(1)), dtype);
+  auto unpermuted_output_cu = makeTransformerEngineTensor(
+      unpermuted_output.data_ptr(),
+      make_nvte_2d_shape(unpermuted_output.size(0), unpermuted_output.size(1)), dtype);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
   auto prob_cu = makeTransformerEngineTensor(prob);
 

@@ -81,8 +81,8 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
     auto *T_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(T_quantizer.get());
     if (create_hp_tensor_for_cs) {
       if (data.has_value()) {
-        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(
-            nvte_shape, dtype, data.value());
+        std::tie(te_T, py_T) =
+            T_quantizer_fp8->create_unquantized_tensor_with_amax(nvte_shape, dtype, data.value());
       } else {
         std::tie(te_T, py_T) =
             T_quantizer_fp8->create_unquantized_tensor_with_amax(nvte_shape, dtype);
@@ -165,48 +165,45 @@ std::vector<py::object> fused_attn_fwd(
   }
   if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
     NVTEShape bias_shape = getTensorShape(Bias.value());
-    te_Bias = makeTransformerEngineTensor(Bias.value().data_ptr(),
-                                          bias_shape, DType::kFloat32);
+    te_Bias = makeTransformerEngineTensor(Bias.value().data_ptr(), bias_shape, DType::kFloat32);
   }
   auto cu_seqlens_q_sizes = cu_seqlens_q.sizes().vec();
   NVTEShape cu_seqlens_q_shape = getTensorShape(cu_seqlens_q);
   auto cu_seqlens_kv_sizes = cu_seqlens_kv.sizes().vec();
   NVTEShape cu_seqlens_kv_shape = getTensorShape(cu_seqlens_kv);
-  te_cu_seqlens_q = makeTransformerEngineTensor(
-      cu_seqlens_q.data_ptr(), cu_seqlens_q_shape, DType::kInt32);
-  te_cu_seqlens_kv = makeTransformerEngineTensor(
-      cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape, DType::kInt32);
+  te_cu_seqlens_q =
+      makeTransformerEngineTensor(cu_seqlens_q.data_ptr(), cu_seqlens_q_shape, DType::kInt32);
+  te_cu_seqlens_kv =
+      makeTransformerEngineTensor(cu_seqlens_kv.data_ptr(), cu_seqlens_kv_shape, DType::kInt32);
 
   if ((cu_seqlens_q_padded.has_value()) && (cu_seqlens_kv_padded.has_value())) {
     auto cu_seqlens_q_padded_sizes = cu_seqlens_q_padded.value().sizes().vec();
     NVTEShape cu_seqlens_q_padded_shape = getTensorShape(cu_seqlens_q_padded.value());
     auto cu_seqlens_kv_padded_sizes = cu_seqlens_kv_padded.value().sizes().vec();
     NVTEShape cu_seqlens_kv_padded_shape = getTensorShape(cu_seqlens_kv_padded.value());
-    te_cu_seqlens_q_padded = makeTransformerEngineTensor(
-        cu_seqlens_q_padded.value().data_ptr(), cu_seqlens_q_padded_shape,
-        DType::kInt32);
+    te_cu_seqlens_q_padded = makeTransformerEngineTensor(cu_seqlens_q_padded.value().data_ptr(),
+                                                         cu_seqlens_q_padded_shape, DType::kInt32);
     te_cu_seqlens_kv_padded = makeTransformerEngineTensor(
-        cu_seqlens_kv_padded.value().data_ptr(),
-        cu_seqlens_kv_padded_shape, DType::kInt32);
+        cu_seqlens_kv_padded.value().data_ptr(), cu_seqlens_kv_padded_shape, DType::kInt32);
   }
   if ((page_table_k.has_value()) && (page_table_v.has_value())) {
     NVTEShape page_table_k_shape = getTensorShape(page_table_k.value());
     NVTEShape page_table_v_shape = getTensorShape(page_table_v.value());
-    te_page_table_k = makeTransformerEngineTensor(
-        page_table_k.value().data_ptr(), page_table_k_shape,
-        DType::kInt32, nullptr, nullptr, nullptr, TensorWrapper::defaultShape);
-    te_page_table_v = makeTransformerEngineTensor(
-        page_table_v.value().data_ptr(), page_table_v_shape,
-        DType::kInt32, nullptr, nullptr, nullptr, TensorWrapper::defaultShape);
+    te_page_table_k = makeTransformerEngineTensor(page_table_k.value().data_ptr(),
+                                                  page_table_k_shape, DType::kInt32, nullptr,
+                                                  nullptr, nullptr, TensorWrapper::defaultShape);
+    te_page_table_v = makeTransformerEngineTensor(page_table_v.value().data_ptr(),
+                                                  page_table_v_shape, DType::kInt32, nullptr,
+                                                  nullptr, nullptr, TensorWrapper::defaultShape);
   }
 
   // softmax offset
   TensorWrapper te_SoftmaxOffset;
   if ((softmax_type != NVTE_VANILLA_SOFTMAX) && (SoftmaxOffset.has_value())) {
     NVTEShape SoftmaxOffset_shape = getTensorShape(SoftmaxOffset.value());
-    te_SoftmaxOffset = makeTransformerEngineTensor(
-        SoftmaxOffset.value().data_ptr(), SoftmaxOffset_shape,
-        DType::kFloat32, nullptr, nullptr, nullptr, TensorWrapper::defaultShape);
+    te_SoftmaxOffset = makeTransformerEngineTensor(SoftmaxOffset.value().data_ptr(),
+                                                   SoftmaxOffset_shape, DType::kFloat32, nullptr,
+                                                   nullptr, nullptr, TensorWrapper::defaultShape);
   }
 
   // extract rng seed and offset
@@ -472,9 +469,8 @@ std::vector<py::object> fused_attn_bwd(
   if ((cu_seqlens_q_padded.has_value()) && (cu_seqlens_kv_padded.has_value())) {
     NVTEShape cu_seqlens_q_padded_shape = getTensorShape(cu_seqlens_q_padded.value());
     NVTEShape cu_seqlens_kv_padded_shape = getTensorShape(cu_seqlens_kv_padded.value());
-    te_cu_seqlens_q_padded = makeTransformerEngineTensor(
-        cu_seqlens_q_padded.value().data_ptr(), cu_seqlens_q_padded_shape,
-        DType::kInt32);
+    te_cu_seqlens_q_padded = makeTransformerEngineTensor(cu_seqlens_q_padded.value().data_ptr(),
+                                                         cu_seqlens_q_padded_shape, DType::kInt32);
     te_cu_seqlens_kv_padded = makeTransformerEngineTensor(
         cu_seqlens_kv_padded.value().data_ptr(),
         static_cast<NVTEShape &>(cu_seqlens_kv_padded_shape), DType::kInt32);
@@ -489,8 +485,7 @@ std::vector<py::object> fused_attn_bwd(
 
     NVTEBasicTensor temp_data = {
         Aux_CTX_Tensors[i].data_ptr(),
-        static_cast<NVTEDType>(GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type())),
-        tmp};
+        static_cast<NVTEDType>(GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type())), tmp};
     nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   }
 
