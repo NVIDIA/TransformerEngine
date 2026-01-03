@@ -17,6 +17,9 @@ from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStora
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..utils import devices_match, round_up_to_nearest_multiple
+from ..triton.blockwise_scaling_aware_fp8_transpose import (
+    blockwise_scaling_aware_fp8_transpose,
+)
 
 aten = torch.ops.aten
 
@@ -436,6 +439,94 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         if data is not None:
             return data.untyped_storage()
         return torch.UntypedStorage(0, device=self.device)
+
+    def split_scaling_aware_fp8_transpose(self, m_splits, quantizers):
+        assert (
+            self._rowwise_data is not None and self._rowwise_scale_inv is not None
+        ), "split_transpose_quantize only supports rowwise_data inputs."
+
+        # Temporary solution: perf fp8flow
+        assert (
+            self._rowwise_scale_inv.shape[0] == self._rowwise_data.shape[0]
+        ), "rowwise_data and rowwise_scale_inv must have same M (rows)."
+        if (
+            self._is_gemm_ready_format()
+            and self._rowwise_data.shape[0] == self._rowwise_scale_inv.shape[0]
+        ):
+            self._data_format = tex.Float8BlockScaleTensorFormat.COMPACT
+        assert (
+            not self._is_gemm_ready_format()
+        ), "Only COMPACT input format is supported."
+
+        rowwise_usage = quantizers[0].rowwise_usage
+        device = self._rowwise_data.device
+        kept = [i for i, m in enumerate(m_splits) if m > 0]
+        m_splits_kept = [m_splits[i] for i in kept]
+
+        if len(m_splits_kept) > 0:
+            (
+                rowwise_data_list,
+                rowwise_scale_inv_t_list,
+                columnwise_data_list,
+                columnwise_scale_inv_list,
+            ) = blockwise_scaling_aware_fp8_transpose(
+                self._rowwise_data, self._rowwise_scale_inv, m_splits_kept
+            )
+
+        if len(m_splits_kept) != len(m_splits):
+            K = self._rowwise_data.shape[1]
+            empty_rw_data = (
+                torch.empty((0, K), dtype=self._rowwise_data.dtype, device=device)
+                if rowwise_usage
+                else None
+            )
+            empty_rw_si_t = (
+                torch.empty(
+                    (self._rowwise_scale_inv.shape[1], 0),
+                    dtype=self._rowwise_scale_inv.dtype,
+                    device=device,
+                )
+                if rowwise_usage
+                else None
+            )
+            empty_cw_data = torch.empty(
+                (K, 0), dtype=self._rowwise_data.dtype, device=device
+            )
+            empty_cw_si = torch.empty(
+                (0, K), dtype=self._rowwise_scale_inv.dtype, device=device
+            )
+
+        results = []
+        kept_idx = 0
+        for i, m in enumerate(m_splits):
+            if m == 0:
+                rowwise_data = empty_rw_data
+                rowwise_scale_inv_t = empty_rw_si_t
+                columnwise_data = empty_cw_data
+                columnwise_scale_inv = empty_cw_si
+            else:
+                rowwise_data = rowwise_data_list[kept_idx] if rowwise_usage else None
+                rowwise_scale_inv_t = (
+                    rowwise_scale_inv_t_list[kept_idx] if rowwise_usage else None
+                )
+                columnwise_data = columnwise_data_list[kept_idx]
+                columnwise_scale_inv = columnwise_scale_inv_list[kept_idx]
+                kept_idx += 1
+
+            results.append(
+                Float8BlockwiseQTensorStorage(
+                    rowwise_data=rowwise_data,
+                    rowwise_scale_inv=rowwise_scale_inv_t,
+                    columnwise_data=columnwise_data,
+                    columnwise_scale_inv=columnwise_scale_inv,
+                    fp8_dtype=self._fp8_dtype,
+                    quantizer=quantizers[i],
+                    is_2D_scaled=self._is_2D_scaled,
+                    data_format=tex.Float8BlockScaleTensorFormat.GEMM_READY,
+                )
+            )
+
+        return results
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

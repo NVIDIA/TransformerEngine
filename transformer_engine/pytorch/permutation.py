@@ -224,7 +224,10 @@ class _moe_permute_mask_map(torch.autograd.Function):
             fake_dtype = inp.dtype
             # blockwise scaling
             if blockwise_recipe:
-                fp8_scale = inp._rowwise_scale_inv.T.contiguous()
+                if inp._rowwise_data.shape[0] == inp._rowwise_scale_inv.shape[0]:
+                    fp8_scale = inp._rowwise_scale_inv
+                else:
+                    fp8_scale = inp._rowwise_scale_inv.T.contiguous()
                 scale_hidden_dim = fp8_scale.shape[1]
                 assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
                 inp = inp._rowwise_data
@@ -275,7 +278,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     shape=output.shape,
                     dtype=fake_dtype,
                     rowwise_data=output,
-                    rowwise_scale_inv=permuted_scale.T.contiguous(),
+                    rowwise_scale_inv=permuted_scale,
                     columnwise_data=None,
                     columnwise_scale_inv=None,
                     fp8_dtype=fp8_dtype,
@@ -423,7 +426,10 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     unpermuted_act_grad = unpermuted_act_grad._data
                 # blockwise scaling
                 elif blockwise_recipe:
-                    fp8_scale = unpermuted_act_grad._rowwise_scale_inv.T.contiguous()
+                    if unpermuted_act_grad._rowwise_data.shape[0] == unpermuted_act_grad._rowwise_scale_inv.shape[0]:
+                        fp8_scale = unpermuted_act_grad._rowwise_scale_inv
+                    else:
+                        fp8_scale = unpermuted_act_grad._rowwise_scale_inv.T.contiguous()
                     unpermuted_act_grad = unpermuted_act_grad._rowwise_data
                     scale_hidden_dim = fp8_scale.shape[1]
                     assert ctx.num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
@@ -485,7 +491,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         shape=act_grad.shape,
                         dtype=fake_dtype,
                         rowwise_data=act_grad,
-                        rowwise_scale_inv=permuted_scale.T.contiguous(),
+                        rowwise_scale_inv=permuted_scale,
                         columnwise_data=None,
                         columnwise_scale_inv=None,
                         fp8_dtype=fp8_dtype,
