@@ -413,6 +413,9 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
                              std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
 
+void multi_tensor_scale_tensor_cuda(int chunk_size, at::Tensor noop_flag,
+                                    std::vector<std::vector<at::Tensor>> tensor_lists, at::Tensor scale);
+
 std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     at::optional<bool> per_tensor_python);
