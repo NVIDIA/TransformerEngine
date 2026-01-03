@@ -4,41 +4,41 @@
  * See LICENSE for license information.
  ************************************************************************/
 
- #include <cuda.h>
- #include <cudaTypedefs.h>
- #include <cuda_bf16.h>
- #include <cuda_pipeline.h>
- #include <cuda_runtime.h>
- #include <cutlass/arch/barrier.h>
- #include <transformer_engine/hadamard_transform.h>
- 
- #include <cuda/barrier>
- #include <cute/algorithm/gemm.hpp>
- #include <cute/arch/cluster_sm90.hpp>
- #include <cute/tensor.hpp>
- 
- #include "common/common.h"
- #include "common/util/cuda_runtime.h"
- #include "common/util/curanddx.hpp"
- #include "common/util/ptx.cuh"
- #include "common/utils.cuh"
- #include "customized_pipeline.cuh"
- #include "cutlass/arch/barrier.h"
- #include "cutlass/arch/reg_reconfig.h"
- #include "cutlass/cluster_launch.hpp"
- #include "cutlass/cutlass.h"
- #include "cutlass/detail/sm100_blockscaled_layout.hpp"
- #include "cutlass/fast_math.h"
- #include "cutlass/float8.h"
- #include "cutlass/float_subbyte.h"
- #include "cutlass/gemm/collective/builders/sm100_common.inl"
- #include "cutlass/numeric_conversion.h"
- #include "cutlass/numeric_types.h"
- #include "cutlass/pipeline/pipeline.hpp"
- #include "cutlass/platform/platform.h"
- #include "cutlass/util/GPU_Clock.hpp"
- #include "cutlass/util/command_line.h"
- #include "cutlass/util/print_error.hpp"
+#include <cuda.h>
+#include <cudaTypedefs.h>
+#include <cuda_bf16.h>
+#include <cuda_pipeline.h>
+#include <cuda_runtime.h>
+#include <cutlass/arch/barrier.h>
+#include <transformer_engine/hadamard_transform.h>
+
+#include <cuda/barrier>
+#include <cute/algorithm/gemm.hpp>
+#include <cute/arch/cluster_sm90.hpp>
+#include <cute/tensor.hpp>
+
+#include "common/common.h"
+#include "common/util/cuda_runtime.h"
+#include "common/util/curanddx.hpp"
+#include "common/util/ptx.cuh"
+#include "common/utils.cuh"
+#include "customized_pipeline.cuh"
+#include "cutlass/arch/barrier.h"
+#include "cutlass/arch/reg_reconfig.h"
+#include "cutlass/cluster_launch.hpp"
+#include "cutlass/cutlass.h"
+#include "cutlass/detail/sm100_blockscaled_layout.hpp"
+#include "cutlass/fast_math.h"
+#include "cutlass/float8.h"
+#include "cutlass/float_subbyte.h"
+#include "cutlass/gemm/collective/builders/sm100_common.inl"
+#include "cutlass/numeric_conversion.h"
+#include "cutlass/numeric_types.h"
+#include "cutlass/pipeline/pipeline.hpp"
+#include "cutlass/platform/platform.h"
+#include "cutlass/util/GPU_Clock.hpp"
+#include "cutlass/util/command_line.h"
+#include "cutlass/util/print_error.hpp"
 
 // clang-format off
 
@@ -79,7 +79,7 @@ cutlass::Array<cutlass::float_e2m1_t, 8> StochasticNumericConverterBase(
 }
 
 CUTLASS_DEVICE
-cutlass::Array<cutlass::float_e2m1_t, 16> 
+cutlass::Array<cutlass::float_e2m1_t, 16>
 StochasticNumericConverter(cutlass::Array<float, 16> const &input, cutlass::Array<uint32_t, 4> const &rbits) {
   using result_type = cutlass::Array<cutlass::float_e2m1_t, 16>;
   result_type output;
@@ -255,7 +255,7 @@ __global__ static void row_col_rht_gemm_device(
     CUTLASS_DEVICE uint32_t tile_m() const {
       return work_tile_info.m_idx;
     }
-    CUTLASS_DEVICE uint32_t tile_n_base() const { 
+    CUTLASS_DEVICE uint32_t tile_n_base() const {
       return work_tile_info.n_idx * uint32_t(k_tile_max);
     }
 
@@ -265,7 +265,7 @@ __global__ static void row_col_rht_gemm_device(
       return cute::elem_less(cute::make_coord(work_tile_info.m_idx, work_tile_info.n_idx), cute::make_coord(tiles_in_m, tiles_in_n)) && work_tile_info.is_valid_tile;
     }
     CUTLASS_DEVICE bool is_first_wave() const { return wave_cnt == 0; }
-    CUTLASS_DEVICE auto advance_to_next_work(CLCPipeline& clc_pipeline, CLCPipelineState clc_pipe_producer_state) { 
+    CUTLASS_DEVICE auto advance_to_next_work(CLCPipeline& clc_pipeline, CLCPipelineState clc_pipe_producer_state) {
       uint32_t mbarrier_addr = clc_pipeline.producer_get_barrier(clc_pipe_producer_state);
       // Wait for clcID buffer to become empty with a flipped phase
       clc_pipeline.producer_acquire(clc_pipe_producer_state);
@@ -304,7 +304,7 @@ __global__ static void row_col_rht_gemm_device(
               &clc_response_ptr[state.index()]));
         asm volatile(
           "{\n\t"
-          "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_tx::bytes.multicast::cluster::all.b128 [%0], [%1];\n\t" 
+          "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_tx::bytes.multicast::cluster::all.b128 [%0], [%1];\n\t"
           "}\n"
           :
           : "r"(result_addr), "r"(mbarrier_addr));
@@ -482,30 +482,30 @@ __global__ static void row_col_rht_gemm_device(
 
     Tensor tCsA = make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()), sAlayout); // (MMA,MMA_M,MMA_N,PIPE)
     Tensor tCsB = make_tensor(make_smem_ptr(shared_storage.tensors.smem_B.data()), sBlayout); // (MMA,MMA_N,MMA_K,PIPE)
-  
+
     int block_rank_in_cluster = cute::block_rank_in_cluster();
     ThrMMA thr_mma = mma.get_slice(block_rank_in_cluster);               // blk idx
     Tensor tCgA = thr_mma.partition_A(gA_mk);                                                    // (MMA,MMA_M,MMA_K,k)
     Tensor tCgB = thr_mma.partition_B(gB_nk);                                                    // (MMA,MMA_N,MMA_K,k)
-  
+
     Layout cta_layout_mnk  = make_layout(cluster_shape);
     Layout cta_layout_vmnk = tiled_divide(cta_layout_mnk, make_tile(typename TiledMMA::AtomThrID{}));
     auto cta_coord_vmnk  = cta_layout_vmnk.get_flat_coord(block_rank_in_cluster);
-  
+
     auto [tAgA, tAsA] = tma_partition(
       tma_load_a,
       get<2>(cta_coord_vmnk),
       make_layout(size<2>(cta_layout_vmnk)),
       group_modes<0,3>(tCsA),
       group_modes<0,3>(tCgA));
-  
+
     auto [tBgB, tBsB] = tma_partition(
       tma_load_b,
       get<1>(cta_coord_vmnk),
       make_layout(size<1>(cta_layout_vmnk)),
       group_modes<0,3>(tCsB),
       group_modes<0,3>(tCgB));
-  
+
     uint16_t tma_mcast_mask_a = create_tma_multicast_mask<2>(cta_layout_vmnk, cta_coord_vmnk);
     uint16_t tma_mcast_mask_b = create_tma_multicast_mask<1>(cta_layout_vmnk, cta_coord_vmnk);
     if constexpr (kEnableRHTColQuant) {
@@ -549,14 +549,14 @@ __global__ static void row_col_rht_gemm_device(
       scheduler.update_work_tile_info();
     } while (scheduler.is_valid());
     mainloop_pipeline.producer_tail(mainloop_pipe_producer_state);
-  } 
+  }
 
   else if (is_mma_warp) {
     cutlass::arch::warpgroup_reg_dealloc<32>();
     if constexpr (kEnableRHTColQuant) {
       Tensor tCsA = make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()), sAlayout); // (MMA,MMA_M,MMA_N,PIPE)
       Tensor tCsB = make_tensor(make_smem_ptr(shared_storage.tensors.smem_B.data()), sBlayout); // (MMA,MMA_N,MMA_K,PIPE)
-    
+
       int block_rank_in_cluster = cute::block_rank_in_cluster();
       ThrMMA thr_mma = mma.get_slice(block_rank_in_cluster);               // blk idx
       // Allocate "fragments" -- these are actually umma smem descriptors
@@ -674,7 +674,7 @@ __global__ static void row_col_rht_gemm_device(
         pD,
         epilogue_tiler,
         make_coord(_,_, _),
-        Step<_1,_1, X>{}); // (BLK_M,BLK_N)      
+        Step<_1,_1, X>{}); // (BLK_M,BLK_N)
       Tensor mSFD = make_tensor(make_gmem_ptr(SFD), sfd_layout);
       Tensor gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});           // (BLK_M,BLK_N)
       Tensor pSFD = make_identity_tensor(mSFD.shape());
@@ -717,7 +717,7 @@ __global__ static void row_col_rht_gemm_device(
           Tensor tDpSFD_mn = pSFD_mn(_,_,scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
 
           accumulator_pipeline.consumer_wait(accumulator_pipe_consumer_state);
-          
+
           auto Acc = bulk_tmem_epilogue(_,_,_,accumulator_pipe_consumer_state.index());
           Tensor tDtAcc = thr_t2r.partition_S(Acc); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
           Tensor tDgD = thr_t2r.partition_D(tDgD_mn); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
@@ -788,7 +788,7 @@ __global__ static void row_col_rht_gemm_device(
                 pvscales, global_encode_scale);
           }
           auto pvscales_cvted = cutlass::NumericArrayConverter<TSFD, ElementAccumulator, NumVecs>{}(pvscales);
-          
+
           tD_rRowSFD_frg(_0{}) = pvscales_cvted;
           auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFD, NumVecs>{}(tD_rRowSFD_frg(_0{}));
           auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
@@ -823,18 +823,18 @@ __global__ static void row_col_rht_gemm_device(
               output_frgs[v] = cutlass::NumericArrayConverter<TD, ElementAccumulator, VectorSize>{}(
               cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
                 compute_frgs[v],
-                acc_scale));   
+                acc_scale));
             }
 
           }
 
-          copy_if(tiled_r2g, 
+          copy_if(tiled_r2g,
                 [&](auto coord){
                   Tensor pSrc_view = group_modes<1,rank(pSrc)>(pSrc);
                   return elem_less(pSrc_view(_0{},coord), shape(mD));
                 },
                 src, dst);
-          // 32bit vectorization copy 4 e4m3 SFD for per 64/(16,4):(0, 1)  element 
+          // 32bit vectorization copy 4 e4m3 SFD for per 64/(16,4):(0, 1)  element
           constexpr int vec_len = 32 / sizeof_bits_v<TSFD>;
           Tensor  tDrSFD_v = recast<uint_bit_t<32>>(tDrSFD);
           Tensor  tDgSFD_v = recast<uint_bit_t<32>>(tDgSFD);
@@ -887,7 +887,7 @@ __global__ static void row_col_rht_gemm_device(
       auto thr_r2g_QA = tiled_r2g_QA.get_slice(local_thread_idx);
 
       Tensor tQAsA = thr_s2r.partition_S(sA); // (Copy, Copy_M, Copy_N, PIPE)
-      
+
       Tensor tQArA = make_tensor_like<TA>(make_layout(tQAsA(_, _, _, _0{}).shape())); // (Copy, Copy_M, Copy_N)
       // Tensor tQArA_PI = thr_s2r.partition_S(sA_PI);
       Tensor tQAgQA = thr_r2g_QA.partition_D(gQA_mn);
@@ -979,21 +979,21 @@ __global__ static void row_col_rht_gemm_device(
               output_frgs[v] = cutlass::NumericArrayConverter<TQA, ElementAccumulator, VectorSize>{}(
                 cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
                   compute_frgs_up,
-                  acc_scale)); 
+                  acc_scale));
             }
           }
 
-          copy_if(tiled_r2g_QA, 
+          copy_if(tiled_r2g_QA,
                   [&](auto coord){
                     Tensor tQApQA_view = group_modes<1,rank(tQApQA_mn)>(tQApQA_mn);
                     return elem_less(tQApQA_view(_0{}, coord), shape(mQA));
                   },
                   tQArQA, tQAgQA_mn);
-          // 32bit vectorization copy 4 e4m3 SFA for per 64/(16,4):(0, 1)  element 
+          // 32bit vectorization copy 4 e4m3 SFA for per 64/(16,4):(0, 1)  element
           constexpr int vec_len = 32 / sizeof_bits_v<TSFD>;
           Tensor  tQArSFA_v = recast<uint_bit_t<32>>(filter(tQArSFA));
           Tensor  tQAgSFA_v = recast<uint_bit_t<32>>(filter(tQAgSFA_mn));
-          copy_if( 
+          copy_if(
                   [&](auto coord){
                     Tensor tQApSFA_view = filter(tQApSFA_mn);
                     return elem_less(tQApSFA_view(_0{}, coord * vec_len), shape(mSFA));
@@ -1036,10 +1036,10 @@ void row_col_rht_gemm_ntt_w_sfc(
     uint32_t sm_count,
     cudaStream_t stream,
     int k_tile_size = 1024) {
-  using namespace cute; 
+  using namespace cute;
   static int constexpr SFVecSize = 16;
   static int constexpr RhtTensorSize = 16;
-  
+
   static_assert(RhtTensorSize == 16, "RhtTensorSize must be 16");
   using LinearSFALayout = decltype(make_layout(make_shape(make_shape(Int<SFVecSize>{}, 0), 0), make_stride(make_stride(_0{}, _1{}), 0)));
   using LinearSFCLayout = decltype(make_layout(make_shape(0, make_shape(Int<SFVecSize>{}, 0)), make_stride(0, make_stride(_0{}, _1{}))));
@@ -1169,7 +1169,7 @@ void row_col_rht_gemm_ntt_w_sfc(
   uint32_t tiles_in_m = uint32_t(size(ceil_div(M, size<0>(cluster_tile_shape))));
   uint32_t tiles_in_n = uint32_t(size(ceil_div(N, k_tile_size)));
   uint32_t tiles = tiles_in_m * tiles_in_n;
-  
+
   dim3 dimBlock(512);
   dim3 dimCluster(size<0>(cluster_shape), size<1>(cluster_shape), size<2>(cluster_shape));
   dim3 dimGrid(tiles_in_m, tiles_in_n, 1);
@@ -1196,14 +1196,14 @@ void row_col_rht_gemm_ntt_w_sfc(
     TSFA, decltype(sfa_layout),
     decltype(mma),
     AccumulatorPipelineStageCount,
-    SchedulerPipelineStageCount, 
+    SchedulerPipelineStageCount,
     kEnableStochasticRounding,
     kEnableRHTColQuant,
     kEnableRowQuant,
     kUseFastMath>;
 
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(*kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-  
+
   cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size, stream};
   cutlass::Status status = cutlass::launch_kernel_on_cluster(
      params, (void const *)kernel_ptr, M, N, k_tile_size, cluster_shape, cluster_tile_shape,
@@ -1226,9 +1226,8 @@ void row_col_rht_gemm_ntt_w_sfc(
 // clang-format on
 
 void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
-                                               const Tensor &hadamard_matrix_,
-                                               QuantizationConfig quant_config,
-                                               cudaStream_t stream) {
+                                    const Tensor &hadamard_matrix_, QuantizationConfig quant_config,
+                                    cudaStream_t stream) {
   NVTE_API_CALL(hadamard_transform_cast_fusion);
 
   // Check input and output tensors
@@ -1239,7 +1238,7 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
              "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
   const SimpleTensor &input = input_.data;
-  
+
   // rowwise cast and columnwise cast has different output data pointers
   bool has_rowwise_quant = false;
   bool has_columnwise_quant = false;
@@ -1265,7 +1264,8 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
     columnwise_amax_ptr = output_.columnwise_amax.dptr;
   }
 
-  NVTE_CHECK(has_rowwise_quant || has_columnwise_quant, "Output tensor must have rowwise or columnwise quant.");
+  NVTE_CHECK(has_rowwise_quant || has_columnwise_quant,
+             "Output tensor must have rowwise or columnwise quant.");
 
   // Stochastic rounding config
   const bool use_stochastic_rounding = quant_config.stochastic_rounding;
@@ -1324,52 +1324,52 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
   const bool use_swizzle_sf_output = false;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-    use_stochastic_rounding, kEnableStochasticRounding,
-    TRANSFORMER_ENGINE_SWITCH_CONDITION(
-        has_columnwise_quant, kEnableRhtColQuant,
-        TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          has_rowwise_quant, kEnableRowQuant,
-            TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              use_swizzle_sf_output, kEnableSwizzleSFOutput,
+      use_stochastic_rounding, kEnableStochasticRounding,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          has_columnwise_quant, kEnableRhtColQuant,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              has_rowwise_quant, kEnableRowQuant,
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                quant_config.use_fast_math, kUseFastMath,
+                  use_swizzle_sf_output, kEnableSwizzleSFOutput,
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                      quant_config.use_fast_math, kUseFastMath,
 
-                if constexpr (kEnableRhtColQuant || kEnableRowQuant) {
-                  detail::row_col_rht_gemm_ntt_w_sfc<
-                      kEnableStochasticRounding, kEnableRhtColQuant, kEnableRowQuant,
-                      kEnableSwizzleSFOutput, TA, TB, TD, TSFD, TQA, TSFA, kUseFastMath>(
-                      /*sequence_length=*/m, /*hidden_size=*/n,
-                      /*A=*/reinterpret_cast<TA const *>(input.dptr),
-                      /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-                      /*D=*/reinterpret_cast<TD *>(columnwise_data_ptr),
-                      /*SFD=*/reinterpret_cast<TSFD *>(columnwise_scale_inv_ptr),
-                      /*QA=*/reinterpret_cast<TQA *>(rowwise_data_ptr),
-                      /*SFA=*/reinterpret_cast<TSFA *>(rowwise_scale_inv_ptr),
-                      /*a_global_amax=*/reinterpret_cast<float const *>(rowwise_amax_ptr),
-                      /*d_global_amax=*/reinterpret_cast<float const *>(columnwise_amax_ptr),
-                      /*rng_state=*/rng_state, /*sm_count=*/sm_count,
-                      /*stream=*/stream, /*k_tile_size=*/k_tile_size);
-                } else {
-                  NVTE_ERROR("Invalid kernel configuration (kEnableRHTColQuant=",
-                              kEnableRhtColQuant, ", kEnableRowQuant=", kEnableRowQuant, ").");
-                }
+                      if constexpr (kEnableRhtColQuant || kEnableRowQuant) {
+                        detail::row_col_rht_gemm_ntt_w_sfc<
+                            kEnableStochasticRounding, kEnableRhtColQuant, kEnableRowQuant,
+                            kEnableSwizzleSFOutput, TA, TB, TD, TSFD, TQA, TSFA, kUseFastMath>(
+                            /*sequence_length=*/m, /*hidden_size=*/n,
+                            /*A=*/reinterpret_cast<TA const *>(input.dptr),
+                            /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+                            /*D=*/reinterpret_cast<TD *>(columnwise_data_ptr),
+                            /*SFD=*/reinterpret_cast<TSFD *>(columnwise_scale_inv_ptr),
+                            /*QA=*/reinterpret_cast<TQA *>(rowwise_data_ptr),
+                            /*SFA=*/reinterpret_cast<TSFA *>(rowwise_scale_inv_ptr),
+                            /*a_global_amax=*/reinterpret_cast<float const *>(rowwise_amax_ptr),
+                            /*d_global_amax=*/reinterpret_cast<float const *>(columnwise_amax_ptr),
+                            /*rng_state=*/rng_state, /*sm_count=*/sm_count,
+                            /*stream=*/stream, /*k_tile_size=*/k_tile_size);
+                      } else {
+                        NVTE_ERROR("Invalid kernel configuration (kEnableRHTColQuant=",
+                                   kEnableRhtColQuant, ", kEnableRowQuant=", kEnableRowQuant, ").");
+                      }
 
-              );););););
+                  );););););
 }
 
 }  // namespace transformer_engine
 
 void nvte_hadamard_transform_cast_fusion(const NVTETensor input, NVTETensor output,
-                                                    const NVTETensor hadamard_matrix,
-                                                    const NVTEQuantizationConfig quant_config,
-                                                    cudaStream_t stream) {
+                                         const NVTETensor hadamard_matrix,
+                                         const NVTEQuantizationConfig quant_config,
+                                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_hadamard_transform_cast_fusion);
   using namespace transformer_engine;
   QuantizationConfig quant_config_cpp;
   if (quant_config != nullptr) {
     quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
   }
-  hadamard_transform_cast_fusion(
-      *convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
-      *convertNVTETensorCheck(hadamard_matrix), quant_config_cpp, stream);
+  hadamard_transform_cast_fusion(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
+                                 *convertNVTETensorCheck(hadamard_matrix), quant_config_cpp,
+                                 stream);
 }

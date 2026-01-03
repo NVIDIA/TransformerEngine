@@ -7,9 +7,9 @@
 #include <pybind.h>
 
 #include "common.h"
+#include "common/util/system.h"
 #include "pybind.h"
 #include "torch/torch.h"
-#include "common/util/system.h"
 
 namespace transformer_engine::pytorch {
 
@@ -1444,7 +1444,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   return {std::move(out_cpp), std::move(tensor)};
 }
 
-void NVFP4Quantizer::quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out, TensorWrapper& rht_output_t_cpp, QuantizationConfigWrapper& quant_config, QuantizationConfigWrapper& quant_config_columnwise, cudaStream_t stream){
+void NVFP4Quantizer::quantize_with_rht_unfused_helper(
+    const TensorWrapper& input, TensorWrapper& out, TensorWrapper& rht_output_t_cpp,
+    QuantizationConfigWrapper& quant_config, QuantizationConfigWrapper& quant_config_columnwise,
+    cudaStream_t stream) {
   // only triggered for irregular shapes where RHT cast fusion kernel is not eligible
   if (rowwise_usage) {
     // For rowwise usage, we need to quantize the input directly, but we need to avoid quantizing columnwise
@@ -1500,7 +1503,7 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(const TensorWrapper& input
                            static_cast<DType>(out_columnwise_amax.dtype),
                            out_columnwise_amax.shape);
 
-    // Invoking fallback RHT kernel unfused. 
+    // Invoking fallback RHT kernel unfused.
 
     NVTE_SCOPED_GIL_RELEASE({
       // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
@@ -1512,7 +1515,7 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(const TensorWrapper& input
     // intended.
     NVTE_SCOPED_GIL_RELEASE({
       nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose.data(), quant_config_columnwise,
-                        stream);
+                       stream);
     });
   }
 }
@@ -1553,14 +1556,15 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   TensorWrapper te_rng_state_columnwise;
   QuantizationConfigWrapper quant_config_columnwise;
 
-  // Only need a separate rng state when: 
+  // Only need a separate rng state when:
   // 1. Stochastic rounding is enabled
   // 2. RHT is enabled
   // 3. Columnwise usage is enabled
   // 4. Rowwise and columnwise quantization are not fused,
   //    because within a single kernel we can generate two different random numbers for rowwise and columnwise
-  const bool need_separate_columnwise_rng =
-      this->stochastic_rounding && this->with_rht && this->columnwise_usage && (!eligible_for_rht_cast_fusion);
+  const bool need_separate_columnwise_rng = this->stochastic_rounding && this->with_rht &&
+                                            this->columnwise_usage &&
+                                            (!eligible_for_rht_cast_fusion);
 
   if (this->stochastic_rounding) {
     const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
@@ -1669,24 +1673,29 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       auto rht_matrix_nvte = makeTransformerEngineTensor(this->rht_matrix);
       // Fusion kernel that does the following:
       // 1. Rowwise quantization
-      // 2. RHT followed by columnwise quantization & transpose 
-      NVTE_SCOPED_GIL_RELEASE({ nvte_hadamard_transform_cast_fusion(input.data(), out.data(), rht_matrix_nvte.data(), quant_config, stream); });
+      // 2. RHT followed by columnwise quantization & transpose
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_hadamard_transform_cast_fusion(input.data(), out.data(), rht_matrix_nvte.data(),
+                                            quant_config, stream);
+      });
     } else {
       // Use separate RNG state for columnwise to ensure different random numbers than rowwise
-      // This is only necessary because it's the unfused path where rowwise and columnwise 
+      // This is only necessary because it's the unfused path where rowwise and columnwise
       // are separate kernel launches
       auto& columnwise_quant_config_to_use =
-            need_separate_columnwise_rng ? quant_config_columnwise : quant_config;
+          need_separate_columnwise_rng ? quant_config_columnwise : quant_config;
       // unfused path also needs memory allocation for intermediate buffer for RHT output
       at::Tensor rht_output_t;  // The RHT(x_t) output, in columnwise layout
       // This wrapper is going to be passed as input to the quantization kernel.
       TensorWrapper rht_output_t_cpp;  // Wrapper to contain the RHT(x) and RHT(x_t) outputs
-      rht_output_t = allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
+      rht_output_t =
+          allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
       // NOTE (frsun): This is non-intuitive, we are writing the
       // result of transposed RHT to the output of rowwise.
       rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
-                                  std::vector<size_t>{cols, rows});
-      this->quantize_with_rht_unfused_helper(input, out, rht_output_t_cpp, quant_config, columnwise_quant_config_to_use, stream);
+                                        std::vector<size_t>{cols, rows});
+      this->quantize_with_rht_unfused_helper(input, out, rht_output_t_cpp, quant_config,
+                                             columnwise_quant_config_to_use, stream);
     }
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
