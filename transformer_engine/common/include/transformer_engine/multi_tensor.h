@@ -244,6 +244,22 @@ void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor noop_flag, NVTETens
                                   const size_t num_tensor_lists, const size_t num_tensors_per_list,
                                   float scale, cudaStream_t stream);
 
+/*!  \brief Check overflow and scale a list of tensors. scale is tensor input.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
+ *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
+ *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
+ *  \param[in]      scale                   Tensor for the scaling operation.
+ *  \param[in]      stream                  CUDA stream used for this operation.
+ */
+void nvte_multi_tensor_scale_tensor_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
+                                  const size_t num_tensor_lists, const size_t num_tensors_per_list,
+                                  NVTETensor scale, cudaStream_t stream);
+
 /*!  \brief Check overflow and scale a list of tensors.
  *
  * \warning   This API is **experimental** and subject to change.
