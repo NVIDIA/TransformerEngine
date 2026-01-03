@@ -72,10 +72,10 @@ void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTE
  *  \param[in]      quant_config    Quantization configuration.
  *  \param[in]      stream          CUDA stream used for the operation.
  */
- void nvte_hadamard_transform_cast_fusion(const NVTETensor input, NVTETensor output,
-    const NVTETensor hadamard_matrix,
-    const NVTEQuantizationConfig quant_config,
-    cudaStream_t stream);
+void nvte_hadamard_transform_cast_fusion(const NVTETensor input, NVTETensor output,
+                                         const NVTETensor hadamard_matrix,
+                                         const NVTEQuantizationConfig quant_config,
+                                         cudaStream_t stream);
 
 /*! \brief Split a tensor along dimension 0 and compute RHT amaxes for each split.
  *
