@@ -140,10 +140,7 @@ def benchmark_linear(
     label = f"{recipe_name}_{'linear'}"
     torch.cuda.nvtx.range_push(label)
     timing = benchmark.Timer(
-        stmt=(
-            "run_linear_multiple_steps(layer, x, mode, gradient, num_microbatches,"
-            " recipe)"
-        ),
+        stmt="run_linear_multiple_steps(layer, x, mode, gradient, num_microbatches, recipe)",
         globals={
             "run_linear_multiple_steps": run_linear_multiple_steps,
             "layer": layer,
@@ -161,9 +158,7 @@ def benchmark_linear(
     return timing_ms
 
 
-def run_benchmark_linear(
-    mkns, recipe_name, use_bias, fwd_only=False
-):
+def run_benchmark_linear(mkns, recipe_name, use_bias, fwd_only=False):
     data = []
     assert not use_bias, "Bias is not supported in this benchmark script"
 
