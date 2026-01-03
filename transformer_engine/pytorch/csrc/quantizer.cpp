@@ -9,6 +9,7 @@
 #include "common.h"
 #include "pybind.h"
 #include "torch/torch.h"
+#include "common/util/system.h"
 
 namespace transformer_engine::pytorch {
 
@@ -1443,6 +1444,79 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   return {std::move(out_cpp), std::move(tensor)};
 }
 
+void NVFP4Quantizer::quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out, TensorWrapper& rht_output_t_cpp, QuantizationConfigWrapper& quant_config, QuantizationConfigWrapper& quant_config_columnwise, cudaStream_t stream){
+  // only triggered for irregular shapes where RHT cast fusion kernel is not eligible
+  if (rowwise_usage) {
+    // For rowwise usage, we need to quantize the input directly, but we need to avoid quantizing columnwise
+    TensorWrapper out_identity(out.scaling_mode());
+    auto out_identity_data = out.get_rowwise_data();
+    auto out_identity_scale_inv = out.get_rowwise_scale_inv();
+    auto out_identity_amax = out.get_amax();
+    out_identity.set_rowwise_data(out_identity_data.data_ptr,
+                                  static_cast<DType>(out_identity_data.dtype),
+                                  out_identity_data.shape);
+    out_identity.set_rowwise_scale_inv(out_identity_scale_inv.data_ptr,
+                                       static_cast<DType>(out_identity_scale_inv.dtype),
+                                       out_identity_scale_inv.shape);
+    out_identity.set_amax(out_identity_amax.data_ptr, static_cast<DType>(out_identity_amax.dtype),
+                          out_identity_amax.shape);
+
+    NVTE_SCOPED_GIL_RELEASE(
+        { nvte_quantize_v2(input.data(), out_identity.data(), quant_config, stream); });
+  }
+
+  if (columnwise_usage) {
+    // Get the output columnwise data, scale_inv, and amax
+    auto out_columnwise_data = out.get_columnwise_data();
+    auto out_columnwise_scale_inv = out.get_columnwise_scale_inv();
+    // NOTE: should already be populated.
+    auto out_columnwise_amax = out.get_columnwise_amax();
+
+    // Create a wrapper for the columnwise output, as the rowwise output.
+    // The reason is due to the input `rht_output_t` is already in the transposed layout.
+    // Thus, we only need a rowwise quantization to generate the columnwise output.
+    TensorWrapper out_transpose(out.scaling_mode());
+    // Note: since we are faking columnwise tensor into rowwise, the flat first dim check will fail
+    // need to convert the shape to 2D here
+    auto colwise_data_shape = out_columnwise_data.shape;
+    std::vector<size_t> colwise_data_shape_2d;
+    // shape could be [512, 32, 64], that's actually 512, 32, 128 because 2 FP4 take 1 byte
+    // the 2D shape should be [512, 32*128], but columnwise data shape expect last dim to be halved again
+    // so the multiple 2 get cancelled out
+    colwise_data_shape_2d.push_back(colwise_data_shape.data[0]);
+    size_t last_dim = 1;
+    for (size_t i = 1; i < colwise_data_shape.ndim; ++i) {
+      last_dim *= colwise_data_shape.data[i];
+    }
+    colwise_data_shape_2d.push_back(last_dim);
+
+    out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
+                                   static_cast<DType>(out_columnwise_data.dtype),
+                                   colwise_data_shape_2d);
+    out_transpose.set_rowwise_scale_inv(out_columnwise_scale_inv.data_ptr,
+                                        static_cast<DType>(out_columnwise_scale_inv.dtype),
+                                        out_columnwise_scale_inv.shape);
+    out_transpose.set_amax(out_columnwise_amax.data_ptr,
+                           static_cast<DType>(out_columnwise_amax.dtype),
+                           out_columnwise_amax.shape);
+
+    // Invoking fallback RHT kernel unfused. 
+
+    NVTE_SCOPED_GIL_RELEASE({
+      // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
+      nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
+                              this->rht_matrix_random_sign_mask_t, stream);
+    });
+
+    // Quantize kernel will treat everything as rowwise input/output, which is
+    // intended.
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose.data(), quant_config_columnwise,
+                        stream);
+    });
+  }
+}
+
 void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                                    const std::optional<TensorWrapper>& noop_flag,
                                    bool compute_amax) {
@@ -1468,14 +1542,25 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
   size_t cols = input.size(input.ndim() - 1);
 
+  // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT
+  bool eligible_for_rht_cast_fusion =
+      input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0;
+
   // Stochastic rounding
   // When both rowwise and columnwise quantization are used with RHT,
   // we need separate RNG states for each to ensure they use different random numbers.
   TensorWrapper te_rng_state;
   TensorWrapper te_rng_state_columnwise;
   QuantizationConfigWrapper quant_config_columnwise;
+
+  // Only need a separate rng state when: 
+  // 1. Stochastic rounding is enabled
+  // 2. RHT is enabled
+  // 3. Columnwise usage is enabled
+  // 4. Rowwise and columnwise quantization are not fused,
+  //    because within a single kernel we can generate two different random numbers for rowwise and columnwise
   const bool need_separate_columnwise_rng =
-      this->stochastic_rounding && this->with_rht && this->columnwise_usage;
+      this->stochastic_rounding && this->with_rht && this->columnwise_usage && (!eligible_for_rht_cast_fusion);
 
   if (this->stochastic_rounding) {
     const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
@@ -1500,10 +1585,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       quant_config_columnwise.set_rng_state(te_rng_state_columnwise.data());
     }
   }
-
-  // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT
-  bool eligible_for_rht_cast_fusion =
-      input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0;
 
   // Compute amax.
   if (this->with_rht) {
@@ -1570,103 +1651,42 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
         { this->amax_reduction_group->allreduce_coalesced(amax_tensors, opts)->wait(); });
   }
 
+  // Fast math toggle: RHT transform can be accelerated
+  // What math is accelerated? Only the high precision math, so numerical impact is minimal
+  // 1. replace x / y by x * (1/y)
+  // 2. replace 1 / x by reciporal_approximate_ftz(x)
+  // 3. when RHT cast fusion is available, fusion allows cast to be performed on FP32 data,
+  //    this will essentially remove a round trip between FP32 to BF16 then FP32
+  const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
+  if (use_fast_math) {
+    quant_config.set_use_fast_math(true);
+    quant_config_columnwise.set_use_fast_math(true);
+  }
+
   if (this->with_rht) {
-    if (rowwise_usage) {
-      // For rowwise usage, we need to quantize the input directly, but we need to avoid quantizing columnwise
-      TensorWrapper out_identity(out.scaling_mode());
-      auto out_identity_data = out.get_rowwise_data();
-      auto out_identity_scale_inv = out.get_rowwise_scale_inv();
-      auto out_identity_amax = out.get_amax();
-      out_identity.set_rowwise_data(out_identity_data.data_ptr,
-                                    static_cast<DType>(out_identity_data.dtype),
-                                    out_identity_data.shape);
-      out_identity.set_rowwise_scale_inv(out_identity_scale_inv.data_ptr,
-                                         static_cast<DType>(out_identity_scale_inv.dtype),
-                                         out_identity_scale_inv.shape);
-      out_identity.set_amax(out_identity_amax.data_ptr, static_cast<DType>(out_identity_amax.dtype),
-                            out_identity_amax.shape);
-
-      NVTE_SCOPED_GIL_RELEASE(
-          { nvte_quantize_v2(input.data(), out_identity.data(), quant_config, stream); });
-    }
-
-    if (columnwise_usage) {
-      // Get the output columnwise data, scale_inv, and amax
-      auto out_columnwise_data = out.get_columnwise_data();
-      auto out_columnwise_scale_inv = out.get_columnwise_scale_inv();
-      // NOTE: should already be populated.
-      auto out_columnwise_amax = out.get_columnwise_amax();
-
-      // Create a wrapper for the columnwise output, as the rowwise output.
-      // The reason is due to the input `rht_output_t` is already in the transposed layout.
-      // Thus, we only need a rowwise quantization to generate the columnwise output.
-      TensorWrapper out_transpose(out.scaling_mode());
-      // Note: since we are faking columnwise tensor into rowwise, the flat first dim check will fail
-      // need to convert the shape to 2D here
-      auto colwise_data_shape = out_columnwise_data.shape;
-      std::vector<size_t> colwise_data_shape_2d;
-      // shape could be [512, 32, 64], that's actually 512, 32, 128 because 2 FP4 take 1 byte
-      // the 2D shape should be [512, 32*128], but columnwise data shape expect last dim to be halved again
-      // so the multiple 2 get cancelled out
-      colwise_data_shape_2d.push_back(colwise_data_shape.data[0]);
-      size_t last_dim = 1;
-      for (size_t i = 1; i < colwise_data_shape.ndim; ++i) {
-        last_dim *= colwise_data_shape.data[i];
-      }
-      colwise_data_shape_2d.push_back(last_dim);
-
-      out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
-                                     static_cast<DType>(out_columnwise_data.dtype),
-                                     colwise_data_shape_2d);
-      out_transpose.set_rowwise_scale_inv(out_columnwise_scale_inv.data_ptr,
-                                          static_cast<DType>(out_columnwise_scale_inv.dtype),
-                                          out_columnwise_scale_inv.shape);
-      out_transpose.set_amax(out_columnwise_amax.data_ptr,
-                             static_cast<DType>(out_columnwise_amax.dtype),
-                             out_columnwise_amax.shape);
-
+    if (eligible_for_rht_cast_fusion) {
+      // fusion kernel requires passing in RHT matrix directly for maximum performance
+      auto rht_matrix_nvte = makeTransformerEngineTensor(this->rht_matrix);
+      // Fusion kernel that does the following:
+      // 1. Rowwise quantization
+      // 2. RHT followed by columnwise quantization & transpose 
+      NVTE_SCOPED_GIL_RELEASE({ nvte_hadamard_transform_cast_fusion(input.data(), out.data(), rht_matrix_nvte.data(), quant_config, stream); });
+    } else {
       // Use separate RNG state for columnwise to ensure different random numbers than rowwise
-      auto& columnwise_quant_config =
-          need_separate_columnwise_rng ? quant_config_columnwise : quant_config;
-
-      if (!eligible_for_rht_cast_fusion) {
-        // Invoking fallback RHT kernel.
-
-        // If using RHT, then amax will be computed in the RHT step
-        // If not using RHT, then amax will be computed based on input x
-        at::Tensor rht_output_t;  // The RHT(x_t) output, in columnwise layout
-        // This wrapper is going to be passed as input to the quantization kernel.
-        TensorWrapper rht_output_t_cpp;  // Wrapper to contain the RHT(x) and RHT(x_t) outputs
-        rht_output_t =
-            allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
-        // NOTE (frsun): This is non-intuitive, we are writing the
-        // result of transposed RHT to the output of rowwise.
-        rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
-                                          std::vector<size_t>{cols, rows});
-
-        NVTE_SCOPED_GIL_RELEASE({
-          // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
-          nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
-                                  this->rht_matrix_random_sign_mask_t, stream);
-        });
-
-        // Quantize kernel will treat everything as rowwise input/output, which is
-        // intended.
-        NVTE_SCOPED_GIL_RELEASE({
-          nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose.data(), columnwise_quant_config,
-                           stream);
-        });
-      } else {
-        // RHT cast fusion kernel.
-        NVTE_CHECK(this->rht_matrix.defined() && this->rht_matrix.numel() > 0,
-                   "RHT matrix is not set");
-        auto rht_matrix_nvte = makeTransformerEngineTensor(this->rht_matrix);
-        NVTE_SCOPED_GIL_RELEASE({
-          nvte_hadamard_transform_cast_fusion_columnwise(input.data(), out_transpose.data(),
-                                                         rht_matrix_nvte.data(),
-                                                         columnwise_quant_config, stream);
-        });
-      }
+      // This is only necessary because it's the unfused path where rowwise and columnwise 
+      // are separate kernel launches
+      auto& columnwise_quant_config_to_use =
+            need_separate_columnwise_rng ? quant_config_columnwise : quant_config;
+      // unfused path also needs memory allocation for intermediate buffer for RHT output
+      at::Tensor rht_output_t;  // The RHT(x_t) output, in columnwise layout
+      // This wrapper is going to be passed as input to the quantization kernel.
+      TensorWrapper rht_output_t_cpp;  // Wrapper to contain the RHT(x) and RHT(x_t) outputs
+      rht_output_t = allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
+      // NOTE (frsun): This is non-intuitive, we are writing the
+      // result of transposed RHT to the output of rowwise.
+      rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
+                                  std::vector<size_t>{cols, rows});
+      this->quantize_with_rht_unfused_helper(input, out, rht_output_t_cpp, quant_config, columnwise_quant_config_to_use, stream);
     }
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
