@@ -179,6 +179,24 @@ __global__ static void row_col_rht_gemm_device(
     float const* c_global_amax,
     const size_t* rng_state) {
   using namespace cute;
+
+  // Abort immediately if compilation is not supported
+  constexpr bool is_blackwell_arch = ARCH_BLACKWELL_FAMILY;
+  if constexpr (!is_blackwell_arch) {
+    NVTE_DEVICE_ERROR(
+        "row_col_rht_gemm_device is only supported on Blackwell "
+        "with architecture-specific compilation. "
+        "Try recompiling with sm_100a or similar.");
+    return;
+  }
+  static_assert(kEnableRHTColQuant_ || kEnableRowQuant_,
+                "row_col_rht_gemm_device must generate row-wise "
+                "and/or column-wise output.");
+#if !defined(CUTLASS_ARCH_CLC_ENABLED)
+  CUTLASS_NOT_IMPLEMENTED();
+  return;
+#endif
+
   using X = Underscore;
   // static constexpr bool kApplyStochasticRounding = true;
   using ElementAccumulator = float;
