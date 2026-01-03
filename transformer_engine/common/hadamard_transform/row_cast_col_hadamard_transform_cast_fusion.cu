@@ -436,8 +436,7 @@ __global__ static void row_col_rht_gemm_device(
   typename CLCPipeline::Params clc_pipeline_params;
   if (is_sched_warp) {
     clc_pipeline_params.role = CLCPipeline::ThreadCategory::ProducerConsumer;
-  }
-  else {
+  } else {
     clc_pipeline_params.role = CLCPipeline::ThreadCategory::Consumer;
   }
   clc_pipeline_params.producer_blockid = 0;
@@ -549,9 +548,7 @@ __global__ static void row_col_rht_gemm_device(
       scheduler.update_work_tile_info();
     } while (scheduler.is_valid());
     mainloop_pipeline.producer_tail(mainloop_pipe_producer_state);
-  }
-
-  else if (is_mma_warp) {
+  } else if (is_mma_warp) {
     cutlass::arch::warpgroup_reg_dealloc<32>();
     if constexpr (kEnableRHTColQuant) {
       Tensor tCsA = make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()), sAlayout); // (MMA,MMA_M,MMA_N,PIPE)
@@ -615,8 +612,7 @@ __global__ static void row_col_rht_gemm_device(
       accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
       tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
     }
-  }
-  else if(is_sched_warp) {
+  } else if(is_sched_warp) {
     cutlass::arch::warpgroup_reg_dealloc<32>();
     do {
       clc_throttle_pipeline.consumer_wait(clc_pipe_throttle_consumer_state);
@@ -627,8 +623,7 @@ __global__ static void row_col_rht_gemm_device(
       ++clc_pipeline_consumer_state;
       scheduler.update_work_tile_info();
     } while (scheduler.is_valid());
-  }
-  else if (is_epilogue_col_quant_warp) {
+  } else if (is_epilogue_col_quant_warp) {
     cutlass::arch::warpgroup_reg_alloc<192>();
     if constexpr (kEnableRHTColQuant) {
       using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b64x;
@@ -848,8 +843,7 @@ __global__ static void row_col_rht_gemm_device(
         scheduler.update_work_tile_info();
       } while (scheduler.is_valid());
     }
-  }
-  else if (is_epilogue_row_quant_warp) {
+  } else if (is_epilogue_row_quant_warp) {
     cutlass::arch::warpgroup_reg_alloc<136>();
     if constexpr (kEnableRowQuant) {
       using S2RVectorType = uint128_t;
@@ -1008,7 +1002,7 @@ __global__ static void row_col_rht_gemm_device(
   } else {
       cutlass::arch::warpgroup_reg_dealloc<32>();
   }
-}
+} // NOLINT(readability/fn_size)
 
 
 // this function computes RHT-GEMM for
