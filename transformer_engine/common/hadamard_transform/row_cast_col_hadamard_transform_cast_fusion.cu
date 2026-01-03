@@ -149,7 +149,7 @@ template <class MShape, class NShape, class KShape, class ClusterShape, class Cl
           bool kEnableStochasticRounding_ = false,
           bool kEnableRHTColQuant_ = true,
           bool kEnableRowQuant_ = true,
-          bool kEnableFastMath_ = true>
+          bool kUseFastMath_ = true>
 __launch_bounds__(512, 1)
 __global__ static void row_col_rht_gemm_device(
     MShape M,
@@ -189,7 +189,7 @@ __global__ static void row_col_rht_gemm_device(
   static constexpr bool kEnableStochasticRounding = kEnableStochasticRounding_;
   static constexpr bool kEnableRHTColQuant = kEnableRHTColQuant_;
   static constexpr bool kEnableRowQuant = kEnableRowQuant_;
-  static constexpr bool kEnableFastMath = kEnableFastMath_;
+  static constexpr bool kUseFastMath = kUseFastMath_;
   static int constexpr RhtTensorSize = 16;
   static int constexpr kTmaRhtTensorTransactionBytes = cutlass::bits_to_bytes(
       RhtTensorSize * RhtTensorSize * cute::sizeof_bits_v<TB>);
@@ -700,7 +700,11 @@ __global__ static void row_col_rht_gemm_device(
         : 1.0f;
 
       float const global_decode_scale = 1.0f / global_encode_scale;
-      float const global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+      // Scaling factor for fast math path
+      float global_encode_scale_multiplier = 1.0f;
+      if constexpr (kUseFastMath) {
+        global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+      }
       auto sfc_converter = cutlass::NumericConverter<TSFD, float>{};
 
       do {
@@ -752,6 +756,19 @@ __global__ static void row_col_rht_gemm_device(
           accumulator_pipeline.consumer_release(accumulator_pipe_consumer_state);
           ++accumulator_pipe_consumer_state;
 
+          if constexpr (!kUseFastMath) {
+            // Downcast to BF16 for bit-wise compatibility with
+            // unfused kernels
+            auto convert_accum_to_bf16 =
+                cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator,
+                                               FragmentSize>{};
+            auto convert_bf16_to_accum =
+                cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t,
+                                               FragmentSize>{};
+            tTR_rAcc_frag(_0{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
+            tTR_rAcc_frag(_1{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_1{})));
+          }
+
           auto compute_frgs = reinterpret_cast<cutlass::Array< ElementAccumulator, VectorSize> *>(tTR_rAcc_frag.data());
           auto output_frgs = reinterpret_cast<cutlass::Array< TD, VectorSize> *>(tDrD_frag.data());
           CUTLASS_PRAGMA_UNROLL
@@ -759,7 +776,17 @@ __global__ static void row_col_rht_gemm_device(
             vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
           }
 
-          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, global_encode_scale_multiplier);
+          if constexpr (kUseFastMath) {
+            // Fast math: multiply with precomputed reciprocal
+            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+                vec_maxs, global_encode_scale_multiplier);
+          } else {
+            // Accurate math: perform division
+            pvscales =
+                cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
+            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+                pvscales, global_encode_scale);
+          }
           auto pvscales_cvted = cutlass::NumericArrayConverter<TSFD, ElementAccumulator, NumVecs>{}(pvscales);
           
           tD_rRowSFD_frg(_0{}) = pvscales_cvted;
@@ -769,7 +796,7 @@ __global__ static void row_col_rht_gemm_device(
             global_decode_scale);
 
           cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
-          if constexpr (kEnableFastMath) {
+          if constexpr (kUseFastMath) {
             // fast math: use reciprocal approximate to replace div
             acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
           } else {
@@ -882,7 +909,11 @@ __global__ static void row_col_rht_gemm_device(
         : 1.0f;
 
       float const global_decode_scale = 1.0f / global_encode_scale;
-      float const global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+      // Scaling factor for fast math path
+      float global_encode_scale_multiplier = 1.0f;
+      if constexpr (kUseFastMath) {
+        global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+      }
       auto sfa_converter = cutlass::NumericConverter<TSFA, ElementAccumulator>{};
       do {
         uint32_t skip_wait = K_TILE_MAX <= 0;
@@ -916,12 +947,21 @@ __global__ static void row_col_rht_gemm_device(
           for (int v = 0; v < size(tQArA)/VectorSize; v++) {
             auto compute_frgs_up = cutlass::NumericArrayConverter<ElementAccumulator, TA, VectorSize>{}(compute_frgs[v]);
             auto amax = amax_reduction(ElementAccumulator(0), compute_frgs_up);
-            auto pvscales= cutlass::multiplies<ElementAccumulator>{}(amax, global_encode_scale_multiplier);
+            // declare pvscales
+            ElementAccumulator pvscales;
+            if constexpr (kUseFastMath) {
+              // Fast math: multiply with precomputed reciprocal
+              pvscales = cutlass::multiplies<ElementAccumulator>{}(amax, global_encode_scale_multiplier);
+            } else {
+              // Accurate math: perform division
+              pvscales = cutlass::divides<ElementAccumulator>{}(amax, fp4_max);
+              pvscales = cutlass::multiplies<ElementAccumulator>{}(pvscales, global_encode_scale);
+            }
             filter(tQArSFA)(v) = sfa_converter(pvscales);
             auto qpvscale_ups = cutlass::NumericConverter<ElementAccumulator, TSFA>{}(filter(tQArSFA)(v));
             auto qpvscale_scaled = cutlass::multiplies<ElementAccumulator>{}(qpvscale_ups, global_decode_scale);
             ElementAccumulator acc_scales;
-            if constexpr (kEnableFastMath) {
+            if constexpr (kUseFastMath) {
               // fast math: use reciprocal approximate to replace div
               acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
             } else {
@@ -980,7 +1020,7 @@ __global__ static void row_col_rht_gemm_device(
 // QA: m x n: col-major
 // SFA: m/16 x n: col-major
 template <bool kEnableStochasticRounding, bool kEnableRHTColQuant, bool kEnableRowQuant, bool kEnableSwizzleSFOutput,
-class TA, class TB, class TD, class TSFD, class TQA, class TSFA, bool kEnableFastMath=true>
+class TA, class TB, class TD, class TSFD, class TQA, class TSFA, bool kUseFastMath=true>
 void row_col_rht_gemm_ntt_w_sfc(
     int sequence_length,
     int hidden_size,
@@ -1160,7 +1200,7 @@ void row_col_rht_gemm_ntt_w_sfc(
     kEnableStochasticRounding,
     kEnableRHTColQuant,
     kEnableRowQuant,
-    kEnableFastMath>;
+    kUseFastMath>;
 
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(*kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   
@@ -1216,7 +1256,9 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
     rowwise_data_ptr = output_.data.dptr;
     rowwise_scale_inv_ptr = output_.scale_inv.dptr;
     rowwise_amax_ptr = output_.amax.dptr;
-  } else {
+  }
+
+  if (output_.columnwise_data.dptr != nullptr) {
     has_columnwise_quant = true;
     columnwise_data_ptr = output_.columnwise_data.dptr;
     columnwise_scale_inv_ptr = output_.columnwise_scale_inv.dptr;
