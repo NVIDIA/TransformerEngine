@@ -58,7 +58,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 from transformer_engine.pytorch.attention.dot_product_attention.backends import (
     UnfusedDotProductAttention,
     FusedAttention,
-    FlashAttention
+    FlashAttention,
 )
 
 # Save reference to native FlashAttention for fallback
