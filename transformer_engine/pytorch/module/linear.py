@@ -93,7 +93,6 @@ class _Linear(torch.autograd.Function):
         non_tensor_args: Tuple,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-
         (
             is_first_microbatch,
             fp8,
@@ -130,6 +129,10 @@ class _Linear(torch.autograd.Function):
             debug,
         ) = non_tensor_args
 
+        inp_requires_grad = inp.requires_grad
+        weight_requires_grad = weight.requires_grad
+        bias_requires_grad = bias.requires_grad if bias is not None else False
+
         # NVTX label for profiling
         nvtx_label = "transformer_engine._Linear.forward"
         if ub_name is not None:
@@ -141,7 +144,7 @@ class _Linear(torch.autograd.Function):
 
         # Configure tensor-parallel communication
         tp_world_size = get_distributed_world_size(tp_group)
-        backward_needs_input = is_grad_enabled and weight.requires_grad
+        backward_needs_input = is_grad_enabled and weight_requires_grad
         with_input_all_gather_nccl = (
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
         )
@@ -254,7 +257,7 @@ class _Linear(torch.autograd.Function):
             # Configure quantizer
             # No need to set the quantizer states if weight is already quantized
             if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
-                columnwise_usage = is_grad_enabled and inp.requires_grad
+                columnwise_usage = is_grad_enabled and inp_requires_grad
                 if not columnwise_usage:
                     columnwise_usage = (
                         is_fp8_activation_recompute_enabled()
@@ -379,7 +382,7 @@ class _Linear(torch.autograd.Function):
             ctx.weight_quantizer = weight_quantizer
 
             ctx.backward_input_needs_gather = (
-                weight.requires_grad and parallel_mode == "column" and sequence_parallel
+                weight_requires_grad and parallel_mode == "column" and sequence_parallel
             )
 
             # Discard unneeded data in input tensor
@@ -447,7 +450,7 @@ class _Linear(torch.autograd.Function):
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-            if fuse_wgrad_accumulation and weight.requires_grad:
+            if fuse_wgrad_accumulation and weight_requires_grad:
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -473,12 +476,12 @@ class _Linear(torch.autograd.Function):
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_name = ub_name
             ctx.tp_size = tp_size
-            ctx.requires_dgrad = inp.requires_grad
-            ctx.requires_wgrad = weight.requires_grad
+            ctx.requires_dgrad = inp_requires_grad
+            ctx.requires_wgrad = weight_requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
 
             ctx.owns_input = saved_inputmat is not inp
-            if ctx.fp8 and requires_grad(inp, weight, bias):
+            if ctx.fp8 and inp_requires_grad and weight_requires_grad and bias_requires_grad:
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():

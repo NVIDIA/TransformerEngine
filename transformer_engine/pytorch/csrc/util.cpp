@@ -15,7 +15,7 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
 
   if (input.scaling_mode() == NVTE_INVALID_SCALING) {
     NVTE_ERROR("Invalid scaling mode for swizzle.");
-  } else if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING &&
+  } else if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING ||
              input.scaling_mode() != NVTE_NVFP4_1D_SCALING) {
     return std::nullopt;
   }

@@ -35,9 +35,9 @@ PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
 PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
+bool is_extension_initialized = false;
 
 void init_float8_extension() {
-  if (Float8TensorPythonClass) return;
   auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.float8_tensor");
   Float8QuantizerClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Quantizer"));
@@ -54,7 +54,6 @@ void init_float8_extension() {
 }
 
 void init_mxfp8_extension() {
-  if (MXFP8TensorPythonClass) return;
   auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.mxfp8_tensor");
   MXFP8QuantizerClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "MXFP8Quantizer"));
@@ -69,7 +68,6 @@ void init_mxfp8_extension() {
 }
 
 void init_float8blockwise_extension() {
-  if (Float8BlockwiseQTensorStoragePythonClass) return;
   auto fp8_module =
       py::module_::import("transformer_engine.pytorch.tensor.float8_blockwise_tensor");
   auto fp8_base_module = py::module_::import(
@@ -90,7 +88,6 @@ void init_float8blockwise_extension() {
 }
 
 void init_nvfp4_extensions() {
-  if (NVFP4TensorPythonClass) return;
   auto nvfp4_module = py::module_::import("transformer_engine.pytorch.tensor.nvfp4_tensor");
   NVFP4QuantizerClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Quantizer"));
@@ -105,10 +102,12 @@ void init_nvfp4_extensions() {
 }
 
 void init_extension() {
+  if (is_extension_initialized) return;
   init_float8_extension();
   init_mxfp8_extension();
   init_float8blockwise_extension();
   init_nvfp4_extensions();
+  is_extension_initialized = true;
 }
 
 }  // namespace transformer_engine::pytorch

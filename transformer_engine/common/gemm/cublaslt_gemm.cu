@@ -129,7 +129,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Atype = A.data.dtype;
     ret.A_scale_inv = A.scale_inv.dptr;
     ret.lda = is_A_transposed ? k : m;
-    if (!nvte_is_non_tn_fp8_gemm_supported() && !is_A_transposed) {
+    int is_nvte_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
+    if (!is_nvte_non_tn_fp8_gemm_supported && !is_A_transposed) {
       // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
       if (A.has_columnwise_data() && is_fp8_dtype(A.columnwise_data.dtype)) {
         ret.A = A.columnwise_data.dptr;
@@ -140,7 +141,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       } else {
         NVTE_CHECK(!is_fp8_dtype(ret.Atype), "Input A is missing column-wise usage");
       }
-    } else if (nvte_is_non_tn_fp8_gemm_supported() && !A.has_data()) {
+    } else if (is_nvte_non_tn_fp8_gemm_supported && !A.has_data()) {
       // Blackwell supports any GEMM layout for FP8, so we can use column-wise/transposed
       // data  with the mirrored transpose-flag if we don't have row-wise data.
       NVTE_CHECK(A.has_columnwise_data() && is_fp8_dtype(A.columnwise_data.dtype),
@@ -220,7 +221,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = B.data.dtype;
     ret.B_scale_inv = B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
-    if (!nvte_is_non_tn_fp8_gemm_supported() && is_B_transposed) {
+    int is_nvte_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
+    if (!is_nvte_non_tn_fp8_gemm_supported && is_B_transposed) {
       // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
       if (B.has_columnwise_data() && is_fp8_dtype(B.columnwise_data.dtype)) {
         ret.B = B.columnwise_data.dptr;
@@ -231,7 +233,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       } else {
         NVTE_CHECK(!is_fp8_dtype(ret.Btype), "Input B is missing column-wise usage");
       }
-    } else if (nvte_is_non_tn_fp8_gemm_supported() && !B.has_data()) {
+    } else if (is_nvte_non_tn_fp8_gemm_supported && !B.has_data()) {
       // Blackwell supports any GEMM layout for FP8, so we can use column-wise/transposed
       // data with the mirrored transpose-flag if we don't have row-wise data.
       NVTE_CHECK(B.has_columnwise_data() && is_fp8_dtype(B.columnwise_data.dtype),

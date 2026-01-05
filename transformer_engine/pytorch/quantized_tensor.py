@@ -360,8 +360,15 @@ class QuantizedTensor(torch.Tensor):
             requires_grad=requires_grad,
             device=torch.cuda.current_device() if device is None else device,
         )
-
+        instance._dtype = dtype
         return instance
+
+    @property
+    def dtype(self) -> torch.dtype:
+        # Attribute access of custom tensors goes through an
+        # expensive Pyobject lookup. Since dtype for a tensor is never
+        # change after creation, we cache it in a member variable.
+        return self._dtype
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Convert quantized data to standard PyTorch tensor"""
