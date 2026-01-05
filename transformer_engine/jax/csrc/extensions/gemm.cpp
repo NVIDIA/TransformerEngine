@@ -768,10 +768,24 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     NVTE_CHECK_CUDA(cudaMemsetAsync(dptr, 0, count, stream_i));
   }
 
-  nvte_multi_tensor_gemm(rhs_list.data(), lhs_list.data(), out_list.data(), bias_list.data(),
-                         pre_gelu_list.data(), num_non_empty_gemms, rhs_is_trans, lhs_is_trans,
-                         grad, workspace_list.data(), accumulate, use_split_accumulator,
-                         num_math_sm, stream);
+  // nvte_multi_tensor_gemm(rhs_list.data(), lhs_list.data(), out_list.data(), bias_list.data(),
+  //                        pre_gelu_list.data(), num_non_empty_gemms, rhs_is_trans, lhs_is_trans,
+  //                        grad, workspace_list.data(), accumulate, use_split_accumulator,
+  //                        num_math_sm, stream);
+  int64_t avg_m = 0, avg_n = 0, avg_k = 0;
+  nvte_grouped_gemm(
+    rhs_is_trans, lhs_is_trans,
+    alpha,
+    rhs_list, lhs_list,
+    beta,
+    C,
+    out_list,
+    workspace_setup,
+    workspace_cublas,
+    stream,
+    &avg_m,
+    &avg_n,
+    &avg_k);
 
   return ffi_with_cuda_error_check();
 }
