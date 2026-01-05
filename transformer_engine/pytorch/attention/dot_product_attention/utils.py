@@ -718,7 +718,8 @@ def get_attention_backend(
         if qkv_format == "thd":
             if cudnn_version < (9, 18, 0):
                 logger.debug(
-                    "Disabling FusedAttention for softmax_type = %s and qkv_format = thd", softmax_type
+                    "Disabling FusedAttention for softmax_type = %s and qkv_format = thd",
+                    softmax_type,
                 )
                 use_fused_attention = False
             logger.debug(
