@@ -133,7 +133,10 @@ struct Tensor {
 
   NVTEScalingMode scaling_mode;
   NVTETensor nvte_tensor;
-  /*! Whether scaling factors are in format expected by GEMM */
+  /*! \brief Whether scaling factors are in format expected by GEMM
+   *
+   *  Only meaningful for MXFP8 and NVFP4.
+   */
   bool with_gemm_swizzled_scales = false;
 
   /*! Map from NVTETensorParam to parameter sizes */

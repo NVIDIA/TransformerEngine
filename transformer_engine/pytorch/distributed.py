@@ -1093,15 +1093,16 @@ def _start_all_gather_fp8_blockwise(
         out_shape[0] *= world_size
 
     # Check that quantizer is valid
-    if quantizer is not None and not isinstance(quantizer, Float8BlockQuantizer):
+    if quantizer is None:
+        raise ValueError("Quantizer is missing")
+    if not isinstance(quantizer, Float8BlockQuantizer):
         raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
 
     # Fall back to high-precision all-gather if FP8 is not supported
-    if quantizer is None or not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
+    if not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
         out = torch.empty(out_shape, dtype=dtype, device=device)
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
-        if quantizer is not None:
-            out = quantizer(out)
+        out = quantizer(out)
         return out, None
 
     # Quantize input tensor if needed

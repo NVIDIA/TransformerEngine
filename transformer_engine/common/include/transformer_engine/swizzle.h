@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file cast.h
- *  \brief Functions to cast to/from FP8.
+ *  \brief Functions to convert scaling factors into format expected by GEMM.
  */
 
 #ifndef TRANSFORMER_ENGINE_SWIZZLE_H_
