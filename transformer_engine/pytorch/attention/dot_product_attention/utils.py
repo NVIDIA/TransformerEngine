@@ -73,6 +73,9 @@ class AttentionLogging:
         """
         Set up log levels, logger and handlers
         """
+        if AttentionLogging._is_logging_setup:
+            # if setup done, we don't have to setup again
+            return
         _log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
         AttentionLogging._log_level = _log_levels[
             AttentionLogging._log_level if AttentionLogging._log_level in [0, 1, 2] else 2
@@ -106,7 +109,7 @@ class FlashAttentionUtils:
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
     version_required_blackwell = PkgVersion("2.7.3")
-    max_version = PkgVersion("2.8.1")
+    max_version = PkgVersion("2.8.3")
     v2_plus = False
     v2_1_plus = False
     v2_3_plus = False
