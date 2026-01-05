@@ -983,7 +983,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
       Tensor tQAgSFA = thr_r2g_SFA.partition_S(gSFA_mn);
       Tensor tQArSFA = make_tensor_like(tQAgSFA(_, _, _, _0{}, _0{}));
 
-      int row_quant_barrier_id = 10;
+      // Will result in barrier_id=10 passed to bar.sync instr as cutlass adds 8
+      // in order to go over the reserved named barrier count.
+      constexpr int row_quant_barrier_id = 2;
       cutlass::arch::NamedBarrier::sync(NumEpilogueRowQuantThreadCount, row_quant_barrier_id);
 
       int group_idx = GetGroupIdx(&args, scheduler.tile_n_base() * size<1>(epilogue_tiler));
