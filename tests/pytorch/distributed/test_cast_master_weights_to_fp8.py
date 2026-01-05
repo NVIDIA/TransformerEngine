@@ -1399,4 +1399,5 @@ def test_single_gpu_partial_cast_vs_full():
 
 if __name__ == "__main__":
     #main()
-    test_nvfp4_transpose_kernel()
+    #test_nvfp4_transpose_kernel()
+    test_single_gpu_partial_cast_vs_full()

@@ -225,7 +225,7 @@ def _cast_master_weights_to_fp8_delayed_scaling(
             # We cannot create transpose cache here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated currently.
-        model_weight._reset_caches()
+            model_weight._reset_caches()
 
         quantizer = model_weight._get_quantizer()
 
@@ -371,7 +371,7 @@ def _cast_master_weights_to_fp8_current_scaling(
             # We cannot create transpose cache here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated currently.
-        model_weight._reset_caches()
+            model_weight._reset_caches()
 
         # If master weight is None, it means that the master weight of the current model weight
         # is in other DP ranks.
@@ -502,7 +502,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
             # We cannot create columnwise data here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated at this moment.
-        model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
+            model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
 
         # If master weight is None, it means that the master weight of the current model weight
         # is in other DP ranks.
