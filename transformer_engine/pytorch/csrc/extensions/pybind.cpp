@@ -261,6 +261,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Transpose NVFP4 tile-level scales (E4M3 stored as uint8) from rowwise to columnwise format",
         py::arg("input"), py::arg("output"), py::arg("M_tiles"), py::arg("K_tiles"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_expand_scale_to_fp8", &transformer_engine::pytorch::nvfp4_expand_scale_to_fp8,
+        "Expand tile-level scales to row-level scales and convert to FP8 E4M3",
+        py::arg("input"), py::arg("output"), py::arg("tile_rows"), py::arg("tile_cols"),
+        py::arg("rows_padded"), py::arg("block_len"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_compute_per_block_scale", &transformer_engine::pytorch::nvfp4_compute_per_block_scale,
+        "Compute per-block decode scale from block amax and global amax",
+        py::arg("block_amax"), py::arg("scale"), py::arg("global_amax"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_compute_global_scale", &transformer_engine::pytorch::nvfp4_compute_global_scale,
+        "Compute global encode scale from global amax",
+        py::arg("global_amax"), py::arg("global_scale"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("swap_first_dims", &transformer_engine::pytorch::swap_first_dims,
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());

@@ -346,6 +346,51 @@ void nvte_nvfp4_transpose(const NVTETensor input, NVTETensor output, cudaStream_
 void nvte_nvfp4_scale_transpose(const NVTETensor input, NVTETensor output,
                                 size_t M_tiles, size_t K_tiles, cudaStream_t stream);
 
+/*! \brief Expand tile-level scales to row-level scales and convert to FP8 E4M3.
+ *
+ * Each tile row's scale is repeated block_len times in the output.
+ *
+ *  \param[in]     input       Input tensor with tile scales [tile_rows, tile_cols], float32.
+ *  \param[out]    output      Output tensor with expanded scales [rows_padded, tile_cols], uint8 (E4M3).
+ *  \param[in]     tile_rows   Number of tile rows.
+ *  \param[in]     tile_cols   Number of tile columns.
+ *  \param[in]     rows_padded Padded row count in output.
+ *  \param[in]     block_len   Block length (typically 16 for NVFP4).
+ *  \param[in]     stream      CUDA stream.
+ */
+void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output,
+                                    size_t tile_rows, size_t tile_cols,
+                                    size_t rows_padded, size_t block_len,
+                                    cudaStream_t stream);
+
+/*! \brief Compute per-block decode scale from block amax and global amax.
+ *
+ * Computes: 
+ *   global_scale = (fp8_max * fp4_max) / global_amax = 2688 / global_amax
+ *   per_block_decode_scale = block_amax / fp4_max * global_scale
+ *
+ * This matches the CUDA device function compute_decoding_scaling_factor() in core_nvfp4.cuh.
+ *
+ *  \param[in]     block_amax   Input block amax tensor [tile_rows, tile_cols], float32.
+ *  \param[out]    scale        Output scale tensor [tile_rows, tile_cols], float32.
+ *  \param[in]     global_amax  Global amax value (per-tensor, after all-reduce).
+ *  \param[in]     stream       CUDA stream.
+ */
+void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor scale,
+                                        float global_amax, cudaStream_t stream);
+
+/*! \brief Compute global encode scale from global amax.
+ *
+ * Computes: global_scale = (fp8_max * fp4_max) / global_amax = 2688 / global_amax
+ * If global_amax <= 0, returns 1.0.
+ *
+ *  \param[in]     global_amax   Input global amax tensor [num_params], float32.
+ *  \param[out]    global_scale  Output global scale tensor [num_params], float32.
+ *  \param[in]     stream        CUDA stream.
+ */
+void nvte_nvfp4_compute_global_scale(const NVTETensor global_amax, NVTETensor global_scale,
+                                     cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

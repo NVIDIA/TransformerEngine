@@ -221,11 +221,11 @@ def _cast_master_weights_to_fp8_delayed_scaling(
 
     for model_weight, master_weight, start_offset, shard_model_weight_raw in params:
         if not manual_post_all_gather_processing:
-            # Reset transpose cache for all model weights.
+        # Reset transpose cache for all model weights.
             # We cannot create transpose cache here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated currently.
-            model_weight._reset_caches()
+        model_weight._reset_caches()
 
         quantizer = model_weight._get_quantizer()
 
@@ -367,11 +367,11 @@ def _cast_master_weights_to_fp8_current_scaling(
         params, scales
     ):
         if not manual_post_all_gather_processing:
-            # Reset transpose cache for all model weights.
+        # Reset transpose cache for all model weights.
             # We cannot create transpose cache here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated currently.
-            model_weight._reset_caches()
+        model_weight._reset_caches()
 
         # If master weight is None, it means that the master weight of the current model weight
         # is in other DP ranks.
@@ -502,7 +502,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
             # We cannot create columnwise data here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated at this moment.
-            model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
+        model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
 
         # If master weight is None, it means that the master weight of the current model weight
         # is in other DP ranks.
@@ -596,34 +596,19 @@ def _cast_master_weights_to_nvfp4_2d(
     if global_amaxes.numel() > 0:
         torch.distributed.all_reduce(global_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
 
-    global_scale_tensor = global_amaxes.clone()
+    # Use GPU kernel to compute global encode scales from global amaxes
+    # This replaces multiple Python tensor operations with a single kernel
+    global_scale_tensor = torch.empty_like(global_amaxes)
     if len(amaxes) > 0:
-        finfo = torch.finfo(torch.float32)
-        tiny = finfo.tiny
-
-        # Use FP32 tensors for constants to match CUDA kernel's FP32 computation.
-        # Python float literals are float64, which causes precision differences.
-        # Example: 2688/5 = 537.6000366211 (PyTorch with float64) vs 537.5999755859 (CUDA FP32)
-        fp4_max_t = torch.tensor(6.0, dtype=torch.float32, device=device)
-        fp8_max_t = torch.tensor(448.0, dtype=torch.float32, device=device)
-
-        safe_global_amax = torch.clamp(global_amaxes, min=tiny)
-        global_encode_scales = torch.clamp((fp8_max_t * fp4_max_t) / safe_global_amax, max=finfo.max)
-        global_encode_scales = torch.where(
-            global_amaxes > 0, global_encode_scales, torch.ones_like(global_encode_scales)
-        )
-        global_scale_tensor.copy_(global_encode_scales)
+        tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor)
         global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
-        for amax_tensor, scale_tensor, global_scale in zip(
-            amaxes, scales, global_scale_views
+        # Use GPU kernel for computing per-block decode scales
+        # Takes global_amax (not global_scale) and computes scale internally
+        for amax_tensor, scale_tensor, global_amax_view in zip(
+            amaxes, scales, [global_amaxes[i : i + 1] for i in range(len(params))]
         ):
-            # Use FP32 tensor division to match CUDA kernel exactly.
-            # CUDA computes: float S_dec_b = block_amax / fp4_max * S_enc;
-            per_block_decode_scale = torch.clamp(
-                (amax_tensor / fp4_max_t) * global_scale, max=finfo.max
-            )
-            scale_tensor.copy_(per_block_decode_scale)
+            tex.nvfp4_compute_per_block_scale(amax_tensor, scale_tensor, global_amax_view.item())
     else:
         global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
@@ -657,19 +642,17 @@ def _cast_master_weights_to_nvfp4_2d(
 
         # Always write scales and amax for ALL layers (computed from all-reduced amax).
         # This ensures scales are correct even for layers not owned by this rank.
+        # Use GPU kernel to expand tile-level scales to row-level and convert to FP8
         tile_rows = tile_shape[0]
-        expanded_scale = torch.zeros_like(target_scale, dtype=torch.float32)
-        chunk = block_len
-        for tile_row_idx in range(tile_rows):
-            base_row = tile_row_idx * chunk
-            row_end = min(base_row + chunk, rows)
-            if base_row >= target_scale.shape[0]:
-                break
-            expanded_scale[base_row:row_end, :tile_col_cnt] = per_block_decode_scale[
-                tile_row_idx
-            ]
-        fp8_view = expanded_scale.to(dtype=torch.float8_e4m3fn).view(torch.uint8)
-        target_scale.copy_(fp8_view)
+        rows_padded = target_scale.shape[0]
+        tex.nvfp4_expand_scale_to_fp8(
+            per_block_decode_scale,
+            target_scale,
+            tile_rows,
+            tile_col_cnt,
+            rows_padded,
+            block_len,
+        )
         
         if target_amax is not None:
             target_amax.copy_(global_amaxes[idx : idx + 1])
