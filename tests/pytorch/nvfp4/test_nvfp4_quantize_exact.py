@@ -12,7 +12,6 @@ from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 from transformer_engine.pytorch.constants import TE_DType
 
-
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 

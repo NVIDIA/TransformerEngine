@@ -53,7 +53,6 @@ from ..sharding import (
     dp_or_fsdp_axis_size,
 )
 
-
 __all__ = [
     "CollectiveOp",
     "CollectiveOpSet",
@@ -698,7 +697,7 @@ class GemmPrimitive(BasePrimitive):
             reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
             lhs = reordered.reshape(original_shape)
 
-        (output, bias_grad, pre_gelu_out, _) = GemmPrimitive.inner_primitive.bind(
+        output, bias_grad, pre_gelu_out, _ = GemmPrimitive.inner_primitive.bind(
             lhs,
             lhs_scale_inv,
             rhs,
@@ -1015,10 +1014,8 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim,
         )
 
-        (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
-            GemmPrimitive._parse_operand_output_specs(
-                arg_infos, contracting_dims, transpose_batch_sequence, collective_op
-            )
+        _, (out_specs, dbias_specs, pre_gelu_specs), *_ = GemmPrimitive._parse_operand_output_specs(
+            arg_infos, contracting_dims, transpose_batch_sequence, collective_op
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -1187,7 +1184,7 @@ class GemmPrimitive(BasePrimitive):
 
         lhs, _, rhs, *_ = operand_types
         operand_ndims = (len(lhs.shape), len(rhs.shape))
-        (lhs_cdims, rhs_cdims) = map(sanitize_dims, operand_ndims, contracting_dims)
+        lhs_cdims, rhs_cdims = map(sanitize_dims, operand_ndims, contracting_dims)
         lhs_specs, rhs_specs = map(
             _generate_operand_rules,
             ("lhs", "rhs"),
@@ -1502,7 +1499,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        (out_aval, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
+        out_aval, _ = GroupedGemmPrimitive.abstract(*args, **kwargs)
         return (out_aval,)
 
     @staticmethod
@@ -1556,7 +1553,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         use_async_d2h_group_sizes,
     ):
         assert GroupedGemmPrimitive.inner_primitive is not None
-        (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
+        out, _ = GroupedGemmPrimitive.inner_primitive.bind(
             lhs_data,
             lhs_scale_inv,
             rhs_data,

@@ -4,6 +4,7 @@
 """
 Wrapper module for Transformer related layers with FP8 support.
 """
+
 import functools
 from enum import Enum
 from math import sqrt

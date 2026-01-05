@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Tensor class with FP8 data quantized with NxN tiles"""
+
 from __future__ import annotations
 from typing import Optional, Tuple, Iterable, Union
 

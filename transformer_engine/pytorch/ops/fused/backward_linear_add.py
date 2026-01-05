@@ -48,7 +48,7 @@ class BackwardLinearAdd(FusedOperation):
         linear_op_ctx = basic_op_ctxs[0]
 
         # Saved tensors from forward pass
-        (x_local, w) = linear_op_ctx.saved_tensors
+        x_local, w = linear_op_ctx.saved_tensors
 
         # Megatron-LM wgrad fusion
         # Note: Get grad tensor from param so we can accumulate

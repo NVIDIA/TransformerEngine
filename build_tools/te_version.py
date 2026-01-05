@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Transformer Engine version string."""
+
 import os
 from pathlib import Path
 import subprocess

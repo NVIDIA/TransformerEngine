@@ -96,7 +96,7 @@ def _activation_bwd_rule(activation_type, act_params, ctx, g):
     Returns:
         Gradient with respect to input
     """
-    (x, _) = ctx
+    x, _ = ctx
     assert x.dtype == g.dtype
     dx = tex.dact_lu(g, x, activation_type, act_params=act_params)
     # No quantization is used in this VJP backward, so the output should

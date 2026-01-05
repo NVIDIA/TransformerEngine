@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
+
 from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
@@ -858,7 +859,7 @@ class _Linear(torch.autograd.Function):
                     ),
                     "layout": "NT",
                     "out": main_grad if ctx.fuse_wgrad_accumulation else None,
-                    "bias": (bias if (grad_bias is None and not ctx.fp8) else None),
+                    "bias": bias if (grad_bias is None and not ctx.fp8) else None,
                     "use_split_accumulator": use_split_accumulator,
                     "grad": True,
                     "ub": ub_obj_wgrad,

@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Transformer Engine bindings for JAX"""
+
 from .module import DenseGeneral, LayerNorm
 from .module import LayerNormDenseGeneral, LayerNormMLP
 from .module import wrap_function_in_te_state_module, make_dot_general_cls

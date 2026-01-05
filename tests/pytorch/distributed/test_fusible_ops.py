@@ -36,7 +36,6 @@ _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import dtype_tols, make_recipe, quantization_tols
 
-
 # Check what quantization schemes are supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)

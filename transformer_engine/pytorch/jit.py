@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """NVFuser functions and JIT utilities"""
+
 import os
 from functools import wraps
 from typing import Callable, Optional, Tuple

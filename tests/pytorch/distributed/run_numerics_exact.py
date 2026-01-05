@@ -26,7 +26,6 @@ from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
 from transformer_engine.pytorch.custom_recipes import utils
 from run_layer_with_overlap import _compare_tensors
 
-
 BATCH_SIZE, HIDDEN_SIZE, OUT_SIZE = 128, 256, 128
 WORLD_RANK, WORLD_SIZE = None, None
 NCCL_WORLD = None
