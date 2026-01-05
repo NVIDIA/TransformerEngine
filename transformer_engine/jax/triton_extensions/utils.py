@@ -122,8 +122,7 @@ def _check_triton_compatibility():
             "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
         )
 
-    use_pytorch_triton_env = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0").lower()
-    use_pytorch_triton_explicit = use_pytorch_triton_env in ("1", "true", "yes")
+    use_pytorch_triton_explicit = bool(int(os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")))
 
     if is_pytorch_triton:
         if use_pytorch_triton_explicit:
@@ -186,8 +185,7 @@ def get_triton_info():
         if info['is_pytorch_triton']:
              print("Using pytorch-triton - compatible with both PyTorch and JAX")
     """
-    use_pytorch_triton_env = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0").lower()
-    env_acknowledged = use_pytorch_triton_env in ("1", "true", "yes")
+    env_acknowledged = bool(int(os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")))
 
     return {
         "version": _TRITON_VERSION,
