@@ -98,7 +98,7 @@ def reference_make_row_id_map(
     # Compute total tokens per expert and expert offsets
     tokens_per_expert = jnp.sum(routing_map, axis=0)
     expert_offsets = jnp.concatenate(
-        [jnp.array([0], dtype=jnp.int32), jnp.cumsum(tokens_per_expert)[:-1]]
+        [jnp.array([0], dtype=jnp.int32), jnp.cumsum(tokens_per_expert)[:-1].astype(jnp.int32)]
     )
 
     # Compute destination rows for all (token, expert) pairs
