@@ -430,6 +430,9 @@ class EncoderRunner(BaseRunner):
         "attention/DotProductAttention_0/_UnfusedDotProductAttention_0/softmax_offset": (
             "attention/DotProductAttention_0/softmax_offset"
         ),
+        "attention/DotProductAttention_0/_FusedDotProductAttention_0/softmax_offset": (
+            "attention/DotProductAttention_0/softmax_offset"
+        ),
         "mlp/wi_kernel": "mlp/wi/kernel",
         "mlp/wi_bias": "mlp/wi/bias",
         "mlp/wo_kernel": "mlp/wo/kernel",
@@ -478,11 +481,17 @@ class DecoderRunner(BaseRunner):
         "encoder_decoder_attention/DotProductAttention_0/_UnfusedDotProductAttention_0/softmax_offset": (
             "encoder_decoder_attention/DotProductAttention_0/softmax_offset"
         ),
+        "encoder_decoder_attention/DotProductAttention_0/_FusedDotProductAttention_0/softmax_offset": (
+            "encoder_decoder_attention/DotProductAttention_0/softmax_offset"
+        ),
         "self_attention/qkv/scale": "pre_self_attention_layer_norm/scale",
         "self_attention/qkv/ln_bias": "pre_self_attention_layer_norm/ln_bias",
         "self_attention/query/scale": "pre_self_attention_layer_norm/scale",
         "self_attention/query/ln_bias": "pre_self_attention_layer_norm/ln_bias",
         "self_attention/DotProductAttention_0/_UnfusedDotProductAttention_0/softmax_offset": (
+            "self_attention/DotProductAttention_0/softmax_offset"
+        ),
+        "self_attention/DotProductAttention_0/_FusedDotProductAttention_0/softmax_offset": (
             "self_attention/DotProductAttention_0/softmax_offset"
         ),
         "mlp/wi_kernel": "mlp/wi/kernel",
