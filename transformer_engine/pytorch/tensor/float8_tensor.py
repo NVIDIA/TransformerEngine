@@ -913,6 +913,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     @property
     def shape(self):
         return self._data.shape if self._data is not None else self._transpose.shape
+
     @property
     def is_cuda(self):
         return self._data.is_cuda if self._data is not None else self._transpose.is_cuda
