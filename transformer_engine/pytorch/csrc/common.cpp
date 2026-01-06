@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -11,6 +11,20 @@
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine::pytorch {
+
+/*! convert fp4 data shape back to original shape */
+std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose) {
+  std::vector<size_t> ret;
+  size_t start_idx = (transpose) ? 1 : 0;
+  for (size_t i = start_idx; i < shape.size() - 1; ++i) {
+    ret.push_back(shape[i]);
+  }
+  ret.push_back(shape.back() * 2);
+  if (transpose) {
+    ret.push_back(shape.front());
+  }
+  return ret;
+}
 
 std::vector<size_t> getTensorShape(const at::Tensor& t) {
   std::vector<size_t> shape;
@@ -176,8 +190,9 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
   const std::vector<size_t> meta_shape{1};
   ret.set_amax(amax_ptr, DType::kFloat32, meta_shape);
   ret.set_scale(scale_ptr, DType::kFloat32, meta_shape);
-  auto scale_inv_dtype =
-      (scaling_mode == NVTE_MXFP8_1D_SCALING) ? DType::kFloat8E8M0 : DType::kFloat32;
+  auto scale_inv_dtype = (scaling_mode == NVTE_MXFP8_1D_SCALING)   ? DType::kFloat8E8M0
+                         : (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat8E4M3
+                                                                   : DType::kFloat32;
   ret.set_rowwise_scale_inv(scale_inv_ptr, scale_inv_dtype, scale_inv_shape);
   ret.set_columnwise_scale_inv(columnwise_scale_inv_ptr, scale_inv_dtype,
                                columnwise_scale_inv_shape);
@@ -289,6 +304,22 @@ std::vector<size_t> convertShape(const NVTEShape& shape) {
 size_t roundup(const size_t value, const size_t multiple) {
   assert(multiple > 0);
   return ((value + multiple - 1) / multiple) * multiple;
+}
+
+void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) {
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_extract_seed_and_offset(rng_state_ptr, arg.captured_, arg.seed_.ptr, arg.seed_.val,
+                                 arg.offset_.ptr, arg.offset_.val, arg.offset_intragraph_,
+                                 at::cuda::getCurrentCUDAStream());
+  });
+}
+
+// extract PhiloxCudaState from CUDA random number generator
+at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl* gen, size_t elts_per_thread) {
+  at::PhiloxCudaState philox_args;
+  std::lock_guard<std::mutex> lock(gen->mutex_);
+  philox_args = gen->philox_cuda_state(elts_per_thread);
+  return philox_args;
 }
 
 }  // namespace transformer_engine::pytorch

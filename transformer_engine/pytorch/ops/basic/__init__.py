@@ -1,10 +1,22 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Single tensor operations supported by the operation fuser."""
 
-from .activation import GELU, GEGLU, QGELU, QGEGLU, ReLU, ReGLU, SReLU, SReGLU, SiLU, SwiGLU
+from .activation import (
+    GELU,
+    GEGLU,
+    QGELU,
+    QGEGLU,
+    ReLU,
+    ReGLU,
+    SReLU,
+    SReGLU,
+    SiLU,
+    SwiGLU,
+    ClampedSwiGLU,
+)
 from .add_extra_input import AddExtraInput
 from .all_gather import AllGather
 from .all_reduce import AllReduce

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -87,13 +87,13 @@ def fuse_backward_add_rmsnorm(
 
     Parameters
     ----------
-    ops: list of tuples
+    ops : list of tuples
         Backward pass operations and the indices of the corresponding
         basic operations.
 
     Returns
     -------
-    ops: list of tuples
+    ops : list of tuples
         Updated backward pass operations
 
     """

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -12,10 +12,29 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 from pathlib import Path
 from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
+
+
+# Needs to stay consistent with .pre-commit-config.yaml config.
+def min_python_version() -> Tuple[int]:
+    """Minimum supported Python version."""
+    return (3, 10, 0)
+
+
+def min_python_version_str() -> str:
+    """String representing minimum supported Python version."""
+    return ".".join(map(str, min_python_version()))
+
+
+if sys.version_info < min_python_version():
+    raise RuntimeError(
+        f"Transformer Engine requires Python {min_python_version_str()} or newer, "
+        f"but found Python {platform.python_version()}."
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -222,27 +241,24 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
     cuda_root = Path(nvidia.__file__).parent
     return [
-        cuda_root / "cuda_nvcc" / "include",
-        cuda_root / "cublas" / "include",
-        cuda_root / "cuda_runtime" / "include",
-        cuda_root / "cudnn" / "include",
-        cuda_root / "cuda_cccl" / "include",
-        cuda_root / "nvtx" / "include",
-        cuda_root / "cuda_nvrtc" / "include",
+        subdir / "include"
+        for subdir in cuda_root.iterdir()
+        if subdir.is_dir() and (subdir / "include").is_dir()
     ]
 
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
-    version = cuda_version()
-    if os.getenv("NVTE_CUDA_ARCHS") is None:
+    archs = os.getenv("NVTE_CUDA_ARCHS")
+    if archs is None:
+        version = cuda_version()
         if version >= (13, 0):
-            os.environ["NVTE_CUDA_ARCHS"] = "75;80;89;90;100;120"
+            archs = "75;80;89;90;100;120"
         elif version >= (12, 8):
-            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90;100;120"
+            archs = "70;80;89;90;100;120"
         else:
-            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90"
-    return os.getenv("NVTE_CUDA_ARCHS")
+            archs = "70;80;89;90"
+    return archs
 
 
 def cuda_version() -> Tuple[int, ...]:

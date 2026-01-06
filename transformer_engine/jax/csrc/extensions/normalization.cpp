@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -29,6 +29,7 @@ pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_si
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(nullptr, out_dtype, input_shape);
+  output_tensor.set_amax(nullptr, DType::kFloat32, std::vector<size_t>{1});
 
   // WAR: NVTE Norms query the is_training from whereas columwise_data is allocated
   if (is_training && scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
@@ -59,12 +60,13 @@ pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_si
 }
 
 Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf,
-                          Buffer_Type gamma_buf, Buffer_Type beta_buf, Result_Type output_buf,
-                          Result_Type colwise_output_buf, Result_Type scale_inv_buf,
-                          Result_Type colwise_scale_inv_buf, Result_Type amax_buf,
-                          Result_Type mu_buf, Result_Type rsigma_buf, Result_Type wkspace_buf,
-                          int norm_type, bool zero_centered_gamma, double epsilon,
-                          int64_t sm_margin, JAXX_Scaling_Mode scaling_mode, bool is_2x) {
+                          Buffer_Type amax_buf, Buffer_Type gamma_buf, Buffer_Type beta_buf,
+                          Result_Type output_buf, Result_Type colwise_output_buf,
+                          Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
+                          Result_Type updated_amax_buf, Result_Type mu_buf, Result_Type rsigma_buf,
+                          Result_Type wkspace_buf, int norm_type, bool zero_centered_gamma,
+                          double epsilon, int64_t sm_margin, JAXX_Scaling_Mode scaling_mode,
+                          JAXX_Quantize_Layout quantize_layout, bool output_amax_when_no_scaling) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
@@ -77,11 +79,13 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   auto *output = output_buf->untyped_data();
   auto *rsigma = rsigma_buf->untyped_data();
   auto *mu = mu_buf->untyped_data();
-  auto *amax = reinterpret_cast<float *>(amax_buf->untyped_data());
   auto *workspace = wkspace_buf->untyped_data();
 
+  auto *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
+  auto *updated_amax = reinterpret_cast<float *>(updated_amax_buf->untyped_data());
+  NVTE_CHECK(amax == updated_amax && amax != nullptr, "amax and updated_amax should be aliased");
+
   auto _norm_type = static_cast<NVTE_Norm_Type>(norm_type);
-  auto _is_2x = static_cast<bool>(is_2x);
 
   auto x_size = product(x_buf.dimensions());
   auto gamma_size = product(gamma_buf.dimensions());
@@ -106,6 +110,10 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), input_shape);
+  if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
+      (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
+    output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
+  }
 
   NVTE_CHECK(
       scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
@@ -123,11 +131,9 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
 
   if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING && is_fp8_dtype(out_dtype)) {
     output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-    nvte_memset(amax, 0, sizeof(float), stream);
-    output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
   }
 
-  if (_is_2x) {
+  if (is_quantize_2x2x(quantize_layout)) {
     output_tensor.set_columnwise_data(colwise_output_buf->untyped_data(),
                                       static_cast<DType>(out_dtype), input_shape);
     output_tensor.set_columnwise_scale_inv(
@@ -162,13 +168,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardHandler, NormForwardFFI,
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // x
                                   .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // amax
                                   .Arg<Buffer_Type>()      // gamma
                                   .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // colwise_output
                                   .Ret<Buffer_Type>()      // scale_inv
                                   .Ret<Buffer_Type>()      // colwise_scale_inv
-                                  .Ret<Buffer_Type>()      // amax
+                                  .Ret<Buffer_Type>()      // updated_amax
                                   .Ret<Buffer_Type>()      // mu
                                   .Ret<Buffer_Type>()      // rsigma
                                   .Ret<Buffer_Type>()      // wkspace
@@ -177,8 +184,48 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardHandler, NormForwardFFI,
                                   .Attr<double>("epsilon")
                                   .Attr<int64_t>("sm_margin")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x"),
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
+                                  .Attr<bool>("output_amax_when_no_scaling"),
                               FFI_CudaGraph_Traits);
+
+Error_Type NormForwardInitializeFFI(
+    cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf, Buffer_Type amax_buf,
+    Buffer_Type gamma_buf, Buffer_Type beta_buf, Result_Type output_buf,
+    Result_Type colwise_output_buf, Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
+    Result_Type updated_amax_buf, Result_Type mu_buf, Result_Type rsigma_buf,
+    Result_Type wkspace_buf, int norm_type, bool zero_centered_gamma, double epsilon,
+    int64_t sm_margin, JAXX_Scaling_Mode scaling_mode, JAXX_Quantize_Layout quantize_layout,
+    bool output_amax_when_no_scaling) {
+  return wrapInStreamCapture(std::function(NormForwardFFI), stream, x_buf, scale_buf, amax_buf,
+                             gamma_buf, beta_buf, output_buf, colwise_output_buf, scale_inv_buf,
+                             colwise_scale_inv_buf, updated_amax_buf, mu_buf, rsigma_buf,
+                             wkspace_buf, norm_type, zero_centered_gamma, epsilon, sm_margin,
+                             scaling_mode, quantize_layout, output_amax_when_no_scaling);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardInitializeHandler, NormForwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // amax
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Arg<Buffer_Type>()      // beta
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // colwise_output
+                                  .Ret<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>()      // colwise_scale_inv
+                                  .Ret<Buffer_Type>()      // updated_amax
+                                  .Ret<Buffer_Type>()      // mu
+                                  .Ret<Buffer_Type>()      // rsigma
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Attr<int64_t>("norm_type")
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<double>("epsilon")
+                                  .Attr<int64_t>("sm_margin")
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
+                                  .Attr<bool>("output_amax_when_no_scaling"));
 
 pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
                                               DType w_dtype, NVTE_Norm_Type norm_type,
@@ -304,6 +351,33 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormBackwardHandler, NormBackwardFFI,
                                   .Attr<bool>("zero_centered_gamma")
                                   .Attr<int64_t>("sm_margin"),
                               FFI_CudaGraph_Traits);
+
+Error_Type NormBackwardInitializeFFI(cudaStream_t stream, Buffer_Type dz_buf, Buffer_Type x_buf,
+                                     Buffer_Type mu_buf, Buffer_Type rsigma_buf,
+                                     Buffer_Type gamma_buf, Result_Type xgrad_buf,
+                                     Result_Type wgrad_buf, Result_Type dbeta_buf,
+                                     Result_Type wkspace_buf, int64_t norm_type,
+                                     bool zero_centered_gamma, int64_t sm_margin) {
+  return wrapInStreamCapture(std::function(NormBackwardFFI), stream, dz_buf, x_buf, mu_buf,
+                             rsigma_buf, gamma_buf, xgrad_buf, wgrad_buf, dbeta_buf, wkspace_buf,
+                             norm_type, zero_centered_gamma, sm_margin);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(NormBackwardInitializeHandler, NormBackwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // dz
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // mu
+                                  .Arg<Buffer_Type>()      // rsigma
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Ret<Buffer_Type>()      // xgrad
+                                  .Ret<Buffer_Type>()      // wgrad
+                                  .Ret<Buffer_Type>()      // dbeta
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Attr<int64_t>("norm_type")
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<int64_t>("sm_margin"));
 
 }  // namespace jax
 }  // namespace transformer_engine

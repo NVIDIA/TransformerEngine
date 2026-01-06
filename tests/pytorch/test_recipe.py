@@ -1,8 +1,8 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
-from typing import Iterable, Optional
+from typing import Optional
 
 import pytest
 import torch
@@ -10,27 +10,33 @@ import warnings
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch import (
+    Float8BlockQuantizer,
+    MXFP8Quantizer,
+    Float8Quantizer,
+    NVFP4Quantizer,
+    quantized_model_init,
+    Linear,
+    LayerNormLinear,
+    LayerNormMLP,
+    GroupedLinear,
+)
+
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.fp8 import (
+from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     _amax_and_scale_update,
-    fp8_model_init,
 )
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch import Linear, LayerNormLinear, LayerNormMLP, GroupedLinear
-from transformer_engine.pytorch.distributed import fp8_autocast
 from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
-import transformer_engine_torch as tex
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
 )
+fp4_available, reason_for_no_fp4 = te.is_nvfp4_available(return_reason=True)
 
 
 # FP8 per tensor delayed scaling
@@ -63,7 +69,7 @@ class TestFP8Recipe:
             amax_history_len=amax_history_len,
             amax_compute_algo=amax_compute_algo,
         )
-        with te.fp8_autocast(fp8_recipe=recipe):
+        with te.autocast(recipe=recipe):
             module = te.Linear(16, 16)
             y = module(
                 torch.randn([16, 16], device="cuda"),
@@ -119,7 +125,7 @@ class TestFP8Recipe:
         # ref_scale_inv_backward = torch.reciprocal(ref_scale_backward)
 
         # Perform forward, backward, and optimizer steps to update fp8_meta
-        with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+        with te.autocast(enabled=True, recipe=recipe):
             x = torch.randn([16, 16], device="cuda")
             y = module(x, is_first_microbatch=is_first_microbatch)
         y.backward(torch.randn_like(y))
@@ -218,7 +224,7 @@ class TestFP8Recipe:
                 op.weight.fill_(w_history[-1])
 
             # Forward and backward pass
-            with te.fp8_autocast(fp8_recipe=recipe):
+            with te.autocast(recipe=recipe):
                 y = op(x)
             y.backward(dy)
 
@@ -300,7 +306,7 @@ class TestFP8Recipe:
         scaling_factor_compute_algo = None
         if fused_update:
             scaling_factor_compute_algo = (
-                lambda amax, scale, fp8_max, recipe: te.fp8._default_sf_compute(
+                lambda amax, scale, fp8_max, recipe: te.quantization._default_sf_compute(
                     amax, scale, fp8_max, recipe.margin
                 )
             )
@@ -310,7 +316,7 @@ class TestFP8Recipe:
 
         # Setup fp8_meta dictionary
         def setup_fp8_meta():
-            with te.fp8_autocast(fp8_recipe=recipe):
+            with te.autocast(recipe=recipe):
                 module = te.Linear(16, 16)
                 y = module(torch.zeros([16, 16], device="cuda"))
             y.backward(torch.zeros_like(y))
@@ -392,11 +398,11 @@ class TestFP8Recipe:
         ],
     )
     def test_check_for_weight_tensor_and_recipe_correspondence(self, model_init_recipe):
-        with fp8_model_init(enabled=True, recipe=model_init_recipe):
+        with quantized_model_init(enabled=True, recipe=model_init_recipe):
             linear = Linear(32, 32).cuda()
 
         x = torch.randn(32, 32, device="cuda")
-        with fp8_autocast(enabled=True, fp8_recipe=DelayedScaling()):
+        with te.autocast(enabled=True, recipe=DelayedScaling()):
             with pytest.raises(RuntimeError) as excinfo:
                 _ = linear(x)
             assert "Recipe mismatch for " in str(excinfo.value)
@@ -435,7 +441,7 @@ class TestFP8Recipe:
         # Run initial iterations with DelayedScaling
         for _ in range(3):
             x = torch.randn(batch_size, in_features, device="cuda")
-            with fp8_autocast(enabled=True, fp8_recipe=initial_recipe):
+            with te.autocast(enabled=True, recipe=initial_recipe):
                 y = linear(x)
             loss = y.mean()
             loss.backward()
@@ -452,7 +458,7 @@ class TestFP8Recipe:
             if i == 0:
                 # Expect a warning on the first iteration with the new recipe
                 with pytest.warns(UserWarning, match="Recipe type changed"):
-                    with fp8_autocast(enabled=True, fp8_recipe=target_recipe):
+                    with te.autocast(enabled=True, recipe=target_recipe):
                         y = linear(x)
                 for quantizer in linear.quantizers["scaling_fwd"]:
                     assert isinstance(quantizer, expected_quantizer_type)
@@ -460,7 +466,7 @@ class TestFP8Recipe:
                 # No warning expected on subsequent iterations
                 with warnings.catch_warnings():
                     warnings.simplefilter("error")  # Raise error if unexpected warning occurs
-                    with fp8_autocast(enabled=True, fp8_recipe=target_recipe):
+                    with te.autocast(enabled=True, recipe=target_recipe):
                         y = linear(x)
             loss = y.mean()
             loss.backward()
@@ -484,7 +490,7 @@ class TestFP8Recipe:
         batch_size = 32
 
         recipe = DelayedScaling(amax_history_len=1024)
-        with fp8_model_init(recipe=recipe):
+        with quantized_model_init(recipe=recipe):
             if module_class == GroupedLinear:
                 module = module_class(1, in_features, out_features).cuda()
             else:
@@ -492,10 +498,43 @@ class TestFP8Recipe:
 
         x = torch.randn(batch_size, in_features, device="cuda")
         recipe = DelayedScaling(amax_history_len=1)
-        with fp8_autocast(enabled=True, fp8_recipe=recipe):
+        with te.autocast(enabled=True, recipe=recipe):
             warn_msg = "Quantizer is being updated, this may affect model behavior"
             with pytest.warns(UserWarning, match=warn_msg):
                 if module_class == GroupedLinear:
                     y = module(x, [batch_size])
                 else:
                     y = module(x)
+
+
+@pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        # full tile cases
+        (128, 128),
+        (256, 1024),
+        (1024, 256),
+        # Padding required cases
+        (256, 272),
+        (304, 304),
+        (320, 256),
+        # # largest tile
+        (8192, 8192),
+    ],
+)
+def test_fp4_dequantize(dtype, M, N):
+    q = NVFP4Quantizer()
+    a = torch.rand((M, N)).cuda().to(dtype=dtype)
+    starting_tensor = q(a)
+    dequantized_tensor = starting_tensor.dequantize()
+    new_tensor = q(dequantized_tensor)
+    torch.testing.assert_close(
+        new_tensor._rowwise_data,
+        starting_tensor._rowwise_data,
+        rtol=0,
+        atol=0,
+    )
+    new_dequantized_tensor = new_tensor.dequantize()
+    torch.testing.assert_close(dequantized_tensor, new_dequantized_tensor)

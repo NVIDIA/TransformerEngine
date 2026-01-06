@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 700" style="display: block; margin: 0 auto; max-width: 280px;">
+  <defs>
+    <style>
+      .box { fill: #a8c686; stroke: #7a9a5a; stroke-width: 2; }
+      .circle { fill: #b8d4a0; stroke: #7a9a5a; stroke-width: 2; }
+      .text { font-family: Arial, sans-serif; font-size: 16px; font-weight: 500; fill: #333; text-anchor: middle; dominant-baseline: middle; }
+      .arrow { stroke: #6b8fb3; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .skip { stroke: #6b8fb3; stroke-width: 2; fill: none; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6b8fb3"/>
+    </marker>
+  </defs>
+  
+  <!-- Input arrow -->
+  <line x1="160" y1="5" x2="160" y2="40" class="arrow"/>
+  
+  <!-- Skip connection 1 (input to first +) -->
+  <path d="M 160 20 L 280 20 L 280 420" class="skip"/>
+  <line x1="280" y1="420" x2="185" y2="420" class="arrow"/>
+  
+  <!-- LayerNorm 1 -->
+  <rect x="60" y="40" width="200" height="45" rx="10" ry="10" class="box"/>
+  <text x="160" y="62" class="text">LayerNorm</text>
+  
+  <line x1="160" y1="85" x2="160" y2="110" class="arrow"/>
+  
+  <!-- QKV Projection -->
+  <rect x="60" y="110" width="200" height="45" rx="10" ry="10" class="box"/>
+  <text x="160" y="132" class="text">QKV Projection</text>
+  
+  <line x1="160" y1="155" x2="160" y2="180" class="arrow"/>
+  
+  <!-- Dot Product Attention -->
+  <rect x="60" y="180" width="200" height="55" rx="10" ry="10" class="box"/>
+  <text x="160" y="200" class="text">Dot Product</text>
+  <text x="160" y="220" class="text">Attention</text>
+  
+  <line x1="160" y1="235" x2="160" y2="260" class="arrow"/>
+  
+  <!-- Projection -->
+  <rect x="60" y="260" width="200" height="45" rx="10" ry="10" class="box"/>
+  <text x="160" y="282" class="text">Projection</text>
+  
+  <line x1="160" y1="305" x2="160" y2="330" class="arrow"/>
+  
+  <!-- Dropout -->
+  <rect x="60" y="330" width="200" height="45" rx="10" ry="10" class="box"/>
+  <text x="160" y="352" class="text">Dropout</text>
+  
+  <line x1="160" y1="375" x2="160" y2="395" class="arrow"/>
+  
+  <!-- First + circle -->
+  <circle cx="160" cy="420" r="25" class="circle"/>
+  <text x="160" y="420" class="text" font-size="24">+</text>
+  
+  <line x1="160" y1="445" x2="160" y2="480" class="arrow"/>
+  
+  <!-- Skip connection 2 (first + to second +) -->
+  <path d="M 160 455 L 280 455 L 280 640" class="skip"/>
+  <line x1="280" y1="640" x2="185" y2="640" class="arrow"/>
+  
+  <!-- LayerNorm 2 -->
+  <rect x="60" y="480" width="200" height="45" rx="10" ry="10" class="box"/>
+  <text x="160" y="502" class="text">LayerNorm</text>
+  
+  <line x1="160" y1="525" x2="160" y2="555" class="arrow"/>
+  
+  <!-- MLP -->
+  <rect x="60" y="555" width="200" height="45" rx="10" ry="10" class="box"/>
+  <text x="160" y="577" class="text">MLP</text>
+  
+  <line x1="160" y1="600" x2="160" y2="615" class="arrow"/>
+  
+  <!-- Second + circle -->
+  <circle cx="160" cy="640" r="25" class="circle"/>
+  <text x="160" y="640" class="text" font-size="24">+</text>
+  
+  <!-- Output arrow -->
+  <line x1="160" y1="665" x2="160" y2="695" class="arrow"/>
+</svg>
+

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -13,8 +13,9 @@ from transformer_engine_torch import DType as TE_DType
 from transformer_engine_torch import Float8BlockScaleTensorFormat
 
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
-from ._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..quantized_tensor import QuantizedTensor, Quantizer
+from ._quantization_helpers import _IdentityFunc
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 aten = torch.ops.aten
@@ -55,6 +56,22 @@ class Float8BlockQuantizer(Quantizer):
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
         self.all_gather_usage = all_gather_usage
+
+    def copy(self) -> Float8BlockQuantizer:
+        """Create shallow copy"""
+
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            block_scaling_dim=self.block_scaling_dim,
+            all_gather_usage=self.all_gather_usage,
+            amax_epsilon=self.amax_epsilon,
+            force_pow_2_scales=self.force_pow_2_scales,
+        )
+        quantizer.internal = self.internal
+
+        return quantizer
 
     def update_quantized(
         self,
@@ -100,6 +117,10 @@ class Float8BlockQuantizer(Quantizer):
 
         dst._fp8_dtype = self.dtype
         return dst
+
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Calculate the shape of the scaling tensor for blockwise quantization.
@@ -209,6 +230,7 @@ class Float8BlockQuantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> Float8BlockwiseQTensor:
         """Construct quantized tensor with uninitialized data"""
         if device is None:
@@ -224,12 +246,13 @@ class Float8BlockQuantizer(Quantizer):
         data = None
         scale_inv = None
         if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device)
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
             scale_shape = self.get_scale_shape(shape, columnwise=False)
             scale_inv = torch.empty(
                 scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Allocate FP8 data transpose if needed
@@ -237,13 +260,17 @@ class Float8BlockQuantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty(
-                self.get_columnwise_shape(shape), dtype=torch.uint8, device=device
+                self.get_columnwise_shape(shape),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
                 columnwise_scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -270,7 +297,7 @@ class Float8BlockQuantizer(Quantizer):
         return Float8BlockScaling
 
 
-class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
+class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
     """Tensor class with FP8 data quantized via NxN blocks or 1xN blocks.
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -280,22 +307,22 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
 
     Parameters
     ----------
-    rowwise_data: torch.Tensor
+    rowwise_data : torch.Tensor
           FP8 data in a uint8 tensor matching shape of dequantized tensor.
-    rowwise_scale_inv: torch.Tensor
+    rowwise_scale_inv : torch.Tensor
           FP32 dequantization scales in GEMM format for dequantizing rowwise_data.
-    columnwise_data: Optional[torch.Tensor]
+    columnwise_data : Optional[torch.Tensor]
           FP8 data in a uint8 tensor matching shape of dequantized tensor transpose.
-    columnwise_scale_inv: Optional[torch.Tensor]
+    columnwise_scale_inv : Optional[torch.Tensor]
           FP32 dequantization scales in GEMM format for dequantizing columnwise_data.
 
-    fp8_dtype: transformer_engine_torch.DType, default = kFloat8E4M3
+    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
                FP8 format.
-    quantizer: Quantizer - the Float8BlockQuantizer that quantized this tensor and
+    quantizer : Quantizer - the Float8BlockQuantizer that quantized this tensor and
                holds configuration about quantization and dequantization modes.
     """
 
-    # NOTE: We reorder the *args so that we can instantiate a Float8BlockwiseQTensorBase with positional args,
+    # NOTE: We reorder the *args so that we can instantiate a Float8BlockwiseQTensorStorage with positional args,
     # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
     def __new__(
         cls,
@@ -334,15 +361,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             f" data_format={self._data_format}"
         )
 
-    def _get_quantizer(self) -> Quantizer:
-        """Get builder for quantized tensor
-
-        Quantizer can be used for in-place operations.
-
-        """
-        assert self._quantizer is not None
-        return self._quantizer
-
     def quantize_(
         self,
         tensor: torch.Tensor,
@@ -361,8 +379,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         """
         if isinstance(tensor, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
-        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
-        return self
+        return super().quantize_(tensor, noop_flag=noop_flag)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
@@ -405,6 +422,21 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         return _ReshapeFunc.apply(self, shape)
 
+    def untyped_storage(self) -> torch.UntypedStorage:
+        """Return the underlying UntypedStorage of the FP8 data.
+
+        Note that FP8 block-scaled tensor may involve multiple
+        buffers: row-wise FP8 data, row-wise scales, column-wise FP8
+        data, column-wise scales. The UntypedStorage of the row-wise
+        FP8 data is returned if it exists, and otherwise the
+        UntypedStorage of the column-wise FP8 data.
+
+        """
+        data = self._rowwise_data if self._rowwise_data is not None else self._columnwise_data
+        if data is not None:
+            return data.untyped_storage()
+        return torch.UntypedStorage(0, device=self.device)
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
@@ -428,6 +460,19 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                     " (scales and columnwise data untouched)."
                 )
             return Float8BlockwiseQTensor.make_like(tensor)
+
+        # record stream op
+        if func == torch.ops.aten.record_stream.default:
+            qt, stream = args
+            for t in (
+                qt._rowwise_data,
+                qt._columnwise_data,
+                qt._rowwise_scale_inv,
+                qt._columnwise_scale_inv,
+            ):
+                if t is not None and t.is_cuda:
+                    t.record_stream(stream)
+            return None
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)

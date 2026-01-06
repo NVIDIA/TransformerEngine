@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -19,9 +19,8 @@ from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
-    get_workspace,
 )
-from ...tensor.quantized_tensor import Quantizer
+from ...quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter
@@ -378,7 +377,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             dx, *_ = general_gemm(
                 w,
                 dy,
-                get_workspace(),
                 out_dtype=dtype,
                 quantization_params=grad_input_quantizer,
                 layout="NN",
@@ -464,7 +462,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             dw, *_ = general_gemm(
                 x,
                 dy,
-                get_workspace(),
                 out_dtype=dw_dtype,
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",
@@ -523,6 +520,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             weight_param = linear_op.weight
             if hasattr(weight_param, "__fsdp_param__"):
                 weight_param.main_grad = weight_param.get_main_grad()
+            accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
             if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
@@ -591,13 +589,13 @@ def fuse_userbuffers_backward_linear(
 
     Parameters
     ----------
-    ops: list of tuples
+    ops : list of tuples
         Backward pass operations and the indices of the corresponding
         basic operations.
 
     Returns
     -------
-    ops: list of tuples
+    ops : list of tuples
         Updated backward pass operations
 
     """

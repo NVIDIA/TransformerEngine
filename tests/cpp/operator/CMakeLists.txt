@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,6 +11,7 @@ add_executable(test_operator
                test_cast_mxfp8_gated_swiglu.cu
                test_qdq.cu
                test_cast_mxfp8.cu
+               test_cast_nvfp4_transpose.cu
                test_cast_float8blockwise.cu
                test_dequantize_mxfp8.cu
                test_transpose.cu
@@ -31,6 +32,7 @@ add_executable(test_operator
                test_swap_first_dims.cu
                ../test_common.cu)
 
+# Find required packages
 find_package(OpenMP REQUIRED)
 list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn)
 

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -40,6 +40,9 @@ DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type) {
       break;
     case xla::ffi::DataType::F8E8M0FNU:
       return DType::kFloat8E8M0;
+      break;
+    case xla::ffi::DataType::F4E2M1FN:
+      return DType::kFloat4E2M1;
       break;
     default:
       auto type_num = static_cast<XLA_FFI_DataType>(type);

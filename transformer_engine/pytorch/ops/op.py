@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,10 +14,10 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.common.recipe import Recipe
-from ..fp8 import (
+from ..quantization import (
     FP8GlobalStateManager,
     RecipeState,
-    fp8_autocast,
+    autocast,
 )
 from ..tensor import Quantizer
 
@@ -64,6 +64,13 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
     def pre_first_fuser_forward(self) -> None:
         """Preprocessing before first fuser forward pass"""
+
+    def pre_fuser_forward(
+        self,
+        *,
+        requires_grad: bool,  # pylint: disable=unused-argument
+    ) -> None:
+        """Preprocessing before fuser forward pass"""
 
     def get_input_quantizer(self) -> Optional[Quantizer]:
         """Get builder class for quantized input tensor"""
@@ -181,9 +188,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
-        with_fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_fp8_parameters else None
-        self.reset_recipe_state(recipe=recipe)
 
     @property
     def is_fused_op(self) -> bool:
@@ -588,6 +592,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 extra[key] = val
             state[mode]["extra_fp8_variables"] = extra
 
+        if not state:
+            return torch.empty(0, dtype=torch.uint8)
+
         # Serialize state into byte tensor
         torch.cuda.synchronize()
         state_serialized = bytearray(pickle.dumps(state))
@@ -624,7 +631,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
             # Get op's quantizer state, initializing if needed
             if self._fp8_metas is None or self._fp8_metas[mode] is None:
-                with fp8_autocast(fp8_recipe=state[mode]["recipe"]):
+                with autocast(recipe=state[mode]["recipe"]):
                     self.reset_recipe_state(recipe=state[mode]["recipe"])
             fp8_meta = self._fp8_metas[mode]
 
@@ -677,7 +684,7 @@ class FusedOperation(FusibleOperation):
 
     Parameters
     ----------
-    basic_ops: iterable of FusibleOperation
+    basic_ops : iterable of FusibleOperation
         Basic ops that are interchangeable with this op
 
     """
@@ -709,6 +716,10 @@ class FusedOperation(FusibleOperation):
     def pre_first_fuser_forward(self) -> None:
         for op in self.basic_ops:
             op.pre_first_fuser_forward()
+
+    def pre_fuser_forward(self, *, requires_grad: bool) -> None:
+        for op in self.basic_ops:
+            op.pre_fuser_forward(requires_grad=requires_grad)
 
     def forward(
         self,

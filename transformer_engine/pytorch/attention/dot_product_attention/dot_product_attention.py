@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,9 +14,23 @@ import torch
 from torch.nn.parameter import Parameter
 
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import (
+    Format,
+    Recipe,
+    DelayedScaling,
+    Float8CurrentScaling,
+)
 from transformer_engine.pytorch.utils import get_cudnn_version
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.quantization import (
+    get_fp8_te_dtype,
+    FP8GlobalStateManager,
+    RecipeState,
+    DelayedScalingRecipeState,
+    MXFP8BlockScalingRecipeState,
+    Float8CurrentScalingRecipeState,
+    Float8BlockScalingRecipeState,
+)
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import (
@@ -73,29 +87,90 @@ _alibi_cache = {
     "_alibi_bias_require_update": False,
 }
 
+"""
+This feature is **experimental** and subject to change.
+
+Some models may use different FP8 recipes for their linear layers and attention layers. To support this,
+users can either use multiple, nested autocast() contexts to assign a distinct recipe for each layer,
+or use a single autocast() for the non-attention layers and configure the recipe for the attention
+layers as follows.
+
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| Linear            | Attention | Configuration                                                                     |
++===================+===========+===================================================================================+
+| FP8DS/FP8CS/NVFP4 | FP16/BF16 | Pass FP8DS, FP8CS or NVFP4 to autocast();                                     |
+|                   |           | export NVTE_DPA_FP8_RECIPE="F16"                                                  |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8DS             | FP8DS     | Pass FP8DS to autocast();                                                     |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8CS             | FP8DS     | Pass FP8CS to autocast();                                                     |
+|                   |           | Attention FP8DS reuses the fp8_format, fp8_dpa, fp8_mha values from linear FP8CS; |
+|                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| NVFP4             | FP8DS     | Pass NVFP4 to autocast();                                                     |
+|                   |           | Attention FP8DS reuses the fp8_dpa, fp8_mha values from linear NVFP4;             |
+|                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
+|                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8DS             | FP8CS     | Pass FP8DS to autocast();                                                     |
+|                   |           | Attention uses FP8DS for S, dP tensors, and creates a new FP8CS recipe for QKV, O,|
+|                   |           | dO, dQKV tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8DS;         |
+|                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8CS             | FP8CS     | Pass FP8CS to autocast();                                                     |
+|                   |           | Attention uses FP8CS for QKV, O, dO, dQKV tensors, and creates a new FP8DS recipe |
+|                   |           | for S, dP tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8CS and:    |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| NVFP4             | FP8CS     | Pass NVFP4 to autocast();                                                     |
+|                   |           | Attention creates a new FP8CS recipe for QKV, O, dO, dQKV, and a new FP8DS recipe |
+|                   |           | for S, dP, based on the fp8_dpa, fp8_mha values from linear NVFP4 and:            |
+|                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
+|                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+"""
+_dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+formats = {"HYBRID": Format.HYBRID, "E4M3": Format.E4M3, "E5M2": Format.E5M2}
+_dpa_fp8_format = formats[os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")]
+_dpa_fp8ds_amax_algo = os.getenv("NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent")
+_dpa_fp8ds_amax_histlen = int(os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1"))
+_dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
+
+
 __all__ = ["DotProductAttention"]
 
 
 class DotProductAttention(TransformerEngineBaseModule):
-    """Allows the model to jointly attend to information from different
+    r"""Allows the model to jointly attend to information from different
     representation subspaces as described in the paper:
     `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
 
     .. note::
 
-        Argument :attr:`attention_mask` in the `forward` call is only used when
-        :attr:`attn_mask_type` includes '"padding"' or `"arbitrary"`.
+        Argument :attr:`attention_mask` in the ``forward`` call is only used when
+        :attr:`attn_mask_type` includes '"padding"' or ``"arbitrary"``.
 
     .. warning::
 
         FlashAttention uses a non-deterministic algorithm for optimal performance. To observe
-        deterministic behavior at the cost of performance, use FlashAttention version >= `2.4.1`
+        deterministic behavior at the cost of performance, use FlashAttention version >= ``2.4.1``
         and set the environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order
-        to disable`flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
+        to disable ``flash-attn`` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
 
     .. note::
 
-        Transformer Engine stores the FP8 metadata under a `._extra_state` key when checkpointing.
+        Transformer Engine stores the FP8 metadata under a ``._extra_state`` key when checkpointing.
         As the FP8 attention support expands from one backend to multiple backends, the location
         of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_).
 
@@ -107,112 +182,137 @@ class DotProductAttention(TransformerEngineBaseModule):
     kv_channels : Union[int, Tuple[int, int]]
                 the head size in key and value tensors. If the same, :attr:`kv_channels` can be
                 an integer; if not, :attr:`kv_channels` should be a tuple of two integers.
-    num_gqa_groups : Optional[int] = None
+    num_gqa_groups : Optional[int], default = None
                     number of GQA groups in the transformer layer.
                     Grouped Query Attention is described in
                     `this paper <https://arxiv.org/pdf/2305.13245.pdf>`_.
                     This only affects the keys and values, not the queries.
                     GQA-1 is equivalent to Multi-Query Attention
                     (`MQA <https://arxiv.org/pdf/1911.02150.pdf>`_), while GQA-H
-                    is equivalent to MHA, i.e. `num_gqa_groups = num_attention_heads`.
-    attention_dropout: float, default = 0.0
+                    is equivalent to MHA, i.e. ``num_gqa_groups = num_attention_heads``.
+    attention_dropout : float, default = 0.0
                       dropout probability for the dropout op during multi-head attention.
-    attn_mask_type: str, default = `causal`
-                   type of attention mask passed into softmax operation, options are "`no_mask`",
-                   "`padding`", "`causal`", "`padding,causal`", "`causal,padding`",
-                   "`padding_causal`", "`causal_bottom_right`", "`padding_causal_bottom_right`", and
-                   "`arbitrary`", where "`padding,causal`", "`causal,padding`" and "`padding_causal`"
+    attn_mask_type : str, default = "causal"
+                   type of attention mask passed into softmax operation, options are ``"no_mask"``,
+                   ``"padding"``, ``"causal"``, ``"padding,causal"``, ``"causal,padding"``,
+                   ``"padding_causal"``, ``"causal_bottom_right"``, ``"padding_causal_bottom_right"``, and
+                   ``"arbitrary"``, where ``"padding,causal"``, ``"causal,padding"`` and ``"padding_causal"``
                    are equivalent. This arg can be overridden by :attr:`attn_mask_type` in the
-                   `forward` method. It is useful for cases involving compilation/tracing, e.g.
+                   :meth:`forward` method. It is useful for cases involving compilation/tracing, e.g.
                    ONNX export, and the forward arg is useful for dynamically changing mask types,
                    e.g. a different mask for training and inference.
-                   1. For "`no_mask`", no attention mask is applied.
-                   2. For "`causal`", "`causal_bottom_right`", or the causal mask in
-                   "`padding_causal`" and "`padding_causal_bottom_right`", Transformer Engine
-                   calculates and applies an upper triangular mask to the softmax input.
-                   No user input is needed. Causal masks without the "`bottom_right`" appendix align
-                   the diagonal line to the top left corner of the softmax matrix. With
-                   "`bottom_right`", the causal mask is aligned to the bottom right corner, which is
-                   often used in inference/KV caching.
-                   3. For "`padding`", or the padding mask in "`padding_causal`" and
-                   "`padding_causal_bottom_right`", users need to provide the locations of padded
-                   tokens, either via :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv` (both in shape
-                   [batch_size + 1]), or via :attr:`attention_mask` (one tensor for self-attention
-                   in shape [batch_size, 1, 1, max_seqlen_q], or two tensors in a tuple for
-                   cross-attention in shapes [batch_size, 1, 1, max_seqlen_q] and
-                   [batch_size, 1, 1, max_seqlen_kv]).
-                   4. For "`arbitrary`", users need to provide a mask that is broadcastable to
-                   the shape of softmax input [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
-    window_size: Optional[Tuple[int, int]], default = `None`
+
+                   1. For ``"no_mask"``, no attention mask is applied.
+                   2. For ``"causal"``, ``"causal_bottom_right"``, or the causal mask in
+                      ``"padding_causal"`` and ``"padding_causal_bottom_right"``, Transformer Engine
+                      calculates and applies an upper triangular mask to the softmax input.
+                      No user input is needed. Causal masks without the ``"bottom_right"`` appendix align
+                      the diagonal line to the top left corner of the softmax matrix. With
+                      ``"bottom_right"``, the causal mask is aligned to the bottom right corner, which is
+                      often used in inference/KV caching.
+                   3. For ``"padding"``, or the padding mask in ``"padding_causal"`` and
+                      ``"padding_causal_bottom_right"``, users need to provide the locations of padded
+                      tokens, either via :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv` (both of shape
+                      ``[batch_size + 1]``), or via :attr:`attention_mask` (one tensor for self-attention
+                      of shape ``[batch_size, 1, 1, max_seqlen_q]``, or two tensors in a tuple for
+                      cross-attention of shapes ``[batch_size, 1, 1, max_seqlen_q]`` and
+                      ``[batch_size, 1, 1, max_seqlen_kv]``).
+                   4. For ``"arbitrary"``, users need to provide a mask that is broadcastable to
+                      the shape of softmax input ``[batch_size, num_heads, max_seqlen_q, max_seqlen_kv]``.
+
+    window_size : Optional[Tuple[int, int]], default = None
                 sliding window size for local attention, where query at position i attends to keys
-                in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-                + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-                window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
-                map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
-                `attn_mask_type`. Similar to :attr:`attn_mask_type`, `window_size` can
-                be overridden by :attr:`window_size` in `forward` as well.
-    attention_type: str, default = `self`
-                   type of attention, either "`self`" and "`cross`".
-    layer_number: int, default = `None`
-                 layer number of the current `DotProductAttention` when multiple such modules
+                in ``[i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+                + window_size[1]] inclusive. Special cases ``(-1, -1)`` and ``(-1, 0)`` mean no sliding
+                window and causal mask specifically. Both ``causal`` and ``causal_bottom_right`` masks
+                map to ``window_size = (-1, 0)`` and Transformer Engine distinguishes them based on
+                ``attn_mask_type``. Similar to :attr:`attn_mask_type`, ``window_size`` can
+                be overridden by :attr:`window_size` in ``forward`` as well.
+    attention_type : str, default = "self"
+                   type of attention, either ``"self"`` and ``"cross"``.
+    layer_number : int, default = None
+                 layer number of the current ``DotProductAttention`` when multiple such modules
                  are concatenated, for instance in consecutive transformer blocks.
-    qkv_format: str, default = `sbhd`
-               dimension format for `query_layer`, `key_layer` and `value_layer`,
-               {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length, `b` batch size,
-               `h` the number of heads, `d` head size, and `t` the total number of tokens
-               in a batch, with `t = sum(s_i), for i = 0...b-1`. `sbhd` and `bshd` formats
+    qkv_format : str, default = "sbhd"
+               dimension format for ``query_layer``, ``key_layer`` and ``value_layer``,
+               {``"sbhd"``, ``"bshd"``, ``"thd"``}. ``s`` stands for the sequence length, ``b`` batch size,
+               ``h`` the number of heads, ``d`` head size, and ``t`` the total number of tokens
+               in a batch, with ``t = sum(s_i), for i = 0...b-1``. ``"sbhd"`` and ``"bshd"`` formats
                are used for when sequences in a batch are of equal length or padded to
-               equal length, and the `thd` format is used for when sequences in a batch
+               equal length, and the ``"thd"`` format is used for when sequences in a batch
                have different lengths. Please note that these formats do not reflect how
-               tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
-               For that, please use `get_qkv_layout` to gain the layout information.
-    softmax_scale: Optional[float], default = `None`
-                softmax scale for the attention scores. If `None`, defaults to
-                `1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])`.
-    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
-                 softmax type as described in this paper:
+               tensors ``query_layer``, ``key_layer``, ``value_layer`` are laid out in memory.
+               For that, please use ``get_qkv_layout`` to gain the layout information.
+    softmax_scale : Optional[float], default = None
+                softmax scale for the attention scores. If ``None``, defaults to
+                ``1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])``.
+    softmax_type : str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+                 Softmax type as described in the paper
                  `Efficient Streaming Language Models with Attention Sinks
                  <https://arxiv.org/pdf/2309.17453v3>`_.
-                 For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
-                 'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
-                 'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
-                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
-                 where alpha is a learnable parameter in shape [h].
-                 'off-by-one' and 'learnable' softmax types are also called sink attention
-                 ('zero sink' and 'learnable sink').
+
+                 For a given attention score :math:`S = Q \cdot K^T`, of shape ``[b, h, s_q, s_kv]``:
+
+                 * ``'vanilla'``:
+
+                   .. math::
+                      Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{\sum_j \exp(S_{:,:,:,j})}
+
+                 * ``'off-by-one'``:
+
+                   .. math::
+                      Softmax(S)_{:,:,:,i} = \frac{\exp(S_{:,:,:,i})}{1 + \sum_j \exp(S_{:,:,:,j})}
+
+                 * ``'learnable'``:
+
+                   .. math::
+                      Softmax(S)_{:,h,:,i} = \frac{\exp(S_{:,h,:,i})}{\exp(\alpha_h) + \sum_j \exp(S_{:,h,:,j})}
+
+                   where :math:`\alpha` is a learnable parameter of shape ``[h]``.
+
+                 ``'off-by-one'`` and ``'learnable'`` softmax types are also called sink attention
+                 (``'zero sink'`` and ``'learnable sink'``).
+
+    return_max_logit : Optional[bool], default = False
+                     If true, returns the maximum attention score that can be used in a Muon optimizer to
+                     rescale the Q and K projection weights (see `Muon is Scalable for LLM Training
+                     <https://arxiv.org/pdf/2502.16982>`_).
+                     :math:`\text{max_logit} = \max(S)`, where :math:`S = \text{mask}(Q \cdot K^T \cdot \text{softmax_scale} + \text{bias})` of shape ``[b, h, s_q, s_kv]``,
+                     and :math:`\text{max_logit}` is of shape ``[h]``.
 
     Parallelism parameters
     ----------------------
-    sequence_parallel : bool, default = `False`
-                       if set to `True`, uses sequence parallelism.
+    sequence_parallel : bool, default = False
+                       if set to ``True``, uses sequence parallelism.
     tp_size : int, default = 1
              tensor parallel world size.
-    tp_group : ProcessGroup, default = `None`
+    tp_group : ProcessGroup, default = None
               tensor parallel process group.
-    cp_group : Union[ProcessGroup, List[ProcessGroup]], default = `None`
+    cp_group : Union[ProcessGroup, List[ProcessGroup]], default = None
               context parallel process group.
-              ProcessGroup is for cp_comm_type of "p2p", "all_gather", and "a2a".
-              List[ProcessGroup] is for cp_comm_type of "a2a+p2p", where cp_group[0]
-              and cp_group[1] are for a2a and p2p communications respectively.
-    cp_global_ranks : list of global rank IDs, default = `None`
-                     global rank IDs of GPUs that are in cp_group.
-    cp_stream : CUDA stream, default = `None`
+              ``ProcessGroup`` is for :attr:`cp_comm_type` of ``"p2p"``, ``"all_gather"``, and ``"a2a"``.
+              ``List[ProcessGroup]`` is for :attr:`cp_comm_type` of ``"a2a+p2p"``, where :attr:`cp_group[0]`
+              and :attr:`cp_group[1]` are for ``"a2a"`` and ``"p2p"`` communications respectively.
+    cp_global_ranks : list of global rank IDs, default = None
+                     global rank IDs of GPUs that are in ``cp_group``.
+    cp_stream : CUDA stream, default = None
                context parallelism splits flash attention into multiple steps for
                compute and communication overlapping. To address the wave quantization
                issue of each split step, we add an additional CUDA stream so that we
                can overlap two flash attention kernels.
-    cp_comm_type : str, default = `p2p`
+    cp_comm_type : str, default = "p2p"
                   inter-gpu communication type for context parallelism.
-                  Can be "p2p" or "all_gather" or "a2a" or "a2a+p2p".
-                  "p2p": Exchange KV chunks with P2P communications in ring topology.
-                         P2P is async and can be overlapped with attention compute.
-                  "all_gather": All-gather to get full sequence of KV before attention.
-                                The all-gather is not async, and cannot be overlapped.
-                  "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
-                         group, and gather to get full sequence of QKV.
-                  "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
-                  across each CP sub-group (e.g., via NVLink), then exchanging KV with
-                  p2p between sub-groups (e.g., via IBLink).
+                  Can be ``"p2p"`` or ``"all_gather"`` or ``"a2a"`` or ``"a2a+p2p"``.
+
+                  - ``"p2p"``: Exchange KV chunks with P2P communications in ring topology.
+                    P2P is async and can be overlapped with attention compute.
+                  - ``"all_gather"``: All-gather to get full sequence of KV before attention.
+                    The all-gather is not async, and cannot be overlapped.
+                  - ``"a2a"``: Like DeepSpeed Ulysses, scatter attention heads across the CP
+                    group, and gather to get full sequence of QKV.
+                  - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
+                    across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                    p2p between sub-groups (e.g., via IBLink).
     """
 
     def __init__(
@@ -236,6 +336,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
+        return_max_logit: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -319,6 +420,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
+        self.return_max_logit = return_max_logit
 
         self.softmax_type = softmax_type
         if self.softmax_type == "vanilla":
@@ -356,6 +458,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             deterministic=self.deterministic,
             **attn_kwargs,
             softmax_type=self.softmax_type,
+            return_max_logit=self.return_max_logit,
         )
 
         self.unfused_attention = UnfusedDotProductAttention(
@@ -364,6 +467,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             **attn_kwargs,
             layer_number=layer_number,
             softmax_type=self.softmax_type,
+            return_max_logit=self.return_max_logit,
         )
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
@@ -383,8 +487,8 @@ class DotProductAttention(TransformerEngineBaseModule):
     ):
         """
         This function helps to load Transformer Engine 1.6 and 1.7 checkpoints, where FP8 attention
-        metadata is stored under the `core_attention.fused_attention._extra_state` key and not the
-        `core_attention._extra_state` key. Please see `FP8 checkpoint compatibility
+        metadata is stored under the ``core_attention.fused_attention._extra_state`` key and not the
+        ``core_attention._extra_state`` key. Please see `FP8 checkpoint compatibility
         <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_ for more details.
         """
         fused_attn_key = False
@@ -437,30 +541,259 @@ class DotProductAttention(TransformerEngineBaseModule):
         ----------
         cp_group : Union[ProcessGroup, List[ProcessGroup]]
                   context parallel process group.
-                  ProcessGroup is for cp_comm_type of "p2p", "all_gather", and "a2a".
-                  List[ProcessGroup] is for cp_comm_type of "a2a+p2p", where cp_group[0]
-                  and cp_group[1] are for a2a and p2p communications respectively.
+                  ``ProcessGroup`` is for :attr:`cp_comm_type` of ``"p2p"``, ``"all_gather"``, and ``"a2a"``.
+                  ``List[ProcessGroup]`` is for :attr:`cp_comm_type` of ``"a2a+p2p"``, where :attr:`cp_group[0]`
+                  and :attr:`cp_group[1]` are for ``"a2a"`` and ``"p2p"`` communications respectively.
         cp_global_ranks : List[int]
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
                    cuda stream for context parallel execution.
-        cp_comm_type : str, default = `p2p`
+        cp_comm_type : str, default = "p2p"
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather" or "a2a" or "a2a+p2p".
-                      "p2p": Exchange KV chunks with P2P communications in ring topology.
-                             P2P is async and can be overlapped with attention compute.
-                      "all_gather": All-gather to get full sequence of KV before attention.
-                                    The all-gather is not async, and cannot be overlapped.
-                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
-                             group, and gather to get full sequence of QKV.
-                      "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
-                      across each CP sub-group (e.g., via NVLink), then exchanging KV with
-                      p2p between sub-groups (e.g., via IBLink).
+                      Can be ``"p2p"`` or ``"all_gather"`` or ``"a2a"`` or ``"a2a+p2p"``.
+
+                      - ``"p2p"``: Exchange KV chunks with P2P communications in ring topology.
+                        P2P is async and can be overlapped with attention compute.
+                      - ``"all_gather"``: All-gather to get full sequence of KV before attention.
+                        The all-gather is not async, and cannot be overlapped.
+                      - ``"a2a"``: Like DeepSpeed Ulysses, scatter attention heads across the CP
+                        group, and gather to get full sequence of QKV.
+                      - ``"a2a+p2p"``: hierarchical CP implementation. First applying a2a to QKV
+                        across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                        p2p between sub-groups (e.g., via IBLink).
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
+
+    def init_fp8_metadata(self, num_gemms: int = 1) -> None:
+        """
+        Override TransformerEngineBaseModule.init_fp8_metadata to allow for more flexible recipe support.
+        Initialize fp8 related metadata and tensors during fprop.
+        """
+        _original_recipe = self.fp8_meta.get("recipe", None)
+
+        # global recipe set in autocast()
+        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_recipe.custom():
+            return
+
+        # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
+        # a different recipe than fp8_recipe. DPA.quantizers may be a mix of different quantizers as well.
+        #
+        # fp8_recipe                | NVTE_DPA_FP8_RECIPE | self.fp8_meta["recipe"] | self.quantizers
+        # --------------------------------------------------------------------------------------------
+        # DelayedScaling (DS)       | unset               | DS                      | all DS
+        # Float8CurrentScaling (CS) | unset               | DS                      | CS for QKV, O, dO, dQKV; DS for S, dP
+        # x={DS, CS}                | y                   | refer to row x=y        | refer to row x=y
+        fp8_recipe_dpa = fp8_recipe
+        fp8_recipes = fp8_recipe
+        if _dpa_fp8_recipe == "F16":
+            # ignore the recipe from autocast, set fp8_dpa = False, fp8_mha = False
+            fp8_recipe.fp8_dpa = False
+            fp8_recipe.fp8_mha = False
+        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "DelayedScaling":
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a DS recipe
+            fake_recipe = DelayedScaling(
+                fp8_format=fp8_recipe.fp8_format,
+                amax_history_len=_dpa_fp8ds_amax_histlen,
+                amax_compute_algo=_dpa_fp8ds_amax_algo,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+                reduce_amax=_dpa_fp8ds_reduce_amax,
+            )
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = fp8_recipe_dpa
+        elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "DelayedScaling":
+            # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format; construct a DS recipe
+            fake_recipe = DelayedScaling(
+                fp8_format=_dpa_fp8_format,
+                amax_history_len=_dpa_fp8ds_amax_histlen,
+                amax_compute_algo=_dpa_fp8ds_amax_algo,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+                reduce_amax=_dpa_fp8ds_reduce_amax,
+            )
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = fp8_recipe_dpa
+        elif fp8_recipe.delayed() and _dpa_fp8_recipe == "Float8CurrentScaling":
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a CS+DS recipe
+            fake_recipes = [
+                Float8CurrentScaling(
+                    fp8_format=fp8_recipe.fp8_format,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                ),
+                fp8_recipe,
+            ]
+            fp8_recipe_dpa = fake_recipes[1]
+            fp8_recipes = fake_recipes
+        elif (
+            fp8_recipe.float8_current_scaling()
+            and _dpa_fp8_recipe in ("", "Float8CurrentScaling")
+            and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha)
+        ):
+            # use fp8_recipe for QKV, O, dO, dQKV, and construct a DS recipe for S, dP
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe
+            fake_recipe = DelayedScaling(
+                fp8_format=fp8_recipe.fp8_format,
+                amax_history_len=_dpa_fp8ds_amax_histlen,
+                amax_compute_algo=_dpa_fp8ds_amax_algo,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+                reduce_amax=_dpa_fp8ds_reduce_amax,
+            )
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = [fp8_recipe, fp8_recipe_dpa]
+        elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "Float8CurrentScaling":
+            # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format
+            # construct a CS recipe for QKV, O, dO, dQKV and a DS recipe for S, dP
+            fake_recipes = [
+                Float8CurrentScaling(
+                    fp8_format=_dpa_fp8_format,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                ),
+                DelayedScaling(
+                    fp8_format=_dpa_fp8_format,
+                    amax_history_len=_dpa_fp8ds_amax_histlen,
+                    amax_compute_algo=_dpa_fp8ds_amax_algo,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                    reduce_amax=_dpa_fp8ds_reduce_amax,
+                ),
+            ]
+            fp8_recipe_dpa = fake_recipes[1]
+            fp8_recipes = fake_recipes
+        # DPA only support DS and CS; other recipes should have fp8_dpa=False, fp8_mha=False
+        if not fp8_recipe_dpa.float8_per_tensor_scaling():
+            assert not (
+                fp8_recipe_dpa.fp8_dpa or fp8_recipe_dpa.fp8_mha
+            ), f"DotProductAttention does not support {fp8_recipe_dpa.__class__.__name__} recipe"
+
+        # reduce over TP+CP groups; expect fp8_group to be set up so
+        # assume attention uses the same fp8_group as GEMMs
+        fp8_group = FP8GlobalStateManager.get_fp8_group()
+
+        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
+        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        fp8_enabled = self.fp8 or self.fp8_calibration
+        self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+        if self.fp8_parameters or fp8_enabled:
+            self.fp8_meta["global_recipe"] = fp8_recipe
+            self.fp8_meta["local_recipes"] = (
+                fp8_recipes if isinstance(fp8_recipes, List) else [fp8_recipes]
+            )
+
+        if self.fp8_parameters or fp8_enabled:
+            if self.fp8_initialized and fp8_recipe_dpa == self.fp8_meta["recipe"]:
+                # FP8 init has already been run and recipe is the same, don't do anything.
+                return
+            self.fp8_meta["recipe"] = fp8_recipe_dpa
+            if fp8_recipe != fp8_recipe_dpa:
+                # fp8_recipe has changed, rehash the key.
+                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
+                    fp8_recipe_dpa, fp8_group
+                )
+                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                    fp8_recipe_dpa,
+                    fp8_group,
+                )
+        else:
+            # If fp8 isn't enabled, turn off and return.
+            self.fp8_initialized = False
+            return
+
+        if self.fp8_parameters and not self.fp8_initialized:
+            self.fp8_meta["num_gemms"] = num_gemms
+            self.init_fp8_meta_tensors(fp8_recipes)
+
+        if fp8_enabled:
+            # Set FP8 and other FP8 metadata
+            self.fp8_meta["num_gemms"] = num_gemms
+            self.fp8_meta["fp8_group"] = fp8_group
+
+            # Set FP8_MAX per tensor according to recipe
+            self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
+            self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+
+            # Allocate scales and amaxes
+            self.init_fp8_meta_tensors(fp8_recipes)
+            self.fp8_initialized = True
+
+            self.fp8_meta["recipe"] = fp8_recipe_dpa
+            if fp8_recipe != fp8_recipe_dpa:
+                # fp8_recipe has changed, rehash the key.
+                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
+                    fp8_recipe_dpa, fp8_group
+                )
+                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                    fp8_recipe_dpa,
+                    fp8_group,
+                )
+
+        _current_recipe = self.fp8_meta["recipe"]
+        if _original_recipe is not None and not (
+            issubclass(_current_recipe.__class__, _original_recipe.__class__)
+            or issubclass(_original_recipe.__class__, _current_recipe.__class__)
+        ):
+            warnings.warn(
+                f"Recipe type changed from {_original_recipe.__class__.__name__} "
+                f"to {_current_recipe.__class__.__name__}. "
+                "This may affect model behavior."
+            )
+            # Clear cached workspaces as they were created with the old recipe/quantizer type
+            self._fp8_workspaces.clear()
+
+    def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
+        """Override to allow multiple recipes. Init scales and amaxes for fwd | bwd."""
+        if isinstance(recipe, Recipe):
+            recipe = [recipe]
+        fp8_recipe_dpa = recipe[-1]
+        fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
+
+        # Return early if recipe state matches recipe
+        if self.fp8_meta_tensors_initialized:
+            recipe_state = self.fp8_meta[fp8_meta_tensor_key]
+            if fp8_recipe_dpa.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
+                self.adjust_amax_history_length(fp8_recipe_dpa.amax_history_len, fwd=fwd)
+                return
+            if fp8_recipe_dpa.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
+                return
+            if fp8_recipe_dpa.float8_current_scaling() and isinstance(
+                recipe_state, Float8CurrentScalingRecipeState
+            ):
+                return
+            if fp8_recipe_dpa.float8_block_scaling() and isinstance(
+                recipe_state, Float8BlockScalingRecipeState
+            ):
+                return
+
+        # When fp8_recipe=Float8CurrentScaling, recipe=[CS, DS], and QKV/dQKV, O/dO use CS quantizers, S/dP use DS quantizers.
+        # See table above in init_fp8_metadata for more detail.
+        num_gemms = [2, 1] if len(recipe) == 2 else [3]
+        # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
+        # 2 (grad_output and grad_input) for bwd
+        num_fp8_tensors = [x * 3 if fwd else x * 2 for x in num_gemms]
+
+        # Initialize recipe state and quantizers
+        recipe_states = [
+            RecipeState.create(
+                recipe[i],
+                mode=("forward" if fwd else "backward"),
+                num_quantizers=num_fp8_tensors[i],
+            )
+            for i in range(len(recipe))
+        ]
+
+        self.fp8_meta[fp8_meta_tensor_key] = (
+            recipe_states[-1] if len(recipe) == 2 else recipe_states[0]
+        )
+        self.quantizers[fp8_meta_tensor_key] = []
+        for recipe_state in recipe_states:
+            self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
 
     @no_torch_dynamo(recursive=False)
     def forward(
@@ -485,14 +818,16 @@ class DotProductAttention(TransformerEngineBaseModule):
         fast_zero_fill: bool = True,
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
+        fp8_output: Optional[bool] = False,
+        num_splits: Optional[int] = 1,
     ) -> torch.Tensor:
-        """
+        r"""
         Dot Product Attention Layer.
 
         .. note::
 
             Argument :attr:`attention_mask` is only used when :attr:`attn_mask_type`
-            includes '"padding"' or `"arbitrary"`.
+            includes ``"padding"`` or ``"arbitrary"``.
 
         .. note::
 
@@ -531,24 +866,24 @@ class DotProductAttention(TransformerEngineBaseModule):
                Pass in :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`, or :attr:`attention_mask`
                (which will be converted to :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`), to provide
                the real sequence length information. For example, a batch of 3 sequences
-               [a a a b b c c c c] can be padded to [a a a PAD b b PAD PAD c c c c], and the cumulative
+               ``[a a a b b c c c c]`` can be padded to ``[a a a PAD b b PAD PAD c c c c]``, and the cumulative
                sequence length tensors would be
-               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9] for self-attention.
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = ``[0, 3, 5, 9]`` for self-attention.
 
             2. Do not perform padding on training data. Use :attr:`qkv_format` = "thd" and
                :attr:`attn_mask_type` = {"padding", "padding_causal", "padding_causal_bottom_right"}.
                Pass in :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`, or :attr:`attention_mask`,
-               as in option 1. For example, a batch of 3 sequences [a a a b b c c c c] can be processed
+               as in option 1. For example, a batch of 3 sequences ``[a a a b b c c c c]`` can be processed
                without any padding, and the sequence length tensors would be
-               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9] for self-attention.
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = ``[0, 3, 5, 9]`` for self-attention.
 
                In certain use cases, a varying number of identifier tokens are inserted between
                sequences. These tokens do not participate in the attention calculation.
                :attr:`cu_seqlens_q_padded` and :attr:`cu_seqlens_kv_padded` must be specified
                in such cases to correctly identify the start and end of each sequence in a batch.
-               For example, a batch of 3 sequences [a a a 1 b b 2 2 c c c c 3] would have
-               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9], and
-               :attr:`cu_seqlens_q_padded` = :attr:`cu_seqlens_kv_padded` = [0, 4, 8, 13]
+               For example, a batch of 3 sequences ``[a a a 1 b b 2 2 c c c c 3]`` would have
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = ``[0, 3, 5, 9]``, and
+               :attr:`cu_seqlens_q_padded` = :attr:`cu_seqlens_kv_padded` = ``[0, 4, 8, 13]``
                for self-attention.
 
         .. note::
@@ -583,83 +918,89 @@ class DotProductAttention(TransformerEngineBaseModule):
         value_layer : torch.Tensor
                      Value tensor.
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
-             default = `None`. Boolean tensor(s) used to mask out attention softmax input.
-             It should be `None` for causal masks and "`no_mask`". For padding masks, it should be
-             a single tensor of [batch_size, 1, 1, seqlen_q] for self-attention, and a tuple of
-             two tensors in shapes [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv]
-             for cross-attention. For "`arbitrary`" mask, it should be in a shape broadcastable
-             to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]. A `True` value means
-             the corresponding position is masked out and a `False` means that position
+             default = None. Boolean tensor(s) used to mask out attention softmax input.
+             It should be ``None`` for causal masks and ``"no_mask"``. For padding masks, it should be
+             a single tensor of ``[batch_size, 1, 1, seqlen_q]`` for self-attention, and a tuple of
+             two tensors of shapes ``[batch_size, 1, 1, seqlen_q]`` and ``[batch_size, 1, 1, seqlen_kv]``
+             for cross-attention. For ``"arbitrary"`` mask, it should be of a shape broadcastable
+             to ``[batch_size, num_heads, max_seqlen_q, max_seqlen_kv]``. A ``True`` value means
+             the corresponding position is masked out and a ``False`` means that position
              is allowed to participate in attention.
-        qkv_format: str, default = `None`
+        qkv_format: str, default = None
                    If provided, overrides :attr:`qkv_format` from initialization.
-        cu_seqlens_q: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
+        cu_seqlens_q: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (without offset) in a batch for ``query_layer``,
                    with shape [batch_size + 1] and dtype torch.int32.
                    See :ref:`note<cu_seqlens note>` for more details.
-        cu_seqlens_kv: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
-                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_kv: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (without offset) in a batch for ``key_layer``
+                   and ``value_layer``, with shape [batch_size + 1] and dtype torch.int32.
                    See :ref:`note<cu_seqlens note>` for more details.
-        cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
+        cu_seqlens_q_padded: Optional[torch.Tensor], default = None
                    Cumulative sum of sequence lengths (with offset) in a batch for
-                   `query_layer`, with shape [batch_size + 1] and dtype torch.int32.
+                   ``query_layer``, with shape ``[batch_size + 1]`` and dtype torch.int32.
                    When there is no padding between sequences in a batch,
-                   `cu_seqlens_q_padded = cu_seqlens_q`.
+                   :attr:`cu_seqlens_q_padded` = :attr:`cu_seqlens_q`.
                    See :ref:`note<cu_seqlens note>` for more details.
-        cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
-                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_kv_padded: Optional[torch.Tensor], default = None
+                   Cumulative sum of sequence lengths (with offset) in a batch for ``key_layer``
+                   and ``value_layer``, with shape ``[batch_size + 1]`` and dtype torch.int32.
                    When there is no padding between sequences in a batch,
-                   `cu_seqlens_kv_padded = cu_seqlens_kv`.
+                   :attr:`cu_seqlens_kv_padded` = :attr:`cu_seqlens_kv`.
                    See :ref:`note<cu_seqlens note>` for more details.
-        max_seqlen_q: Optional[int], default = `None`
-                      Maximum sequence length in `query_layer`.
+        max_seqlen_q: Optional[int], default = None
+                      Maximum sequence length in ``query_layer``.
                       See :ref:`note<max_seqlen note>` for more details.
-        max_seqlen_kv: Optional[int], default = `None`
-                       Maximum sequence length in `key_layer` and `value_layer`.
+        max_seqlen_kv: Optional[int], default = None
+                       Maximum sequence length in ``key_layer`` and ``value_layer``.
                        See :ref:`note<max_seqlen note>` for more details.
         attn_mask_type: {'no_mask', 'padding', 'causal', 'padding,causal', 'causal,padding',
                        'padding_causal', 'causal_bottom_right', 'padding_causal_bottom_right',
-                       'arbitrary'}, default = `None`. Type of attention mask passed into
+                       'arbitrary'}, default = None. Type of attention mask passed into
                        softmax operation. 'padding,causal', 'causal,padding' and 'padding_causal'
                        are equivalent. By default, causal masks are aligned to the top left corner
-                       of the softmax matrix. When "`bottom_right`" is specified in the mask type,
+                       of the softmax matrix. When ``"bottom_right"`` is specified in the mask type,
                        causal masks are aligned to the bottom right corner.
-        window_size: Optional[Tuple[int, int]], default = `None`
+        window_size: Optional[Tuple[int, int]], default = None
                     Sliding window size for local attention.
-        checkpoint_core_attention : bool, default = `False`
+        checkpoint_core_attention : bool, default = False
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
                                    otherwise be occupied to store the forward activations until
                                    backprop.
-        core_attention_bias_type: str, default = `no_bias`
-                    Bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}
-        core_attention_bias: Optional[torch.Tensor], default = `None`
-                    Bias tensor for Q * K.T, shape [1, num_head, max_seqlen_q, max_seqlen_kv].
-                    It should be 'None' for 'no_bias' and 'alibi' bias types.
-        alibi_slopes: Optional[torch.Tensor], default = `None`
-                     ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
+        core_attention_bias_type: str, default = "no_bias"
+                    Bias type, {``"no_bias"``, ``"pre_scale_bias"``, ``"post_scale_bias"``, ``"alibi"``}
+        core_attention_bias: Optional[torch.Tensor], default = None
+                    Bias tensor for :math:`Q \cdot K^T`, shape ``[1, num_head, max_seqlen_q, max_seqlen_kv]``.
+                    It should be ``None`` for ``"no_bias"`` and ``"alibi"`` bias types.
+        alibi_slopes: Optional[torch.Tensor], default = None
+                     ALiBi slopes in FP32 and shape ``[nheads]`` or ``[batch_size, nheads]``.
                      It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
                      to the attention score of query i and key j.
-        fast_zero_fill: bool, default = `True`
+        fast_zero_fill: bool, default = True
                     Whether to use the fast path to set output tensors to 0 or not.
-        inference_params: Optional[InferenceParams], default = `None`
+        inference_params: Optional[InferenceParams], default = None
             Optimizes execution performance during inference by caching Keys and Values of the
             current decoding iteration. These cached values are appended to the K and V values
             computed in previous iterations, eliminating the need to recalculate them for the
             entire sequence.
-            Initialization of `inference_params` is required prior to use to ensure sufficient
+            Initialization of ``inference_params`` is required prior to use to ensure sufficient
             memory allocation.
             Adjustments of the sequence_len_offset should be done after a complete forward pass.
             If rotary positional embeddings (RoPE) are utilized, they must be prepared beforehand.
             Supports "sbhd" and "bshd" layouts, with the "sbhd" layout being more efficient.
-        pad_between_seqs: Optional[bool], default = `None`
-            If None, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
-            If true, there are padding tokens between individual sequences in a packed batch.
+        pad_between_seqs: Optional[bool], default = None
+            If ``None``, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
+            If ``True``, there are padding tokens between individual sequences in a packed batch.
+        fp8_output: Optional[bool], default = False
+            Whether to enforce output to be in FP8 or not.
+        num_splits: Optional[int], default = 1
+            Optional split control for FlashAttention-3 only. When set, this value is forwarded
+            to the FA3 backend to control internal kernel splitting behavior for non-context-parallel
+            cases. It is ignored for other backends and when context parallelism is enabled.
         """
 
-        with torch.cuda.device(query_layer.device), self.prepare_forward(
+        with self.prepare_forward(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
@@ -693,6 +1034,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     tex.DType.kFloat8E4M3,
                     tex.DType.kFloat8E5M2,
                 ], """DotProductAttention only supports "E4M3" and "E5M2" FP8 data types."""
+            else:
+                fp8_output = False
 
             # checks for q/k/v shapes
             assert (
@@ -710,14 +1053,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                 query_layer.shape[-1] == key_layer.shape[-1]
             ), "Queries and keys must have the same head dimension!"
             head_dim_qk, head_dim_v = query_layer.shape[-1], value_layer.shape[-1]
-            assert (
-                head_dim_qk == self.hidden_size_per_attention_head_k
-            ), f"Keys have head_dim = {head_dim_qk}, "
-            "but expected head_dim = {self.hidden_size_per_attention_head_k}!"
-            assert (
-                head_dim_v == self.hidden_size_per_attention_head_v
-            ), f"Values have head_dim = {head_dim_v}, "
-            "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
+            assert head_dim_qk == self.hidden_size_per_attention_head_k, (
+                f"Keys have head_dim = {head_dim_qk}, but expected head_dim ="
+                f" {self.hidden_size_per_attention_head_k}!"
+            )
+            assert head_dim_v == self.hidden_size_per_attention_head_v, (
+                f"Values have head_dim = {head_dim_v}, but expected head_dim ="
+                f" {self.hidden_size_per_attention_head_v}!"
+            )
             assert num_gqa_groups == self.num_gqa_groups_per_partition, (
                 "Keys and values must have num_gqa_group ="
                 f" {self.num_gqa_groups_per_partition} heads! Found {num_gqa_groups}."
@@ -995,6 +1338,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_meta=self.fp8_meta,
                 inference_params=inference_params,
                 softmax_type=self.softmax_type,
+                return_max_logit=self.return_max_logit,
+                cuda_graph=is_graph_capturing(),
+                num_splits=num_splits,
             )
             global _attention_backends
             if is_in_onnx_export_mode():
@@ -1092,6 +1438,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     quantizers=self.quantizers,
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
+                    fp8_output=fp8_output,
+                    num_splits=num_splits,
                 )
 
             if use_fused_attention:
@@ -1140,6 +1488,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         pad_between_seqs=pad_between_seqs,
                         inference_params=inference_params,
                         softmax_offset=softmax_offset,
+                        fp8_output=fp8_output,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -1169,17 +1518,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                     pad_between_seqs=pad_between_seqs,
                     inference_params=inference_params,
                     softmax_offset=softmax_offset,
-                )
-
-            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
-
-            if CPUOffloadEnabled:
-                warnings.warn(
-                    "Attention activation Offloading is only implemented"
-                    "with Flash Attention and Fused Attention!"
+                    fp8_output=fp8_output,
                 )
 
             if use_unfused_attention:
+                allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.unfused_attention,
@@ -1190,6 +1533,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         qkv_layout=qkv_layout,
                         cu_seqlens_q=cu_seqlens_q,
                         cu_seqlens_kv=cu_seqlens_kv,
+                        max_seqlen_q=max_seqlen_q,
+                        max_seqlen_kv=max_seqlen_kv,
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
@@ -1198,6 +1543,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                         alibi_slopes=alibi_slopes,
                         inference_params=inference_params,
                         softmax_offset=softmax_offset,
+                        fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa and allow_emulation,
+                        fp8_meta=self.fp8_meta,
+                        quantizers=self.quantizers,
+                        fp8_output=fp8_output,
                     )
                 return self.unfused_attention(
                     _alibi_cache,
@@ -1207,6 +1556,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     qkv_layout=qkv_layout,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,
@@ -1215,5 +1566,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     alibi_slopes=alibi_slopes,
                     inference_params=inference_params,
                     softmax_offset=softmax_offset,
+                    fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa and allow_emulation,
+                    fp8_meta=self.fp8_meta,
+                    quantizers=self.quantizers,
+                    fp8_output=fp8_output,
                 )
             return None

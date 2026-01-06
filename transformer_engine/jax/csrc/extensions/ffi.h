@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -24,6 +24,7 @@ using FFI_Stream_Type = xla::ffi::PlatformStream<cudaStream_t>;
 using Dictionary = xla::ffi::Dictionary;
 
 constexpr auto FFI_Prepare = xla::ffi::ExecutionStage::kPrepare;
+constexpr auto FFI_Initialize = xla::ffi::ExecutionStage::kInitialize;
 constexpr auto FFI_CudaGraph_Traits = {xla::ffi::Traits::kCmdBufferCompatible};
 
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType& type);
@@ -74,6 +75,21 @@ T get_attr_value(Dictionary& attrs, std::string attr_name,
   return attr.value();
 }
 
+template <typename T>
+T get_attr_value_or_default(Dictionary& attrs, std::string attr_name, T default_value,
+                            const source_location& loc = source_location::current()) {
+  auto attr = attrs.get<T>(attr_name);
+  if (attr.has_error()) {
+    NVTE_WARN("Failure in getting attribute value of '", attr_name, "'\n",
+              "Called from: ", loc.file_name(), ":", loc.line(), "\n",
+              "In function: ", loc.function_name(), "\n",
+              "Please ensure the attribute name and datatype match between C++ and Python APIs. "
+              "Currently falling back to a default value.");
+    return default_value;
+  }
+  return attr.value();
+}
+
 inline size_t product(const xla::ffi::Span<const int64_t>& data, size_t start_idx = 0,
                       size_t end_idx = 0) {
   end_idx = (end_idx == 0) ? data.size() : end_idx;
@@ -101,9 +117,25 @@ inline static size_t te_dtype_bytes(const DType& type) {
       return 1;
     case DType::kFloat8E8M0:
       return 1;
+    case DType::kFloat4E2M1:
+      return 1;
     default:
       NVTE_ERROR("Unsupported DType: ", static_cast<int>(type));
   }
+}
+
+template <typename... Args>
+Error_Type wrapInStreamCapture(std::function<Error_Type(cudaStream_t, Args...)> func,
+                               cudaStream_t stream, Args... args) {
+  cudaGraph_t graph{};
+  NVTE_CHECK_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed));
+
+  Error_Type error = func(stream, std::forward<Args>(args)...);
+
+  NVTE_CHECK_CUDA(cudaStreamEndCapture(stream, &graph));
+  NVTE_CHECK_CUDA(cudaGraphDestroy(graph));
+
+  return error;
 }
 
 }  // namespace jax

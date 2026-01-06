@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
@@ -22,16 +22,18 @@ from jax import value_and_grad, jit
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.typing import ArrayLike, DTypeLike
 
-from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax import autocast
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
+    AttnSoftmaxType,
     QKVLayout,
     QKVFormat,
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     fused_attn,
+    run_length_fill,
     make_swa_mask,
     SequenceDescriptor,
     CPStrategy,
@@ -58,14 +60,16 @@ def init():
     yield
 
 
-@partial(jax.jit, static_argnums=(5, 6, 7, 9))
+@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11))
 def general_dot_product_attention(
     query: ArrayLike,
     key: ArrayLike,
     value: ArrayLike,
+    softmax_offset: Optional[ArrayLike],
     bias: ArrayLike,
     mask: ArrayLike,
     deterministic: bool,
+    softmax_type: AttnSoftmaxType,
     scale_factor: float,
     dropout_rate: float,
     dropout_rng: ArrayLike,
@@ -98,7 +102,25 @@ def general_dot_product_attention(
             mask = jnp.expand_dims(mask, axis=-3)
         logits = jnp.where(mask, jnp.finfo(dtype).min, logits)
 
-    softmax_out = jax.nn.softmax(logits).astype(dtype)
+    match softmax_type:
+        case AttnSoftmaxType.VANILLA_SOFTMAX:
+            softmax_out = jax.nn.softmax(logits).astype(dtype)
+        case AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
+            # Softmax with +1 in denominator: exp(x_i) / (sum(exp(x_j)) + 1)
+            # Append a zero logit, apply standard softmax, then remove last column
+            zero_logit = jnp.zeros(logits.shape[:-1] + (1,), dtype=logits.dtype)
+            logits_with_extra = jnp.concatenate([logits, zero_logit], axis=-1)
+            softmax_with_extra = jax.nn.softmax(logits_with_extra, axis=-1)
+            softmax_out = softmax_with_extra[..., :-1].astype(dtype)
+        case AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            # Append learnable offset logit, apply standard softmax, then remove last column
+            learnable_logit = softmax_offset.reshape(1, h_kv, num_groups, 1, 1)
+            learnable_logit = jnp.broadcast_to(learnable_logit, logits.shape[:-1] + (1,))
+            logits_with_extra = jnp.concatenate([logits, learnable_logit], axis=-1)
+            softmax_with_extra = jax.nn.softmax(logits_with_extra, axis=-1)
+            softmax_out = softmax_with_extra[..., :-1].astype(dtype)
+        case _:
+            raise NotImplementedError(f"Unknown {softmax_type=}")
 
     if not deterministic and dropout_rate > 0.0:
         keep_prob = 1.0 - dropout_rate
@@ -172,15 +194,34 @@ def make_mask(
             jnp.arange(segment_ids_kv.shape[-1], dtype=jnp.int32), segment_ids_kv.shape
         )
 
-    # causal mask
-    if attn_mask_type.is_causal():
+    if attn_mask_type.is_bottom_right():
+        run_length_out_q = run_length_fill(segment_ids_q)
+        run_length_out_kv = run_length_fill(segment_ids_kv)
+        bottom_right_causal_mask = make_attention_mask(
+            run_length_out_q - segment_pos_q,
+            run_length_out_kv - segment_pos_kv,
+            jnp.less_equal,
+        )
+        inv_mask = combine_masks(bottom_right_causal_mask, inv_mask)
+    elif attn_mask_type.is_causal():
         inv_causal_mask = make_attention_mask(
             segment_pos_q, segment_pos_kv, lambda x, y: jnp.greater_equal(x, y)
         )
         inv_mask = combine_masks(inv_causal_mask, inv_mask)
 
     # sliding window mask
-    inv_swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, jnp.bool_)
+    inv_swa_mask = (
+        make_swa_mask(
+            segment_pos_q,
+            segment_pos_kv,
+            window_size,
+            dtype=jnp.bool,
+            segment_ids_q=segment_ids_q,
+            segment_ids_kv=segment_ids_kv,
+        )
+        if attn_mask_type.is_bottom_right()
+        else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool_)
+    )
     inv_mask = combine_masks(inv_mask, inv_swa_mask)
     mask = jnp.logical_not(inv_mask)
     return mask
@@ -218,7 +259,7 @@ def _split_valid_and_invalid(primitive, reference, pad):
     return primitive_valid, primitive_invalid, reference_valid, reference_invalid
 
 
-def jax_dpa(query, key, value, bias, mask, dropout_rng, **kwargs):
+def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs):
     """
     JAX native dot product attention implementation
     """
@@ -226,11 +267,13 @@ def jax_dpa(query, key, value, bias, mask, dropout_rng, **kwargs):
         query,
         key,
         value,
+        softmax_offset,
         bias,
         mask,
         deterministic=not kwargs["is_training"],
         scale_factor=kwargs["scaling_factor"],
         dropout_rate=kwargs["dropout_probability"],
+        softmax_type=kwargs["softmax_type"],
         dropout_rng=dropout_rng,
         dtype=jnp.float32,
     )
@@ -242,6 +285,7 @@ def customcall_fused_dpa(
     key,
     value,
     bias,
+    softmax_offset,
     sequence_descriptor,
     dropout_rng,
     **kwargs,
@@ -263,9 +307,9 @@ def customcall_fused_dpa(
             qkv_args = (query, key, value)
         case _:
             raise ValueError(f"Unsupported {qkv_layout=}")
-    return fused_attn(qkv_args, bias, sequence_descriptor, dropout_rng, **kwargs).astype(
-        query.dtype
-    )
+    return fused_attn(
+        qkv_args, bias, sequence_descriptor, dropout_rng, softmax_offset=softmax_offset, **kwargs
+    ).astype(query.dtype)
 
 
 class BiasShape(Enum):
@@ -300,6 +344,7 @@ class FusedAttnRunner:
     head_dim_v: int
     attn_bias_type: AttnBiasType
     attn_mask_type: AttnMaskType
+    softmax_type: AttnSoftmaxType
     dropout_prob: float
     dtype: DTypeLike
     is_training: bool
@@ -307,6 +352,8 @@ class FusedAttnRunner:
     bias_shape: BiasShape
     window_size: Tuple[int, int]
     seq_desc_format: SeqDescFormat
+    stripe_size: int | None = None
+    num_segments_per_seq: int | None = None
 
     # Specifies sharding resources for distributed tests
     number_of_devices: int = 1
@@ -320,6 +367,14 @@ class FusedAttnRunner:
 
     # dictionary of expected collective comm bytes
     coll_count_ref: Optional[Dict[str, int]] = None
+
+    def __post_init__(self):
+        # Reset defaults for num_segments_per_seq if not explicitly passed
+        if self.num_segments_per_seq is None:
+            if self.qkv_layout.is_thd():
+                self.num_segments_per_seq = 2
+            else:
+                self.num_segments_per_seq = 1
 
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
@@ -338,6 +393,16 @@ class FusedAttnRunner:
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
 
+        if self.attn_mask_type.is_bottom_right():
+            if self.max_seqlen_q > self.max_seqlen_kv:
+                pytest.skip(
+                    f"BRCM requires cross attn type pattern, i.e.max_seqlen_kv >= max_seqlen_q"
+                )
+            if self.attn_bias_type is not AttnBiasType.NO_BIAS:
+                pytest.skip(f"cuDNN does not support pre or post scale bias for BRCM")
+            if self.dropout_prob != 0.0:
+                pytest.skip(f"cuDNN does not support non-zero dropoouts for BRCM")
+
         if self.qkv_layout.is_qkvpacked():
             if self.max_seqlen_q != self.max_seqlen_kv:
                 pytest.skip(f"{self.qkv_layout} requires max_seqlen_q == max_seqlen_kv")
@@ -348,14 +413,14 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
-
+        # TODO(KshitijLakhani): Set the upper limit for skipping this test when cuDNN adds support
         if (
-            get_device_compute_capability(0) == 100
+            get_device_compute_capability(0) >= 100
             and self.dropout_prob == 0.1
             and self.attn_bias_type is not AttnBiasType.NO_BIAS
         ):
             pytest.skip(
-                "For sm100, bprop kernel support for dropout + determinism (bias) is not supported"
+                "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
             )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
@@ -372,6 +437,7 @@ class FusedAttnRunner:
             self.qkv_layout,
             self.attn_bias_type,
             self.attn_mask_type,
+            self.softmax_type,
             self.dropout_prob,
             self.num_heads_q,
             self.num_heads_kv,
@@ -409,7 +475,7 @@ class FusedAttnRunner:
         self.tp_size = self.mesh.shape.get(self.mesh_resource.tpsp_resource, 1)
 
         key = jax.random.PRNGKey(0)
-        q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
+        q_key, k_key, v_key, bias_key, dropout_key, softmax_key = jax.random.split(key, 6)
 
         q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
         k_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_qk)
@@ -459,6 +525,13 @@ class FusedAttnRunner:
             pad_ratio = 0.3
         else:
             pad_ratio = 0.0
+
+        if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            self.softmax_offset = jax.random.uniform(
+                softmax_key, (1, self.num_heads_q, 1, 1), jnp.float32, -1.0
+            )
+        else:
+            self.softmax_offset = None
 
         def gen_valid(bs, max_seqlen, pad_ratio):
             pad_len = int(max_seqlen * pad_ratio)
@@ -514,7 +587,6 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            self.num_segments_per_seq = 2
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
@@ -526,7 +598,11 @@ class FusedAttnRunner:
                 self.pad_kv = self.pad_q
             else:
                 # Force kv_len >= q_len for swa, otherwise, cuDNN kernels don't support
-                min_segment_len = None if self.window_size is None else self.seqlens_q
+                min_segment_len = None
+                if (
+                    self.window_size is not None or self.attn_mask_type.is_bottom_right()
+                ):  # SWA or BRCM requires kv_len >= q_len
+                    min_segment_len = self.seqlens_q
                 self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
                     self.batch_size,
                     self.max_seqlen_kv,
@@ -536,7 +612,6 @@ class FusedAttnRunner:
                 )
             self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
-            self.num_segments_per_seq = 1
             self.segment_ids_q, self.pad_q = gen_valid(
                 self.batch_size, self.max_seqlen_q, pad_ratio
             )
@@ -568,12 +643,14 @@ class FusedAttnRunner:
                 strategy=reorder_strategy,
                 cp_size=self.cp_size,
                 seq_dim=seq_dim,
+                stripe_size=self.stripe_size,
             )
             self.cp_inverse_reorder_fn = partial(
                 inverse_reorder_causal_load_balancing,
                 strategy=reorder_strategy,
                 cp_size=self.cp_size,
                 seq_dim=seq_dim,
+                stripe_size=self.stripe_size,
             )
         else:
             # no-ops for non cp or non load balanced
@@ -591,14 +668,24 @@ class FusedAttnRunner:
                         (self.offsets_q, self.offsets_kv),
                     )
                 case SeqDescFormat.SegmentIDs:
+                    # Exercise the path to generate the segment_pos in from_segment_ids_and_pos()
+                    # if no CP and load balancing, else explicitly pass the segment_pos
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (
                             self.cp_reorder_fn(self.segment_ids_q),
                             self.cp_reorder_fn(self.segment_ids_kv),
                         ),
                         (
-                            self.cp_reorder_fn(self.segment_pos_q),
-                            self.cp_reorder_fn(self.segment_pos_kv),
+                            (
+                                self.cp_reorder_fn(self.segment_pos_q),
+                                self.cp_reorder_fn(self.segment_pos_kv),
+                            )
+                            if self.cp_size > 1 and self.cp_load_balanced
+                            else None
+                        ),
+                        is_thd=self.qkv_layout.is_thd(),
+                        is_segment_ids_reordered=(
+                            True if self.cp_size > 1 and self.cp_load_balanced else False
                         ),
                     )
                 case _:
@@ -627,6 +714,8 @@ class FusedAttnRunner:
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (self.segment_ids_q, self.segment_ids_kv),
                         None,
+                        is_thd=self.qkv_layout.is_thd(),
+                        is_segment_ids_reordered=False,
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
@@ -679,6 +768,16 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
+        # Softmax offset sharding (1, num_heads, 1, 1)
+        # Use the same logic as HEAD_AXES: tpsp_resource if enabled, else tp_resource
+        head_resource = (
+            self.mesh_resource.tpsp_resource
+            if self.mesh_resource.tpsp_resource is not None
+            else self.mesh_resource.tp_resource
+        )
+        self.softmax_offset_pspec = PartitionSpec(None, head_resource, None, None)
+        self.softmax_offset_sharding = NamedSharding(self.mesh, self.softmax_offset_pspec)
+
         self.dropout_rng_pspec = PartitionSpec(
             None,
         )
@@ -694,11 +793,11 @@ class FusedAttnRunner:
 
     def test_forward(self):
         """
-        Test forward without JIT
+        Test forward with JITted primitive and unJITted reference
         """
         self._setup_inputs()
 
-        args = [self.q, self.k, self.v, self.bias, self.mask, self.dropout_rng]
+        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
 
         customcall_args = [
             # Put test data onto each GPU for distributed.
@@ -708,12 +807,14 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
+            "softmax_type": self.softmax_type,
             "scaling_factor": self.scaling_factor,
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
@@ -722,6 +823,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
+            "stripe_size": self.stripe_size,
         }
 
         customcall_fused_dpa_jit = jit(
@@ -732,12 +834,13 @@ class FusedAttnRunner:
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
+                self.softmax_offset_sharding,
                 self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ],
         )
 
-        with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+        with self.mesh, autocast(mesh_resource=self.mesh_resource):
             primitive_out = customcall_fused_dpa_jit(*customcall_args)
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
@@ -754,7 +857,7 @@ class FusedAttnRunner:
         assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
 
         if self.coll_count_ref is not None:
-            with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+            with self.mesh, autocast(mesh_resource=self.mesh_resource):
                 target_hlo = (
                     customcall_fused_dpa_jit.lower(*customcall_args, **kwargs).compile().as_text()
                 )
@@ -792,7 +895,7 @@ class FusedAttnRunner:
                 jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
             ).astype(self.dtype)
 
-        args = [self.q, self.k, self.v, self.bias, self.mask, self.dropout_rng]
+        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
         customcall_args = [
             # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
             # THD params once we support those features on CP.
@@ -800,12 +903,14 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
+            "softmax_type": self.softmax_type,
             "scaling_factor": self.scaling_factor,
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
@@ -814,6 +919,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
+            "stripe_size": self.stripe_size,
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
@@ -832,8 +938,16 @@ class FusedAttnRunner:
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
             value_and_grad(
-                lambda q, k, v, bias, *args: grad_func(
-                    customcall_fused_dpa, q, k, v, bias, *args, cp_reverse_out=True, **kwargs
+                lambda q, k, v, bias, softmax_offset, *args: grad_func(
+                    customcall_fused_dpa,
+                    q,
+                    k,
+                    v,
+                    bias,
+                    softmax_offset,
+                    *args,
+                    cp_reverse_out=True,
+                    **kwargs,
                 ),
                 arg_nums,
             ),
@@ -842,6 +956,7 @@ class FusedAttnRunner:
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
+                self.softmax_offset_sharding,
                 self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ),
@@ -849,12 +964,14 @@ class FusedAttnRunner:
         )
         jitted_reference = jit(
             value_and_grad(
-                lambda q, k, v, bias, *args: grad_func(jax_dpa, q, k, v, bias, *args, **kwargs),
+                lambda q, k, v, bias, softmax_offset, *args: grad_func(
+                    jax_dpa, q, k, v, bias, softmax_offset, *args, **kwargs
+                ),
                 arg_nums,
             )
         )
 
-        with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+        with self.mesh, autocast(mesh_resource=self.mesh_resource):
             primitive_out, primitive_dgrad = jitted_primitive(*customcall_args)
 
         reference_out, reference_dgrad = jitted_reference(*args)
@@ -925,7 +1042,7 @@ class FusedAttnRunner:
             )
 
         if self.coll_count_ref is not None:
-            with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+            with self.mesh, autocast(mesh_resource=self.mesh_resource):
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
@@ -937,6 +1054,17 @@ class FusedAttnRunner:
         pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
         pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
         pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "softmax_type",
+    [
+        pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+        pytest.param(AttnSoftmaxType.OFF_BY_ONE_SOFTMAX, id="OFF_BY_ONE_SOFTMAX"),
+        pytest.param(AttnSoftmaxType.LEARNABLE_SOFTMAX, id="LEARNABLE_SOFTMAX"),
     ],
 )
 @pytest.mark.parametrize(
@@ -958,14 +1086,14 @@ class FusedAttnRunner:
         ),
         pytest.param(
             2,
-            2048,
+            512,
             1024,
             12,
             12,
             64,
             64,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-64-BF16-CROSS",
+            id="2-512-1024-12-12-64-64-BF16-CROSS",
         ),
         pytest.param(
             2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
@@ -1047,6 +1175,7 @@ class TestFusedAttn:
         d_v,
         attn_bias_type,
         attn_mask_type,
+        softmax_type,
         dropout_prob,
         dtype,
         is_training,
@@ -1073,6 +1202,7 @@ class TestFusedAttn:
             d_v,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             dtype,
             is_training,
@@ -1101,6 +1231,7 @@ class TestFusedAttn:
         d_v,
         attn_bias_type,
         attn_mask_type,
+        softmax_type,
         dropout_prob,
         dtype,
         qkv_layout,
@@ -1124,6 +1255,7 @@ class TestFusedAttn:
             d_v,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             dtype,
             True,

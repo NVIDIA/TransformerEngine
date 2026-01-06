@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -9,16 +9,16 @@ These wrappers add logic related to debugging, using the nvdlfw_inspect package.
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union
+from typing import Optional, Tuple, Iterable, Union, List
 import torch
 
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
-    QuantizedTensorBase,
+    QuantizedTensorStorage,
     prepare_for_saving,
     restore_from_saved,
 )
@@ -556,8 +556,25 @@ class DebugQuantizer(Quantizer):
         if not self.output_tensor:
             self._update_parent_quantizer_usage()
 
+    @classmethod
+    def multi_tensor_quantize(
+        cls,
+        tensor: torch.Tensor,
+        quantizers: List[Quantizer],
+        m_splits: List[int],
+        activation_dtype: torch.dtype,
+    ) -> List[DebugQuantizedTensor]:
+        """
+        Splits a tensor into a list of tensors and quantizes each tensor using a list of quantizers.
+        """
+        tensors = torch.split(tensor, m_splits)
+        output = []
+        for tensor, quantizer in zip(tensors, quantizers):
+            output.append(quantizer.quantize(tensor, dtype=activation_dtype))
+        return output
 
-class DebugQuantizedTensor(QuantizedTensorBase):
+
+class DebugQuantizedTensor(QuantizedTensorStorage):
     """
     Class containing quantized tensors after debug. Depending on configuration
     it can contain one or two different objects. These objects can be accessed by the method
@@ -623,9 +640,9 @@ class DebugQuantizedTensor(QuantizedTensorBase):
         """Is used in the python gemm() to get tensor or transpose of the tensor."""
         return self.rowwise_gemm_tensor if not transpose else self.columnwise_gemm_tensor
 
-    def size(self):
+    def size(self, *args):
         """Size of the tensor."""
-        return self.rowwise_gemm_tensor.size()
+        return self.rowwise_gemm_tensor.size(*args)
 
     def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""

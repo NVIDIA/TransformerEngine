@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -54,10 +54,25 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
     return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
   }
 
-  // Unfused impl if quantizer is not supported
-  const bool with_fused_dbias_quantize_kernel =
-      detail::IsFloat8Quantizers(quantizer.ptr()) || detail::IsMXFP8Quantizers(quantizer.ptr());
-  if (!with_fused_dbias_quantize_kernel) {
+  // Check if fused kernel is supported
+  bool with_fused_kernel = false;
+  if (detail::IsFloat8Quantizers(quantizer.ptr())) {
+    auto prop = at::cuda::getCurrentDeviceProperties();
+    const size_t sm_arch = 10 * prop->major + prop->minor;
+    if (sm_arch >= 100) {
+      // Fused kernel for dbias + FP8 cast on SM arch 10.0+
+      with_fused_kernel = true;
+    } else if (quantizer_cpp->rowwise_usage && quantizer_cpp->columnwise_usage) {
+      // Fused kernel for dbias + FP8 cast + FP8 transpose
+      with_fused_kernel = true;
+    }
+  } else if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
+    // Fused kernel for dbias + MXFP8 quantize
+    with_fused_kernel = true;
+  }
+
+  // Apply unfused impl if fused kernel is not supported
+  if (!with_fused_kernel) {
     at::sum_out(grad_bias_torch, grad_output_torch.reshape({-1, bias_size}), {0});
     quantizer_cpp->quantize(grad_output_nvte, grad_input_nvte);
     return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
@@ -122,13 +137,27 @@ std::vector<py::object> dact_dbias(
   }
 
   // Choose implementation
-  enum class Impl { UNFUSED, FUSED_DACT_DBIAS_QUANTIZE, FUSED_DACT_AMAX };
+  enum class Impl {
+    UNFUSED,
+    FUSED_DACT_DBIAS_QUANTIZE,
+    FUSED_DACT_AMAX_FP8,
+    FUSED_DACT_AMAX_NVFP4
+  };
   Impl impl = Impl::UNFUSED;
   if (detail::IsFloat8Quantizers(quantizer_py.ptr()) ||
       detail::IsMXFP8Quantizers(quantizer_py.ptr())) {
     impl = Impl::FUSED_DACT_DBIAS_QUANTIZE;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
-    impl = Impl::FUSED_DACT_AMAX;
+    impl = Impl::FUSED_DACT_AMAX_FP8;
+  } else if (detail::IsNVFP4Quantizers(quantizer_py.ptr())) {
+    auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+    NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
+    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
+      // Post-RHT amax is handled within NVFP4 quantizer
+      impl = Impl::UNFUSED;
+    } else {
+      impl = Impl::FUSED_DACT_AMAX_NVFP4;
+    }
   }
 
   // Perform compute
@@ -172,20 +201,38 @@ std::vector<py::object> dact_dbias(
         });
         break;
       }
-    case Impl::FUSED_DACT_AMAX:
-      // Fused dact-amax kernel, unfused dbias and quantize
+    case Impl::FUSED_DACT_AMAX_FP8:
+      // Fused dact-amax kernel, unfused dbias and FP8 quantize
       {
-        auto *quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-        NVTE_CHECK(quantizer_cpp_cs != nullptr,
+        auto *fp8_quantizer_cpp =
+            dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+        NVTE_CHECK(fp8_quantizer_cpp != nullptr,
                    "Invalid quantizer for fused dact-amax kernel impl");
         auto [temp_nvte, temp_py] =
-            quantizer_cpp_cs->create_hp_tensor_with_amax(input_shape, grad_output_dtype);
+            fp8_quantizer_cpp->create_unquantized_tensor_with_amax(input_shape, grad_output_dtype);
         NVTE_SCOPED_GIL_RELEASE({
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
         const auto temp_torch = temp_py.cast<at::Tensor>();
         at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
-        quantizer_cpp_cs->quantize_with_amax(temp_nvte, grad_input_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
+        break;
+      }
+    case Impl::FUSED_DACT_AMAX_NVFP4:
+      // Fused dact-amax kernel, unfused dbias and NVFP4 quantize
+      {
+        auto *nvfp4_quantizer_cpp =
+            static_cast<NVFP4Quantizer *>(quantizer_cpp.get());  // Already checked cast is valid
+        NVTE_CHECK(nvfp4_quantizer_cpp != nullptr,
+                   "Invalid quantizer for fused dact-amax kernel impl");
+        auto [temp_nvte, temp_py] = nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(
+            grad_input_nvte, grad_output_dtype);
+        NVTE_SCOPED_GIL_RELEASE({
+          dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
+        });
+        const auto temp_torch = temp_py.cast<at::Tensor>();
+        at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
+        nvfp4_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
         break;
       }
     default:

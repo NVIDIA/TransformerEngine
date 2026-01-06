@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Transformer Engine bindings for JAX.
@@ -34,7 +34,7 @@ load_framework_extension("jax")
 from . import flax
 from . import quantize
 
-from .quantize import fp8_autocast, update_collections, get_delayed_scaling
+from .quantize import autocast, fp8_autocast, update_collections
 from .quantize import NVTE_FP8_COLLECTION_NAME
 
 from .sharding import MeshResource
@@ -45,9 +45,9 @@ from ..common.utils import DeprecatedEnum
 
 __all__ = [
     "NVTE_FP8_COLLECTION_NAME",
+    "autocast",
     "fp8_autocast",
     "update_collections",
-    "get_delayed_scaling",
     "MeshResource",
     "flax",
     "quantize",

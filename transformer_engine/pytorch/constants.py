@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -89,3 +89,5 @@ GemmParallelModes = ("row", "column", None)
 dist_group_type = torch.distributed.ProcessGroup
 
 MXFP8_BLOCK_SCALING_SIZE = 32
+
+NVFP4_BLOCK_SCALING_SIZE = 16

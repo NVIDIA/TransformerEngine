@@ -1,11 +1,10 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Unit tests for context parallel utils."""
 import torch
 import unittest
-from typing import Tuple
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_batch_on_this_cp_rank,
     pad_thd_sequences_for_cp,
