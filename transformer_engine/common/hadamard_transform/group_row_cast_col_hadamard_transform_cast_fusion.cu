@@ -1316,7 +1316,8 @@ void group_row_col_rht_gemm_ntt_w_sfc(int packed_sequence_length, int hidden_siz
 void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tensor *> &output_list,
                                           const size_t *split_sections, size_t num_tensors,
                                           const Tensor &hadamard_matrix_,
-                                          QuantizationConfig &quant_config, cudaStream_t stream) {
+                                          QuantizationConfig &quant_config, Tensor &quant_workspace,
+                                          cudaStream_t stream) {
   NVTE_API_CALL(group_hadamard_transform_cast_fusion);
 
   using transformer_engine::detail::kMaxTensorsPerKernel;
@@ -1398,15 +1399,10 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
   }
 
   uint32_t *tile_scheduler_workspace = nullptr;
-  NVTE_CHECK(quant_config.tile_scheduler_workspace != nullptr,
-             "Tile scheduler workspace must be provided.");
-  Tensor &tile_scheduler_workspace_tensor =
-      *convertNVTETensorCheck(quant_config.tile_scheduler_workspace);
-  NVTE_CHECK(tile_scheduler_workspace_tensor.dtype() == DType::kInt32 &&
-                 tile_scheduler_workspace_tensor.data.shape == std::vector<size_t>{1},
-             "Tile scheduler workspace must be a tensor with shape [1] and dtype int32.");
-  tile_scheduler_workspace =
-      reinterpret_cast<uint32_t *>(tile_scheduler_workspace_tensor.data.dptr);
+  NVTE_CHECK(quant_workspace.data.dptr != nullptr, "Quantization workspace must be provided.");
+  NVTE_CHECK(quant_workspace.data.buffer_size_bytes() >= sizeof(uint32_t),
+             "Quantization workspace must be at least 4 bytes.");
+  tile_scheduler_workspace = reinterpret_cast<uint32_t *>(quant_workspace.data.dptr);
 
   // Template arguments
   using TA = cute::bfloat16_t;
@@ -1489,7 +1485,7 @@ void nvte_group_hadamard_transform_cast_fusion(const NVTETensor input, NVTETenso
                                                const size_t *split_sections,
                                                const size_t num_tensors,
                                                const NVTEQuantizationConfig quant_config,
-                                               cudaStream_t stream) {
+                                               NVTETensor quant_workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_hadamard_transform_cast_fusion);
   using namespace transformer_engine;
   NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
@@ -1500,6 +1496,8 @@ void nvte_group_hadamard_transform_cast_fusion(const NVTETensor input, NVTETenso
     output_list[i] = convertNVTETensorCheck(outputs[i]);
   }
 
+  Tensor *quant_workspace_tensor = convertNVTETensorCheck(quant_workspace);
+
   QuantizationConfig quant_config_cpp;
   if (quant_config != nullptr) {
     quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
@@ -1508,5 +1506,5 @@ void nvte_group_hadamard_transform_cast_fusion(const NVTETensor input, NVTETenso
   // Call the multi-tensor Hadamard transform amax implementation.
   group_hadamard_transform_cast_fusion(*input_tensor, output_list, split_sections, num_tensors,
                                        *convertNVTETensorCheck(hadamard_matrix), quant_config_cpp,
-                                       stream);
+                                       *quant_workspace_tensor, stream);
 }

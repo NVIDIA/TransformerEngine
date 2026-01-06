@@ -902,9 +902,6 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       std::memcpy(buf, &config_.use_fast_math, attr_size);
       break;
-    case kNVTEQuantizationConfigTileSchedulerWorkspace:
-      std::memcpy(buf, &config_.tile_scheduler_workspace, attr_size);
-      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -951,9 +948,6 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigUseFastMath:
       std::memcpy(&config_.use_fast_math, buf, attr_size);
-      break;
-    case kNVTEQuantizationConfigTileSchedulerWorkspace:
-      std::memcpy(&config_.tile_scheduler_workspace, buf, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
