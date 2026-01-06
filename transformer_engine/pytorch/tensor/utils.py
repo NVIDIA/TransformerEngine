@@ -177,14 +177,39 @@ def cast_master_weights_to_nvfp4(
     else:
         use_fsdp_shard_model_weights = True
 
+    # Batch convert master_weights to model dtype (single kernel instead of N kernels)
+    # All NVFP4 model_weights should have the same dtype (BF16)
+    if len(model_weights) > 0:
+        target_dtype = model_weights[0].dtype
+        
+        # Collect non-None master_weights and their indices
+        non_none_indices = []
+        non_none_weights = []
+        sizes = []
+        for i, mw in enumerate(master_weights):
+            if mw is not None:
+                non_none_indices.append(i)
+                non_none_weights.append(mw.view(-1))
+                sizes.append(mw.numel())
+        
+        if len(non_none_weights) > 0 and non_none_weights[0].dtype != target_dtype:
+            # Concatenate, convert once, then split
+            concatenated = torch.cat(non_none_weights)
+            converted = concatenated.to(target_dtype)
+            split_weights = torch.split(converted, sizes)
+            
+            # Rebuild master_weights list with converted tensors
+            converted_master_weights = list(master_weights)
+            for idx, split_w, orig_mw in zip(non_none_indices, split_weights, 
+                                              [master_weights[i] for i in non_none_indices]):
+                converted_master_weights[idx] = split_w.view(orig_mw.shape)
+            master_weights = converted_master_weights
+
     for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
         model_weights, master_weights, start_offsets, fsdp_shard_model_weights
     ):
         if hasattr(model_weight, "clear_high_precision_init_val"):
             model_weight.clear_high_precision_init_val()
-
-        if master_weight is not None:
-            master_weight = master_weight.to(model_weight.dtype)
 
         quantizer = model_weight._get_quantizer()
         if isinstance(quantizer, NVFP4Quantizer):
@@ -537,8 +562,6 @@ def _cast_master_weights_to_nvfp4_2d(
     device = params[0][0].device
     block_len = NVFP4_BLOCK_SCALING_SIZE
 
-    dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=device)
-
     cu_amax_sizes = [0]
     tile_shapes: List[tuple[int, int]] = []
     row_sizes: List[int] = []
@@ -562,6 +585,7 @@ def _cast_master_weights_to_nvfp4_2d(
         cu_amax_sizes.append(cu_amax_sizes[-1] + num_amaxes)
 
     packed_amaxes = torch.zeros(cu_amax_sizes[-1], dtype=torch.float32, device=device)
+    packed_scales = torch.zeros(cu_amax_sizes[-1], dtype=torch.float32, device=device)
 
     amaxes: List[torch.Tensor] = []
     scales: List[torch.Tensor] = []
@@ -573,7 +597,7 @@ def _cast_master_weights_to_nvfp4_2d(
     for i, (model_weight, master_weight, start_offset, _) in enumerate(params):
         scale_shape = tile_shapes[i]
         amax = packed_amaxes[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].reshape(scale_shape)
-        scale = torch.empty(scale_shape, dtype=torch.float32, device=device)
+        scale = packed_scales[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].reshape(scale_shape)
         global_amax_view = global_amax_views[i]
 
         assert model_weight._rowwise_scale_inv is not None
@@ -599,18 +623,16 @@ def _cast_master_weights_to_nvfp4_2d(
     # Use GPU kernel to compute global encode scales from global amaxes
     # This replaces multiple Python tensor operations with a single kernel
     global_scale_tensor = torch.empty_like(global_amaxes)
-    if len(amaxes) > 0:
-        tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor)
-        global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
+    
+    tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor)
+    global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
-        # Use GPU kernel for computing per-block decode scales
-        # Takes global_amax (not global_scale) and computes scale internally
-        for amax_tensor, scale_tensor, global_amax_view in zip(
-            amaxes, scales, [global_amaxes[i : i + 1] for i in range(len(params))]
-        ):
-            tex.nvfp4_compute_per_block_scale(amax_tensor, scale_tensor, global_amax_view.item())
-    else:
-        global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
+    # Use GPU kernel for computing per-block decode scales
+    # Takes global_amax (not global_scale) and computes scale internally
+    for amax_tensor, scale_tensor, global_amax_view in zip(
+        amaxes, scales, [global_amaxes[i : i + 1] for i in range(len(params))]
+    ):
+        tex.nvfp4_compute_per_block_scale(amax_tensor, scale_tensor, global_amax_view.item())
 
     zipped_meta = zip(
         tile_shapes,
