@@ -29,7 +29,7 @@ Transformer Engine documentation
    :caption: Getting Started
 
    installation
-   getting_started
+   getting_started/index
    faq
 
 .. toctree::
