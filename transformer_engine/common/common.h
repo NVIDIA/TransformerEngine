@@ -395,6 +395,7 @@ struct QuantizationConfig {
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
+  NVTETensor tile_scheduler_workspace = nullptr;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(bool),                          // force_pow_2_scales
@@ -404,7 +405,8 @@ struct QuantizationConfig {
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(bool),                          // nvfp4_2d_quantization
       sizeof(bool),                          // stochastic_rounding
-      sizeof(bool)                           // use_fast_math
+      sizeof(bool),                          // use_fast_math
+      sizeof(NVTETensor)                     // tile_scheduler_workspace
   };
 };
 

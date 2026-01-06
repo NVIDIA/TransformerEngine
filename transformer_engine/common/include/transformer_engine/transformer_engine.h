@@ -343,6 +343,8 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
+  /*! Tile scheduler workspace (NVTETensor with 1 uint32_t element) */
+  kNVTEQuantizationConfigTileSchedulerWorkspace = 8,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1007,6 +1009,12 @@ class QuantizationConfigWrapper {
   void set_use_fast_math(bool use_fast_math) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath,
                                            &use_fast_math, sizeof(bool));
+  }
+
+  /*! \brief Set tile scheduler workspace */
+  void set_tile_scheduler_workspace(NVTETensor tile_scheduler_workspace) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigTileSchedulerWorkspace,
+                                           &tile_scheduler_workspace, sizeof(NVTETensor));
   }
 
  private:
