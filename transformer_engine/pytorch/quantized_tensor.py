@@ -393,7 +393,6 @@ class QuantizedTensor(torch.Tensor):
         super().requires_grad_(requires_grad)
         return self
 
- 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Convert quantized data to standard PyTorch tensor"""
         raise NotImplementedError(
