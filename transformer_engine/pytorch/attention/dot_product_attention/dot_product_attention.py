@@ -61,10 +61,18 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FlashAttention,
 )
 
+#########################################################################
 # Save reference to native FlashAttention for fallback
 _FlashAttentionNative = FlashAttention
 # Use plugin system's flash_attention if available, otherwise use native
 FlashAttention = getattr(tex, 'flash_attention', _FlashAttentionNative)
+# Save the original get_attention_backend for backends that want to use default logic
+# CUDA backend can access this via dpa_utils._original_get_attention_backend
+dpa_utils._original_get_attention_backend = dpa_utils.get_attention_backend
+# Replace dpa_utils.get_attention_backend with tex.get_attention_backend
+# This allows each backend (FlagOS, CUDA, Reference) to control its own backend selection
+dpa_utils.get_attention_backend = tex.get_attention_backend
+#########################################################################
 
 # Setup Attention Logging
 attn_log.setup_logging()

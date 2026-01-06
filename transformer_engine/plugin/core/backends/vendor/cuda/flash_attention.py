@@ -72,7 +72,7 @@ class FlashAttentionCUDA(FlashAttentionBase):
     def backend_name(self) -> str:
         return "cuda"
 
-    def forward(
+    def _forward_impl(
         self,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,

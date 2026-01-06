@@ -44,6 +44,38 @@ class ReferenceBackend(TEFLBackendBase):
         from .flash_attention import FlashAttentionTorch
         return FlashAttentionTorch
 
+    def get_attention_backend(self, attention_params=None):
+        from packaging.version import Version as PkgVersion
+        from ...logger_manager import get_logger
+        logger = get_logger()
+
+        # Read environment variables to determine which backends to enable
+        use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+        use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+        use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
+
+        # Log disabled backends
+        if not use_flash_attention:
+            logger.info_once("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
+        if not use_fused_attention:
+            logger.info_once("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
+        if not use_unfused_attention:
+            logger.info_once("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
+
+        flash_attention_backend = PkgVersion("2.6.0") if use_flash_attention else None
+        fused_attention_backend = NVTE_Fused_Attn_Backend.NVTE_No_Backend
+
+        available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
+
+        return (
+            use_flash_attention,
+            flash_attention_backend,
+            use_fused_attention,
+            fused_attention_backend,
+            use_unfused_attention,
+            available_backends,
+        )
+
     def generic_gemm(
         self,
         A: torch.Tensor,

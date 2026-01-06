@@ -32,7 +32,6 @@ from transformer_engine.pytorch.attention.inference import InferenceParams
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 
 from transformer_engine.plugin.core.ops import FlashAttentionBase
-from transformer_engine.plugin.core.logger_manager import print_once
 
 import flag_gems
 
@@ -231,7 +230,6 @@ class FlashAttentionFL(FlashAttentionBase):
             layer_number=layer_number,
             deterministic=deterministic,
         )
-
         self.use_FAv2_bwd = os.getenv(
             "NVTE_FUSED_ATTN_USE_FAv2_BWD", "0"
         ) == "1" and get_device_compute_capability() == (9, 0)
@@ -255,7 +253,7 @@ class FlashAttentionFL(FlashAttentionBase):
         return "flagos"
 
     @no_torch_dynamo()
-    def forward(
+    def _forward_impl(
         self,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,

@@ -6,8 +6,12 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Type
 from enum import IntEnum
 from contextlib import nullcontext
-
+import os
+import traceback
 import torch
+
+from .logger_manager import get_logger
+logger = get_logger()
 
 class DType(IntEnum):
     kByte = 0
@@ -185,6 +189,9 @@ class TEFLBackendBase(ABC):
         raise NotImplementedError
 
     def get_flash_attention_class(self) -> Type["FlashAttentionBase"]:
+        raise NotImplementedError
+
+    def get_attention_backend(self, attention_params=None):
         raise NotImplementedError
 
     def quantize(
@@ -1062,6 +1069,9 @@ class TEFLBackendBase(ABC):
         raise NotImplementedError
 
 class FlashAttentionBase(torch.nn.Module, ABC):
+    # Class-level tracking for last logged implementation
+    _last_impl_id: Optional[str] = None
+
     def __init__(
         self,
         softmax_scale: float,
@@ -1079,6 +1089,43 @@ class FlashAttentionBase(torch.nn.Module, ABC):
         self.attention_type = attention_type
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
+
+        # For fallback support
+        self._manager = None
+        self._init_params = None
+
+    @abstractmethod
+    def _forward_impl(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        qkv_layout: str = "sbh3d",
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
+        attn_mask_type: str = "causal",
+        window_size: Optional[Tuple[int, int]] = None,
+        alibi_slopes: Optional[torch.Tensor] = None,
+        cp_group: Optional[Any] = None,
+        cp_global_ranks: Optional[List[int]] = None,
+        cp_stream: Optional[torch.cuda.Stream] = None,
+        cp_comm_type: str = "p2p",
+        fp8: bool = False,
+        fp8_meta: Optional[Dict[str, Any]] = None,
+        quantizers: Optional[Any] = None,
+        inference_params: Optional[Any] = None,
+        flash_attention_backend: Optional[Any] = None,
+        fp8_output: bool = False,
+    ) -> torch.Tensor:
+        """
+        Actual forward implementation - subclasses must implement this.
+
+        This method contains the backend-specific logic for flash attention.
+        """
+        raise NotImplementedError("Subclasses must implement _forward_impl()")
 
     def forward(
         self,
@@ -1105,7 +1152,252 @@ class FlashAttentionBase(torch.nn.Module, ABC):
         flash_attention_backend: Optional[Any] = None,
         fp8_output: bool = False,
     ) -> torch.Tensor:
-        raise NotImplementedError("Subclasses must implement forward()")
+        """
+        Forward pass with automatic fallback support.
+        If TE_FL_STRICT=1 (default), this will automatically try alternative
+        implementations if the primary one fails.
+        """
+        # Check if fallback is enabled
+        enable_fallback = os.getenv("TE_FL_STRICT", "1") != "0"
+
+        # Key for tracking this operation (use op name)
+        layer_key = "get_flash_attention_class"
+
+        # If no manager or fallback disabled, use direct implementation
+        if self._manager is None or not enable_fallback:
+            # Try to get implementation details from manager if available
+            if self._manager is not None:
+                snap = self._manager.registry.snapshot()
+                # Find the impl that matches this instance's class
+                class_name_lower = self.__class__.__name__.lower()
+                impl_id = None
+
+                for impl in snap.impls_by_op.get(layer_key, []):
+                    if impl.impl_id == class_name_lower or class_name_lower.startswith(impl.impl_id):
+                        impl_id = impl.impl_id
+                        break
+
+                # Log using info_once (it handles deduplication)
+                if impl_id is not None:
+                    for impl in snap.impls_by_op.get(layer_key, []):
+                        if impl.impl_id == impl_id:
+                            # Only log if first time or implementation actually changed
+                            if FlashAttentionBase._last_impl_id is None:
+                                logger.info_once(
+                                    f"Op '{layer_key}' using '{impl_id}' "
+                                    f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                                )
+                            elif FlashAttentionBase._last_impl_id != impl_id:
+                                logger.info_once(
+                                    f"Op '{layer_key}' switched from '{FlashAttentionBase._last_impl_id}' to '{impl_id}' "
+                                    f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                                )
+                            break
+                    # Update tracking
+                    FlashAttentionBase._last_impl_id = impl_id
+
+            return self._forward_impl(
+                query_layer=query_layer,
+                key_layer=key_layer,
+                value_layer=value_layer,
+                attention_mask=attention_mask,
+                qkv_layout=qkv_layout,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                attn_mask_type=attn_mask_type,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                cp_group=cp_group,
+                cp_global_ranks=cp_global_ranks,
+                cp_stream=cp_stream,
+                cp_comm_type=cp_comm_type,
+                fp8=fp8,
+                fp8_meta=fp8_meta,
+                quantizers=quantizers,
+                inference_params=inference_params,
+                flash_attention_backend=flash_attention_backend,
+                fp8_output=fp8_output,
+            )
+
+        # Fallback mode: try candidates in priority order
+        candidates = []
+        try:
+            candidates = self._manager.resolve_candidates(layer_key)
+        except Exception as resolve_error:
+            logger.error(f"Failed to resolve fallback candidates: {resolve_error}")
+            # If we can't get candidates, just try the primary implementation
+            return self._forward_impl(
+                query_layer=query_layer,
+                key_layer=key_layer,
+                value_layer=value_layer,
+                attention_mask=attention_mask,
+                qkv_layout=qkv_layout,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                attn_mask_type=attn_mask_type,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                cp_group=cp_group,
+                cp_global_ranks=cp_global_ranks,
+                cp_stream=cp_stream,
+                cp_comm_type=cp_comm_type,
+                fp8=fp8,
+                fp8_meta=fp8_meta,
+                quantizers=quantizers,
+                inference_params=inference_params,
+                flash_attention_backend=flash_attention_backend,
+                fp8_output=fp8_output,
+            )
+
+        # Find current implementation's impl_id
+        snap = self._manager.registry.snapshot()
+        current_impl_id = None
+        current_class = self.__class__
+
+        for impl in snap.impls_by_op.get(layer_key, []):
+            try:
+                # Check if this impl creates our current class
+                impl_class = impl.fn()
+                if impl_class == current_class:
+                    current_impl_id = impl.impl_id
+                    break
+            except:
+                continue
+
+        # Try primary implementation first and capture any error
+        primary_error = None
+        try:
+            result = self._forward_impl(
+                query_layer=query_layer,
+                key_layer=key_layer,
+                value_layer=value_layer,
+                attention_mask=attention_mask,
+                qkv_layout=qkv_layout,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                attn_mask_type=attn_mask_type,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                cp_group=cp_group,
+                cp_global_ranks=cp_global_ranks,
+                cp_stream=cp_stream,
+                cp_comm_type=cp_comm_type,
+                fp8=fp8,
+                fp8_meta=fp8_meta,
+                quantizers=quantizers,
+                inference_params=inference_params,
+                flash_attention_backend=flash_attention_backend,
+                fp8_output=fp8_output,
+            )
+            # Primary implementation succeeded
+            return result
+        except Exception as e:
+            primary_error = e
+            # Log the primary failure
+            error_summary = f"{type(e).__name__}: {str(e)}"
+            logger.warning_once(
+                f"Implementation '{current_impl_id}' failed for op '{layer_key}' "
+                f" - {error_summary}"
+            )
+            # Log full traceback if verbose mode is enabled
+            if os.getenv("TE_FL_VERBOSE_ERROR", "0") == "1":
+                error_traceback = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+                logger.warning(f"Detailed traceback for '{current_impl_id}':\n{error_traceback}")
+
+        last_error = primary_error
+
+        for idx, impl in enumerate(candidates):
+            # Skip the current implementation (already tried above)
+            if impl.impl_id == current_impl_id:
+                continue
+
+            try:
+                # All attempts here are fallbacks (since we skipped current impl)
+                # Get fallback class and create instance
+                fallback_class = impl.fn()
+                fallback_instance = fallback_class(**self._init_params)
+                # Set manager for nested fallback support
+                fallback_instance._manager = self._manager
+                fallback_instance._init_params = self._init_params
+
+                # Call the implementation directly (not forward, to avoid recursion)
+                result = fallback_instance._forward_impl(
+                    query_layer=query_layer,
+                    key_layer=key_layer,
+                    value_layer=value_layer,
+                    attention_mask=attention_mask,
+                    qkv_layout=qkv_layout,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    attn_mask_type=attn_mask_type,
+                    window_size=window_size,
+                    alibi_slopes=alibi_slopes,
+                    cp_group=cp_group,
+                    cp_global_ranks=cp_global_ranks,
+                    cp_stream=cp_stream,
+                    cp_comm_type=cp_comm_type,
+                    fp8=fp8,
+                    fp8_meta=fp8_meta,
+                    quantizers=quantizers,
+                    inference_params=inference_params,
+                    flash_attention_backend=flash_attention_backend,
+                    fp8_output=fp8_output,
+                )
+
+                # Log on fallback success
+                logger.info_once(
+                    f"Op '{layer_key}' fallback to '{impl.impl_id}' "
+                    f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                )
+
+                # Update tracking on success
+                FlashAttentionBase._last_impl_id = impl.impl_id
+                return result
+
+            except Exception as e:
+                last_error = e
+                # Determine if there are more candidates to try
+                has_more_candidates = any(
+                    c.impl_id != current_impl_id
+                    for c in candidates[idx+1:]
+                )
+
+                # Format error summary
+                error_summary = f"{type(e).__name__}: {str(e)}"
+
+                if has_more_candidates:
+                    logger.warning_once(
+                        f"Implementation '{impl.impl_id}' failed for op '{layer_key}' - {error_summary}"
+                    )
+                else:
+                    # Last candidate failed
+                    logger.error_once(
+                        f"Last implementation '{impl.impl_id}' failed for op '{layer_key}' - {error_summary}"
+                    )
+
+                # Log full traceback if verbose mode is enabled
+                if os.getenv("TE_FL_VERBOSE_ERROR", "0") == "1":
+                    error_traceback = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+                    log_func = logger.error if not has_more_candidates else logger.warning
+                    log_func(f"Detailed traceback for '{impl.impl_id}':\n{error_traceback}")
+
+        # All implementations failed
+        logger.error(
+            f"All implementations failed for op '{layer_key}'. "
+            f"Original: '{current_impl_id}'"
+        )
+        raise RuntimeError(
+            f"All implementation(s) failed for op='{layer_key}'. "
+            f"Last error: {last_error}"
+        ) from last_error
 
     @property
     def backend_name(self) -> str:
@@ -1123,10 +1415,7 @@ class TEFLModule:
         """
         # Import here to avoid circular dependency
         from .manager import get_default_manager
-        from .logger_manager import get_logger
-
         self._manager = manager if manager is not None else get_default_manager()
-        self._logger = get_logger()
 
         self.DType = DType
         self.Float8BlockScaleTensorFormat = Float8BlockScaleTensorFormat
@@ -1216,15 +1505,24 @@ class TEFLModule:
         # This provides the same fallback support and logging as other operators
         flash_attn_class = self._manager.call("get_flash_attention_class")
 
-        # Instantiate and return the FlashAttention
-        return flash_attn_class(
-            softmax_scale=softmax_scale,
-            attention_dropout=attention_dropout,
-            attention_dropout_ctx=attention_dropout_ctx,
-            attention_type=attention_type,
-            layer_number=layer_number,
-            deterministic=deterministic,
-        )
+        # Prepare initialization parameters
+        init_params = {
+            'softmax_scale': softmax_scale,
+            'attention_dropout': attention_dropout,
+            'attention_dropout_ctx': attention_dropout_ctx,
+            'attention_type': attention_type,
+            'layer_number': layer_number,
+            'deterministic': deterministic,
+        }
+
+        # Instantiate the FlashAttention
+        instance = flash_attn_class(**init_params)
+
+        # Set manager and init_params for fallback support
+        instance._manager = self._manager
+        instance._init_params = init_params
+
+        return instance
 
     def __repr__(self) -> str:
         op_count = len(self._manager.registry.list_operators())

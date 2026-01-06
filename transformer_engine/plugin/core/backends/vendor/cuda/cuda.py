@@ -202,6 +202,18 @@ class CUDABackend(TEFLBackendBase):
         from .flash_attention import FlashAttentionCUDA
         return FlashAttentionCUDA
 
+    def get_attention_backend(self, attention_params=None):
+        """
+        CUDA backend uses the default attention backend selection logic.
+        This allows hardware-specific checks and optimizations for CUDA devices.
+        Returns:
+            Tuple of (use_flash_attention, flash_attention_backend, use_fused_attention,
+                     fused_attention_backend, use_unfused_attention, available_backends)
+        """
+        # Import the original get_attention_backend function
+        from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
+        return dpa_utils._original_get_attention_backend(attention_params)
+
     def quantize(
         self,
         tensor: torch.Tensor,

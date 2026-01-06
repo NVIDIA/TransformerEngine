@@ -176,7 +176,7 @@ class FlashAttentionTorch(FlashAttentionBase):
 
         return packed_tensor
 
-    def forward(
+    def _forward_impl(
         self,
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,

@@ -346,30 +346,29 @@ class OpManager:
             # Original behavior: use cached resolve() and fast-fail
             fn = self.resolve(op_name)
 
-            # Get current impl_id to check if it changed
+            # Get current impl_id and log
             impl_id = self.get_selected_impl_id(op_name)
             last_impl_id = self._called_ops.get(op_name)
 
-            # Log if first call or implementation changed
-            if last_impl_id != impl_id:
-                with self._lock:
-                    # Double-check after acquiring lock
-                    if self._called_ops.get(op_name) != impl_id:
-                        snap = self._registry.snapshot()
-                        for impl in snap.impls_by_op.get(op_name, []):
-                            if impl.impl_id == impl_id:
-                                if last_impl_id is None:
-                                    logger.info(
-                                        f"Op '{op_name}' using '{impl_id}' "
-                                        f"(kind={impl.kind.value}, vendor={impl.vendor})"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"Op '{op_name}' switched from '{last_impl_id}' to '{impl_id}' "
-                                        f"(kind={impl.kind.value}, vendor={impl.vendor})"
-                                    )
-                                break
-                        self._called_ops[op_name] = impl_id
+            # Get impl details for logging
+            snap = self._registry.snapshot()
+            for impl in snap.impls_by_op.get(op_name, []):
+                if impl.impl_id == impl_id:
+                    # Only log if first time or implementation actually changed
+                    if last_impl_id is None:
+                        logger.info_once(
+                            f"Op '{op_name}' using '{impl_id}' "
+                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                        )
+                    elif last_impl_id != impl_id:
+                        logger.info_once(
+                            f"Op '{op_name}' switched from '{last_impl_id}' to '{impl_id}' "
+                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                        )
+                    break
+
+            # Update tracking
+            self._called_ops[op_name] = impl_id
 
             return fn(*args, **kwargs)
 
@@ -379,37 +378,31 @@ class OpManager:
 
         for idx, impl in enumerate(candidates):
             try:
-                # Log primary implementation or fallback attempts
+                result = impl.fn(*args, **kwargs)
+
+                # Log on success
+                last_impl_id = self._called_ops.get(op_name)
                 if idx == 0:
-                    # Primary implementation
-                    last_impl_id = self._called_ops.get(op_name)
-                    if last_impl_id != impl.impl_id:
-                        with self._lock:
-                            if self._called_ops.get(op_name) != impl.impl_id:
-                                if last_impl_id is None:
-                                    logger.info(
-                                        f"Op '{op_name}' using '{impl.impl_id}' "
-                                        f"(kind={impl.kind.value}, vendor={impl.vendor})"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"Op '{op_name}' switched from '{last_impl_id}' to '{impl.impl_id}' "
-                                        f"(kind={impl.kind.value}, vendor={impl.vendor})"
-                                    )
-                                self._called_ops[op_name] = impl.impl_id
+                    # Primary implementation - only log if first time or changed
+                    if last_impl_id is None:
+                        logger.info_once(
+                            f"Op '{op_name}' using '{impl.impl_id}' "
+                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                        )
+                    elif last_impl_id != impl.impl_id:
+                        logger.info_once(
+                            f"Op '{op_name}' switched from '{last_impl_id}' to '{impl.impl_id}' "
+                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                        )
                 else:
-                    # Always log fallback attempts (these are important runtime events)
-                    logger.info(
+                    # Fallback succeeded
+                    logger.info_once(
                         f"Op '{op_name}' fallback to '{impl.impl_id}' "
                         f"(kind={impl.kind.value}, vendor={impl.vendor})"
                     )
 
-                result = impl.fn(*args, **kwargs)
-
-                # Update tracked impl_id on success (for fallback case)
-                if idx > 0:
-                    with self._lock:
-                        self._called_ops[op_name] = impl.impl_id
+                # Update tracking on success
+                self._called_ops[op_name] = impl.impl_id
 
                 return result
 
@@ -417,7 +410,7 @@ class OpManager:
                 last_error = e
                 if idx < len(candidates) - 1:
                     # Not the last candidate, log warning and try next
-                    logger.warning(
+                    logger.warning_once(
                         f"Implementation '{impl.impl_id}' failed for op '{op_name}': {e}"
                     )
                 else:

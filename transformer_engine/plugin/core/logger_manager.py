@@ -50,6 +50,11 @@ class Logger:
             self._printed_once.add(message)
             self.logger.warning(message, stacklevel=2)
 
+    def error_once(self, message):
+        if message not in self._printed_once:
+            self._printed_once.add(message)
+            self.logger.error(message, stacklevel=2)
+
     def debug_once(self, message):
         if message not in self._printed_once:
             self._printed_once.add(message)

@@ -49,6 +49,10 @@ def register_builtins(registry) -> None:
 
         # FlashAttention class getter
         OpImpl(op_name="get_flash_attention_class", impl_id="default.flagos", kind=BackendImplKind.DEFAULT, fn=_bind_is_available(backend.get_flash_attention_class, is_avail), vendor=None, priority=150),
+
+        # Attention backend selection
+        OpImpl(op_name="get_attention_backend", impl_id="default.flagos", kind=BackendImplKind.DEFAULT, fn=_bind_is_available(backend.get_attention_backend, is_avail), vendor=None, priority=150),
+        OpImpl(op_name="get_fused_attn_backend", impl_id="default.flagos", kind=BackendImplKind.DEFAULT, fn=_bind_is_available(backend.get_fused_attn_backend, is_avail), vendor=None, priority=150),
     ]
 
     registry.register_many(impls)
