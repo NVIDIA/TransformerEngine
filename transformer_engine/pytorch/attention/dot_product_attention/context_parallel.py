@@ -4046,9 +4046,10 @@ def attn_forward_func_with_cp(
         softmax_type == "vanilla" or cp_comm_type == "a2a"
     ), f"Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
     if get_cudnn_version() < (9, 18, 0):
-        assert (
-            softmax_type == "vanilla" or qkv_format != "thd"
-        ), f"Before cuDNN 9.18.0, context parallelism does not support {softmax_type=} with qkv_format = 'thd'!"
+        assert softmax_type == "vanilla" or qkv_format != "thd", (
+            f"Before cuDNN 9.18.0, context parallelism does not support {softmax_type=} with"
+            " qkv_format = 'thd'!"
+        )
 
     args = [
         is_training,
