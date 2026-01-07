@@ -308,14 +308,14 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  * Uses NVTEGroupedTensor to efficiently handle collections of tensors with contiguous
  * memory layout and shape metadata.
  *
- *  \param[in]  transa           Whether to transpose A matrices.
- *  \param[in]  transb           Whether to transpose B matrices.
- *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
  *  \param[in]  A                Input grouped tensor A.
+ *  \param[in]  transa           Whether to transpose A matrices.
  *  \param[in]  B                Input grouped tensor B.
- *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
+ *  \param[in]  transb           Whether to transpose B matrices.
  *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
  *  \param[out] D                Output grouped tensor D.
+ *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
+ *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
  *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
  *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
  *  \param[in]  config           Additional configuration (can be NULL for defaults).
@@ -329,10 +329,11 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  * - Shape compatibility: if transa=false, transb=false:
  *   - A[i]: (M[i], K[i]), B[i]: (K[i], N[i]), D[i]: (M[i], N[i])
  */
-void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVTEGroupedTensor A,
-                       const NVTEGroupedTensor B, const NVTETensor beta, const NVTEGroupedTensor C,
-                       NVTEGroupedTensor D, NVTETensor workspace_setup, NVTETensor workspace_cublas,
-                       NVTEGroupedMatmulConfig config, cudaStream_t stream);
+void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
+                       const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
+                       const NVTETensor beta, NVTETensor workspace_setup,
+                       NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
+                       cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -62,7 +62,7 @@ struct TensorShapeInfo {
   }
 
   // Create for C tensor (uses D's dimensions, only has offsets)
-  static TensorShapeInfo for_C(const transformer_engine::GroupedTensor *C,
+  static TensorShapeInfo create_shape_info_for_C(const transformer_engine::GroupedTensor *C,
                                const transformer_engine::GroupedTensor *D) {
     const bool has_first = D->first_dims.has_data();
     const bool has_last = D->last_dims.has_data();
@@ -166,16 +166,16 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
                                          const transformer_engine::Tensor *alpha_tensor,
                                          const transformer_engine::Tensor *beta_tensor) {
   const size_t num_tensors = inputA->num_tensors;
-  NVTE_CHECK(num_tensors >= 1, "Grouped GEMM: num_tensors must be at least 1");
+  NVTE_CHECK(num_tensors >= 1, "Grouped GEMM: number of tensors must be at least 1");
   NVTE_CHECK(inputB->num_tensors == num_tensors,
-             "Grouped GEMM: A and B must have the same num_tensors");
+             "Grouped GEMM: A and B must have the same number of tensors");
   // C can be NULL (will use D as C when beta=0)
   if (inputC != nullptr) {
     NVTE_CHECK(inputC->num_tensors == num_tensors,
-               "Grouped GEMM: A and C must have the same num_tensors");
+               "Grouped GEMM: A and C must have the same number of tensors");
   }
   NVTE_CHECK(outputD->num_tensors == num_tensors,
-             "Grouped GEMM: A and D must have the same num_tensors");
+             "Grouped GEMM: A and D must have the same number of tensors");
 
   // Validate alpha/beta have per-matrix values
   const size_t alpha_numel = alpha_tensor->data.numel();
@@ -471,7 +471,7 @@ inline void launch_grouped_gemm_setup(
     const transformer_engine::Tensor *beta_tensor, size_t num_tensors, cudaStream_t stream) {
   TensorShapeInfo A_meta = TensorShapeInfo::from_tensor(A_sel.tensor);
   TensorShapeInfo B_meta = TensorShapeInfo::from_tensor(B_sel.tensor);
-  TensorShapeInfo C_meta = TensorShapeInfo::for_C(C, D);
+  TensorShapeInfo C_meta = TensorShapeInfo::create_shape_info_for_C(C, D);
   TensorShapeInfo D_meta = TensorShapeInfo::from_tensor(D);
 
   const char *c_base = static_cast<const char *>(C->data.dptr);
@@ -500,10 +500,11 @@ inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
 
 }  // namespace
 
-void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVTEGroupedTensor A,
-                       const NVTEGroupedTensor B, const NVTETensor beta, const NVTEGroupedTensor C,
-                       NVTEGroupedTensor D, NVTETensor workspace_setup, NVTETensor workspace_cublas,
-                       NVTEGroupedMatmulConfig config, cudaStream_t stream) {
+void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
+                       const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
+                       const NVTETensor beta, NVTETensor workspace_setup,
+                       NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
+                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
@@ -593,10 +594,11 @@ void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVT
 
 #else  // CUBLAS_VERSION < 130100
 
-void nvte_grouped_gemm(int transa, int transb, const NVTETensor alpha, const NVTEGroupedTensor A,
-                       const NVTEGroupedTensor B, const NVTETensor beta, const NVTEGroupedTensor C,
-                       NVTEGroupedTensor D, NVTETensor workspace_setup, NVTETensor workspace_cublas,
-                       NVTEGroupedMatmulConfig config, cudaStream_t stream) {
+void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
+                       const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
+                       const NVTETensor beta, NVTETensor workspace_setup,
+                       NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
+                       cudaStream_t stream) {
   NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.1+, but compile-time cuBLAS version is ",
              CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
 }
