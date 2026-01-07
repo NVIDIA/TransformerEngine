@@ -164,7 +164,13 @@ void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output,
                                int64_t tile_rows, int64_t tile_cols,
                                int64_t rows_padded, int64_t block_len);
 
-void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, float global_amax);
+void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax);
+
+void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax,
+                       at::Tensor per_block_scale, at::Tensor target_scale,
+                       at::Tensor target_amax,
+                       int64_t tile_rows, int64_t tile_cols,
+                       int64_t rows_padded, int64_t block_len);
 
 void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale);
 

@@ -627,13 +627,8 @@ def _cast_master_weights_to_nvfp4_2d(
     tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor)
     global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
-    # Use GPU kernel for computing per-block decode scales
-    # Takes global_amax (not global_scale) and computes scale internally
-    for amax_tensor, scale_tensor, global_amax_view in zip(
-        amaxes, scales, [global_amaxes[i : i + 1] for i in range(len(params))]
-    ):
-        tex.nvfp4_compute_per_block_scale(amax_tensor, scale_tensor, global_amax_view.item())
-
+    # Main loop: use fused kernel for scale computation + expansion + amax copy
+    # This saves 2 kernel launches per parameter
     zipped_meta = zip(
         tile_shapes,
         row_sizes,
@@ -641,6 +636,7 @@ def _cast_master_weights_to_nvfp4_2d(
         scale_targets,
         amax_targets,
         params,
+        amaxes,
         scales,
         global_scale_views,
     )
@@ -651,6 +647,7 @@ def _cast_master_weights_to_nvfp4_2d(
         target_scale,
         target_amax,
         (model_weight, master_weight, start_offset, model_weight_fragment),
+        block_amax,
         per_block_decode_scale,
         global_scale,
     ) in enumerate(zipped_meta):
@@ -662,22 +659,36 @@ def _cast_master_weights_to_nvfp4_2d(
             # not updated currently.
             model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
 
-        # Always write scales and amax for ALL layers (computed from all-reduced amax).
-        # This ensures scales are correct even for layers not owned by this rank.
-        # Use GPU kernel to expand tile-level scales to row-level and convert to FP8
+        # Use fused kernel: computes per-block decode scale, copies global amax to target,
+        # and expands to row-level FP8 scale - all in one kernel launch
         tile_rows = tile_shape[0]
         rows_padded = target_scale.shape[0]
-        tex.nvfp4_expand_scale_to_fp8(
-            per_block_decode_scale,
-            target_scale,
-            tile_rows,
-            tile_col_cnt,
-            rows_padded,
-            block_len,
-        )
+        global_amax_view = global_amaxes[idx : idx + 1]
         
+        # target_amax could be None if model_weight._amax_rowwise is None
         if target_amax is not None:
-            target_amax.copy_(global_amaxes[idx : idx + 1])
+            tex.nvfp4_fused_scale(
+                block_amax,
+                global_amax_view,
+                per_block_decode_scale,
+                target_scale,
+                target_amax,
+                tile_rows,
+                tile_col_cnt,
+                rows_padded,
+                block_len,
+            )
+        else:
+            # Fallback: compute scale and expand without amax copy
+            tex.nvfp4_compute_per_block_scale(block_amax, per_block_decode_scale, global_amax_view)
+            tex.nvfp4_expand_scale_to_fp8(
+                per_block_decode_scale,
+                target_scale,
+                tile_rows,
+                tile_col_cnt,
+                rows_padded,
+                block_len,
+            )
 
         # Only cast data for layers owned by this rank
         if master_weight is None or master_weight.numel() == 0:

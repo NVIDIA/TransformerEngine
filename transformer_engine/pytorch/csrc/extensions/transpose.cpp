@@ -149,18 +149,56 @@ void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output,
                                  at::cuda::getCurrentCUDAStream());
 }
 
-void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, float global_amax) {
+void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax) {
   init_extension();
 
   // block_amax and scale: [tile_rows, tile_cols], float32
+  // global_amax: single element tensor, float32 (avoids D2H transfer)
   NVTE_CHECK(block_amax.scalar_type() == at::kFloat, "Block amax must be float32.");
   NVTE_CHECK(scale.scalar_type() == at::kFloat, "Scale must be float32.");
+  NVTE_CHECK(global_amax.scalar_type() == at::kFloat, "Global amax must be float32.");
+  NVTE_CHECK(global_amax.numel() == 1, "Global amax must be a single element tensor.");
 
   auto block_amax_cu = makeTransformerEngineTensor(block_amax);
   auto scale_cu = makeTransformerEngineTensor(scale);
+  auto global_amax_cu = makeTransformerEngineTensor(global_amax);
 
   nvte_nvfp4_compute_per_block_scale(block_amax_cu.data(), scale_cu.data(),
-                                     global_amax, at::cuda::getCurrentCUDAStream());
+                                     global_amax_cu.data(), at::cuda::getCurrentCUDAStream());
+}
+
+void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax,
+                       at::Tensor per_block_scale, at::Tensor target_scale,
+                       at::Tensor target_amax,
+                       int64_t tile_rows, int64_t tile_cols,
+                       int64_t rows_padded, int64_t block_len) {
+  init_extension();
+
+  // block_amax: [tile_rows, tile_cols], float32
+  // global_amax: [1], float32
+  // per_block_scale: [tile_rows, tile_cols], float32 (for partial_cast)
+  // target_scale: [rows_padded, tile_cols], uint8 (E4M3)
+  // target_amax: [1], float32
+  NVTE_CHECK(block_amax.scalar_type() == at::kFloat, "Block amax must be float32.");
+  NVTE_CHECK(global_amax.scalar_type() == at::kFloat, "Global amax must be float32.");
+  NVTE_CHECK(per_block_scale.scalar_type() == at::kFloat, "Per-block scale must be float32.");
+  NVTE_CHECK(target_scale.scalar_type() == at::kByte, "Target scale must be uint8 (E4M3).");
+  NVTE_CHECK(target_amax.scalar_type() == at::kFloat, "Target amax must be float32.");
+  NVTE_CHECK(global_amax.numel() == 1, "Global amax must be a single element tensor.");
+  NVTE_CHECK(target_amax.numel() == 1, "Target amax must be a single element tensor.");
+
+  auto block_amax_cu = makeTransformerEngineTensor(block_amax);
+  auto global_amax_cu = makeTransformerEngineTensor(global_amax);
+  auto per_block_scale_cu = makeTransformerEngineTensor(per_block_scale);
+  auto target_scale_cu = makeTransformerEngineTensor(target_scale);
+  auto target_amax_cu = makeTransformerEngineTensor(target_amax);
+
+  nvte_nvfp4_fused_scale(block_amax_cu.data(), global_amax_cu.data(),
+                         per_block_scale_cu.data(), target_scale_cu.data(),
+                         target_amax_cu.data(),
+                         static_cast<size_t>(tile_rows), static_cast<size_t>(tile_cols),
+                         static_cast<size_t>(rows_padded), static_cast<size_t>(block_len),
+                         at::cuda::getCurrentCUDAStream());
 }
 
 void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale) {

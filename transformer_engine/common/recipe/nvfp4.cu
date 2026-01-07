@@ -580,7 +580,7 @@ void nvfp4_expand_scale_to_fp8(const Tensor input, Tensor output,
 __global__ void nvfp4_compute_per_block_scale_kernel(
     const float* __restrict__ block_amax,  // [tile_rows, tile_cols]
     float* __restrict__ scale,             // [tile_rows, tile_cols]
-    const float global_amax,
+    const float* __restrict__ global_amax_ptr,  // Pointer to single float value (avoids D2H)
     const size_t numel
 ) {
     const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -590,6 +590,9 @@ __global__ void nvfp4_compute_per_block_scale_kernel(
     constexpr float fp8_max = 448.0f;
     constexpr float flt_max = 3.402823466e+38f;
     constexpr float tiny = 1.17549435e-38f;  // FLT_MIN
+    
+    // Read global_amax from device memory (avoids D2H transfer)
+    float global_amax = *global_amax_ptr;
     
     // Compute global encode scale: S_enc = (fp8_max * fp4_max) / global_amax
     float safe_global_amax = fmaxf(global_amax, tiny);
@@ -623,9 +626,11 @@ __global__ void nvfp4_compute_global_scale_kernel(
 }
 
 void nvfp4_compute_per_block_scale(const Tensor block_amax, Tensor scale,
-                                   float global_amax, cudaStream_t stream) {
+                                   const Tensor global_amax, cudaStream_t stream) {
     NVTE_CHECK(block_amax.dtype() == DType::kFloat32, "Block amax must be float32.");
     NVTE_CHECK(scale.dtype() == DType::kFloat32, "Scale must be float32.");
+    NVTE_CHECK(global_amax.dtype() == DType::kFloat32, "Global amax must be float32.");
+    NVTE_CHECK(global_amax.numel() == 1, "Global amax must be a single element tensor.");
     
     size_t numel = block_amax.numel();
     if (numel == 0) return;
@@ -636,7 +641,8 @@ void nvfp4_compute_per_block_scale(const Tensor block_amax, Tensor scale,
     nvfp4_compute_per_block_scale_kernel<<<grid_size, kBlockSize, 0, stream>>>(
         reinterpret_cast<const float*>(block_amax.data.dptr),
         reinterpret_cast<float*>(scale.data.dptr),
-        global_amax, numel);
+        reinterpret_cast<const float*>(global_amax.data.dptr),
+        numel);
     NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -658,6 +664,108 @@ void nvfp4_compute_global_scale(const Tensor global_amax, Tensor global_scale,
     NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * FUSED NVFP4 SCALE COMPUTATION KERNEL
+ *
+ * Fuses three operations into one kernel:
+ * 1. nvfp4_compute_per_block_scale: compute tile-level decode scales from block amax
+ * 2. target_amax.copy_: copy global amax to target tensor
+ * 3. nvfp4_expand_scale_to_fp8: expand to row-level and convert to FP8 E4M3
+ *
+ * Input (block_amax): [tile_rows, tile_cols] float32
+ * Input (global_amax): [1] float32
+ * Output (per_block_scale): [tile_rows, tile_cols] float32 (intermediate, for partial_cast)
+ * Output (target_scale): [rows_padded, tile_cols] uint8 (E4M3)
+ * Output (target_amax): [1] float32 (copy of global_amax)
+ *
+ * Saves 2 kernel launches per parameter (eliminates nvfp4_compute_per_block_scale and
+ * nvfp4_expand_scale_to_fp8 as separate calls, plus the amax copy).
+ * ---------------------------------------------------------------------------
+ */
+ __global__ void nvfp4_fused_scale_kernel(
+  const float* __restrict__ block_amax,    // [tile_rows, tile_cols]
+  const float* __restrict__ global_amax,   // [1]
+  float* __restrict__ per_block_scale,     // [tile_rows, tile_cols] - for partial_cast
+  uint8_t* __restrict__ target_scale,      // [rows_padded, tile_cols]
+  float* __restrict__ target_amax,         // [1]
+  const size_t tile_rows,
+  const size_t tile_cols,
+  const size_t rows_padded,
+  const size_t block_len
+) {
+  const size_t out_row = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t out_col = blockIdx.x * blockDim.x + threadIdx.x;
+  
+  // Read global amax once per thread (broadcast)
+  const float g_amax = *global_amax;
+  
+  // Thread (0,0) copies global_amax to target_amax
+  if (out_row == 0 && out_col == 0) {
+      *target_amax = g_amax;
+  }
+  
+  if (out_row >= rows_padded || out_col >= tile_cols) return;
+  
+  // Determine which tile row this output row belongs to
+  const size_t tile_row = out_row / block_len;
+  
+  // Compute the scale value
+  constexpr float fp4_max = 6.0f;
+  constexpr float fp8_max = 448.0f;
+  constexpr float flt_max = 3.402823466e+38f;
+  constexpr float tiny = 1.17549435e-38f;
+  
+  float scale_val = 0.0f;
+  if (tile_row < tile_rows) {
+      float safe_global_amax = fmaxf(g_amax, tiny);
+      float global_scale = (g_amax > 0.0f) ? 
+          fminf((fp8_max * fp4_max) / safe_global_amax, flt_max) : 1.0f;
+      
+      // Read block amax and compute per-block decode scale
+      float amax_val = block_amax[tile_row * tile_cols + out_col];
+      scale_val = fminf((amax_val / fp4_max) * global_scale, flt_max);
+      
+      // Write per-block scale (only once per tile, when out_row % block_len == 0)
+      if (out_row % block_len == 0) {
+          per_block_scale[tile_row * tile_cols + out_col] = scale_val;
+      }
+  }
+  
+  // Convert float32 to FP8 E4M3 and write expanded scale
+  fp8e4m3 fp8_val = static_cast<fp8e4m3>(scale_val);
+  target_scale[out_row * tile_cols + out_col] = reinterpret_cast<const uint8_t&>(fp8_val);
+}
+
+void nvfp4_fused_scale(const Tensor block_amax, const Tensor global_amax,
+                     Tensor per_block_scale, Tensor target_scale, Tensor target_amax,
+                     size_t tile_rows, size_t tile_cols,
+                     size_t rows_padded, size_t block_len,
+                     cudaStream_t stream) {
+  NVTE_CHECK(block_amax.dtype() == DType::kFloat32, "Block amax must be float32.");
+  NVTE_CHECK(global_amax.dtype() == DType::kFloat32, "Global amax must be float32.");
+  NVTE_CHECK(per_block_scale.dtype() == DType::kFloat32, "Per-block scale must be float32.");
+  NVTE_CHECK(target_scale.dtype() == DType::kByte, "Target scale must be uint8 (E4M3).");
+  NVTE_CHECK(target_amax.dtype() == DType::kFloat32, "Target amax must be float32.");
+  NVTE_CHECK(global_amax.numel() == 1, "Global amax must be a single element tensor.");
+  NVTE_CHECK(target_amax.numel() == 1, "Target amax must be a single element tensor.");
+  
+  if (tile_rows == 0 || tile_cols == 0 || rows_padded == 0) return;
+  
+  constexpr int kBlockDim = 16;
+  dim3 block(kBlockDim, kBlockDim);
+  dim3 grid((tile_cols + kBlockDim - 1) / kBlockDim,
+            (rows_padded + kBlockDim - 1) / kBlockDim);
+  
+  nvfp4_fused_scale_kernel<<<grid, block, 0, stream>>>(
+      reinterpret_cast<const float*>(block_amax.data.dptr),
+      reinterpret_cast<const float*>(global_amax.data.dptr),
+      reinterpret_cast<float*>(per_block_scale.data.dptr),
+      reinterpret_cast<uint8_t*>(target_scale.data.dptr),
+      reinterpret_cast<float*>(target_amax.data.dptr),
+      tile_rows, tile_cols, rows_padded, block_len);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 }  // namespace nvfp4_recipe
 }  // namespace transformer_engine
 
@@ -673,12 +781,13 @@ void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output,
 }
 
 void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor scale,
-                                        float global_amax, cudaStream_t stream) {
+                                        const NVTETensor global_amax, cudaStream_t stream) {
     NVTE_API_CALL(nvte_nvfp4_compute_per_block_scale);
     using namespace transformer_engine;
     nvfp4_recipe::nvfp4_compute_per_block_scale(*convertNVTETensorCheck(block_amax),
                                                 *convertNVTETensorCheck(scale),
-                                                global_amax, stream);
+                                                *convertNVTETensorCheck(global_amax),
+                                                stream);
 }
 
 void nvte_nvfp4_compute_global_scale(const NVTETensor global_amax, NVTETensor global_scale,
@@ -755,6 +864,19 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-
-
-
+void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global_amax,
+                            NVTETensor per_block_scale, NVTETensor target_scale,
+                            NVTETensor target_amax,
+                            size_t tile_rows, size_t tile_cols,
+                            size_t rows_padded, size_t block_len,
+                            cudaStream_t stream) {
+    NVTE_API_CALL(nvte_nvfp4_fused_scale);
+    using namespace transformer_engine;
+    nvfp4_recipe::nvfp4_fused_scale(*convertNVTETensorCheck(block_amax),
+                                    *convertNVTETensorCheck(global_amax),
+                                    *convertNVTETensorCheck(per_block_scale),
+                                    *convertNVTETensorCheck(target_scale),
+                                    *convertNVTETensorCheck(target_amax),
+                                    tile_rows, tile_cols, rows_padded, block_len,
+                                    stream);
+}

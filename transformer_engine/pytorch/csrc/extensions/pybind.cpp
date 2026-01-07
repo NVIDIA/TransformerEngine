@@ -274,6 +274,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Compute global encode scale from global amax",
         py::arg("global_amax"), py::arg("global_scale"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_fused_scale", &transformer_engine::pytorch::nvfp4_fused_scale,
+        "Fused kernel: compute per-block decode scale, copy global amax, expand to row-level FP8",
+        py::arg("block_amax"), py::arg("global_amax"), py::arg("per_block_scale"),
+        py::arg("target_scale"), py::arg("target_amax"),
+        py::arg("tile_rows"), py::arg("tile_cols"), py::arg("rows_padded"), py::arg("block_len"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("swap_first_dims", &transformer_engine::pytorch::swap_first_dims,
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());

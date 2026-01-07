@@ -373,11 +373,38 @@ void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output,
  *
  *  \param[in]     block_amax   Input block amax tensor [tile_rows, tile_cols], float32.
  *  \param[out]    scale        Output scale tensor [tile_rows, tile_cols], float32.
- *  \param[in]     global_amax  Global amax value (per-tensor, after all-reduce).
+ *  \param[in]     global_amax  Global amax tensor (single element), float32. Avoids D2H transfer.
  *  \param[in]     stream       CUDA stream.
  */
 void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor scale,
-                                        float global_amax, cudaStream_t stream);
+                                        const NVTETensor global_amax, cudaStream_t stream);
+
+/*! \brief Fused kernel for NVFP4 scale computation.
+ *
+ *  Fuses three operations into one kernel:
+ *  1. Compute per-block decode scales from block amax and global amax
+ *  2. Copy global amax to target tensor
+ *  3. Expand tile-level scales to row-level and convert to FP8 E4M3
+ *
+ *  Saves 2 kernel launches per parameter.
+ *
+ *  \param[in]     block_amax      Input block amax tensor [tile_rows, tile_cols], float32.
+ *  \param[in]     global_amax     Global amax tensor [1], float32.
+ *  \param[out]    per_block_scale Output per-block scale [tile_rows, tile_cols], float32 (for partial_cast).
+ *  \param[out]    target_scale    Output scale tensor [rows_padded, tile_cols], uint8 (E4M3).
+ *  \param[out]    target_amax     Output amax tensor [1], float32 (copy of global_amax).
+ *  \param[in]     tile_rows       Number of tile rows.
+ *  \param[in]     tile_cols       Number of tile columns.
+ *  \param[in]     rows_padded     Total padded rows in output.
+ *  \param[in]     block_len       Block length (16 for NVFP4).
+ *  \param[in]     stream          CUDA stream.
+ */
+void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global_amax,
+                            NVTETensor per_block_scale, NVTETensor target_scale,
+                            NVTETensor target_amax,
+                            size_t tile_rows, size_t tile_cols,
+                            size_t rows_padded, size_t block_len,
+                            cudaStream_t stream);
 
 /*! \brief Compute global encode scale from global amax.
  *
