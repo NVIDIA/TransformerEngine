@@ -827,14 +827,26 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   TensorWrapper beta_tensor(static_cast<void *>(beta.untyped_data()), std::vector<size_t>{num_gemms},
                            convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
-  NVTEShape rhsShape{.data={num_gemms * k, n}, .ndim=2};
+  NVTEShape rhsShape{.data={k, n}, .ndim=2};
+  if (!is_grouped_dense_wgrad) {
+    rhsShape.data[0] *= num_gemms;
+  }
+  if (rhs_is_trans) {
+    std::swap(rhsShape.data[0], rhsShape.data[1]);
+  }
   NVTEGroupedTensor rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
   NVTEShape lhsShape{.data={m, k}, .ndim=2};
+  if (lhs_is_trans) {
+    std::swap(lhsShape.data[0], lhsShape.data[1]);
+  }
   NVTEGroupedTensor lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
   NVTEShape outShape{.data={m, n}, .ndim=2};
+  if (is_grouped_dense_wgrad) {
+    outShape.data[0] *= num_gemms;
+  }
   NVTEGroupedTensor out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
 
-  NVTE_CHECK(!rhs_is_trans && !lhs_is_trans, "TE grouped GEMM only supports non-transposed inputs but received rhs_is_trans=", rhs_is_trans, " lhs_is_trans=", lhs_is_trans);
+  // NVTE_CHECK(!rhs_is_trans && !lhs_is_trans, "TE grouped GEMM only supports non-transposed inputs but received rhs_is_trans=", rhs_is_trans, " lhs_is_trans=", lhs_is_trans);
 
   nvte_grouped_gemm(
     rhs_is_trans, lhs_is_trans,
