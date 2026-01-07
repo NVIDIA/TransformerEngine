@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Python interface for fused attention extensions"""
+
 import math
 from typing import Tuple, List, Union, Optional
 import torch
@@ -16,7 +17,6 @@ from transformer_engine_torch import (
     NVTE_Fused_Attn_Backend,
 )
 from ..quantized_tensor import Quantizer
-
 
 __all__ = [
     "fused_attn_fwd",

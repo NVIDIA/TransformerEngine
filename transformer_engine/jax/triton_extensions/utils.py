@@ -16,7 +16,6 @@ from jax import core
 import jax
 import jax.numpy as jnp
 
-
 try:
     from jax._src.lib import gpu_triton
     from triton.compiler import compiler as tc

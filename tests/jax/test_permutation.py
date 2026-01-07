@@ -18,7 +18,6 @@ from transformer_engine.jax.permutation import (
 )
 from utils import assert_allclose, pytest_parametrize_wrapper
 
-
 # =============================================================================
 # Test parameter definitions with L0 (fast) and L2 (comprehensive) levels
 # =============================================================================

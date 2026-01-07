@@ -2629,7 +2629,7 @@ class _custom_mha_fp8(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         with torch.cuda.nvtx.range("_DPA"):
             saved_tensors = ctx.saved_tensors
-            (q, k, v, inp_fp8, qkv_weight_fp8, out) = restore_from_saved(
+            q, k, v, inp_fp8, qkv_weight_fp8, out = restore_from_saved(
                 ctx.tensor_objects, saved_tensors
             )
 

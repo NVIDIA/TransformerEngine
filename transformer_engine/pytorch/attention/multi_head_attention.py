@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Multi-head Attention."""
+
 import os
 import collections
 from typing import Callable, List, Optional, Tuple, Union

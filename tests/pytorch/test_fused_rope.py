@@ -418,9 +418,7 @@ def test_fused_qkv_rope(
         # for more accurate comparison
 
         t_clone = t.clone()
-        (query, key, value) = torch.split(
-            t_clone, [hidden_size * 4, hidden_size, hidden_size], dim=3
-        )
+        query, key, value = torch.split(t_clone, [hidden_size * 4, hidden_size, hidden_size], dim=3)
         query = query.reshape(query.shape[0], query.shape[1], head_num * 4, hidden_size)
 
         query_unfused = apply_rotary_pos_emb(

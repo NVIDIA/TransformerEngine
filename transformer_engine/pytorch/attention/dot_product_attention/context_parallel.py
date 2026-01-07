@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Context Parallelism."""
+
 import os
 import itertools
 from typing import List, Union, Tuple
@@ -3046,7 +3047,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         rank = get_distributed_rank(ctx.cp_group)
 
         (*saved_tensors,) = ctx.saved_tensors
-        (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = saved_tensors[:5]
+        q, k, v, cu_seqlens_q, cu_seqlens_q_padded = saved_tensors[:5]
         cu_seqlens_kv_per_step = saved_tensors[5:7]
         out_per_step = saved_tensors[7:9]
         softmax_lse_per_step = saved_tensors[9:11]

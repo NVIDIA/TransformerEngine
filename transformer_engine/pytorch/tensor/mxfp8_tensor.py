@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Tensor class with MXFP8 data"""
+
 from __future__ import annotations
 from collections.abc import Iterable
 import math

@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Collective Dense Gradient test on multi-GPU with tensor parallelism"""
+
 import argparse
 import unittest
 import os

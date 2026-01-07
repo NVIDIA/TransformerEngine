@@ -6,6 +6,7 @@ Tensor quantization classes for TE/JAX.
 
 This module provides classes and utilities for quantizing tensors in JAX.
 """
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import partial

@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for amax calculation"""
+
 from enum import Enum
 
 
@@ -24,7 +25,6 @@ from ..quantize import (
     get_wgrad_sign_vector,
     get_sign_from_vector,
 )
-
 
 __all__ = ["AmaxScope", "calculate_amax", "calculate_post_rht_amax"]
 

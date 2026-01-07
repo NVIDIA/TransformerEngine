@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Encoder training on multi-GPU with tesnor parallelism"""
+
 import argparse
 import unittest
 from functools import partial

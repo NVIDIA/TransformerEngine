@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Transformer."""
+
 import os
 import warnings
 from contextlib import nullcontext
@@ -35,7 +36,6 @@ from transformer_engine.pytorch.constants import (
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-
 
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 

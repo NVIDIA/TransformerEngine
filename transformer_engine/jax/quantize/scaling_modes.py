@@ -25,7 +25,6 @@ from transformer_engine_jax import JAXX_Scaling_Mode
 from .misc import QuantizeLayout
 from .device_utils import is_fp8_gemm_with_all_layouts_supported
 
-
 __all__ = [
     "QuantizeShardyRules",
     "ScalingMode",

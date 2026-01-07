@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Tensor class with FP8 data"""
+
 from __future__ import annotations
 from typing import Any, Optional, Tuple, Iterable, Union
 import warnings
@@ -877,7 +878,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         """
 
         (data,) = all_gather_outputs
-        (fp8_scale_inv, rowwise_usage, columnwise_usage, fp8_dtype) = metadata
+        fp8_scale_inv, rowwise_usage, columnwise_usage, fp8_dtype = metadata
         orig_shape = data.size()
         # Quantizer has only columnwise usage set for backward pass
         # In Blackwell+ architectures, transpose is not needed at all,

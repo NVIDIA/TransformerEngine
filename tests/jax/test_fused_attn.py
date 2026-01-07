@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
+
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial

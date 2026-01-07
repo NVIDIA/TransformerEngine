@@ -1008,7 +1008,7 @@ class BasicLinear(BasicOperation):
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
 
         # Saved tensors from forward pass
-        (x_local, w) = ctx.saved_tensors
+        x_local, w = ctx.saved_tensors
 
         # Megatron-LM wgrad fusion
         # Note: Get grad tensor from param so we can accumulate

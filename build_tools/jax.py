@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """JAX related extensions."""
+
 import os
 from pathlib import Path
 from packaging import version

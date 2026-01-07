@@ -23,7 +23,6 @@ from transformer_engine.common.triton.permutation import (
 )
 from .utils import triton_call_lowering
 
-
 __all__ = [
     "make_row_id_map",
     "permute_with_mask_map",

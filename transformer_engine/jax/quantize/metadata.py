@@ -8,8 +8,8 @@ Metadata classes for quantization in JAX.
 This module provides classes for managing quantization metadata, including
 scale factors and amax history for different tensor types.
 """
-from dataclasses import dataclass
 
+from dataclasses import dataclass
 
 __all__ = ["QuantizeMeta", "QuantizeMetaSet"]
 

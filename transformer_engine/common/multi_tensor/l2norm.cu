@@ -54,7 +54,7 @@ reduce_block_into_lanes(T *x, T val, int lanes = 1,
       final = x[tid] + x[tid + 32];
     else
       final = val;
-      // __SYNCWARP();
+    // __SYNCWARP();
 
 #pragma unroll
     for (int i = 16; i >= lanes; i >>= 1) final = final + __shfl_down_sync(0xffffffff, final, i);
@@ -95,7 +95,7 @@ reduce_block_into_lanes_max_op(T *x, T val, int lanes = 1,
       final = fmaxf(fabsf(x[tid]), fabsf(x[tid + 32]));
     else
       final = val;
-      // __SYNCWARP();
+    // __SYNCWARP();
 
 #pragma unroll
     for (int i = 16; i >= lanes; i >>= 1)

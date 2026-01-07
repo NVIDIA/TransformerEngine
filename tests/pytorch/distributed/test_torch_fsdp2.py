@@ -10,7 +10,6 @@ import transformer_engine.pytorch as te
 
 import torch
 
-
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 NUM_PROCS: int = torch.cuda.device_count()

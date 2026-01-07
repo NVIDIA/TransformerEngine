@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Attention."""
+
 from contextlib import nullcontext
 import math
 import os
@@ -60,7 +61,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FusedAttention,
     FlashAttention,
 )
-
 
 # Setup Attention Logging
 attn_log.setup_logging()

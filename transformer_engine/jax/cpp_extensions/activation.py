@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for activation"""
+
 from typing import Sequence, Union, Callable, Optional, Tuple
 import operator
 from functools import reduce, partial
@@ -36,7 +37,6 @@ from ..quantize import (
     ScalingMode,
     QuantizeLayout,
 )
-
 
 __all__ = ["act_lu", "dact_lu", "quantize_dact_dbias"]
 
@@ -726,7 +726,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         te_dact_dbias_quantize_p outer abstract
         """
-        (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
+        out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _ = (
             BaseDActLuDBiasQuantizePrimitive.abstract(*args, **kwargs)
         )
         return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias
@@ -808,7 +808,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         del is_outer
         assert BaseDActLuDBiasQuantizePrimitive.inner_primitive is not None
-        (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
+        out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _ = (
             BaseDActLuDBiasQuantizePrimitive.inner_primitive.bind(
                 dz,
                 x,
@@ -1058,7 +1058,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         )
 
         def sharded_impl(dz, x, scale, amax):
-            (out, colwise_out, scale_inv, colwise_scale_inv, local_updated_amax, local_dbias) = (
+            out, colwise_out, scale_inv, colwise_scale_inv, local_updated_amax, local_dbias = (
                 BaseDActLuDBiasQuantizePrimitive.impl(
                     dz,
                     x,
