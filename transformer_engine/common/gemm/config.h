@@ -48,12 +48,8 @@ struct GroupedMatmulConfig {
   bool avg_n_set = false;
   bool avg_k_set = false;
 
-  static constexpr size_t attr_sizes[] = {
-      sizeof(avg_m), 
-      sizeof(avg_n),
-      sizeof(avg_k),
-      sizeof(sm_count)
-  };
+  static constexpr size_t attr_sizes[] = {sizeof(avg_m), sizeof(avg_n), sizeof(avg_k),
+                                          sizeof(sm_count)};
 };
 
 }  // namespace transformer_engine
