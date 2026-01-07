@@ -24,6 +24,7 @@ from .basic_linear import BasicLinear
 from .bias import Bias
 from .constant_scale import ConstantScale
 from .dropout import Dropout
+from .grouped_linear import GroupedLinear
 from .identity import Identity
 from .l2normalization import L2Normalization
 from .layer_norm import LayerNorm
