@@ -2123,6 +2123,13 @@ def grouped_gemm(
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
+    print(f"{lhs_data.shape=}, {rhs_data.shape=}, {group_sizes.shape=}")
+    print(f"{M=}, {N=}, {K_lhs=}, {K_rhs=}")
+    # import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
+    # print(f"{lhs_is_trans=}, {rhs_is_trans=}")
+    # import pdb; pdb.set_trace()
+
     num_gemms = group_sizes.shape[0]
     alpha = jnp.ones((num_gemms,), jnp.float32)
     beta = jnp.zeros((num_gemms,), jnp.float32)
