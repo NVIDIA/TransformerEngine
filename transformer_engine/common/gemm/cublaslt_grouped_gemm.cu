@@ -63,7 +63,7 @@ struct TensorShapeInfo {
 
   // Create for C tensor (uses D's dimensions, only has offsets)
   static TensorShapeInfo create_shape_info_for_C(const transformer_engine::GroupedTensor *C,
-                               const transformer_engine::GroupedTensor *D) {
+                                                 const transformer_engine::GroupedTensor *D) {
     const bool has_first = D->first_dims.has_data();
     const bool has_last = D->last_dims.has_data();
     NVTE_CHECK(has_first || D->all_same_first_dim(),
