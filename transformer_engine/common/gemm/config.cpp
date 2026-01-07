@@ -145,15 +145,21 @@ void nvte_get_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
   NVTE_CHECK(config != nullptr, "Invalid NVTEGroupedMatmulConfig (got NULL)");
   const auto &config_ = *reinterpret_cast<const transformer_engine::GroupedMatmulConfig *>(config);
   switch (attr) {
-    case kNVTEGroupedMatmulConfigAvgM:
-      std::memcpy(buf, &config_.avg_m, attr_size);
+    case kNVTEGroupedMatmulConfigAvgM: {
+      int64_t val = config_.avg_m.value_or(0);
+      std::memcpy(buf, &val, attr_size);
       break;
-    case kNVTEGroupedMatmulConfigAvgN:
-      std::memcpy(buf, &config_.avg_n, attr_size);
+    }
+    case kNVTEGroupedMatmulConfigAvgN: {
+      int64_t val = config_.avg_n.value_or(0);
+      std::memcpy(buf, &val, attr_size);
       break;
-    case kNVTEGroupedMatmulConfigAvgK:
-      std::memcpy(buf, &config_.avg_k, attr_size);
+    }
+    case kNVTEGroupedMatmulConfigAvgK: {
+      int64_t val = config_.avg_k.value_or(0);
+      std::memcpy(buf, &val, attr_size);
       break;
+    }
     case kNVTEGroupedMatmulConfigSMCount:
       std::memcpy(buf, &config_.sm_count, attr_size);
       break;
@@ -180,18 +186,24 @@ void nvte_set_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
   NVTE_CHECK(config != nullptr, "Invalid NVTEGroupedMatmulConfig (got NULL)");
   auto &config_ = *reinterpret_cast<transformer_engine::GroupedMatmulConfig *>(config);
   switch (attr) {
-    case kNVTEGroupedMatmulConfigAvgM:
-      std::memcpy(&config_.avg_m, buf, attr_size);
-      config_.avg_m_set = true;
+    case kNVTEGroupedMatmulConfigAvgM: {
+      int64_t val;
+      std::memcpy(&val, buf, attr_size);
+      config_.avg_m = val;
       break;
-    case kNVTEGroupedMatmulConfigAvgN:
-      std::memcpy(&config_.avg_n, buf, attr_size);
-      config_.avg_n_set = true;
+    }
+    case kNVTEGroupedMatmulConfigAvgN: {
+      int64_t val;
+      std::memcpy(&val, buf, attr_size);
+      config_.avg_n = val;
       break;
-    case kNVTEGroupedMatmulConfigAvgK:
-      std::memcpy(&config_.avg_k, buf, attr_size);
-      config_.avg_k_set = true;
+    }
+    case kNVTEGroupedMatmulConfigAvgK: {
+      int64_t val;
+      std::memcpy(&val, buf, attr_size);
+      config_.avg_k = val;
       break;
+    }
     case kNVTEGroupedMatmulConfigSMCount:
       std::memcpy(&config_.sm_count, buf, attr_size);
       break;
