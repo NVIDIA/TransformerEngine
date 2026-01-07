@@ -419,6 +419,17 @@ def test_dpa_softmax(dtype, model_configs, model):
     )
 
 
+@pytest.mark.skipif(get_cudnn_version() < (9, 18, 0), reason="cuDNN 9.18.0+ is required.")
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("model_configs", [model_configs_softmax])
+@pytest.mark.parametrize("model", model_configs_softmax.keys())
+def test_dpa_softmax_thd(dtype, model_configs, model):
+    """Test DotProductAttention module with different softmax types"""
+    test_dot_product_attention(
+        dtype, model_configs, model, True, True, "thd_thd_thd", False, False
+    )
+
+
 model_configs_mla = {
     # test: ModelConfig(b, sq, hq, dqk)
     "mla_1_0": ModelConfig(8, 128, 16, 64, head_dim_v=128),

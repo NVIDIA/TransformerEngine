@@ -722,11 +722,6 @@ def get_attention_backend(
                     softmax_type,
                 )
                 use_fused_attention = False
-            logger.debug(
-                "Disabling UnfusedDotProductAttention for softmax_type = %s and qkv_format = thd",
-                softmax_type,
-            )
-            use_unfused_attention = False
         if context_parallel:
             logger.debug(
                 "Disabling UnfusedDotProductAttention for context parallelism with softmax_type"
