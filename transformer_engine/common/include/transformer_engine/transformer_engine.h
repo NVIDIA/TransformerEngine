@@ -517,7 +517,6 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
  *  \brief Namespace containing C++ API of Transformer Engine.
  */
 namespace transformer_engine {
-
 /*! \enum DType
  *  \brief TE datatype.
  */

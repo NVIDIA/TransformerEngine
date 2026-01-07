@@ -15,7 +15,7 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
 
   if (input.scaling_mode() == NVTE_INVALID_SCALING) {
     NVTE_ERROR("Invalid scaling mode for swizzle.");
-  } else if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING &&
+  } else if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING ||
              input.scaling_mode() != NVTE_NVFP4_1D_SCALING) {
     return std::nullopt;
   }
@@ -26,26 +26,22 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
   const auto nvfp4 = input.scaling_mode() == NVTE_NVFP4_1D_SCALING;
 
   NVTEBasicTensor scale_inv;
-  NVTEShape nvte_input_shape;
+  NVTEShape input_shape;
   if (rowwise) {
-    nvte_input_shape = input.shape();
+    input_shape = input.shape();
     scale_inv = input.get_rowwise_scale_inv();
   } else {
-    nvte_input_shape = input.get_columnwise_data().shape;
+    input_shape = input.get_columnwise_data().shape;
     scale_inv = input.get_columnwise_scale_inv();
   }
 
-  auto input_shape = nvte_shape_to_vector(nvte_input_shape);
-  auto scale_inv_shape = nvte_shape_to_vector(scale_inv.shape);
-
-  NVTE_CHECK(input_shape.size() >= 2, "Wrong ndims for swizzle input shape.");
+  auto& scale_inv_shape = scale_inv.shape;
+  NVTE_CHECK(input_shape.ndim >= 2, "Wrong ndims for swizzle input shape.");
 
   // Allocate memory for swizzled output.
   auto options = at::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
-  std::vector<int64_t> scale_inv_shape_int;
-  for (size_t i = 0; i < scale_inv_shape.size(); ++i) {
-    scale_inv_shape_int.push_back(static_cast<int64_t>(scale_inv_shape[i]));
-  }
+  std::vector<int64_t> scale_inv_shape_int(scale_inv_shape.data,
+                                           scale_inv_shape.data + scale_inv_shape.ndim);
   auto swizzled_scale_inv = at::empty(scale_inv_shape_int, options);
   void* scale_inv_dptr = scale_inv.data_ptr;
   void* swizzled_scale_inv_dptr = getDataPtr(swizzled_scale_inv, 0);

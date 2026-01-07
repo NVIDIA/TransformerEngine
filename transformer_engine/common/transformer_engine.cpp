@@ -961,7 +961,7 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
 }
 
 int nvte_is_non_tn_fp8_gemm_supported() {
-  int num_devices = transformer_engine::cuda::num_devices();
+  static int num_devices = transformer_engine::cuda::num_devices();
   static std::vector<int> cache(num_devices, -1);
   static std::vector<std::once_flag> flags(num_devices);
   int device_id = transformer_engine::cuda::current_device();
