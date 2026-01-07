@@ -27,7 +27,9 @@ endif()
 
 # Process GPU architectures
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.3)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120 107)
+  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
     set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
   elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
     set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
@@ -77,6 +79,14 @@ if(NOT arch_120_index EQUAL -1)
   else()
     list(APPEND NVTE_SPECIFIC_ARCHS "120a")
   endif()
+endif()
+
+# Check for architecture 107 (if we see this we are in toolkit >= 13.3)
+list(FIND CMAKE_CUDA_ARCHITECTURES "107" arch_107_index)
+if(NOT arch_107_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "107")
+  list(APPEND NVTE_GENERIC_ARCHS "107")
+  list(APPEND NVTE_SPECIFIC_ARCHS "107a")
 endif()
 
 # cuDNN frontend API
