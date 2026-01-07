@@ -425,9 +425,7 @@ def test_dpa_softmax(dtype, model_configs, model):
 @pytest.mark.parametrize("model", model_configs_softmax.keys())
 def test_dpa_softmax_thd(dtype, model_configs, model):
     """Test DotProductAttention module with different softmax types"""
-    test_dot_product_attention(
-        dtype, model_configs, model, True, True, "thd_thd_thd", False, False
-    )
+    test_dot_product_attention(dtype, model_configs, model, True, True, "thd_thd_thd", False, False)
 
 
 model_configs_mla = {
