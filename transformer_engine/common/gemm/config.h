@@ -49,10 +49,10 @@ struct GroupedMatmulConfig {
   bool avg_k_set = false;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(int64_t),  // avg_m
-      sizeof(int64_t),  // avg_n
-      sizeof(int64_t),  // avg_k
-      sizeof(int)       // sm_count
+      sizeof(avg_m), 
+      sizeof(avg_n),
+      sizeof(avg_k),
+      sizeof(sm_count)
   };
 };
 
