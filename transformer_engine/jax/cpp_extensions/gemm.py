@@ -1463,7 +1463,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     name = "te_grouped_gemm_ffi"
     multiple_results = True
-    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    impl_static_args = (9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
     inner_primitive = None
     outer_primitive = None
 
@@ -1476,6 +1476,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         bias_aval,
         group_sizes_aval,
         group_offset_aval,
+        alpha,
+        beta,
         *,
         M,
         N,
@@ -1535,6 +1537,8 @@ class GroupedGemmPrimitive(BasePrimitive):
             # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
             workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
             workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
+
+        workspace_size += 1024*1024 # HACK: properly make a workspace_setup buffer in addition to the workspace_cublas buffer
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         out_shape = (M, N)
@@ -1587,6 +1591,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         bias,
         group_sizes,
         group_offset,
+        alpha,
+        beta,
         M,
         N,
         K,
@@ -1607,6 +1613,8 @@ class GroupedGemmPrimitive(BasePrimitive):
             bias,
             group_sizes,
             group_offset,
+            alpha,
+            beta,
             M=M,
             N=N,
             K=K,
@@ -2115,6 +2123,9 @@ def grouped_gemm(
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
+    num_gemms = group_sizes.shape[0]
+    alpha = jnp.ones((num_gemms,), jnp.float32)
+    beta = jnp.zeros((num_gemms,), jnp.float32)
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
         lhs_scale_inv,
@@ -2123,6 +2134,8 @@ def grouped_gemm(
         bias,
         group_sizes,
         group_offset,
+        alpha,
+        beta,
         M=M,
         N=N,
         K=K_lhs,
