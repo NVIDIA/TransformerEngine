@@ -8,9 +8,12 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec
+from jax.experimental.custom_partitioning import SdyShardingRule
 import triton
 
 from transformer_engine.jax.cpp_extensions.base import BasePrimitive, register_primitive
+from transformer_engine.jax.cpp_extensions.misc import get_padded_spec, NamedSharding
 from transformer_engine.common.triton.permutation import (
     _row_id_map_pass_1_kernel,
     _row_id_map_pass_2_kernel,
@@ -117,6 +120,81 @@ class RowIdMapPass1Primitive(BasePrimitive):
             },
         )
 
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, num_tokens, num_experts, block_size):
+        """Batching rule for vmap."""
+        raise NotImplementedError("vmap is not supported for RowIdMapPass1Primitive")
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        num_tokens, num_experts, block_size, mesh, arg_infos, result_infos
+    ):
+        """Infer output sharding from input sharding."""
+        del num_tokens, num_experts, block_size, result_infos
+        routing_map_spec = get_padded_spec(arg_infos[0])
+        # row_id_map has same token dimension sharding as routing_map
+        # Shape: (num_tokens, num_experts * 2 + 1)
+        row_id_map_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(routing_map_spec[0], None),
+            desc="RowIdMapPass1.row_id_map_sharding",
+        )
+        # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Keep it replicated for simplicity
+        workspace_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(None, None),
+            desc="RowIdMapPass1.workspace_sharding",
+        )
+        return row_id_map_sharding, workspace_sharding
+
+    @staticmethod
+    def partition(num_tokens, num_experts, block_size, mesh, arg_infos, result_infos):
+        """Partition the primitive for distributed execution."""
+        del result_infos
+        routing_map_spec = get_padded_spec(arg_infos[0])
+
+        # Input sharding
+        arg_shardings = (arg_infos[0].sharding,)
+
+        # Output shardings
+        row_id_map_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(routing_map_spec[0], None),
+            desc="RowIdMapPass1.row_id_map_sharding",
+        )
+        workspace_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(None, None),
+            desc="RowIdMapPass1.workspace_sharding",
+        )
+        out_shardings = (row_id_map_sharding, workspace_sharding)
+
+        def sharded_impl(routing_map):
+            # Each shard processes its local tokens
+            local_num_tokens = routing_map.shape[0]
+            return RowIdMapPass1Primitive.impl(
+                routing_map,
+                num_tokens=local_num_tokens,
+                num_experts=num_experts,
+                block_size=block_size,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(num_tokens, num_experts, block_size, mesh, value_types, result_types):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, num_experts, block_size, mesh, result_types
+        prefix = "RowIdMapPass1"
+        # routing_map shape: (num_tokens, num_experts)
+        input_spec = (f"{prefix}_tokens", f"{prefix}_experts")
+        # row_id_map shape: (num_tokens, num_experts * 2 + 1)
+        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
+        # workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        workspace_spec = (f"{prefix}_ws_experts", f"{prefix}_ws_blocks")
+        return SdyShardingRule((input_spec,), (row_id_map_spec, workspace_spec))
+
 
 register_primitive(RowIdMapPass1Primitive)
 
@@ -185,6 +263,74 @@ class RowIdMapPass2Primitive(BasePrimitive):
             },
         )
 
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, num_tokens, num_experts, block_size):
+        """Batching rule for vmap."""
+        raise NotImplementedError("vmap is not supported for RowIdMapPass2Primitive")
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        num_tokens, num_experts, block_size, mesh, arg_infos, result_infos
+    ):
+        """Infer output sharding from input sharding."""
+        del num_tokens, num_experts, block_size, result_infos
+        row_id_map_spec = get_padded_spec(arg_infos[0])
+        # Output has same sharding as input (in-place operation)
+        row_id_map_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(*row_id_map_spec),
+            desc="RowIdMapPass2.row_id_map_sharding",
+        )
+        workspace_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(None, None),
+            desc="RowIdMapPass2.workspace_sharding",
+        )
+        return row_id_map_sharding, workspace_sharding
+
+    @staticmethod
+    def partition(num_tokens, num_experts, block_size, mesh, arg_infos, result_infos):
+        """Partition the primitive for distributed execution."""
+        del result_infos
+        row_id_map_spec = get_padded_spec(arg_infos[0])
+
+        # Input shardings
+        arg_shardings = (arg_infos[0].sharding, arg_infos[1].sharding)
+
+        # Output shardings (same as inputs for in-place operation)
+        row_id_map_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(*row_id_map_spec),
+            desc="RowIdMapPass2.row_id_map_sharding",
+        )
+        workspace_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(None, None),
+            desc="RowIdMapPass2.workspace_sharding",
+        )
+        out_shardings = (row_id_map_sharding, workspace_sharding)
+
+        def sharded_impl(row_id_map, workspace):
+            local_num_tokens = row_id_map.shape[0]
+            return RowIdMapPass2Primitive.impl(
+                row_id_map,
+                workspace,
+                num_tokens=local_num_tokens,
+                num_experts=num_experts,
+                block_size=block_size,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(num_tokens, num_experts, block_size, mesh, value_types, result_types):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, num_experts, block_size, mesh, result_types
+        prefix = "RowIdMapPass2"
+        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_cols")
+        workspace_spec = (f"{prefix}_ws_experts", f"{prefix}_ws_blocks")
+        return SdyShardingRule((row_id_map_spec, workspace_spec), (row_id_map_spec, workspace_spec))
+
 
 register_primitive(RowIdMapPass2Primitive)
 
@@ -239,6 +385,57 @@ class RowIdMapPass3Primitive(BasePrimitive):
                 "LOAD_SIZE": load_size,
             },
         )
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, num_tokens, num_experts):
+        """Batching rule for vmap."""
+        raise NotImplementedError("vmap is not supported for RowIdMapPass3Primitive")
+
+    @staticmethod
+    def infer_sharding_from_operands(num_tokens, num_experts, mesh, arg_infos, result_infos):
+        """Infer output sharding from input sharding."""
+        del num_tokens, num_experts, result_infos
+        row_id_map_spec = get_padded_spec(arg_infos[0])
+        # Output has same sharding as input (in-place operation)
+        return NamedSharding(
+            mesh,
+            PartitionSpec(*row_id_map_spec),
+            desc="RowIdMapPass3.row_id_map_sharding",
+        )
+
+    @staticmethod
+    def partition(num_tokens, num_experts, mesh, arg_infos, result_infos):
+        """Partition the primitive for distributed execution."""
+        del result_infos
+        row_id_map_spec = get_padded_spec(arg_infos[0])
+
+        # Input sharding
+        arg_shardings = (arg_infos[0].sharding,)
+
+        # Output sharding (same as input for in-place operation)
+        out_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(*row_id_map_spec),
+            desc="RowIdMapPass3.row_id_map_sharding",
+        )
+
+        def sharded_impl(row_id_map):
+            local_num_tokens = row_id_map.shape[0]
+            return RowIdMapPass3Primitive.impl(
+                row_id_map,
+                num_tokens=local_num_tokens,
+                num_experts=num_experts,
+            )
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(num_tokens, num_experts, mesh, value_types, result_types):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, num_experts, mesh, result_types
+        prefix = "RowIdMapPass3"
+        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_cols")
+        return SdyShardingRule((row_id_map_spec,), (row_id_map_spec,))
 
 
 register_primitive(RowIdMapPass3Primitive)
@@ -405,6 +602,168 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             },
         )
 
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        with_probs,
+        with_pad,
+    ):
+        """Batching rule for vmap."""
+        raise NotImplementedError("vmap is not supported for PermuteWithMaskMapPrimitive")
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        with_probs,
+        with_pad,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Infer output sharding from input sharding.
+
+        For batch-dimension partitioning:
+        - Input (num_tokens, hidden_size) is sharded on token dim
+        - Output (num_out_tokens, hidden_size) gets same token dim sharding
+        - Permuted probs (num_out_tokens,) gets same token dim sharding
+        """
+        del num_tokens, num_experts, num_out_tokens, hidden_size, with_pad, result_infos
+        inp_spec = get_padded_spec(arg_infos[0])
+        # Output has same sharding pattern: (token_shard, None)
+        output_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(inp_spec[0], None),
+            desc="PermuteWithMaskMap.output_sharding",
+        )
+        if with_probs:
+            permuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(inp_spec[0]),
+                desc="PermuteWithMaskMap.permuted_probs_sharding",
+            )
+        else:
+            permuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(None),
+                desc="PermuteWithMaskMap.permuted_probs_sharding_empty",
+            )
+        return output_sharding, permuted_probs_sharding
+
+    @staticmethod
+    def partition(
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        with_probs,
+        with_pad,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Partition the primitive for distributed execution.
+
+        For batch-dimension partitioning, each GPU processes its local tokens
+        independently. The row_id_map contains local destination indices,
+        so no inter-GPU communication is needed.
+        """
+        del result_infos
+        inp_spec = get_padded_spec(arg_infos[0])
+        row_id_map_spec = get_padded_spec(arg_infos[1])
+        probs_spec = get_padded_spec(arg_infos[2])
+
+        # Input shardings - preserve original shardings
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
+        # Output shardings
+        output_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(inp_spec[0], None),
+            desc="PermuteWithMaskMap.output_sharding",
+        )
+        if with_probs:
+            permuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(inp_spec[0]),
+                desc="PermuteWithMaskMap.permuted_probs_sharding",
+            )
+        else:
+            permuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(None),
+                desc="PermuteWithMaskMap.permuted_probs_sharding_empty",
+            )
+        out_shardings = (output_sharding, permuted_probs_sharding)
+
+        def sharded_impl(inp, row_id_map, probs, scale, permuted_scale, pad_offsets):
+            # Each shard processes its local tokens
+            local_num_tokens = inp.shape[0]
+            local_hidden_size = inp.shape[1]
+            # Compute local num_out_tokens proportionally
+            # In batch-parallel case, each GPU has local_tokens = total_tokens / num_gpus
+            # and local_out_tokens = total_out_tokens / num_gpus
+            local_num_out_tokens = num_out_tokens  # Will be adjusted by the outer function
+            return PermuteWithMaskMapPrimitive.impl(
+                inp,
+                row_id_map,
+                probs,
+                scale,
+                permuted_scale,
+                pad_offsets,
+                num_tokens=local_num_tokens,
+                num_experts=num_experts,
+                num_out_tokens=local_num_out_tokens,
+                hidden_size=local_hidden_size,
+                with_probs=with_probs,
+                with_pad=with_pad,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        with_probs,
+        with_pad,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, num_experts, num_out_tokens, hidden_size, with_pad, mesh, result_types
+        prefix = "PermuteWithMaskMap"
+        # inp: (num_tokens, hidden_size)
+        inp_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
+        # row_id_map: (num_tokens, num_experts * 2 + 1)
+        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
+        # probs: (num_tokens, num_experts) or (0,)
+        probs_spec = (f"{prefix}_tokens", f"{prefix}_experts") if with_probs else (f"{prefix}_empty",)
+        # scale, permuted_scale: dummy
+        scale_spec = (f"{prefix}_scale_tok", f"{prefix}_scale_hid")
+        # pad_offsets: (num_experts,) or (0,)
+        pad_offsets_spec = (f"{prefix}_pad_off",)
+        # output: (num_out_tokens, hidden_size)
+        output_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
+        # permuted_probs: (num_out_tokens,) or (0,)
+        permuted_probs_spec = (f"{prefix}_out_tokens",) if with_probs else (f"{prefix}_empty2",)
+
+        return SdyShardingRule(
+            (inp_spec, row_id_map_spec, probs_spec, scale_spec, scale_spec, pad_offsets_spec),
+            (output_spec, permuted_probs_spec),
+        )
+
 
 register_primitive(PermuteWithMaskMapPrimitive)
 
@@ -553,6 +912,154 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
                 "FUSION_UNPAD": False,
                 "BLOCK_SIZE": block_size,
             },
+        )
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        num_tokens,
+        num_experts,
+        hidden_size,
+        with_merging_probs,
+        with_probs,
+    ):
+        """Batching rule for vmap."""
+        raise NotImplementedError("vmap is not supported for UnpermuteWithMaskMapPrimitive")
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        num_tokens,
+        num_experts,
+        hidden_size,
+        with_merging_probs,
+        with_probs,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Infer output sharding from input sharding.
+
+        For batch-dimension partitioning:
+        - row_id_map (num_tokens, num_experts*2+1) is sharded on token dim
+        - Output (num_tokens, hidden_size) gets same token dim sharding
+        """
+        del num_tokens, num_experts, hidden_size, with_merging_probs, result_infos
+        row_id_map_spec = get_padded_spec(arg_infos[1])
+        # Output has same token dimension sharding as row_id_map
+        output_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(row_id_map_spec[0], None),
+            desc="UnpermuteWithMaskMap.output_sharding",
+        )
+        if with_probs:
+            unpermuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(row_id_map_spec[0], None),
+                desc="UnpermuteWithMaskMap.unpermuted_probs_sharding",
+            )
+        else:
+            unpermuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(None),
+                desc="UnpermuteWithMaskMap.unpermuted_probs_sharding_empty",
+            )
+        return output_sharding, unpermuted_probs_sharding
+
+    @staticmethod
+    def partition(
+        num_tokens,
+        num_experts,
+        hidden_size,
+        with_merging_probs,
+        with_probs,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Partition the primitive for distributed execution."""
+        del result_infos
+        row_id_map_spec = get_padded_spec(arg_infos[1])
+
+        # Input shardings - preserve original shardings
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
+        # Output shardings
+        output_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(row_id_map_spec[0], None),
+            desc="UnpermuteWithMaskMap.output_sharding",
+        )
+        if with_probs:
+            unpermuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(row_id_map_spec[0], None),
+                desc="UnpermuteWithMaskMap.unpermuted_probs_sharding",
+            )
+        else:
+            unpermuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(None),
+                desc="UnpermuteWithMaskMap.unpermuted_probs_sharding_empty",
+            )
+        out_shardings = (output_sharding, unpermuted_probs_sharding)
+
+        def sharded_impl(inp, row_id_map, merging_probs, permuted_probs, pad_offsets):
+            # Each shard processes its local tokens
+            local_num_tokens = row_id_map.shape[0]
+            local_hidden_size = inp.shape[1]
+            return UnpermuteWithMaskMapPrimitive.impl(
+                inp,
+                row_id_map,
+                merging_probs,
+                permuted_probs,
+                pad_offsets,
+                num_tokens=local_num_tokens,
+                num_experts=num_experts,
+                hidden_size=local_hidden_size,
+                with_merging_probs=with_merging_probs,
+                with_probs=with_probs,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        num_tokens,
+        num_experts,
+        hidden_size,
+        with_merging_probs,
+        with_probs,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, num_experts, hidden_size, mesh, result_types
+        prefix = "UnpermuteWithMaskMap"
+        # inp: (num_out_tokens, hidden_size)
+        inp_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
+        # row_id_map: (num_tokens, num_experts * 2 + 1)
+        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
+        # merging_probs: (num_tokens, num_experts) or (0,)
+        merging_probs_spec = (
+            (f"{prefix}_tokens", f"{prefix}_experts") if with_merging_probs else (f"{prefix}_empty",)
+        )
+        # permuted_probs: (num_out_tokens,) or (0,)
+        permuted_probs_spec = (f"{prefix}_out_tokens",) if with_probs else (f"{prefix}_empty2",)
+        # pad_offsets: (num_experts,) or (0,)
+        pad_offsets_spec = (f"{prefix}_pad_off",)
+        # output: (num_tokens, hidden_size)
+        output_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
+        # unpermuted_probs: (num_tokens, num_experts) or (0,)
+        unpermuted_probs_spec = (
+            (f"{prefix}_tokens", f"{prefix}_experts") if with_probs else (f"{prefix}_empty3",)
+        )
+
+        return SdyShardingRule(
+            (inp_spec, row_id_map_spec, merging_probs_spec, permuted_probs_spec, pad_offsets_spec),
+            (output_spec, unpermuted_probs_spec),
         )
 
 
@@ -704,6 +1211,138 @@ class UnpermuteWithMaskMapAndUnpadPrimitive(BasePrimitive):
             },
         )
 
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        num_tokens,
+        num_experts,
+        hidden_size,
+        with_merging_probs,
+        with_probs,
+    ):
+        """Batching rule for vmap."""
+        raise NotImplementedError("vmap is not supported for UnpermuteWithMaskMapAndUnpadPrimitive")
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        num_tokens,
+        num_experts,
+        hidden_size,
+        with_merging_probs,
+        with_probs,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Infer output sharding from input sharding."""
+        del num_tokens, num_experts, hidden_size, with_merging_probs, result_infos
+        row_id_map_spec = get_padded_spec(arg_infos[1])
+        output_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(row_id_map_spec[0], None),
+            desc="UnpermuteWithMaskMapAndUnpad.output_sharding",
+        )
+        if with_probs:
+            unpermuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(row_id_map_spec[0], None),
+                desc="UnpermuteWithMaskMapAndUnpad.unpermuted_probs_sharding",
+            )
+        else:
+            unpermuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(None),
+                desc="UnpermuteWithMaskMapAndUnpad.unpermuted_probs_sharding_empty",
+            )
+        return output_sharding, unpermuted_probs_sharding
+
+    @staticmethod
+    def partition(
+        num_tokens,
+        num_experts,
+        hidden_size,
+        with_merging_probs,
+        with_probs,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Partition the primitive for distributed execution."""
+        del result_infos
+        row_id_map_spec = get_padded_spec(arg_infos[1])
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
+        output_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(row_id_map_spec[0], None),
+            desc="UnpermuteWithMaskMapAndUnpad.output_sharding",
+        )
+        if with_probs:
+            unpermuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(row_id_map_spec[0], None),
+                desc="UnpermuteWithMaskMapAndUnpad.unpermuted_probs_sharding",
+            )
+        else:
+            unpermuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(None),
+                desc="UnpermuteWithMaskMapAndUnpad.unpermuted_probs_sharding_empty",
+            )
+        out_shardings = (output_sharding, unpermuted_probs_sharding)
+
+        def sharded_impl(inp, row_id_map, merging_probs, permuted_probs, pad_offsets):
+            local_num_tokens = row_id_map.shape[0]
+            local_hidden_size = inp.shape[1]
+            return UnpermuteWithMaskMapAndUnpadPrimitive.impl(
+                inp,
+                row_id_map,
+                merging_probs,
+                permuted_probs,
+                pad_offsets,
+                num_tokens=local_num_tokens,
+                num_experts=num_experts,
+                hidden_size=local_hidden_size,
+                with_merging_probs=with_merging_probs,
+                with_probs=with_probs,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        num_tokens,
+        num_experts,
+        hidden_size,
+        with_merging_probs,
+        with_probs,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, num_experts, hidden_size, mesh, result_types
+        prefix = "UnpermuteWithMaskMapAndUnpad"
+        inp_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
+        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
+        merging_probs_spec = (
+            (f"{prefix}_tokens", f"{prefix}_experts") if with_merging_probs else (f"{prefix}_empty",)
+        )
+        permuted_probs_spec = (f"{prefix}_out_tokens",) if with_probs else (f"{prefix}_empty2",)
+        pad_offsets_spec = (f"{prefix}_pad_off",)
+        output_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
+        unpermuted_probs_spec = (
+            (f"{prefix}_tokens", f"{prefix}_experts") if with_probs else (f"{prefix}_empty3",)
+        )
+
+        return SdyShardingRule(
+            (inp_spec, row_id_map_spec, merging_probs_spec, permuted_probs_spec, pad_offsets_spec),
+            (output_spec, unpermuted_probs_spec),
+        )
+
 
 register_primitive(UnpermuteWithMaskMapAndUnpadPrimitive)
 
@@ -843,6 +1482,120 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
             },
         )
 
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+    ):
+        """Batching rule for vmap."""
+        raise NotImplementedError("vmap is not supported for UnpermuteBwdWithMergingProbsPrimitive")
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Infer output sharding from input sharding."""
+        del num_tokens, num_experts, num_out_tokens, hidden_size, result_infos
+        fwd_output_grad_spec = get_padded_spec(arg_infos[0])
+        merging_probs_spec = get_padded_spec(arg_infos[2])
+        # fwd_input_grad has same token sharding as fwd_output_grad
+        fwd_input_grad_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(fwd_output_grad_spec[0], None),
+            desc="UnpermuteBwdWithMergingProbs.fwd_input_grad_sharding",
+        )
+        # merging_probs_grad has same sharding as merging_probs
+        merging_probs_grad_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(merging_probs_spec[0], None),
+            desc="UnpermuteBwdWithMergingProbs.merging_probs_grad_sharding",
+        )
+        return fwd_input_grad_sharding, merging_probs_grad_sharding
+
+    @staticmethod
+    def partition(
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Partition the primitive for distributed execution."""
+        del result_infos
+        fwd_output_grad_spec = get_padded_spec(arg_infos[0])
+        merging_probs_spec = get_padded_spec(arg_infos[2])
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
+        fwd_input_grad_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(fwd_output_grad_spec[0], None),
+            desc="UnpermuteBwdWithMergingProbs.fwd_input_grad_sharding",
+        )
+        merging_probs_grad_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(merging_probs_spec[0], None),
+            desc="UnpermuteBwdWithMergingProbs.merging_probs_grad_sharding",
+        )
+        out_shardings = (fwd_input_grad_sharding, merging_probs_grad_sharding)
+
+        def sharded_impl(fwd_output_grad, fwd_input, merging_probs, row_id_map, pad_offsets):
+            local_num_tokens = row_id_map.shape[0]
+            local_hidden_size = fwd_output_grad.shape[1]
+            local_num_out_tokens = fwd_input.shape[0]
+            return UnpermuteBwdWithMergingProbsPrimitive.impl(
+                fwd_output_grad,
+                fwd_input,
+                merging_probs,
+                row_id_map,
+                pad_offsets,
+                num_tokens=local_num_tokens,
+                num_experts=num_experts,
+                num_out_tokens=local_num_out_tokens,
+                hidden_size=local_hidden_size,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, num_experts, num_out_tokens, hidden_size, mesh, result_types
+        prefix = "UnpermuteBwdWithMergingProbs"
+        fwd_output_grad_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
+        fwd_input_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
+        merging_probs_spec = (f"{prefix}_tokens", f"{prefix}_experts")
+        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
+        pad_offsets_spec = (f"{prefix}_pad_off",)
+        fwd_input_grad_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
+        merging_probs_grad_spec = (f"{prefix}_tokens", f"{prefix}_experts")
+
+        return SdyShardingRule(
+            (fwd_output_grad_spec, fwd_input_spec, merging_probs_spec, row_id_map_spec, pad_offsets_spec),
+            (fwd_input_grad_spec, merging_probs_grad_spec),
+        )
+
 
 register_primitive(UnpermuteBwdWithMergingProbsPrimitive)
 
@@ -980,6 +1733,120 @@ class UnpermuteBwdWithMergingProbsAndUnpadPrimitive(BasePrimitive):
                 "FUSION_UNPAD": True,
                 "BLOCK_SIZE": block_size,
             },
+        )
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+    ):
+        """Batching rule for vmap."""
+        raise NotImplementedError(
+            "vmap is not supported for UnpermuteBwdWithMergingProbsAndUnpadPrimitive"
+        )
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Infer output sharding from input sharding."""
+        del num_tokens, num_experts, num_out_tokens, hidden_size, result_infos
+        fwd_output_grad_spec = get_padded_spec(arg_infos[0])
+        merging_probs_spec = get_padded_spec(arg_infos[2])
+        fwd_input_grad_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(fwd_output_grad_spec[0], None),
+            desc="UnpermuteBwdWithMergingProbsAndUnpad.fwd_input_grad_sharding",
+        )
+        merging_probs_grad_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(merging_probs_spec[0], None),
+            desc="UnpermuteBwdWithMergingProbsAndUnpad.merging_probs_grad_sharding",
+        )
+        return fwd_input_grad_sharding, merging_probs_grad_sharding
+
+    @staticmethod
+    def partition(
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """Partition the primitive for distributed execution."""
+        del result_infos
+        fwd_output_grad_spec = get_padded_spec(arg_infos[0])
+        merging_probs_spec = get_padded_spec(arg_infos[2])
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
+        fwd_input_grad_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(fwd_output_grad_spec[0], None),
+            desc="UnpermuteBwdWithMergingProbsAndUnpad.fwd_input_grad_sharding",
+        )
+        merging_probs_grad_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(merging_probs_spec[0], None),
+            desc="UnpermuteBwdWithMergingProbsAndUnpad.merging_probs_grad_sharding",
+        )
+        out_shardings = (fwd_input_grad_sharding, merging_probs_grad_sharding)
+
+        def sharded_impl(fwd_output_grad, fwd_input, merging_probs, row_id_map, pad_offsets):
+            local_num_tokens = row_id_map.shape[0]
+            local_hidden_size = fwd_output_grad.shape[1]
+            local_num_out_tokens = fwd_input.shape[0]
+            return UnpermuteBwdWithMergingProbsAndUnpadPrimitive.impl(
+                fwd_output_grad,
+                fwd_input,
+                merging_probs,
+                row_id_map,
+                pad_offsets,
+                num_tokens=local_num_tokens,
+                num_experts=num_experts,
+                num_out_tokens=local_num_out_tokens,
+                hidden_size=local_hidden_size,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, num_experts, num_out_tokens, hidden_size, mesh, result_types
+        prefix = "UnpermuteBwdWithMergingProbsAndUnpad"
+        fwd_output_grad_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
+        fwd_input_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
+        merging_probs_spec = (f"{prefix}_tokens", f"{prefix}_experts")
+        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
+        pad_offsets_spec = (f"{prefix}_pad_off",)
+        fwd_input_grad_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
+        merging_probs_grad_spec = (f"{prefix}_tokens", f"{prefix}_experts")
+
+        return SdyShardingRule(
+            (fwd_output_grad_spec, fwd_input_spec, merging_probs_spec, row_id_map_spec, pad_offsets_spec),
+            (fwd_input_grad_spec, merging_probs_grad_spec),
         )
 
 
@@ -1147,6 +2014,59 @@ class MakeChunkSortMapPrimitive(BasePrimitive):
             },
         )
 
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, num_tokens, num_splits):
+        """Batching rule for vmap."""
+        raise NotImplementedError("vmap is not supported for MakeChunkSortMapPrimitive")
+
+    @staticmethod
+    def infer_sharding_from_operands(num_tokens, num_splits, mesh, arg_infos, result_infos):
+        """Infer output sharding from input sharding."""
+        del num_tokens, num_splits, result_infos, arg_infos
+        # row_id_map is replicated since split_sizes and sorted_indices are typically small
+        return NamedSharding(
+            mesh,
+            PartitionSpec(None),
+            desc="MakeChunkSortMap.row_id_map_sharding",
+        )
+
+    @staticmethod
+    def partition(num_tokens, num_splits, mesh, arg_infos, result_infos):
+        """Partition the primitive for distributed execution."""
+        del result_infos
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
+        out_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(None),
+            desc="MakeChunkSortMap.row_id_map_sharding",
+        )
+
+        def sharded_impl(split_sizes, sorted_indices):
+            return MakeChunkSortMapPrimitive.impl(
+                split_sizes,
+                sorted_indices,
+                num_tokens=num_tokens,
+                num_splits=num_splits,
+            )
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(num_tokens, num_splits, mesh, value_types, result_types):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, num_splits, mesh, result_types
+        prefix = "MakeChunkSortMap"
+        split_sizes_spec = (f"{prefix}_splits",)
+        sorted_indices_spec = (f"{prefix}_splits",)
+        row_id_map_spec = (f"{prefix}_tokens",)
+
+        return SdyShardingRule(
+            (split_sizes_spec, sorted_indices_spec),
+            (row_id_map_spec,),
+        )
+
 
 register_primitive(MakeChunkSortMapPrimitive)
 
@@ -1226,6 +2146,101 @@ class SortChunksByMapPrimitive(BasePrimitive):
                 "FORWARD": is_forward,
                 "BLOCK_SIZE": block_size,
             },
+        )
+
+    @staticmethod
+    def batcher(
+        batched_args, batch_dims, *, num_tokens, hidden_size, is_forward, with_probs
+    ):
+        """Batching rule for vmap."""
+        raise NotImplementedError("vmap is not supported for SortChunksByMapPrimitive")
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        num_tokens, hidden_size, is_forward, with_probs, mesh, arg_infos, result_infos
+    ):
+        """Infer output sharding from input sharding."""
+        del num_tokens, hidden_size, is_forward, result_infos
+        inp_spec = get_padded_spec(arg_infos[0])
+        output_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(inp_spec[0], None),
+            desc="SortChunksByMap.output_sharding",
+        )
+        if with_probs:
+            permuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(inp_spec[0]),
+                desc="SortChunksByMap.permuted_probs_sharding",
+            )
+        else:
+            permuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(None),
+                desc="SortChunksByMap.permuted_probs_sharding_empty",
+            )
+        return output_sharding, permuted_probs_sharding
+
+    @staticmethod
+    def partition(
+        num_tokens, hidden_size, is_forward, with_probs, mesh, arg_infos, result_infos
+    ):
+        """Partition the primitive for distributed execution."""
+        del result_infos
+        inp_spec = get_padded_spec(arg_infos[0])
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
+        output_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(inp_spec[0], None),
+            desc="SortChunksByMap.output_sharding",
+        )
+        if with_probs:
+            permuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(inp_spec[0]),
+                desc="SortChunksByMap.permuted_probs_sharding",
+            )
+        else:
+            permuted_probs_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(None),
+                desc="SortChunksByMap.permuted_probs_sharding_empty",
+            )
+        out_shardings = (output_sharding, permuted_probs_sharding)
+
+        def sharded_impl(inp, row_id_map, probs):
+            local_num_tokens = inp.shape[0]
+            local_hidden_size = inp.shape[1]
+            return SortChunksByMapPrimitive.impl(
+                inp,
+                row_id_map,
+                probs,
+                num_tokens=local_num_tokens,
+                hidden_size=local_hidden_size,
+                is_forward=is_forward,
+                with_probs=with_probs,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        num_tokens, hidden_size, is_forward, with_probs, mesh, value_types, result_types
+    ):
+        """Shardy sharding rule for this primitive."""
+        del num_tokens, hidden_size, is_forward, mesh, result_types
+        prefix = "SortChunksByMap"
+        inp_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
+        row_id_map_spec = (f"{prefix}_tokens",)
+        probs_spec = (f"{prefix}_tokens",) if with_probs else (f"{prefix}_empty",)
+        output_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
+        permuted_probs_spec = (f"{prefix}_tokens",) if with_probs else (f"{prefix}_empty2",)
+
+        return SdyShardingRule(
+            (inp_spec, row_id_map_spec, probs_spec),
+            (output_spec, permuted_probs_spec),
         )
 
 
