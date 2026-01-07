@@ -132,7 +132,7 @@ def _get_shared_object_file(library: str) -> Path:
     """
 
     # Check provided input and determine the correct prefix for .so.
-    assert library in ("core", "torch", "jax"), f"Unsupported TE library {library}."
+    assert library in ("core", "torch_nv", "jax"), f"Unsupported TE library {library}."
     if library == "core":
         so_prefix = "libtransformer_engine"
     else:
@@ -183,12 +183,7 @@ def load_framework_extension(framework: str) -> None:
         return
 
     # Supported frameworks.
-    assert framework in ("jax", "torch"), f"Unsupported framework {framework}"
-
-    # For torch: plugin system already handles transformer_engine_torch
-    # The native module is transformer_engine_torch_nv (imported by NVIDIA backend)
-    if framework == "torch":
-        return  # Nothing to do, plugin system handles this
+    assert framework in ("jax", "torch_nv"), f"Unsupported framework {framework}"
 
     # For jax: load the native module as before
     module_name = f"transformer_engine_{framework}"
