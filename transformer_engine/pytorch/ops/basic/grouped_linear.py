@@ -13,7 +13,13 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...module.base import get_dummy_wgrad
+from ...cpp_extensions import general_grouped_gemm
+from ...module.base import (
+    _2X_ACC_FPROP,
+    _2X_ACC_DGRAD,
+    _2X_ACC_WGRAD,
+    get_dummy_wgrad,
+)
 from ...quantization import FP8GlobalStateManager
 from ...tensor import Quantizer
 from ...utils import (
@@ -288,6 +294,8 @@ class GroupedLinear(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+        group_size = self.group_size
+        has_bias = self.has_bias
 
         # Check which grads are required
         ctx = basic_op_ctxs[0]
@@ -303,7 +311,7 @@ class GroupedLinear(BasicOperation):
             input_quantizers = []
             weight_quantizers = []
             grad_output_quantizers = []
-            for group_idx in range(self.group_size):
+            for group_idx in range(group_size):
                 input_quantizers.append(self.get_quantizer("forward", 2 * group_idx))
                 weight_quantizers.append(self.get_quantizer("forward", 2 * group_idx + 1))
                 grad_output_quantizers.append(self.get_quantizer("backward", group_idx))
@@ -318,26 +326,40 @@ class GroupedLinear(BasicOperation):
         # TODO Support splits on GPU
         split_sizes = basic_op_extra_inputs[0][0]
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
-        if len(split_sizes_int) != self.group_size:
+        if len(split_sizes_int) != group_size:
             raise ValueError(
-                f"Expected {self.group_size} splits, but got {len(split_sizes_int)}."
+                f"Expected {group_size} splits, but got {len(split_sizes_int)}."
             )
 
         # Extract params
         weights = []
-        biases = []
-        for group_idx in range(self.group_size):
+        biases = [] if has_bias else None
+        for group_idx in range(group_size):
             weights.append(getattr(self, f"weight{group_idx}"))
-            biases.append(getattr(self, f"bias{group_idx}"))
+            if has_bias:
+                biases.append(getattr(self, f"bias{group_idx}"))
+
+        # Split input tensor
+        xs = torch.split(input_, split_sizes_int)
+
+        # Allocate output tensor
+        in_shape = list(input_.size())
+        out_shape = in_shape[:-1] + [self.out_features]
+        out = torch.empty(out_shape, dtype=dtype, device=input_.device)
 
         # Perform GEMMs
-        # TODO: Fused impl, quantization
-        xs = torch.split(input_, split_sizes_int)
-        ys = []
-        for x, w, b in zip(xs, weights, biases):
-            y = torch.nn.functional.linear(x, w, bias=b)
-            ys.append(y)
-        out = torch.cat(ys)
+        general_grouped_gemm(
+            weights,
+            xs,
+            [out],
+            [None] * group_size,  # quantization_params
+            dtype,
+            m_splits=split_sizes_int,
+            bias=biases,
+            use_bias=has_bias,
+            use_split_accumulator=_2X_ACC_FPROP,
+            single_output=True,
+        )
 
         # Save state for backward pass
         if ctx.requires_grad:
@@ -379,55 +401,74 @@ class GroupedLinear(BasicOperation):
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
         dys = torch.split(grad_output, split_sizes_int)
 
-        # Megatron-LM wgrad fusion
-        # Note: Get grad tensors from params so we can accumulate
-        # directly into it.
         accumulate_into_main_grad = self._accumulate_into_main_grad
         grad_weights = [None] * group_size
-        if ctx.weight_requires_grad and accumulate_into_main_grad:
-            for group_idx in range(group_size):
-                weight_param = getattr(self, f"weight{group_idx}")
-                if hasattr(weight_param, "__fsdp_param__"):
-                    weight_param.main_grad = weight_param.get_main_grad()
-                accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
-                if not hasattr(weight_param, "main_grad"):
-                    raise RuntimeError(
-                        "GroupLinear op is configured with "
-                        "accumulate_into_main_grad=True, "
-                        "but weight parameter does not have main_grad attribute"
+        if ctx.weight_requires_grad:
+            if accumulate_into_main_grad:
+                # Megatron-LM wgrad fusion
+                # Note: Get grad tensors from params so we can
+                # accumulate directly into it.
+                for group_idx in range(group_size):
+                    weight_param = getattr(self, f"weight{group_idx}")
+                    if hasattr(weight_param, "__fsdp_param__"):
+                        weight_param.main_grad = weight_param.get_main_grad()
+                    accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
+                    if not hasattr(weight_param, "main_grad"):
+                        raise RuntimeError(
+                            "GroupLinear op is configured with "
+                            "accumulate_into_main_grad=True, "
+                            "but weight parameter does not have main_grad attribute"
+                        )
+            else:
+                weight_shape = weights[0].size()
+                device = weights[0].device
+                for group_idx in range(group_size):
+                    grad_weights[group_idx] = torch.empty(
+                        weight_shape,
+                        dtype=ctx.dtype,
+                        device=device,
                     )
-                grad_weights[group_idx] = weight_param.main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
-        # Compute grad biases
-        # TODO: Fuse with quantization
-        grad_biases = [None] * group_size
-        if ctx.weight_requires_grad and has_bias:
-            for group_idx in range(group_size):
-                dy = dys[group_idx]
-                grad_biases[group_idx] = dy.reshape(-1, dy.size(-1)).sum(0)
-
-        # Perform GEMMs
-        # TODO: Fused impl, quantization
+        # Perform dgrad GEMMs
         grad_input = None
         if ctx.input_requires_grad:
-            dxs = []
-            for group_idx in range(group_size):
-                dy_shape = list(dys[group_idx].size())
-                dx = torch.matmul(
-                    dys[group_idx].reshape(-1, dy_shape[-1]),
-                    weights[group_idx],
-                )
-                dxs.append(dx.reshape(dy_shape[:-1] + [dx.size(-1)]))
-            grad_input = torch.cat(dxs)
+            out_shape = list(grad_output.size())
+            in_shape = out_shape[:-1] + [self.in_features]
+            grad_input = torch.empty(
+                in_shape,
+                dtype=ctx.dtype,
+                device=grad_output.device,
+            )
+            general_grouped_gemm(
+                weights,
+                dys,
+                [grad_input],
+                [None] * group_size,  # quantization_params
+                ctx.dtype,
+                layout="NN",
+                m_splits=split_sizes_int,
+                use_split_accumulator=_2X_ACC_DGRAD,
+                single_output=True,
+            )
+
+        # Perform wgrad GEMMs
+        grad_biases = [None] * group_size
         if ctx.weight_requires_grad:
-            for group_idx in range(group_size):
-                grad_weights[group_idx] = torch.matmul(
-                    dys[group_idx].reshape(-1, dys[group_idx].size(-1)).T,
-                    xs[group_idx].reshape(-1, xs[group_idx].size(-1)),
-                    out=grad_weights[group_idx],
-                )
+            _, grad_biases, _ = general_grouped_gemm(
+                xs,
+                dys,
+                grad_weights,
+                [None] * group_size,  # quantization_params
+                ctx.dtype,
+                layout="NT",
+                m_splits=split_sizes_int,
+                grad=True,
+                use_bias=has_bias,
+                use_split_accumulator=_2X_ACC_WGRAD,
+                accumulate=accumulate_into_main_grad,
+            )
 
         # Clear input tensors if possible
         clear_tensor_data(*xs)
