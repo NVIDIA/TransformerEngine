@@ -828,15 +828,16 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                            convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
   NVTEShape rhsShape{.data={k, n}, .ndim=2};
-  if (!is_grouped_dense_wgrad) {
-    rhsShape.data[0] *= num_gemms;
-  }
   if (rhs_is_trans) {
     std::swap(rhsShape.data[0], rhsShape.data[1]);
   }
+  if (!is_grouped_dense_wgrad) {
+    // If is_grouped_dense_wgrad, then n already includes num_gemms (G) pre-multiplied in gemm.py, so we don't need to multiply it here.
+    rhsShape.data[0] *= num_gemms;
+  }
   NVTEGroupedTensor rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
   NVTEShape lhsShape{.data={m, k}, .ndim=2};
-  if (lhs_is_trans) {
+  if (lhs_is_trans && is_grouped_dense_wgrad) {
     std::swap(lhsShape.data[0], lhsShape.data[1]);
   }
   NVTEGroupedTensor lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
