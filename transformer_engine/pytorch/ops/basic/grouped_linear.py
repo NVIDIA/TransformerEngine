@@ -122,20 +122,17 @@ class GroupedLinear(BasicOperation):
     def has_bias(self) -> bool:
         return self.bias0 is not None
 
-    @torch.no_grad
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""
 
+        # Parameter device
+        device = self.weight0.device
+        if device.type == "meta":
+            device = canonicalize_device(None)
+
+        # Initialize weights
         for group_idx in range(self.group_size):
-
-            # Parameters
             weight = getattr(self, f"weight{group_idx}")
-            bias = getattr(self, f"bias{group_idx}")
-
-            # Parameter device
-            device = weight.device
-            if device.type == "meta":
-                device = canonicalize_device(None)
 
             # Allocate buffers if needed
             if is_quantized_tensor(weight):
@@ -146,8 +143,6 @@ class GroupedLinear(BasicOperation):
                 )
             elif not devices_match(weight.device, device):
                 weight = torch.empty_like(weight, device=device)
-            if bias is not None and not devices_match(bias.device, device):
-                bias = torch.empty_like(bias, device=device)
 
             # Initialize values
             init_context = contextlib.nullcontext()
@@ -155,12 +150,10 @@ class GroupedLinear(BasicOperation):
                 init_context = self._rng_state_tracker_function().fork()
             with init_context:
                 torch.nn.init.kaiming_uniform_(weight, a=math.sqrt(5))
-            if bias is not None:
-                bias.zero_()
 
             # Quantize weight if needed
             if self._with_quantized_weight:
-                quantizer = self.get_quantizer("forward", 1)
+                quantizer = self.get_quantizer("forward", 2 * group_idx + 1)
                 if quantizer is None:
                     raise RuntimeError(
                         "Tried to quantize weight with deferred initialization "
@@ -181,10 +174,18 @@ class GroupedLinear(BasicOperation):
             if not isinstance(weight, torch.nn.Parameter):
                 weight = torch.nn.Parameter(weight)
             setattr(self, f"weight{group_idx}", weight)
-            if bias is not None:
-                if not isinstance(bias, torch.nn.Parameter):
-                    bias = torch.nn.Parameter(bias)
-                setattr(self, f"bias{group_idx}", bias)
+
+        # Initialize biases if needed
+        if self.bias0 is not None:
+            with torch.no_grad():
+                for group_idx in range(self.group_size):
+                    bias = getattr(self, f"bias{group_idx}")
+                    if not devices_match(bias.device, device):
+                        bias = torch.empty_like(bias, device=device)
+                    bias.zero_()
+                    if not isinstance(bias, torch.nn.Parameter):
+                        bias = torch.nn.Parameter(bias)
+                    setattr(self, f"bias{group_idx}", bias)
 
     def pre_first_fuser_forward(self) -> None:
         super().pre_first_fuser_forward()
