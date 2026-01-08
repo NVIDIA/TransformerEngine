@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -1354,3 +1354,87 @@ class LayerNormMLP(TransformerEngineBase):
 
         assert out.dtype == input_dtype
         return out, ln_output  # Output, layer_norm_output
+
+
+def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str] = None):
+    """Wraps the given function `f` to support TransformerEngine quantization.
+
+    This method does a couple things:
+
+    1. Wraps the given function in a Flax linen module. This module does not store any Flax parameters
+    but can store Flax variables for quantizers if required by the recipe.
+
+    2. When the wrapper is called, it provides an additional argument to the given function `f`, 'generate_quantizer_set' as the first argument. 'generate_quantizer_set' is a function that can be called to generate a TransformerEngine/JAX quantizer set object used in TransformerEngine/JAX APIs. 'generate_quantizer_set' will generate quantizers based on the recipe of this TransformerEngineQuantizer object.
+
+    Args:
+      f: The function to wrap. The first argument must be 'generate_quantizer_set'.
+      name: The name of this wrapped operation. If unspecified, will use `f.__name__`.
+
+    Returns:
+      A Flax linen module that wraps the given function.
+    """
+
+    import transformer_engine.jax as te
+
+    class TEWrapper(te.flax.module.TransformerEngineBase):
+        """Wrapper Flax module for TransformerEngine quantization support."""
+
+        def generate_quantizer_set(self, postfix: str = ""):
+            OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
+            return super().generate_quantizer_set(
+                postfix=postfix,
+                variable_collection=OVERWRITE_WITH_GRADIENT,
+                fp8_recipe=quantization_recipe,
+            )
+
+        @nn.compact
+        def __call__(self, *args, **kwargs):
+            return f(self.generate_quantizer_set, *args, **kwargs)
+
+    TEWrapper.__name__ = f"TEWrapper_{name if name else f.__name__}"
+
+    return TEWrapper
+
+
+def make_dot_general_cls(quantization_recipe):
+    """Creates a Flax module class that performs a dot_general operation with the arguments x and kernel using the given quantization recipe.
+
+    This is intended for usage when you already have model parameters initialized and sharded for the kernel weights and you want to replace the GEMM implementation with TE's quantized GEMM using a given recipe.
+
+    For example,
+    ```
+        te_dot_general_cls = make_dot_general_cls(DelayedScaling())
+        dense = nn.Dense(..., dot_general=te_dot_general_cls())
+    ```
+
+    If you would like a drop-in replacement for nn.Dense that manages the model weights itself, please use TE's DenseGeneral module.
+
+    Args:
+        quantization_recipe: The quantization recipe to use for the dot_general operation.
+    Returns:
+        A Flax module class that performs a dot_general operation with the given quantization recipe.
+    """
+    import transformer_engine.jax as te
+    from transformer_engine.common.recipe import NVFP4BlockScaling
+
+    def te_dot_general(generate_quantizer_set, x, kernel, dims, **kwargs):
+        """Performs a dot_general operation using TransformerEngine with quantization."""
+        del kwargs  # Unused
+        contracting_dims, batch_dims = dims
+        assert batch_dims == ((), ()), "Batch dimensions must be empty for TransformerEngine dot."
+
+        quantizer_set = generate_quantizer_set()
+
+        if isinstance(quantization_recipe, NVFP4BlockScaling):
+            # NVFP4 RHT requires inputs to be in bfloat16
+            x = x.astype(jnp.bfloat16)
+            kernel = kernel.astype(jnp.bfloat16)
+
+        return te.dense.dense(
+            x,
+            kernel,
+            contracting_dims=contracting_dims,
+            quantizer_set=quantizer_set,
+        )
+
+    return wrap_function_in_te_state_module(te_dot_general, quantization_recipe, "dot_general")
