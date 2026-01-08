@@ -1220,10 +1220,10 @@ class FusedAttnRunner:
             QKVLayout.THD_T2HD,
             id="4-128-128-16-16-64-64-FP16-SELF-RAGGED_KV_PACKED",
         ),
-        # large data size + fp16 + gqa + diff hidden v dim + qkv separate
+        # large data size + fp16 + cross attn + gqa + diff hidden v dim + qkv separate
         pytest.param(
             2,
-            2048,
+            1024,
             2048,
             12,
             6,
@@ -1231,11 +1231,11 @@ class FusedAttnRunner:
             64,
             jnp.float16,
             QKVLayout.BSHD_BSHD_BSHD,
-            id="2-2048-2048-12-6-128-64-FP16-GQA-SEPARATE",
+            id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-SEPARATE",
         ),
         pytest.param(
             2,
-            2048,
+            1024,
             2048,
             12,
             6,
@@ -1243,7 +1243,7 @@ class FusedAttnRunner:
             64,
             jnp.float16,
             QKVLayout.THD_THD_THD,
-            id="2-2048-2048-12-6-128-64-FP16-GQA-RAGGED_SEPARATE",
+            id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-RAGGED_SEPARATE",
         ),
     ],
 )
