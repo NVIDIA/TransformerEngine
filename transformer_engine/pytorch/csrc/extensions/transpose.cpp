@@ -240,5 +240,72 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
   return std::move(*out);
 }
 
+void nvfp4_multi_tensor_create_columnwise(
+    std::vector<at::Tensor> rowwise_data_list,
+    std::vector<at::Tensor> columnwise_data_list,
+    std::vector<at::Tensor> rowwise_scale_inv_list,
+    std::vector<at::Tensor> columnwise_scale_inv_list,
+    std::vector<int64_t> M_list,
+    std::vector<int64_t> K_list) {
+  init_extension();
+
+  const size_t num_tensors = rowwise_data_list.size();
+  NVTE_CHECK(columnwise_data_list.size() == num_tensors, "Tensor list size mismatch");
+  NVTE_CHECK(rowwise_scale_inv_list.size() == num_tensors, "Tensor list size mismatch");
+  NVTE_CHECK(columnwise_scale_inv_list.size() == num_tensors, "Tensor list size mismatch");
+  NVTE_CHECK(M_list.size() == num_tensors, "M_list size mismatch");
+  NVTE_CHECK(K_list.size() == num_tensors, "K_list size mismatch");
+
+  if (num_tensors == 0) {
+    return;
+  }
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  // Process each tensor - the main benefit is reduced Python overhead
+  // by doing the iteration in C++ rather than Python
+  constexpr size_t TILE_SIZE = 16;
+
+  for (size_t i = 0; i < num_tensors; ++i) {
+    const auto& rowwise_data = rowwise_data_list[i];
+    auto& columnwise_data = columnwise_data_list[i];
+    const auto& rowwise_scale_inv = rowwise_scale_inv_list[i];
+    auto& columnwise_scale_inv = columnwise_scale_inv_list[i];
+    const int64_t M = M_list[i];
+    const int64_t K = K_list[i];
+
+    // Transpose data: [M, K/2] -> [K, M/2]
+    const auto data_shape = getTensorShape(rowwise_data);
+    NVTE_CHECK(data_shape.size() == 2, "NVFP4 data must be 2D.");
+    const size_t M_packed = static_cast<size_t>(M) / 2;
+    const size_t K_packed = data_shape[1];
+
+    auto input_cu = makeTransformerEngineTensor(
+        rowwise_data.data_ptr(), std::vector<size_t>{static_cast<size_t>(M), K_packed},
+        DType::kByte);
+    auto output_cu = makeTransformerEngineTensor(
+        columnwise_data.data_ptr(), std::vector<size_t>{static_cast<size_t>(K), M_packed},
+        DType::kByte);
+    nvte_nvfp4_transpose(input_cu.data(), output_cu.data(), stream);
+
+    // Transpose scales
+    const size_t M_tiles = (static_cast<size_t>(M) + TILE_SIZE - 1) / TILE_SIZE;
+    const size_t K_tiles = (static_cast<size_t>(K) + TILE_SIZE - 1) / TILE_SIZE;
+
+    const auto scale_in_shape = getTensorShape(rowwise_scale_inv);
+    const auto scale_out_shape = getTensorShape(columnwise_scale_inv);
+
+    auto scale_input_cu = makeTransformerEngineTensor(
+        rowwise_scale_inv.data_ptr(),
+        std::vector<size_t>{scale_in_shape[0], scale_in_shape[1]}, DType::kByte);
+    auto scale_output_cu = makeTransformerEngineTensor(
+        columnwise_scale_inv.data_ptr(),
+        std::vector<size_t>{scale_out_shape[0], scale_out_shape[1]}, DType::kByte);
+
+    nvte_nvfp4_scale_transpose(scale_input_cu.data(), scale_output_cu.data(),
+                               M_tiles, K_tiles, stream);
+  }
+}
+
 }  // namespace pytorch
 }  // namespace transformer_engine

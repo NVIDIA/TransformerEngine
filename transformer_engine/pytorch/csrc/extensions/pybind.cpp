@@ -280,6 +280,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("target_scale"), py::arg("target_amax"),
         py::arg("tile_rows"), py::arg("tile_cols"), py::arg("rows_padded"), py::arg("block_len"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_multi_tensor_create_columnwise",
+        &transformer_engine::pytorch::nvfp4_multi_tensor_create_columnwise,
+        "Batched NVFP4 columnwise creation: transpose data and scales for multiple tensors",
+        py::arg("rowwise_data_list"), py::arg("columnwise_data_list"),
+        py::arg("rowwise_scale_inv_list"), py::arg("columnwise_scale_inv_list"),
+        py::arg("M_list"), py::arg("K_list"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("swap_first_dims", &transformer_engine::pytorch::swap_first_dims,
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());

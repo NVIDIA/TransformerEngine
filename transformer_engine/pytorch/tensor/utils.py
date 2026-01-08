@@ -845,9 +845,15 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
     - Float8Tensor: may need to create a transposed view to match backend GEMM.
     - Float8BlockwiseQTensor: create column-wise storage.
     - Plain pytorch tensor: noop.
+    
+    For NVFP4 tensors, uses batched multi-tensor processing to reduce CPU overhead.
     """
     if not isinstance(model_weights, list):
         model_weights = [model_weights]
+    
+    # Collect NVFP4 tensors for batched processing
+    nvfp4_tensors = []
+    
     for model_weight in model_weights:
         if isinstance(model_weight, Float8Tensor):
             # Delayed scaling and per-tensor current scaling: if backend does not support
@@ -858,13 +864,92 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
             # Blockwise scaling: create column-wise storage.
             model_weight._create_columnwise()
         elif isinstance(model_weight, NVFP4Tensor):
-            # NVFP4 scaling: create column-wise storage.
-            model_weight._create_columnwise()
+            # Collect for batched processing
+            nvfp4_tensors.append(model_weight)
         elif isinstance(model_weight, MXFP8Tensor):
             # MXFP8 scaling: no need to do anything.
             pass
         elif isinstance(model_weight, QuantizedTensor):
             raise ValueError(f"post_processing for {type(model_weight)} is not supported")
+    
+    # Batch process all NVFP4 tensors with multi-tensor approach
+    if nvfp4_tensors:
+        _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors)
+
+
+def _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors: List[NVFP4Tensor]):
+    """
+    Batched columnwise creation for multiple NVFP4 tensors.
+    Reduces CPU overhead by collecting all tensor metadata and dispatching to C++.
+    """
+    TILE_SIZE = 16
+    
+    # Prepare tensor lists for batched C++ call
+    rowwise_data_list = []
+    columnwise_data_list = []
+    rowwise_scale_inv_list = []
+    columnwise_scale_inv_list = []
+    M_list = []
+    K_list = []
+    
+    for tensor in nvfp4_tensors:
+        rowwise_data = tensor._rowwise_data
+        if not rowwise_data.is_contiguous():
+            rowwise_data = rowwise_data.contiguous()
+            tensor._rowwise_data = rowwise_data
+        
+        logical_shape = tensor.size()
+        M, K = logical_shape[0], logical_shape[-1]
+        M_tiles = (M + TILE_SIZE - 1) // TILE_SIZE
+        K_tiles = (K + TILE_SIZE - 1) // TILE_SIZE
+        
+        # Allocate columnwise_data if needed
+        if tensor._columnwise_data is None:
+            # Output shape: [K, M/2] packed bytes
+            columnwise_data = torch.empty(
+                (K, M // 2),
+                dtype=torch.uint8,
+                device=rowwise_data.device,
+            )
+            tensor._columnwise_data = columnwise_data
+        else:
+            columnwise_data = tensor._columnwise_data
+        
+        # Allocate columnwise_scale_inv if needed
+        if tensor._columnwise_scale_inv is None:
+            assert tensor._quantizer is not None
+            columnwise_scale_inv_shape = tensor._quantizer.get_scale_shape(logical_shape, True)
+            columnwise_scale_inv = torch.empty(
+                columnwise_scale_inv_shape,
+                dtype=tensor._rowwise_scale_inv.dtype,
+                device=tensor._rowwise_scale_inv.device,
+            )
+            tensor._columnwise_scale_inv = columnwise_scale_inv
+        else:
+            columnwise_scale_inv = tensor._columnwise_scale_inv
+        
+        rowwise_data_list.append(rowwise_data)
+        columnwise_data_list.append(columnwise_data)
+        rowwise_scale_inv_list.append(tensor._rowwise_scale_inv)
+        columnwise_scale_inv_list.append(columnwise_scale_inv)
+        M_list.append(M)
+        K_list.append(K)
+        
+        # Copy amax if needed
+        if tensor._amax_columnwise is None and tensor._amax_rowwise is not None:
+            tensor._amax_columnwise = tensor._amax_rowwise.clone()
+        elif tensor._amax_rowwise is not None:
+            tensor._amax_columnwise.copy_(tensor._amax_rowwise)
+    
+    # Dispatch to C++ multi-tensor kernel
+    tex.nvfp4_multi_tensor_create_columnwise(
+        rowwise_data_list,
+        columnwise_data_list,
+        rowwise_scale_inv_list,
+        columnwise_scale_inv_list,
+        M_list,
+        K_list,
+    )
 
 
 def is_custom(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:

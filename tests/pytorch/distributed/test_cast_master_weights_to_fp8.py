@@ -1037,7 +1037,7 @@ def test_nvfp4_transpose_kernel() -> None:
 
     torch.manual_seed(1234)
     device = torch.device("cuda")
-    shape = (2048, 64)
+    shape = (2048, 5120)
     master_weight = torch.randn(shape, dtype=torch.float32, device=device)
 
     print("\n=== Testing NVFP4 transpose kernel ===")
@@ -1399,6 +1399,6 @@ def test_single_gpu_partial_cast_vs_full():
 
 if __name__ == "__main__":
     #main()
-    #test_nvfp4_transpose_kernel()
+    test_nvfp4_transpose_kernel()
     #test_single_gpu_partial_cast_vs_full()
-    test_nvfp4_partial_cast_matches_full()
+    #test_nvfp4_partial_cast_matches_full()
