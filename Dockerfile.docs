@@ -13,7 +13,8 @@ RUN pip3 install \
     breathe==4.35.0 \
     ipywidgets==8.0.2 \
     sphinx-autoapi==3.3.2 \
-    astroid==3.3.2
+    astroid==3.3.2 \
+    sphinx-tabs==3.4.7
 RUN apt-get update && apt-get install -y pandoc graphviz doxygen && \
     rm -rf /var/lib/apt/lists/*
 
