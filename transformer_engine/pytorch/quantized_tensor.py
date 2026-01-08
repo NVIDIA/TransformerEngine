@@ -21,7 +21,6 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
 )
 
 
-
 class QuantizedTensorStorage:
     r"""Base class for all TensorStorage classes.
 
