@@ -1926,6 +1926,10 @@ class TestBasicOps:
             ), f"Number of zeros is outside 99% confidence interval ({prob=}, {prob_observed=})"
 
     @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantized_compute", (False, True))
+    @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("weight_requires_grad", (False, True))
     def test_grouped_linear(
@@ -1933,13 +1937,13 @@ class TestBasicOps:
         *,
         group_size: int = 4,
         bias: bool,
-        weight_shape: tuple[int, int] = (32, 32),
-        split_alignment: int = 32,
-        dtype: torch.dtype = torch.float32,
+        weight_shape: tuple[int, int] = (128, 128),
+        split_alignment: int = 128,
+        dtype: torch.dtype,
         device: torch.device = "cuda",
-        quantization: Optional[str] = None,
-        quantized_compute: bool = False,
-        quantized_weight: bool = False,
+        quantization: Optional[str],
+        quantized_compute: bool,
+        quantized_weight: bool,
         input_requires_grad: bool,
         weight_requires_grad: bool,
     ) -> None:
@@ -1962,6 +1966,8 @@ class TestBasicOps:
             pytest.skip("Quantization scheme is not specified")
         if quantization is not None and not (quantized_compute or quantized_weight):
             pytest.skip("Quantization scheme is not used")
+        if quantization is not None and dtype not in (torch.bfloat16, torch.float16):
+            pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
