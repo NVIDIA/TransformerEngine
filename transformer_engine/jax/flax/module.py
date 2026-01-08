@@ -1444,6 +1444,7 @@ def make_dot_general_cls(quantization_recipe):
 
 def make_einsum_cls(quantization_recipe):
     import functools
+    import math
     import jax
     def te_einsum(generate_quantizer_set, s, x, kernel, **kwargs):
     #   with open("/tmp/te_einsum_log.txt", "a") as f:
@@ -1493,7 +1494,8 @@ def make_einsum_cls(quantization_recipe):
         kernel = reorder_rhs_for_grouped_gemm(kernel, (batch_dims[1],), contracting_dims[1])
 
         num_groups = kernel.shape[0]
-        group_size = x.shape[0] // num_groups
+        group_size = math.prod(x.shape[:-1]) // num_groups
+        print(f'{num_groups=}, {group_size=}, {x.shape=}, {kernel.shape=}')
 
         group_sizes = jnp.array([group_size]*num_groups, dtype=jnp.int32)
 

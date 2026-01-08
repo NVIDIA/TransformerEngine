@@ -534,22 +534,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   size_t bias_dtype_bytes = te_dtype_bytes(bias_dtype);
   size_t out_dtype_bytes = te_dtype_bytes(out_dtype);
 
-  if (is_tensor_scaling) {
-    size_t dpitch = tensor_scaling_sinv_aligment;
-    size_t spitch = lhs_sinv_dtype_bytes;
-    size_t width = lhs_sinv_dtype_bytes;
-    size_t height = lhs_sinv_size;
-    cudaMemcpy2DAsync(lhs_scatter_aligned_ptr, dpitch, lhs_sinv_ptr, spitch, width, height,
-                      cudaMemcpyDeviceToDevice, stream);
-    spitch = rhs_sinv_dtype_bytes;
-    width = rhs_sinv_dtype_bytes;
-    height = rhs_sinv_size;
-    cudaMemcpy2DAsync(rhs_scatter_aligned_ptr, dpitch, rhs_sinv_ptr, spitch, width, height,
-                      cudaMemcpyDeviceToDevice, stream);
-    lhs_sinv_ptr = lhs_scatter_aligned_ptr;
-    rhs_sinv_ptr = rhs_scatter_aligned_ptr;
-  }
-
   NVTE_CHECK(lhs_dtype_bytes == rhs_dtype_bytes, "sizeof(lhs_dtype) != sizeof(rhs_dtype)");
   NVTE_CHECK(lhs_sinv_dtype_bytes == rhs_sinv_dtype_bytes,
              "sizeof(lhs_sinv_dtype) != sizeof(rhs_sinv_dtype)");
@@ -576,29 +560,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                " = ", expected_out_size, ", got ", actual_out_size);
   }
 
-  size_t dim_list_bytes = sizeof(int32_t) * num_gemms;
-  std::vector<int32_t> dim_list_host(num_gemms);
-  size_t host_num_gemms = 0;
-  if (use_async_d2h_group_sizes) {
-    host_num_gemms = GroupedGemmGetGroupSizes(stream, num_gemms, nullptr, dim_list_host.data());
-    NVTE_CHECK(host_num_gemms == num_gemms, "num_gemms ", num_gemms,
-               " does not match the return of GroupedGemmGetGroupSizes ", host_num_gemms, ".");
-  } else {
-    auto dim_list_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
-    cudaMemcpyAsync(dim_list_host.data(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
-                    stream);
-    // Note: This may break cudaGraph.
-    cudaStreamSynchronize(stream);
-  }
-  size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-  if (!is_grouped_dense_wgrad) {
-    NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
-               ", got sum(group_sizes)=", sum_group_sizes);
-  } else {
-    NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
-               ", got sum(group_sizes)=", sum_group_sizes);
-  }
-
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
   bool grad = false;
   bool accumulate = false;
@@ -611,210 +572,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                "For SM90 or older archs and FP8 input, only NT (row-major) GEMM is supported, ",
                "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
   }
-
-  // These lists are to keep the TensorWrapper objects alive
-  std::vector<TensorWrapper> lhs_wrapper_list;
-  std::vector<TensorWrapper> rhs_wrapper_list;
-  std::vector<TensorWrapper> lhs_swizzle_wrapper_list;  // For MXFP8 scale_inv swizzling
-  std::vector<TensorWrapper> rhs_swizzle_wrapper_list;
-  std::vector<TensorWrapper> bias_wrapper_list;
-  std::vector<TensorWrapper> pre_gelu_wrapper_list;
-  std::vector<TensorWrapper> out_wrapper_list;
-  std::vector<TensorWrapper> workspace_wrapper_list;
-
-  // These lists are the actual NVTETensor (void *) lists for multi-stream GEMM
-  std::vector<NVTETensor> lhs_list;
-  std::vector<NVTETensor> rhs_list;
-  std::vector<NVTETensor> lhs_swizzle_list;
-  std::vector<NVTETensor> rhs_swizzle_list;
-  std::vector<NVTETensor> bias_list;
-  std::vector<NVTETensor> pre_gelu_list;
-  std::vector<NVTETensor> out_list;
-
-  size_t lhs_sinv_total_size = 0;
-  size_t rhs_sinv_total_size = 0;
-
-  std::vector<void *> zero_out_dptr_list;
-  std::vector<size_t> zero_out_size_list;
-
-  for (size_t i = 0; i < num_gemms; i++) {
-    // Matrix data shapes
-    size_t m_i = dim_list_host[i];
-    auto lhs_shape_i = std::vector<size_t>{m_i, k};
-    auto rhs_shape_i = std::vector<size_t>{rhs_is_trans ? n : k, rhs_is_trans ? k : n};
-    auto out_shape_i = std::vector<size_t>{m_i, n};
-    if (is_grouped_dense_wgrad) {
-      size_t k_i = dim_list_host[i];
-      lhs_shape_i[0] = lhs_is_trans ? k_i : m;
-      lhs_shape_i[1] = lhs_is_trans ? m : k_i;
-      rhs_shape_i[0] = rhs_is_trans ? n : k_i;
-      rhs_shape_i[1] = rhs_is_trans ? k_i : n;
-      out_shape_i[0] = m;
-      out_shape_i[1] = n;
-    }
-
-    size_t lhs_size = lhs_shape_i[0] * lhs_shape_i[1];
-    size_t rhs_size = rhs_shape_i[0] * rhs_shape_i[1];
-    size_t out_size = out_shape_i[0] * out_shape_i[1];
-    bool is_empty_gemm = lhs_size == 0 || rhs_size == 0;
-    if (is_empty_gemm && out_size > 0) {
-      zero_out_dptr_list.push_back(out_ptr);
-      zero_out_size_list.push_back(out_size * out_dtype_bytes);
-    }
-
-    // Set matrix data pointers
-    auto lhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
-    auto rhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
-    auto out_i = TensorWrapper(static_cast<void *>(out_ptr), out_shape_i, out_dtype);
-    void *lhs_vptr = static_cast<void *>(lhs_ptr);
-    void *rhs_vptr = static_cast<void *>(rhs_ptr);
-    if (rhs_use_colwise)  // MatA to enter cuBLAS
-      rhs_i.set_columnwise_data(rhs_vptr, rhs_dtype, rhs_shape_i);
-    else
-      rhs_i.set_rowwise_data(rhs_vptr, rhs_dtype, rhs_shape_i);
-    if (lhs_use_colwise)  // MatB to enter cuBLAS
-      lhs_i.set_columnwise_data(lhs_vptr, lhs_dtype, lhs_shape_i);
-    else
-      lhs_i.set_rowwise_data(lhs_vptr, lhs_dtype, lhs_shape_i);
-
-    // Set scale_inv shapes and pointers
-    void *rhs_sinv_vptr = static_cast<void *>(rhs_sinv_ptr);
-    void *lhs_sinv_vptr = static_cast<void *>(lhs_sinv_ptr);
-    size_t lhs_sinv_size_i = 0;
-    size_t rhs_sinv_size_i = 0;
-    if (is_tensor_scaling) {
-      auto tensor_scaling_sinv_shape = std::vector<size_t>{1};
-      // If is_empty_gemm, scale_inv does not have the corresponding value, do not move the pointers
-      if (!is_empty_gemm) {
-        lhs_sinv_size_i = tensor_scaling_sinv_aligment / lhs_sinv_dtype_bytes;
-        rhs_sinv_size_i = tensor_scaling_sinv_aligment / rhs_sinv_dtype_bytes;
-      }
-      if (rhs_use_colwise)  // MatA to enter cuBLAS
-        rhs_i.set_columnwise_scale_inv(rhs_sinv_vptr, rhs_sinv_dtype, tensor_scaling_sinv_shape);
-      else
-        rhs_i.set_rowwise_scale_inv(rhs_sinv_vptr, rhs_sinv_dtype, tensor_scaling_sinv_shape);
-      if (lhs_use_colwise)  // MatB to enter cuBLAS
-        lhs_i.set_columnwise_scale_inv(lhs_sinv_vptr, lhs_sinv_dtype, tensor_scaling_sinv_shape);
-      else
-        lhs_i.set_rowwise_scale_inv(lhs_sinv_vptr, lhs_sinv_dtype, tensor_scaling_sinv_shape);
-    } else if (is_mxfp8_scaling) {
-      auto lhs_swizzle_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
-      auto rhs_swizzle_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
-      void *swizzled_lhs_sinv_vptr = static_cast<void *>(swizzled_lhs_sinv_ptr);
-      void *swizzled_rhs_sinv_vptr = static_cast<void *>(swizzled_rhs_sinv_ptr);
-
-      // {lhs, rhs}_swizzle_i point to unswizzled scale_inv data as input, while {lhs, rhs}_i
-      // point to swizzled scale_inv data (store on workspace, only used for GEMM).
-      // Note: even if is_empty_gemm is true, sinv are still non-empty, need to move the pointers
-      auto lhs_sinv_shape_i =
-          get_block_scale_shape(scaling_mode, lhs_shape_i[0], lhs_shape_i[1], lhs_use_colwise);
-      auto rhs_sinv_shape_i =
-          get_block_scale_shape(scaling_mode, rhs_shape_i[0], rhs_shape_i[1], rhs_use_colwise);
-      lhs_sinv_size_i = lhs_sinv_shape_i[0] * lhs_sinv_shape_i[1];
-      rhs_sinv_size_i = rhs_sinv_shape_i[0] * rhs_sinv_shape_i[1];
-      if (lhs_use_colwise) {
-        lhs_swizzle_i.set_columnwise_data(lhs_vptr, lhs_dtype, lhs_shape_i);
-        lhs_swizzle_i.set_columnwise_scale_inv(lhs_sinv_vptr, lhs_sinv_dtype, lhs_sinv_shape_i);
-        lhs_i.set_columnwise_scale_inv(swizzled_lhs_sinv_vptr, lhs_sinv_dtype, lhs_sinv_shape_i);
-      } else {
-        lhs_swizzle_i.set_rowwise_data(lhs_vptr, lhs_dtype, lhs_shape_i);
-        lhs_swizzle_i.set_rowwise_scale_inv(lhs_sinv_vptr, lhs_sinv_dtype, lhs_sinv_shape_i);
-        lhs_i.set_rowwise_scale_inv(swizzled_lhs_sinv_vptr, lhs_sinv_dtype, lhs_sinv_shape_i);
-      }
-      if (rhs_use_colwise) {
-        rhs_swizzle_i.set_columnwise_data(rhs_vptr, rhs_dtype, rhs_shape_i);
-        rhs_swizzle_i.set_columnwise_scale_inv(rhs_sinv_vptr, rhs_sinv_dtype, rhs_sinv_shape_i);
-        rhs_i.set_columnwise_scale_inv(swizzled_rhs_sinv_vptr, rhs_sinv_dtype, rhs_sinv_shape_i);
-      } else {
-        rhs_swizzle_i.set_rowwise_data(rhs_vptr, rhs_dtype, rhs_shape_i);
-        rhs_swizzle_i.set_rowwise_scale_inv(rhs_sinv_vptr, rhs_sinv_dtype, rhs_sinv_shape_i);
-        rhs_i.set_rowwise_scale_inv(swizzled_rhs_sinv_vptr, rhs_sinv_dtype, rhs_sinv_shape_i);
-      }
-
-      if (!is_empty_gemm) {
-        lhs_swizzle_wrapper_list.push_back(std::move(lhs_swizzle_i));
-        rhs_swizzle_wrapper_list.push_back(std::move(rhs_swizzle_i));
-        lhs_swizzle_list.push_back(lhs_swizzle_wrapper_list.back().data());
-        rhs_swizzle_list.push_back(rhs_swizzle_wrapper_list.back().data());
-      }
-    } else {
-      NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
-                 "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
-    }
-
-    auto bias_i = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
-    auto pre_gelu_i = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);
-
-    // Update pointer for the next GEMM pair
-    lhs_ptr += lhs_size * lhs_dtype_bytes;
-    rhs_ptr += rhs_size * rhs_dtype_bytes;
-    out_ptr += out_size * out_dtype_bytes;
-    if (is_fp8_gemm) {
-      lhs_sinv_ptr += lhs_sinv_size_i * lhs_sinv_dtype_bytes;
-      rhs_sinv_ptr += rhs_sinv_size_i * rhs_sinv_dtype_bytes;
-      lhs_sinv_total_size += lhs_sinv_size_i;
-      rhs_sinv_total_size += rhs_sinv_size_i;
-      if (is_mxfp8_scaling) {
-        swizzled_lhs_sinv_ptr += lhs_sinv_size_i * lhs_sinv_dtype_bytes;
-        swizzled_rhs_sinv_ptr += rhs_sinv_size_i * rhs_sinv_dtype_bytes;
-      }
-    }
-    if (has_bias) bias_ptr += n * bias_dtype_bytes;
-
-    // Move objects to the lists to keep them alive
-    if (is_empty_gemm) continue;
-    lhs_wrapper_list.push_back(std::move(lhs_i));
-    rhs_wrapper_list.push_back(std::move(rhs_i));
-    out_wrapper_list.push_back(std::move(out_i));
-    bias_wrapper_list.push_back(std::move(bias_i));
-    pre_gelu_wrapper_list.push_back(std::move(pre_gelu_i));
-
-    lhs_list.push_back(lhs_wrapper_list.back().data());
-    rhs_list.push_back(rhs_wrapper_list.back().data());
-    bias_list.push_back(bias_wrapper_list.back().data());
-    pre_gelu_list.push_back(pre_gelu_wrapper_list.back().data());
-    out_list.push_back(out_wrapper_list.back().data());
-  }
-
-  if (is_fp8_gemm) {
-    if (is_tensor_scaling) {
-      lhs_sinv_size *= tensor_scaling_sinv_aligment;
-      rhs_sinv_size *= tensor_scaling_sinv_aligment;
-    }
-    NVTE_CHECK(lhs_sinv_total_size <= lhs_sinv_size, "Actual total lhs_sinv size ",
-               lhs_sinv_total_size, " exceeds estimated upper bound ", lhs_sinv_size);
-    NVTE_CHECK(rhs_sinv_total_size <= rhs_sinv_size, "Actual total rhs_sinv size ",
-               rhs_sinv_total_size, " exceeds estimated upper bound ", rhs_sinv_size);
-  }
-
-  size_t num_non_empty_gemms = lhs_list.size();
-
-  if (is_mxfp8_scaling) {
-    for (int i = 0; i < num_non_empty_gemms; i++) {
-      // The i-th GEMM will use the (i % num_streams)-th stream to compute,
-      // use the same stream to swizzle the scaling factors to make sure that
-      // the swizzling is done before the GEMM computation starts.
-      int stream_id = i % num_streams;
-      cudaStream_t stream_i = nvte_get_compute_stream(stream_id);
-      nvte_swizzle_scaling_factors(lhs_swizzle_list[i], lhs_list[i], stream_i);
-      nvte_swizzle_scaling_factors(rhs_swizzle_list[i], rhs_list[i], stream_i);
-    }
-  }
-
-  // Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
-  size_t num_zero_outs = zero_out_dptr_list.size();
-  for (int i = 0; i < num_zero_outs; i++) {
-    int stream_id = i % num_streams;
-    cudaStream_t stream_i = nvte_get_compute_stream(stream_id);
-    void *dptr = zero_out_dptr_list[i];
-    size_t count = zero_out_size_list[i];
-    NVTE_CHECK_CUDA(cudaMemsetAsync(dptr, 0, count, stream_i));
-  }
-
-  // nvte_multi_tensor_gemm(rhs_list.data(), lhs_list.data(), out_list.data(), bias_list.data(),
-  //                        pre_gelu_list.data(), num_non_empty_gemms, rhs_is_trans, lhs_is_trans,
-  //                        grad, workspace_list.data(), accumulate, use_split_accumulator,
-  //                        num_math_sm, stream);
 
   constexpr size_t workspace_setup_size = 1024 * 1024; // HACK: dummy workspace for setup
   TensorWrapper workspace_setup(workspace_ptr,
@@ -888,7 +645,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("has_bias")
                                   .Attr<bool>("is_grouped_dense_wgrad")
-                                  .Attr<bool>("use_async_d2h_group_sizes"));
+                                  .Attr<bool>("use_async_d2h_group_sizes"),
+                                FFI_CudaGraph_Traits);
 
 }  // namespace jax
 }  // namespace transformer_engine

@@ -375,11 +375,24 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   size_t num_groups = group_sizes.dimensions()[0];
   size_t dim_list_bytes = group_size_dtype_bytes * num_groups;
   std::vector<int32_t> dim_list_host(num_groups);
-  auto *group_size_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
-  cudaMemcpyAsync(dim_list_host.data(), group_size_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
-                  stream);
-  // Note: This may break cudaGraph.
-  cudaStreamSynchronize(stream);
+  // HACK: assumes batched gemm with equal group sizes
+  for (size_t i = 0; i < num_groups; i++) {
+    if (input_dims[0] == num_groups) {
+      dim_list_host[i] = 1;
+      continue;
+    }
+    dim_list_host[i] = m / num_groups;
+  }
+  // auto *group_size_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
+  // cudaMemcpyAsync(dim_list_host.data(), group_size_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
+  //                 stream);
+  // // Note: This may break cudaGraph.
+  // cudaStreamSynchronize(stream);
+  // printf("GroupedQuantizeFFI: m=%zu, n=%zu, group sizes = ", m, n);
+  // for (size_t i = 0; i < num_groups; i++) {
+  //   printf("%d ", dim_list_host[i]);
+  // }
+  // printf("\n");
 
   size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
   NVTE_CHECK(m == sum_group_sizes || input_dims[0] == sum_group_sizes,
@@ -492,7 +505,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeHandler, GroupedQuantizeFFI,
                                   .Ret<Buffer_Type>()      // amax
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<JAXX_Quantize_Layout>("q_layout")
-                                  .Attr<int64_t>("flatten_axis"));
+                                  .Attr<int64_t>("flatten_axis"),
+                                FFI_CudaGraph_Traits);
 
 }  // namespace jax
 }  // namespace transformer_engine
