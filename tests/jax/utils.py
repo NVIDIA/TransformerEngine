@@ -46,6 +46,7 @@ def is_devices_enough(required):
     """
     return len(jax.devices()) >= required
 
+
 def is_devices_equal(required):
     """
     Check if the available GPUs is exactly equal
