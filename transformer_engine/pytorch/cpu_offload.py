@@ -369,7 +369,9 @@ class OffloadableLayerState:
                 # Inline prepare_for_saving logic - QuantizedTensor is a torch.Tensor subclass,
                 # so the generic prepare_for_saving would not call tensor.prepare_for_saving()
                 saved_tensors, tensor_obj = tensor_copy.prepare_for_saving()
-                push_results = [self.push_tensor(t) if t is not None else None for t in saved_tensors]
+                push_results = [
+                    self.push_tensor(t) if t is not None else None for t in saved_tensors
+                ]
                 return (push_results, [tensor_obj])
 
             self.fwd_gpu_tensor_group.tensor_list.append(tensor)
@@ -436,11 +438,11 @@ class OffloadableLayerState:
     def _check_if_offload(self, t: torch.Tensor) -> bool:
         """
         Check if tensor needs to be offloaded.
-        """            
+        """
         # Only offload tensors with at least 256k elements (~1MB for float32)
         if t.numel() < 256 * 1024:
             return False
-        
+
         if (
             not isinstance(t, torch.nn.Parameter)
             and not getattr(t, "_TE_do_not_offload", False)
