@@ -168,6 +168,15 @@ void nvfp4_multi_tensor_create_columnwise(
     std::vector<int64_t> M_list,
     std::vector<int64_t> K_list);
 
+void nvfp4_multi_tensor_compute_partial_amax(
+    std::vector<at::Tensor> master_weight_list,
+    std::vector<at::Tensor> partial_amax_list,
+    std::vector<at::Tensor> global_amax_list,
+    std::vector<int64_t> h_list,
+    std::vector<int64_t> w_list,
+    std::vector<int64_t> start_offset_list,
+    int64_t block_len);
+
 void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output,
                                int64_t tile_rows, int64_t tile_cols,
                                int64_t rows_padded, int64_t block_len);

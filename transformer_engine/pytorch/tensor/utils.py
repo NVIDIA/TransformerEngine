@@ -594,6 +594,14 @@ def _cast_master_weights_to_nvfp4_2d(
         global_amaxes[i : i + 1] for i in range(len(params))
     ]
 
+    # Collect tensors for batched multi-tensor amax computation
+    master_weight_list: List[torch.Tensor] = []
+    partial_amax_list: List[torch.Tensor] = []
+    global_amax_list: List[torch.Tensor] = []
+    h_list: List[int] = []
+    w_list: List[int] = []
+    start_offset_list: List[int] = []
+
     for i, (model_weight, master_weight, start_offset, _) in enumerate(params):
         scale_shape = tile_shapes[i]
         amax = packed_amaxes[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].reshape(scale_shape)
@@ -608,11 +616,25 @@ def _cast_master_weights_to_nvfp4_2d(
         if master_weight is not None and master_weight.numel() > 0:
             assert len(model_weight.shape) == 2
             h, w = model_weight.shape
-            # master_weight is already converted to model_weight.dtype (BF16) in the caller
-            tex.nvfp4_2d_compute_partial_amax(
-                master_weight, amax, h, w, start_offset, block_len
-            )
-            tex.compute_amax(master_weight, global_amax_view)
+            # Collect for batched processing
+            master_weight_list.append(master_weight)
+            partial_amax_list.append(amax)
+            global_amax_list.append(global_amax_view)
+            h_list.append(h)
+            w_list.append(w)
+            start_offset_list.append(start_offset)
+
+    # Batched multi-tensor call for partial and global amax computation
+    if master_weight_list:
+        tex.nvfp4_multi_tensor_compute_partial_amax(
+            master_weight_list,
+            partial_amax_list,
+            global_amax_list,
+            h_list,
+            w_list,
+            start_offset_list,
+            block_len,
+        )
 
     if packed_amaxes.numel() > 0:
         torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)

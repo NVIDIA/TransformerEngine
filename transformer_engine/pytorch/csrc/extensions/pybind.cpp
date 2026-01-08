@@ -315,6 +315,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Compute partial amax from master weights for NVFP4 2D", py::arg("tensor"), py::arg("amax"),
         py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len") = 16,
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_multi_tensor_compute_partial_amax",
+        &transformer_engine::pytorch::nvfp4_multi_tensor_compute_partial_amax,
+        "Batched compute partial and global amax from master weights for NVFP4 2D",
+        py::arg("master_weight_list"), py::arg("partial_amax_list"), py::arg("global_amax_list"),
+        py::arg("h_list"), py::arg("w_list"), py::arg("start_offset_list"),
+        py::arg("block_len") = 16,
+        py::call_guard<py::gil_scoped_release>());
   m.def("nvfp4_2d_partial_cast", &transformer_engine::pytorch::nvfp4_2d_partial_cast,
         "Partial cast from master weights for NVFP4 2D", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("global_scale"), py::arg("h"), py::arg("w"),

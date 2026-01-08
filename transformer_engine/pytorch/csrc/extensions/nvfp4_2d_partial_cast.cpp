@@ -50,6 +50,68 @@ void nvfp4_2d_partial_cast(const at::Tensor &inp, py::handle out, const at::Tens
                              at::cuda::getCurrentCUDAStream());
 }
 
+void nvfp4_multi_tensor_compute_partial_amax(
+    std::vector<at::Tensor> master_weight_list,
+    std::vector<at::Tensor> partial_amax_list,
+    std::vector<at::Tensor> global_amax_list,
+    std::vector<int64_t> h_list,
+    std::vector<int64_t> w_list,
+    std::vector<int64_t> start_offset_list,
+    int64_t block_len) {
+  
+  TORCH_CHECK(block_len == 16, "Currently only block_len = 16 is supported for NVFP4 2D");
+  
+  const size_t num_tensors = master_weight_list.size();
+  TORCH_CHECK(partial_amax_list.size() == num_tensors, "partial_amax_list size mismatch");
+  TORCH_CHECK(global_amax_list.size() == num_tensors, "global_amax_list size mismatch");
+  TORCH_CHECK(h_list.size() == num_tensors, "h_list size mismatch");
+  TORCH_CHECK(w_list.size() == num_tensors, "w_list size mismatch");
+  TORCH_CHECK(start_offset_list.size() == num_tensors, "start_offset_list size mismatch");
+
+  if (num_tensors == 0) {
+    return;
+  }
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  for (size_t i = 0; i < num_tensors; ++i) {
+    const auto& master_weight = master_weight_list[i];
+    auto& partial_amax = partial_amax_list[i];
+    auto& global_amax = global_amax_list[i];
+    const size_t h = static_cast<size_t>(h_list[i]);
+    const size_t w = static_cast<size_t>(w_list[i]);
+    const size_t start_offset = static_cast<size_t>(start_offset_list[i]);
+
+    TORCH_CHECK(partial_amax.dim() == 2, "partial_amax must be a 2D tensor");
+    TORCH_CHECK(partial_amax.scalar_type() == at::ScalarType::Float,
+                "partial_amax must be a float tensor");
+    TORCH_CHECK(master_weight.scalar_type() == at::ScalarType::Float ||
+                    master_weight.scalar_type() == at::ScalarType::BFloat16,
+                "master_weight must be a float or bfloat16 tensor");
+    TORCH_CHECK(global_amax.scalar_type() == at::ScalarType::Float,
+                "global_amax must be a float tensor");
+    TORCH_CHECK(global_amax.numel() == 1, "global_amax must have exactly one element");
+
+    // Compute partial amax (per-block amax)
+    const TensorWrapper tensor_cu = makeTransformerEngineTensor(master_weight.contiguous());
+    TensorWrapper amax_cu = makeTransformerEngineTensor(partial_amax);
+
+    nvte_nvfp4_2d_compute_partial_amax(
+        tensor_cu.data(), amax_cu.data(), h, w,
+        partial_amax.stride(0), partial_amax.stride(1),
+        start_offset, static_cast<size_t>(block_len), stream);
+
+    // Compute global amax
+    auto* global_amax_ptr = global_amax.data_ptr<float>();
+    TensorWrapper fake_te_output(
+        /*dptr=*/nullptr, tensor_cu.shape(),
+        DType::kFloat32,
+        global_amax_ptr);
+
+    nvte_compute_amax(tensor_cu.data(), fake_te_output.data(), stream);
+  }
+}
+
 }  // namespace transformer_engine::pytorch
 
 
