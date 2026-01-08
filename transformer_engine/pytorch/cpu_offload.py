@@ -361,17 +361,17 @@ class OffloadableLayerState:
         """
         self._validate_state(func_name="push_tensor", allowed_states=["not_offloaded"])
 
-        # For QuantizedTensor: decompose into component tensors, push each one recursively
-        if isinstance(tensor, QuantizedTensor):
-            # Make a copy because prepare_for_saving modifies the object (sets fields to None)
-            tensor_copy = tensor.detach()
-            # Inline prepare_for_saving logic - QuantizedTensor is a torch.Tensor subclass,
-            # so the generic prepare_for_saving would not call tensor.prepare_for_saving()
-            saved_tensors, tensor_obj = tensor_copy.prepare_for_saving()
-            push_results = [self.push_tensor(t) if t is not None else None for t in saved_tensors]
-            return (push_results, [tensor_obj])
-
         if self._check_if_offload(tensor):
+            # For QuantizedTensor: decompose into component tensors, push each one recursively
+            if isinstance(tensor, QuantizedTensor):
+                # Make a copy because prepare_for_saving modifies the object (sets fields to None)
+                tensor_copy = tensor.detach()
+                # Inline prepare_for_saving logic - QuantizedTensor is a torch.Tensor subclass,
+                # so the generic prepare_for_saving would not call tensor.prepare_for_saving()
+                saved_tensors, tensor_obj = tensor_copy.prepare_for_saving()
+                push_results = [self.push_tensor(t) if t is not None else None for t in saved_tensors]
+                return (push_results, [tensor_obj])
+
             self.fwd_gpu_tensor_group.tensor_list.append(tensor)
             # The group is processed and offloaded at the end of the forward pass of current layer.
             # To enable offloading of tensors faster we use self.offload_stream and record
@@ -436,7 +436,11 @@ class OffloadableLayerState:
     def _check_if_offload(self, t: torch.Tensor) -> bool:
         """
         Check if tensor needs to be offloaded.
-        """
+        """            
+        # Only offload tensors with at least 256k elements (~1MB for float32)
+        if t.numel() < 256 * 1024:
+            return False
+        
         if (
             not isinstance(t, torch.nn.Parameter)
             and not getattr(t, "_TE_do_not_offload", False)
@@ -449,11 +453,6 @@ class OffloadableLayerState:
                     " this tensor will be skipped."
                 )
                 return False
-
-            # Only offload tensors with at least 256k elements (~1MB for float32)
-            if t.numel() < 256 * 1024:
-                return False
-
             return True
         return False
 
@@ -627,6 +626,12 @@ class DefaultOffloadSynchronizer(OffloadSynchronizer):
         for layer in self.start_reload_map[layer_num]:
             self.layer_states[layer].start_reload()
 
+    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor:
+        """Push tensor - skip processing if layer won't be offloaded to reduce CPU overhead."""
+        if not self.offload_layer_map.get(self.num_of_fwds, False):
+            return tensor
+        return self.layer_states[self.num_of_fwds].push_tensor(tensor)
+
 
 class ManualOffloadSynchronizer(OffloadSynchronizer):
     """
@@ -672,7 +677,7 @@ def get_cpu_offload_context(
     offload_weights: bool = False,
     double_buffering: bool = False,  # pylint: disable=unused-argument
     manual_synchronization: bool = False,
-    retain_pinned_cpu_buffers: bool = False,
+    retain_pinned_cpu_buffers: bool = True,
     offload_stream: Optional[torch.cuda.Stream] = None,
 ):
     """
