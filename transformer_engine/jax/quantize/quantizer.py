@@ -7,7 +7,7 @@ Tensor quantization classes for TE/JAX.
 This module provides classes and utilities for quantizing tensors in JAX.
 """
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, InitVar
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Union, Optional, Tuple
 import warnings
@@ -893,7 +893,6 @@ class GroupedQuantizer(Quantizer):
     data_layout: str = None
     n_groups: int = 1
     quantizers: Tuple[Quantizer] = field(default_factory=lambda: (None,))
-    extra_kwargs: InitVar[dict] = None
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
@@ -912,12 +911,10 @@ class GroupedQuantizer(Quantizer):
         )
         return (children, aux_data)
 
-    def __post_init__(self, extra_kwargs: dict):
-        print(f"QuantizerFactory creating quantizers for GroupedQuantizer: {self.n_groups=}, {self.scaling_mode=}, {self.q_dtype=}, {self.q_layout=}, {extra_kwargs=}, {self.quantizers=}")
+    def __post_init__(self):
         if self.quantizers[0] is None:
             quantizers = QuantizerFactory.create(
-                n_quantizers=self.n_groups,
-                scaling_mode=self.scaling_mode, q_dtype=self.q_dtype, q_layout=self.q_layout, **extra_kwargs
+                self.n_groups, self.scaling_mode, self.q_dtype, self.q_layout
             )
             self.quantizers = (quantizers,) if not isinstance(quantizers, tuple) else quantizers
         self.data_layout = self.quantizers[0].data_layout
@@ -1109,14 +1106,8 @@ class QuantizerFactory:
                 warnings.warn(
                     "Using more than one GroupedQuantizer for a grouped input is not recommended"
                 )
-            quantizer_type = lambda q_dtype, scaling_mode, q_layout, checkpoint_name, **kwargs: GroupedQuantizer(
-                q_dtype=q_dtype,
-                scaling_mode=scaling_mode,
-                q_layout=q_layout,
-                checkpoint_name=checkpoint_name,
-                n_groups=n_groups,
-                extra_kwargs=kwargs,
-            )
+            quantizer_type = GroupedQuantizer
+            kwargs["n_groups"] = n_groups
         else:
             quantizer_type = QuantizerFactory.quantizer_type_map.get(scaling_mode)
 
