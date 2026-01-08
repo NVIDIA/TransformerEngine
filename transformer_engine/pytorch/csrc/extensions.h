@@ -189,6 +189,17 @@ void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax,
                        int64_t tile_rows, int64_t tile_cols,
                        int64_t rows_padded, int64_t block_len);
 
+void nvfp4_multi_tensor_fused_scale(
+    std::vector<at::Tensor> block_amax_list,
+    std::vector<at::Tensor> global_amax_list,
+    std::vector<at::Tensor> per_block_scale_list,
+    std::vector<at::Tensor> target_scale_list,
+    std::vector<at::Tensor> target_amax_list,
+    std::vector<int64_t> tile_rows_list,
+    std::vector<int64_t> tile_cols_list,
+    std::vector<int64_t> rows_padded_list,
+    int64_t block_len);
+
 void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale);
 
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
@@ -376,6 +387,16 @@ void nvfp4_2d_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, si
 void nvfp4_2d_partial_cast(const at::Tensor &inp, py::handle out, const at::Tensor &scale,
                            const at::Tensor &global_scale, size_t h, size_t w, size_t start_offset,
                            size_t block_len);
+
+void nvfp4_multi_tensor_2d_partial_cast(
+    std::vector<at::Tensor> inp_list,
+    std::vector<at::Tensor> out_list,
+    std::vector<at::Tensor> scale_list,
+    std::vector<at::Tensor> global_scale_list,
+    std::vector<int64_t> h_list,
+    std::vector<int64_t> w_list,
+    std::vector<int64_t> start_offset_list,
+    int64_t block_len);
 void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
                                         at::Tensor amax_colwise, int rows, int cols,
                                         size_t start_offset);

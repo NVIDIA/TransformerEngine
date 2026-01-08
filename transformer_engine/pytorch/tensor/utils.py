@@ -649,8 +649,26 @@ def _cast_master_weights_to_nvfp4_2d(
     tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor)
     global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
-    # Main loop: use fused kernel for scale computation + expansion + amax copy
-    # This saves 2 kernel launches per parameter
+    # Collect tensors for batched fused scale kernel
+    fused_scale_block_amax_list: List[torch.Tensor] = []
+    fused_scale_global_amax_list: List[torch.Tensor] = []
+    fused_scale_per_block_scale_list: List[torch.Tensor] = []
+    fused_scale_target_scale_list: List[torch.Tensor] = []
+    fused_scale_target_amax_list: List[torch.Tensor] = []
+    fused_scale_tile_rows_list: List[int] = []
+    fused_scale_tile_cols_list: List[int] = []
+    fused_scale_rows_padded_list: List[int] = []
+
+    # Collect tensors for batched partial cast kernel
+    partial_cast_inp_list: List[torch.Tensor] = []
+    partial_cast_out_list: List[torch.Tensor] = []
+    partial_cast_scale_list: List[torch.Tensor] = []
+    partial_cast_global_scale_list: List[torch.Tensor] = []
+    partial_cast_h_list: List[int] = []
+    partial_cast_w_list: List[int] = []
+    partial_cast_start_offset_list: List[int] = []
+
+    # First pass: collect all tensors and update usage
     zipped_meta = zip(
         tile_shapes,
         row_sizes,
@@ -681,27 +699,22 @@ def _cast_master_weights_to_nvfp4_2d(
             # not updated currently.
             model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
 
-        # Use fused kernel: computes per-block decode scale, copies global amax to target,
-        # and expands to row-level FP8 scale - all in one kernel launch
         tile_rows = tile_shape[0]
         rows_padded = target_scale.shape[0]
         global_amax_view = global_amaxes[idx : idx + 1]
-        
-        # target_amax could be None if model_weight._amax_rowwise is None
+
+        # Collect for fused scale kernel (only if target_amax is not None)
         if target_amax is not None:
-            tex.nvfp4_fused_scale(
-                block_amax,
-                global_amax_view,
-                per_block_decode_scale,
-                target_scale,
-                target_amax,
-                tile_rows,
-                tile_col_cnt,
-                rows_padded,
-                block_len,
-            )
+            fused_scale_block_amax_list.append(block_amax)
+            fused_scale_global_amax_list.append(global_amax_view)
+            fused_scale_per_block_scale_list.append(per_block_decode_scale)
+            fused_scale_target_scale_list.append(target_scale)
+            fused_scale_target_amax_list.append(target_amax)
+            fused_scale_tile_rows_list.append(tile_rows)
+            fused_scale_tile_cols_list.append(tile_col_cnt)
+            fused_scale_rows_padded_list.append(rows_padded)
         else:
-            # Fallback: compute scale and expand without amax copy
+            # Fallback: compute scale and expand without amax copy (rare case)
             tex.nvfp4_compute_per_block_scale(block_amax, per_block_decode_scale, global_amax_view)
             tex.nvfp4_expand_scale_to_fp8(
                 per_block_decode_scale,
@@ -712,27 +725,49 @@ def _cast_master_weights_to_nvfp4_2d(
                 block_len,
             )
 
-        # Only cast data for layers owned by this rank
-        if master_weight is None or master_weight.numel() == 0:
-            continue
+        # Collect for partial cast kernel (only for layers owned by this rank)
+        if master_weight is not None and master_weight.numel() > 0:
+            end_offset = start_offset + master_weight.numel()
+            if not use_fsdp_shard_model_weights:
+                rowwise_bytes = model_weight._rowwise_data.view(-1)
+                byte_start = start_offset // 2
+                byte_end = (end_offset + 1) // 2
+                model_weight_fragment = rowwise_bytes[byte_start:byte_end]
+            assert len(model_weight.shape) == 2
+            h, w = model_weight.shape
 
-        end_offset = start_offset + master_weight.numel()
-        if not use_fsdp_shard_model_weights:
-            rowwise_bytes = model_weight._rowwise_data.view(-1)
-            byte_start = start_offset // 2
-            byte_end = (end_offset + 1) // 2
-            model_weight_fragment = rowwise_bytes[byte_start:byte_end]
-        assert len(model_weight.shape) == 2
-        h, w = model_weight.shape
-        # master_weight is already converted to model_weight.dtype (BF16) in the caller
-        tex.nvfp4_2d_partial_cast(
-            master_weight,
-            model_weight_fragment,
-            per_block_decode_scale,
-            global_scale,
-            h,
-            w,
-            start_offset,
+            partial_cast_inp_list.append(master_weight)
+            partial_cast_out_list.append(model_weight_fragment)
+            partial_cast_scale_list.append(per_block_decode_scale)
+            partial_cast_global_scale_list.append(global_scale)
+            partial_cast_h_list.append(h)
+            partial_cast_w_list.append(w)
+            partial_cast_start_offset_list.append(start_offset)
+
+    # Batched multi-tensor call for fused scale
+    if fused_scale_block_amax_list:
+        tex.nvfp4_multi_tensor_fused_scale(
+            fused_scale_block_amax_list,
+            fused_scale_global_amax_list,
+            fused_scale_per_block_scale_list,
+            fused_scale_target_scale_list,
+            fused_scale_target_amax_list,
+            fused_scale_tile_rows_list,
+            fused_scale_tile_cols_list,
+            fused_scale_rows_padded_list,
+            block_len,
+        )
+
+    # Batched multi-tensor call for partial cast
+    if partial_cast_inp_list:
+        tex.nvfp4_multi_tensor_2d_partial_cast(
+            partial_cast_inp_list,
+            partial_cast_out_list,
+            partial_cast_scale_list,
+            partial_cast_global_scale_list,
+            partial_cast_h_list,
+            partial_cast_w_list,
+            partial_cast_start_offset_list,
             block_len,
         )
 
