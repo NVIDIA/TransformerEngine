@@ -856,7 +856,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
 
   // Compute amaxes
   if (quantizer.with_post_rht_amax) {
-    // We need:
+    // True post-RHT amax path:
     // 1. Rowwise amax = amax for input
     // 2. Columnwise amax = amax for RHT(input.t)
     nvte_group_hadamard_transform_amax(
