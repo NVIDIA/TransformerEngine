@@ -177,15 +177,29 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
-    def test_te_bf16_all_gather(self):
-        """Test Collective Dense Gradient with AllGather"""
+    def test_te_bf16_all_gather_userbuffers(self):
+        """Test Collective Dense Gradient with AllGather via Userbuffers"""
         self.args.collective_type = "all_gather"
         run_dense_grad_tests(self.args, self.mesh)
 
-    def test_te_bf16_reduce_scatter(self):
-        """Test Collective Dense Gradient with ReduceScatter"""
+    def test_te_bf16_reduce_scatter_userbuffers(self):
+        """Test Collective Dense Gradient with ReduceScatter via Userbuffers"""
         self.args.collective_type = "reduce_scatter"
         run_dense_grad_tests(self.args, self.mesh)
+
+    def test_te_bf16_all_gather_cublasmp(self):
+        """Test Collective Dense Gradient with AllGather via cuBlasMp"""
+        os.environ["NVTE_WITH_CUBLASMP"] = "1"
+        self.args.collective_type = "all_gather"
+        run_dense_grad_tests(self.args, self.mesh)
+        os.environ.pop("NVTE_WITH_CUBLASMP", None)
+
+    def test_te_bf16_reduce_scatter_cublasmp(self):
+        """Test Collective Dense Gradient with ReduceScatter via cuBlasMp"""
+        os.environ["NVTE_WITH_CUBLASMP"] = "1"
+        self.args.collective_type = "reduce_scatter"
+        run_dense_grad_tests(self.args, self.mesh)
+        os.environ.pop("NVTE_WITH_CUBLASMP", None)
 
 
 if __name__ == "__main__":
