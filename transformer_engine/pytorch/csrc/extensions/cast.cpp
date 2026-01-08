@@ -870,8 +870,8 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
       }
 
       // Compute pre-RHT amax of split input
-      nvte_compute_amax_with_config(input_list[i].data(), output_list[i].data(), quant_config_list[i],
-                                    stream);
+      nvte_compute_amax_with_config(input_list[i].data(), output_list[i].data(),
+                                    quant_config_list[i], stream);
 
       // Mirror pre-RHT amax to both row-wise and column-wise amax buffers
       auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
