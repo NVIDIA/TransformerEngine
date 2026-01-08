@@ -39,6 +39,7 @@ model_configs_flash_attn = {
     "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
     "cp_1_2": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
     "cp_1_3": ModelConfig(2, 4096, 12, 128, window_size=(512, 512)),  # MHA
+    "cp_1_4": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", chunk_size=1024),  # MHA
     "cp_2_0": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal"),  # GQA
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(
@@ -73,7 +74,7 @@ dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_1_0", "cp_1_2", "cp_2_1", "cp_3_2", "cp_3_3"]
+    configs = ["cp_1_0", "cp_1_2", "cp_1_4", "cp_2_1", "cp_3_2", "cp_3_3"]
     model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
@@ -115,6 +116,13 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         )
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
+    if config.chunk_size is not None and cp_comm_type != "p2p":
+        pytest.skip(
+            "Chunked attention with context parallelism is supported only for p2p communication"
+            " type."
+        )
+    if config.chunk_size is not None and qkv_format != "thd":
+        pytest.skip("Chunked attention with context parallelism is supported only for thd format!")
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
     available_backends, *_ = get_available_attention_backends(
         config,
@@ -148,6 +156,7 @@ model_configs_fused_attn = {
     ),  # MHA
     "cp_1_3": ModelConfig(2, 4096, 12, 128, attn_bias_type="post_scale_bias"),  # MHA
     "cp_1_4": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
+    "cp_1_5": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", chunk_size=1024),  # MHA
     "cp_2_0": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal"),  # GQA
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(
@@ -287,6 +296,8 @@ def test_cp_with_fused_attention(
         pytest.skip(
             "CP implementation does not support qkv_format=thd for non-vanilla softmax types!"
         )
+    if config.chunk_size is not None and qkv_format != "thd":
+        pytest.skip("Chunk size with context parallelism is only supported for thd format!")
 
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 

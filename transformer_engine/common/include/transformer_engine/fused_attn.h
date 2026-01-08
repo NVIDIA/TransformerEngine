@@ -809,6 +809,90 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
                                          int total_tokens, int world_size, int rank,
                                          cudaStream_t stream);
 
+/*!  \brief Split sequence into chunks for one P2P part on diagonal.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     cu_seqlens_padded   Cumulative sequence lengths, [batch_size + 1].
+ *  \param[out]    out_cu_seqlens      Output tensor.
+ *  \param[out]    out_cu_seqlens_padded      Output tensor.
+ *  \param[in]     batch                Batch size.
+ *  \param[in]     output_len           Output length.
+ *  \param[in]     chunk_size           Chunk size.
+ *  \param[in]     stream               CUDA stream used for this operation.
+ */
+
+void nvte_cp_thd_chunkify(const NVTETensor &cu_seqlens, const NVTETensor &cu_seqlens_padded,
+                          NVTETensor out_cu_seqlens, NVTETensor out_cu_seqlens_padded, int batch,
+                          int output_len, int chunk_size, cudaStream_t stream);
+
+/*!  \brief Support THD format for Context Parallel: Split sequence into chunks for one P2P part on diagonal.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     cu_seqlens_padded   Cumulative sequence lengths, [batch_size + 1].
+ *  \param[out]    out_cu_seqlens      Output tensor.
+ *  \param[out]    out_cu_seqlens_padded      Output tensor.
+ *  \param[in]     batch                Batch size.
+ *  \param[in]     output_len           Output length.
+ *  \param[in]     chunk_size           Chunk size.
+ *  \param[in]     cp_rank              Context Parallel rank.
+ *  \param[in]     cp_size              Context Parallel size.
+ *  \param[in]     stream               CUDA stream used for this operation.
+ */
+
+void nvte_cp_thd_chunkify_p2p(const NVTETensor &cu_seqlens, const NVTETensor &cu_seqlens_padded,
+                              NVTETensor out_cu_seqlens, NVTETensor out_cu_seqlens_padded,
+                              int batch, int output_len, int chunk_size, int cp_rank, int cp_size,
+                              cudaStream_t stream);
+
+/*!  \brief Support THD format for Context Parallel: Split sequence into chunks for one P2P part below diagonal.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     cu_seqlens_q          Cumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_halfs   Cumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     cu_seqlens_padded     Cumulative sequence lengths, [batch_size + 1].
+ *  \param[out]    out_cu_seqlens_q      Output tensor.
+ *  \param[out]    out_cu_seqlens_kv      Output tensor.
+ *  \param[out]    out_cu_seqlens_q_padded      Output tensor.
+ *  \param[out]    out_cu_seqlens_kv_padded      Output tensor.
+ *  \param[in]     cp_rank_q              Context Parallel rank for Q.
+ *  \param[in]     cp_rank_kv             Context Parallel rank for KV.
+ *  \param[in]     cp_size              Context Parallel size.
+ *  \param[in]     batch                Batch size.
+ *  \param[in]     output_len           Output length.
+ *  \param[in]     chunk_size           Chunk size.
+ *  \param[in]     stream               CUDA stream used for this operation.
+ */
+
+void nvte_cp_thd_seq_tweak_below_diag(
+    const NVTETensor &cu_seqlens_q, const NVTETensor &cu_seqlens_kv_halfs,
+    const NVTETensor &cu_seqlens_padded, NVTETensor out_cu_seqlens_q, NVTETensor out_cu_seqlens_kv,
+    NVTETensor out_cu_seqlens_q_padded, NVTETensor out_cu_seqlens_kv_padded, int cp_rank_q,
+    int cp_rank_kv, int cp_size, int batch, int output_len, int chunk_size, cudaStream_t stream);
+
+/*!  \brief Support THD format for Context Parallel: Split sequence into chunks for one P2P part above diagonal.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     cu_seqlens_q_halfs          Cumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     cu_seqlens_kv_halfs   Cumulative sequence lengths, [batch_size + 1].
+ *  \param[out]    out_cu_seqlens_q_halfs      Output tensor.
+ *  \param[in]     batch                Batch size.
+ *  \param[in]     output_len           Output length.
+ *  \param[in]     chunk_size           Chunk size.
+ *  \param[in]     stream               CUDA stream used for this operation.
+ */
+
+void nvte_cp_thd_seq_tweak_above_diag(
+    const NVTETensor &cu_seqlens_q_halfs, const NVTETensor &cu_seqlens_kv,
+    const NVTETensor &cu_seqlens_padded, NVTETensor out_cu_seqlens_q, NVTETensor out_cu_seqlens_kv,
+    NVTETensor out_cu_seqlens_q_padded, NVTETensor out_cu_seqlens_kv_padded, int cp_rank_q,
+    int cp_rank_kv, int cp_size, int batch, int output_len, int chunk_size, cudaStream_t stream);
+
 /*!  \brief Convert tensor from THD to BSHD format.
  *
  * \warning   This API is **experimental** and subject to change.
