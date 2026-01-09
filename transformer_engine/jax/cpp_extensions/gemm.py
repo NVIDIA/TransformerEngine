@@ -70,6 +70,7 @@ __all__ = [
 
 
 num_cublas_streams = get_num_compute_streams()
+collective_gemm_with_cublasmp = False
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -198,6 +199,7 @@ def collective_gemm_bootstrap(
     num_sm_for_communication=2,
     use_ce=True,
     aggregate_all_gather=False,
+    use_cublasmp=False,
 ):
     """Initialize NCCL communicators for Collective GEMM operations.
 
@@ -281,6 +283,8 @@ def collective_gemm_bootstrap(
         f" num_devices_per_process={num_devices_per_process}"
     )
     assert 0 <= process_id < num_total_devices, f"Invalid process_id={process_id}"
+    global collective_gemm_with_cublasmp
+    collective_gemm_with_cublasmp = use_cublasmp
     initialize_cgemm_communicator(
         num_total_devices,
         num_devices_per_process,
@@ -292,6 +296,7 @@ def collective_gemm_bootstrap(
         num_sm_for_communication,
         use_ce,
         aggregate_all_gather,
+        use_cublasmp,
     )
 
 
@@ -538,7 +543,11 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode.is_nvfp4_scaling:
             workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         if not collective_op.is_none:
-            workspace_size *= get_cgemm_num_max_streams()
+            if collective_gemm_with_cublasmp:
+                # cuBlasMp manages its own cuBlasLt workspaces per stream
+                workspace_size = 0
+            else:
+                workspace_size *= get_cgemm_num_max_streams()
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size += 256
@@ -617,6 +626,7 @@ class GemmPrimitive(BasePrimitive):
             "grad": grad,
             "use_split_accumulator": use_split_accumulator,
             "collective_op": int(collective_op.value),
+            "use_cublasmp": collective_gemm_with_cublasmp,
         }
 
         operand_output_aliases = {}
@@ -803,10 +813,10 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        collective_op,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
+        collective_op,
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
         assert GemmPrimitive.outer_primitive is not None
