@@ -495,7 +495,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     } else if (mxfp8_gemm) {
 #if CUBLAS_VERSION >= 120800
       NVTE_CHECK(cuda::cublas_version() >= 120800,
-                 "MXFP8 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cuda::cublas_version());
+                 "MXFP8 requires cuBLAS 12.8+, but run-time cuBLAS version is ",
+                 cuda::cublas_version());
       fp8e8m0 *A_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.A_scale_inv);
       fp8e8m0 *B_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -521,7 +522,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     } else if (use_fp4) {  // NVFP4 GEMM
 #if CUBLAS_VERSION >= 120800
       NVTE_CHECK(cuda::cublas_version() >= 120800,
-                 "FP4 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cuda::cublas_version());
+                 "FP4 requires cuBLAS 12.8+, but run-time cuBLAS version is ",
+                 cuda::cublas_version());
       // make sure alpha beta computation dtype remains fp32 by CUBLASLT_MATMUL_DESC_SCALE_TYPE
       cublasDataType_t scale_type = CUDA_R_32F;
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
