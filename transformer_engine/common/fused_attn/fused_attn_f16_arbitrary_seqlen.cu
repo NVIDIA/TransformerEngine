@@ -1263,8 +1263,8 @@ void fused_attn_arbitrary_seqlen_bwd(
     devPtrdBias = output_dBias->data.dptr;
     bias_b = output_dBias->data.shape[0];
     bias_h = output_dBias->data.shape[1];
-    bias_sq = input_Bias->data.shape[2];
-    bias_skv = input_Bias->data.shape[3];
+    bias_sq = output_dBias->data.shape[2];
+    bias_skv = output_dBias->data.shape[3];
   }
 
   size_t max_batch_size = 0;
