@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -334,7 +334,7 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
 
 
 class TestDistributedContextParallelSelfAttn:
-
+    # TODO(KshitijLakhani): parametrize num_segments_per_seq for all CP tests
     def impl_test_context_parallel_attn(
         self,
         device_count,
