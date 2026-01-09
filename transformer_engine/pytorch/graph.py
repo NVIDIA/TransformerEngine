@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -60,6 +60,21 @@ def graph_pool_handle():
     Returns an opaque token representing the id of a graph memory pool.
     """
     return _graph_pool_handle()
+
+
+@contextlib.contextmanager
+def _none_grad_context_wrapper(inputs):
+    """
+    Wrapper to set the gradients of the inputs to None,
+    in case the backward pass makes grad accumulations.
+    """
+    original_input_grads = []
+    for input_tensor in inputs:
+        original_input_grads.append(input_tensor.grad)
+        input_tensor.grad = None
+    yield
+    for input_tensor, original_grad in zip(inputs, original_input_grads):
+        input_tensor.grad = original_grad
 
 
 @contextlib.contextmanager
@@ -218,9 +233,10 @@ def _make_graphed_callables(
         assert (
             is_training
         ), "`_reuse_graph_input_output_buffers` is only available in training mode."
-        assert isinstance(
-            sample_args, list
-        ), "sample_args must be a list for _reuse_graph_input_output_buffers."
+        if isinstance(sample_args, tuple):
+            sample_args = list(sample_args)
+        if isinstance(sample_kwargs, tuple):
+            sample_kwargs = list(sample_kwargs)
 
         # Reorganize args and kwargs for input tensor reuse.
         # fwd_sample_qs is keyed by model chunk index. The value is a queue of tuples.
@@ -433,13 +449,15 @@ def _make_graphed_callables(
                 for hook in hooks:
                     hook.remove()
                 if is_training:
-                    grad_inputs = torch.autograd.grad(
-                        outputs=tuple(o for o in outputs if o.requires_grad),
-                        inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                        grad_outputs=tuple(torch.empty_like(o) for o in outputs if o.requires_grad),
-                        only_inputs=True,
-                        allow_unused=allow_unused_input,
-                    )
+                    inputs = tuple(i for i in static_input_surface if i.requires_grad)
+                    with _none_grad_context_wrapper(inputs):
+                        torch.autograd.backward(
+                            tuple(o for o in outputs if o.requires_grad),
+                            grad_tensors=tuple(
+                                torch.empty_like(o) for o in outputs if o.requires_grad
+                            ),
+                        )
+                        grad_inputs = tuple(input.grad for input in inputs)
 
                     # Filter module params that get None grad from grad_inputs and remove them
                     # from static_input_surface. This is to ensure that the backward hooks
@@ -454,6 +472,14 @@ def _make_graphed_callables(
                     module_params_with_grad = []
                     for grad_inputs_idx, inputs_idx in enumerate(required_grad_input_idx):
                         if (
+                            grad_inputs[grad_inputs_idx] is None
+                            and grad_inputs_idx < num_required_grad_sample_args
+                        ):
+                            assert allow_unused_input, (
+                                "The input tensor requires grad, but the grad is None after"
+                                " backward pass."
+                            )
+                        elif (
                             grad_inputs[grad_inputs_idx] is not None
                             and grad_inputs_idx >= num_required_grad_sample_args
                         ):
@@ -605,15 +631,17 @@ def _make_graphed_callables(
                             torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                         )
                     if is_training:
-                        with _graph_context_wrapper(bwd_graph, pool=mempool):
-                            grad_inputs = torch.autograd.grad(
-                                outputs=tuple(o for o in static_outputs if o.requires_grad),
-                                inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                                grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
-                                only_inputs=True,
-                                allow_unused=allow_unused_input,
+                        inputs = tuple(i for i in static_input_surface if i.requires_grad)
+                        with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
+                            bwd_graph, pool=mempool
+                        ):
+                            torch.autograd.backward(
+                                tuple(o for o in static_outputs if o.requires_grad),
+                                grad_tensors=tuple(o for o in static_grad_outputs if o is not None),
                                 retain_graph=retain_graph_in_backward,
                             )
+                            grad_inputs = tuple(input.grad for input in inputs)
+
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
                     # that don't require grad. I couldn't think of a one-liner for this pattern.
@@ -694,15 +722,17 @@ def _make_graphed_callables(
                 torch.empty_like(o) if o.requires_grad else None for o in static_outputs
             )
             if is_training:
-                with _graph_context_wrapper(bwd_graph, pool=mempool):
-                    grad_inputs = torch.autograd.grad(
-                        outputs=tuple(o for o in static_outputs if o.requires_grad),
-                        inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                        grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
-                        only_inputs=True,
-                        allow_unused=allow_unused_input,
+                inputs = tuple(i for i in static_input_surface if i.requires_grad)
+                with _none_grad_context_wrapper(inputs), _graph_context_wrapper(
+                    bwd_graph, pool=mempool
+                ):
+                    torch.autograd.backward(
+                        tuple(o for o in static_outputs if o.requires_grad),
+                        grad_tensors=tuple(o for o in static_grad_outputs if o is not None),
                         retain_graph=retain_graph_in_backward,
                     )
+                    grad_inputs = tuple(input.grad for input in inputs)
+
                 if need_bwd_dw_graph[bwd_idx]:
                     with _graph_context_wrapper(bwd_dw_graph, pool=mempool):
                         for module in visited_te_modules[bwd_idx]:
