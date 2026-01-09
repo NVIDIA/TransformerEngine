@@ -115,13 +115,14 @@ void nvte_group_hadamard_transform_cast_fusion_columnwise(
  *  \param[in]      split_sections    Array specifying splits in dimension 0 for each output tensor.
  *  \param[in]      num_tensors       Number of output tensors, must be > 0.
  *  \param[in]      quant_config      Quantization configuration.
+ *  \param[in]      quant_workspace   Workspace buffer. Must be at least 4 bytes.
  *  \param[in]      stream            CUDA stream used for the operation.
  */
 void nvte_group_hadamard_transform_cast_fusion(const NVTETensor input, NVTETensor* outputs,
                                                const NVTETensor hadamard_matrix,
                                                const size_t* split_sections, size_t num_tensors,
                                                const NVTEQuantizationConfig quant_config,
-                                               cudaStream_t stream);
+                                               NVTETensor quant_workspace, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

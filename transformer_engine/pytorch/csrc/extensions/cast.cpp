@@ -872,10 +872,16 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   auto rht_matrix_nvte = makeTransformerEngineTensor(quantizer.rht_matrix);
 
   if (all_aligned_token_dim) {
+    // allocate a tile scheduler workspace
+    auto tile_scheduler_workspace_torch =
+        at::empty({1}, at::device(at::kCUDA).dtype(torch::kInt32));
+    auto nvte_tile_scheduler_workspace =
+        makeTransformerEngineTensor(tile_scheduler_workspace_torch);
     // call the fully-fused grouped kernel for rowwise quantization & colwise RHT quantization transpose
     nvte_group_hadamard_transform_cast_fusion(
         input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
-        rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0], stream);
+        rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0],
+        nvte_tile_scheduler_workspace.data(), stream);
   } else {
     // Separate quantization for rowwise usage and columnwise usage
     // Rowwise quantization fusion with grouped version

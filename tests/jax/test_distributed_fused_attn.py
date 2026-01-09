@@ -334,7 +334,7 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
 
 
 class TestDistributedContextParallelSelfAttn:
-
+    # TODO(KshitijLakhani): parametrize num_segments_per_seq for all CP tests
     def impl_test_context_parallel_attn(
         self,
         device_count,
