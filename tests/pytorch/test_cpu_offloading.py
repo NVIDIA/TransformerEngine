@@ -54,9 +54,11 @@ gc.disable()
 
 
 class Utils:
+    # Tensor big engough that both data and scaling factor tensor are bigger than 256 * 1024 elements,
+    # so that they are offloaded to GPU.
     tensor1 = torch.randn((1024, 1024), device="cuda", dtype=torch.bfloat16)
-    _B = 64
-    _S = 256
+    _B = 128
+    _S = 512
     _H = 4
     _D = 256
 
