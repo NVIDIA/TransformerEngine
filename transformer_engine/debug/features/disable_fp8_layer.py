@@ -8,6 +8,8 @@ DEPRECATED: This is a backward compatibility alias for DisableQuantizationLayer.
 New code should use DisableQuantizationLayer instead, which works with all quantization formats.
 """
 
+import warnings
+
 from nvdlfw_inspect.registry import Registry
 from transformer_engine.debug.features.disable_quantization_layer import DisableQuantizationLayer
 
@@ -34,3 +36,13 @@ class DisableFP8Layer(DisableQuantizationLayer):
                 DisableFP8Layer:  # Deprecated: use DisableQuantizationLayer
                     enabled: True
     """
+
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "DisableFP8Layer is deprecated. "
+            "Use DisableQuantizationLayer instead, which works with all quantization "
+            "formats (FP8, NVFP4, etc.).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)
