@@ -507,10 +507,13 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer
+  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.1+
   const int current_device = cuda::current_device();
   NVTE_CHECK(cuda::sm_arch(current_device) >= 100,
              "nvte_grouped_gemm requires Blackwell (SM100) or newer architecture.");
+  NVTE_CHECK(cuda::cublas_version() >= 130100,
+             "nvte_grouped_gemm requires cuBLAS 13.1+, but run-time cuBLAS version is ",
+             cuda::cublas_version());
 
   // Convert to internal types
   const GroupedTensor *inputA = convertNVTEGroupedTensorCheck(A);
