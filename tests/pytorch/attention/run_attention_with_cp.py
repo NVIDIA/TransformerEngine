@@ -475,18 +475,14 @@ def run_dpa_with_cp(
                 dbias.shape[1],
                 2 * world_size,
                 dbias.shape[2] // (2 * world_size),
-                dbias.shape[3]
+                dbias.shape[3],
             )
             # bias has fixed axis (2) as dbias shape: (1, 1, max_seqlen_q, max_seqlen_kv)
             dbias = dbias.index_select(2, seq_idx)
             # Flatten
             dbias = dbias.view(dbias.shape[0], dbias.shape[1], -1, dbias.shape[-1])
             dbias_ = dbias_.view(
-                dbias_.shape[0],
-                dbias_.shape[1],
-                2,
-                dbias_.shape[2] // 2,
-                dbias_.shape[3]
+                dbias_.shape[0], dbias_.shape[1], 2, dbias_.shape[2] // 2, dbias_.shape[3]
             )
 
     elif qkv_format == "thd":
