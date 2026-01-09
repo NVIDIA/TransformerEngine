@@ -14,6 +14,7 @@ import triton
 
 from transformer_engine.jax.cpp_extensions.base import BasePrimitive, register_primitive
 from transformer_engine.jax.cpp_extensions.misc import get_padded_spec, NamedSharding
+from transformer_engine.jax.sharding import get_mesh_axis_size
 from transformer_engine.common.triton.permutation import (
     _row_id_map_pass_1_kernel,
     _row_id_map_pass_2_kernel,
@@ -121,11 +122,6 @@ class RowIdMapPass1Primitive(BasePrimitive):
         )
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, num_tokens, num_experts, block_size):
-        """Batching rule for vmap."""
-        raise NotImplementedError("vmap is not supported for RowIdMapPass1Primitive")
-
-    @staticmethod
     def infer_sharding_from_operands(
         num_tokens, num_experts, block_size, mesh, arg_infos, result_infos
     ):
@@ -140,7 +136,6 @@ class RowIdMapPass1Primitive(BasePrimitive):
             desc="RowIdMapPass1.row_id_map_sharding",
         )
         # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
-        # Keep it replicated for simplicity
         workspace_sharding = NamedSharding(
             mesh,
             PartitionSpec(None, None),
@@ -150,7 +145,7 @@ class RowIdMapPass1Primitive(BasePrimitive):
 
     @staticmethod
     def partition(num_tokens, num_experts, block_size, mesh, arg_infos, result_infos):
-        """Partition the primitive for distributed execution."""
+        """Row id map 1st pass partition."""
         del result_infos
         routing_map_spec = get_padded_spec(arg_infos[0])
 
@@ -190,9 +185,10 @@ class RowIdMapPass1Primitive(BasePrimitive):
         # routing_map shape: (num_tokens, num_experts)
         input_spec = (f"{prefix}_tokens", f"{prefix}_experts")
         # row_id_map shape: (num_tokens, num_experts * 2 + 1)
+        # Note: row_id_cols != experts since it's num_experts * 2 + 1
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
         # workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
-        workspace_spec = (f"{prefix}_ws_experts", f"{prefix}_ws_blocks")
+        workspace_spec = (f"{prefix}_experts", f"{prefix}_ws_blocks")
         return SdyShardingRule((input_spec,), (row_id_map_spec, workspace_spec))
 
 
@@ -262,11 +258,6 @@ class RowIdMapPass2Primitive(BasePrimitive):
                 "BLOCK_SIZE": block_size,
             },
         )
-
-    @staticmethod
-    def batcher(batched_args, batch_dims, *, num_tokens, num_experts, block_size):
-        """Batching rule for vmap."""
-        raise NotImplementedError("vmap is not supported for RowIdMapPass2Primitive")
 
     @staticmethod
     def infer_sharding_from_operands(
@@ -385,11 +376,6 @@ class RowIdMapPass3Primitive(BasePrimitive):
                 "LOAD_SIZE": load_size,
             },
         )
-
-    @staticmethod
-    def batcher(batched_args, batch_dims, *, num_tokens, num_experts):
-        """Batching rule for vmap."""
-        raise NotImplementedError("vmap is not supported for RowIdMapPass3Primitive")
 
     @staticmethod
     def infer_sharding_from_operands(num_tokens, num_experts, mesh, arg_infos, result_infos):
@@ -603,21 +589,6 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def batcher(
-        batched_args,
-        batch_dims,
-        *,
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-        with_probs,
-        with_pad,
-    ):
-        """Batching rule for vmap."""
-        raise NotImplementedError("vmap is not supported for PermuteWithMaskMapPrimitive")
-
-    @staticmethod
     def infer_sharding_from_operands(
         num_tokens,
         num_experts,
@@ -704,15 +675,39 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             )
         out_shardings = (output_sharding, permuted_probs_sharding)
 
+        # Get number of data parallel devices from the batch sharding axis
+        batch_axis = inp_spec[0]
+        if batch_axis is not None:
+            num_dp_devices = get_mesh_axis_size(batch_axis, mesh)
+        else:
+            num_dp_devices = 1
+
         def sharded_impl(inp, row_id_map, probs, scale, permuted_scale, pad_offsets):
-            # Each shard processes its local tokens
+            # Each shard processes its local tokens independently (data parallelism)
             local_num_tokens = inp.shape[0]
-            local_hidden_size = inp.shape[1]
-            # Compute local num_out_tokens proportionally
-            # In batch-parallel case, each GPU has local_tokens = total_tokens / num_gpus
-            # and local_out_tokens = total_out_tokens / num_gpus
-            local_num_out_tokens = num_out_tokens  # Will be adjusted by the outer function
-            return PermuteWithMaskMapPrimitive.impl(
+
+            # =========================================================================
+            # MoE Permutation Sharding (data parallelism, no expert parallelism)
+            # =========================================================================
+            # Each GPU has ALL experts and processes its local batch of tokens.
+            #
+            # TopK bounds output: each token goes to at most topK experts, so:
+            #   global_num_out_tokens = global_num_in_tokens * topK
+            #   local_num_out_tokens = local_num_in_tokens * topK
+            #                        = global_num_out_tokens / num_dp_devices
+            #
+            # Local permute produces output ordered by expert: [E0 | E1 | ... | EN]
+            # where each expert section contains tokens routed to that expert.
+            #
+            # Global assembly (if needed) should be done outside this primitive.
+            # =========================================================================
+
+            # Calculate local output tokens based on topK bound
+            # num_out_tokens (from caller) = global_num_in_tokens * topK
+            local_num_out_tokens = num_out_tokens // num_dp_devices
+
+            # Local permute - output stays sharded on this GPU
+            local_output, local_permuted_probs = PermuteWithMaskMapPrimitive.impl(
                 inp,
                 row_id_map,
                 probs,
@@ -722,10 +717,12 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
                 num_tokens=local_num_tokens,
                 num_experts=num_experts,
                 num_out_tokens=local_num_out_tokens,
-                hidden_size=local_hidden_size,
+                hidden_size=hidden_size,
                 with_probs=with_probs,
                 with_pad=with_pad,
             )
+
+            return local_output, local_permuted_probs
 
         return mesh, sharded_impl, out_shardings, arg_shardings
 
@@ -742,7 +739,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         result_types,
     ):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, num_out_tokens, hidden_size, with_pad, mesh, result_types
+        del num_tokens, num_experts, num_out_tokens, hidden_size, mesh, result_types
         prefix = "PermuteWithMaskMap"
         # inp: (num_tokens, hidden_size)
         inp_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
@@ -750,17 +747,19 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
         # probs: (num_tokens, num_experts) or (0,)
         probs_spec = (f"{prefix}_tokens", f"{prefix}_experts") if with_probs else (f"{prefix}_empty",)
-        # scale, permuted_scale: dummy
-        scale_spec = (f"{prefix}_scale_tok", f"{prefix}_scale_hid")
-        # pad_offsets: (num_experts,) or (0,)
-        pad_offsets_spec = (f"{prefix}_pad_off",)
+        # scale: (num_tokens, hidden_size) - same shape as inp, permuted together
+        scale_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
+        # permuted_scale: (num_out_tokens, hidden_size) - same shape as output
+        permuted_scale_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
+        # pad_offsets: (num_experts,) or (0,) - uses same experts factor as probs
+        pad_offsets_spec = (f"{prefix}_experts",) if with_pad else (f"{prefix}_pad_empty",)
         # output: (num_out_tokens, hidden_size)
         output_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
         # permuted_probs: (num_out_tokens,) or (0,)
         permuted_probs_spec = (f"{prefix}_out_tokens",) if with_probs else (f"{prefix}_empty2",)
 
         return SdyShardingRule(
-            (inp_spec, row_id_map_spec, probs_spec, scale_spec, scale_spec, pad_offsets_spec),
+            (inp_spec, row_id_map_spec, probs_spec, scale_spec, permuted_scale_spec, pad_offsets_spec),
             (output_spec, permuted_probs_spec),
         )
 
@@ -770,7 +769,7 @@ register_primitive(PermuteWithMaskMapPrimitive)
 
 class UnpermuteWithMaskMapPrimitive(BasePrimitive):
     """
-    Unpermute the input tensor based on the row_id_map.
+    Unpermute the input tensor based on the row_id_map, optionally with fused unpadding.
     """
 
     name = "te_unpermute_with_mask_map_triton"
@@ -781,7 +780,8 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         7,
         8,
         9,
-    )  # num_tokens, num_experts, hidden_size, with_merging_probs, with_probs
+        10,
+    )  # num_tokens, num_experts, hidden_size, with_merging_probs, with_probs, with_unpad
     inner_primitive = None
     outer_primitive = None
 
@@ -791,16 +791,17 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         row_id_map_aval,
         merging_probs_aval,
         permuted_probs_aval,
-        pad_offsets_aval,  # dummy, not used when FUSION_UNPAD=False
+        pad_offsets_aval,
         *,
         num_tokens,
         num_experts,
         hidden_size,
         with_merging_probs,
         with_probs,
+        with_unpad,
     ):
         """Shape/dtype inference for unpermute."""
-        del row_id_map_aval, merging_probs_aval, with_merging_probs, pad_offsets_aval
+        del row_id_map_aval, merging_probs_aval, with_merging_probs, pad_offsets_aval, with_unpad
 
         output_shape = (num_tokens, hidden_size)
         output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
@@ -827,6 +828,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_merging_probs,
         with_probs,
+        with_unpad,
     ):
         """Forward to inner primitive."""
         assert UnpermuteWithMaskMapPrimitive.inner_primitive is not None
@@ -841,6 +843,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
             hidden_size=hidden_size,
             with_merging_probs=with_merging_probs,
             with_probs=with_probs,
+            with_unpad=with_unpad,
         )
 
     @staticmethod
@@ -857,6 +860,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_merging_probs,
         with_probs,
+        with_unpad,
     ):
         """MLIR lowering using triton_call_lowering."""
         # Compute strides
@@ -882,7 +886,6 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         block_size = _get_min_block_size(_unpermute_kernel)
         grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
-        # Pass all 5 inputs including pad_offsets (even though FUSION_UNPAD=False)
         return triton_call_lowering(
             ctx,
             _unpermute_kernel,
@@ -909,24 +912,10 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
                 "PROBS_LOAD_WIDTH": triton.next_power_of_2(num_experts),
                 "WITH_MERGING_PROBS": with_merging_probs,
                 "PERMUTE_PROBS": with_probs,
-                "FUSION_UNPAD": False,
+                "FUSION_UNPAD": with_unpad,
                 "BLOCK_SIZE": block_size,
             },
         )
-
-    @staticmethod
-    def batcher(
-        batched_args,
-        batch_dims,
-        *,
-        num_tokens,
-        num_experts,
-        hidden_size,
-        with_merging_probs,
-        with_probs,
-    ):
-        """Batching rule for vmap."""
-        raise NotImplementedError("vmap is not supported for UnpermuteWithMaskMapPrimitive")
 
     @staticmethod
     def infer_sharding_from_operands(
@@ -935,6 +924,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_merging_probs,
         with_probs,
+        with_unpad,
         mesh,
         arg_infos,
         result_infos,
@@ -945,7 +935,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         - row_id_map (num_tokens, num_experts*2+1) is sharded on token dim
         - Output (num_tokens, hidden_size) gets same token dim sharding
         """
-        del num_tokens, num_experts, hidden_size, with_merging_probs, result_infos
+        del num_tokens, num_experts, hidden_size, with_merging_probs, with_unpad, result_infos
         row_id_map_spec = get_padded_spec(arg_infos[1])
         # Output has same token dimension sharding as row_id_map
         output_sharding = NamedSharding(
@@ -974,6 +964,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_merging_probs,
         with_probs,
+        with_unpad,
         mesh,
         arg_infos,
         result_infos,
@@ -1008,7 +999,6 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         def sharded_impl(inp, row_id_map, merging_probs, permuted_probs, pad_offsets):
             # Each shard processes its local tokens
             local_num_tokens = row_id_map.shape[0]
-            local_hidden_size = inp.shape[1]
             return UnpermuteWithMaskMapPrimitive.impl(
                 inp,
                 row_id_map,
@@ -1017,9 +1007,10 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
                 pad_offsets,
                 num_tokens=local_num_tokens,
                 num_experts=num_experts,
-                hidden_size=local_hidden_size,
+                hidden_size=hidden_size,  # hidden_size is not sharded
                 with_merging_probs=with_merging_probs,
                 with_probs=with_probs,
+                with_unpad=with_unpad,
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -1031,6 +1022,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_merging_probs,
         with_probs,
+        with_unpad,
         mesh,
         value_types,
         result_types,
@@ -1048,8 +1040,8 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         )
         # permuted_probs: (num_out_tokens,) or (0,)
         permuted_probs_spec = (f"{prefix}_out_tokens",) if with_probs else (f"{prefix}_empty2",)
-        # pad_offsets: (num_experts,) or (0,)
-        pad_offsets_spec = (f"{prefix}_pad_off",)
+        # pad_offsets: (num_experts,) when with_unpad=True, or dummy (0,) otherwise
+        pad_offsets_spec = (f"{prefix}_experts",) if with_unpad else (f"{prefix}_pad_empty",)
         # output: (num_tokens, hidden_size)
         output_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
         # unpermuted_probs: (num_tokens, num_experts) or (0,)
@@ -1066,297 +1058,16 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
 register_primitive(UnpermuteWithMaskMapPrimitive)
 
 
-class UnpermuteWithMaskMapAndUnpadPrimitive(BasePrimitive):
-    """
-    Unpermute the input tensor based on the row_id_map with fused unpadding.
-    """
-
-    name = "te_unpermute_with_mask_map_and_unpad_triton"
-    multiple_results = True
-    impl_static_args = (
-        5,
-        6,
-        7,
-        8,
-        9,
-    )  # num_tokens, num_experts, hidden_size, with_merging_probs, with_probs
-    inner_primitive = None
-    outer_primitive = None
-
-    @staticmethod
-    def abstract(
-        inp_aval,
-        row_id_map_aval,
-        merging_probs_aval,
-        permuted_probs_aval,
-        pad_offsets_aval,
-        *,
-        num_tokens,
-        num_experts,
-        hidden_size,
-        with_merging_probs,
-        with_probs,
-    ):
-        """Shape/dtype inference for unpermute with unpadding."""
-        del row_id_map_aval, merging_probs_aval, with_merging_probs, pad_offsets_aval
-
-        output_shape = (num_tokens, hidden_size)
-        output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
-
-        if with_probs:
-            unpermuted_probs_shape = (num_tokens, num_experts)
-            unpermuted_probs_aval = jax.core.ShapedArray(
-                unpermuted_probs_shape, permuted_probs_aval.dtype
-            )
-        else:
-            unpermuted_probs_aval = jax.core.ShapedArray((0,), inp_aval.dtype)
-
-        return output_aval, unpermuted_probs_aval
-
-    @staticmethod
-    def impl(
-        inp,
-        row_id_map,
-        merging_probs,
-        permuted_probs,
-        pad_offsets,
-        num_tokens,
-        num_experts,
-        hidden_size,
-        with_merging_probs,
-        with_probs,
-    ):
-        """Forward to inner primitive."""
-        assert UnpermuteWithMaskMapAndUnpadPrimitive.inner_primitive is not None
-        return UnpermuteWithMaskMapAndUnpadPrimitive.inner_primitive.bind(
-            inp,
-            row_id_map,
-            merging_probs,
-            permuted_probs,
-            pad_offsets,
-            num_tokens=num_tokens,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            with_merging_probs=with_merging_probs,
-            with_probs=with_probs,
-        )
-
-    @staticmethod
-    def lowering(
-        ctx,
-        inp,
-        row_id_map,
-        merging_probs,
-        permuted_probs,
-        pad_offsets,
-        *,
-        num_tokens,
-        num_experts,
-        hidden_size,
-        with_merging_probs,
-        with_probs,
-    ):
-        """MLIR lowering using triton_call_lowering."""
-        # Compute strides
-        inp_stride_token = hidden_size
-        inp_stride_hidden = 1
-        output_stride_token = hidden_size
-        output_stride_hidden = 1
-        row_id_stride_token = num_experts * 2 + 1
-        row_id_stride_expert = 1
-
-        if with_merging_probs:
-            merging_probs_stride_token = num_experts
-            merging_probs_stride_expert = 1
-        else:
-            merging_probs_stride_token = 0
-            merging_probs_stride_expert = 0
-
-        permuted_probs_stride_token = 1
-        unpermuted_probs_stride_token = num_experts
-        unpermuted_probs_stride_expert = 1
-
-        # Grid - use minimum BLOCK_SIZE from autotune configs
-        block_size = _get_min_block_size(_unpermute_kernel)
-        grid = (num_tokens, triton.cdiv(hidden_size, block_size))
-
-        return triton_call_lowering(
-            ctx,
-            _unpermute_kernel,
-            inp,
-            row_id_map,
-            merging_probs,
-            permuted_probs,
-            pad_offsets,
-            grid=grid,
-            constexprs={
-                "stride_row_id_map_token": row_id_stride_token,
-                "stride_row_id_map_expert": row_id_stride_expert,
-                "stride_input_token": inp_stride_token,
-                "stride_input_hidden": inp_stride_hidden,
-                "stride_output_token": output_stride_token,
-                "stride_output_hidden": output_stride_hidden,
-                "stride_merging_probs_token": merging_probs_stride_token,
-                "stride_merging_probs_expert": merging_probs_stride_expert,
-                "stride_permuted_probs_token": permuted_probs_stride_token,
-                "stride_unpermuted_probs_token": unpermuted_probs_stride_token,
-                "stride_unpermuted_probs_expert": unpermuted_probs_stride_expert,
-                "num_experts": num_experts,
-                "hidden_size": hidden_size,
-                "PROBS_LOAD_WIDTH": triton.next_power_of_2(num_experts),
-                "WITH_MERGING_PROBS": with_merging_probs,
-                "PERMUTE_PROBS": with_probs,
-                "FUSION_UNPAD": True,
-                "BLOCK_SIZE": block_size,
-            },
-        )
-
-    @staticmethod
-    def batcher(
-        batched_args,
-        batch_dims,
-        *,
-        num_tokens,
-        num_experts,
-        hidden_size,
-        with_merging_probs,
-        with_probs,
-    ):
-        """Batching rule for vmap."""
-        raise NotImplementedError("vmap is not supported for UnpermuteWithMaskMapAndUnpadPrimitive")
-
-    @staticmethod
-    def infer_sharding_from_operands(
-        num_tokens,
-        num_experts,
-        hidden_size,
-        with_merging_probs,
-        with_probs,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        """Infer output sharding from input sharding."""
-        del num_tokens, num_experts, hidden_size, with_merging_probs, result_infos
-        row_id_map_spec = get_padded_spec(arg_infos[1])
-        output_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(row_id_map_spec[0], None),
-            desc="UnpermuteWithMaskMapAndUnpad.output_sharding",
-        )
-        if with_probs:
-            unpermuted_probs_sharding = NamedSharding(
-                mesh,
-                PartitionSpec(row_id_map_spec[0], None),
-                desc="UnpermuteWithMaskMapAndUnpad.unpermuted_probs_sharding",
-            )
-        else:
-            unpermuted_probs_sharding = NamedSharding(
-                mesh,
-                PartitionSpec(None),
-                desc="UnpermuteWithMaskMapAndUnpad.unpermuted_probs_sharding_empty",
-            )
-        return output_sharding, unpermuted_probs_sharding
-
-    @staticmethod
-    def partition(
-        num_tokens,
-        num_experts,
-        hidden_size,
-        with_merging_probs,
-        with_probs,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        """Partition the primitive for distributed execution."""
-        del result_infos
-        row_id_map_spec = get_padded_spec(arg_infos[1])
-
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-
-        output_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(row_id_map_spec[0], None),
-            desc="UnpermuteWithMaskMapAndUnpad.output_sharding",
-        )
-        if with_probs:
-            unpermuted_probs_sharding = NamedSharding(
-                mesh,
-                PartitionSpec(row_id_map_spec[0], None),
-                desc="UnpermuteWithMaskMapAndUnpad.unpermuted_probs_sharding",
-            )
-        else:
-            unpermuted_probs_sharding = NamedSharding(
-                mesh,
-                PartitionSpec(None),
-                desc="UnpermuteWithMaskMapAndUnpad.unpermuted_probs_sharding_empty",
-            )
-        out_shardings = (output_sharding, unpermuted_probs_sharding)
-
-        def sharded_impl(inp, row_id_map, merging_probs, permuted_probs, pad_offsets):
-            local_num_tokens = row_id_map.shape[0]
-            local_hidden_size = inp.shape[1]
-            return UnpermuteWithMaskMapAndUnpadPrimitive.impl(
-                inp,
-                row_id_map,
-                merging_probs,
-                permuted_probs,
-                pad_offsets,
-                num_tokens=local_num_tokens,
-                num_experts=num_experts,
-                hidden_size=local_hidden_size,
-                with_merging_probs=with_merging_probs,
-                with_probs=with_probs,
-            )
-
-        return mesh, sharded_impl, out_shardings, arg_shardings
-
-    @staticmethod
-    def shardy_sharding_rule(
-        num_tokens,
-        num_experts,
-        hidden_size,
-        with_merging_probs,
-        with_probs,
-        mesh,
-        value_types,
-        result_types,
-    ):
-        """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, hidden_size, mesh, result_types
-        prefix = "UnpermuteWithMaskMapAndUnpad"
-        inp_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
-        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
-        merging_probs_spec = (
-            (f"{prefix}_tokens", f"{prefix}_experts") if with_merging_probs else (f"{prefix}_empty",)
-        )
-        permuted_probs_spec = (f"{prefix}_out_tokens",) if with_probs else (f"{prefix}_empty2",)
-        pad_offsets_spec = (f"{prefix}_pad_off",)
-        output_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
-        unpermuted_probs_spec = (
-            (f"{prefix}_tokens", f"{prefix}_experts") if with_probs else (f"{prefix}_empty3",)
-        )
-
-        return SdyShardingRule(
-            (inp_spec, row_id_map_spec, merging_probs_spec, permuted_probs_spec, pad_offsets_spec),
-            (output_spec, unpermuted_probs_spec),
-        )
-
-
-register_primitive(UnpermuteWithMaskMapAndUnpadPrimitive)
-
-
 class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
     """
-    Backward pass for unpermute with merging probabilities.
+    Backward pass for unpermute with merging probabilities, optionally with fused unpadding.
 
     This kernel computes gradients for both the input and merging_probs.
     """
 
     name = "te_unpermute_bwd_with_merging_probs_triton"
     multiple_results = True
-    impl_static_args = (5, 6, 7, 8)  # num_tokens, num_experts, num_out_tokens, hidden_size
+    impl_static_args = (5, 6, 7, 8, 9)  # num_tokens, num_experts, num_out_tokens, hidden_size, with_unpad
     inner_primitive = None
     outer_primitive = None
 
@@ -1366,15 +1077,16 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         fwd_input_aval,
         merging_probs_aval,
         row_id_map_aval,
-        pad_offsets_aval,  # dummy, not used when FUSION_UNPAD=False
+        pad_offsets_aval,
         *,
         num_tokens,
         num_experts,
         num_out_tokens,
         hidden_size,
+        with_unpad,
     ):
         """Shape/dtype inference for unpermute backward with merging probs."""
-        del fwd_input_aval, row_id_map_aval, pad_offsets_aval
+        del fwd_input_aval, row_id_map_aval, pad_offsets_aval, with_unpad
 
         # fwd_input_grad has same shape as fwd_input
         fwd_input_grad_shape = (num_out_tokens, hidden_size)
@@ -1399,6 +1111,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         num_experts,
         num_out_tokens,
         hidden_size,
+        with_unpad,
     ):
         """Forward to inner primitive."""
         assert UnpermuteBwdWithMergingProbsPrimitive.inner_primitive is not None
@@ -1412,6 +1125,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
             num_experts=num_experts,
             num_out_tokens=num_out_tokens,
             hidden_size=hidden_size,
+            with_unpad=with_unpad,
         )
 
     @staticmethod
@@ -1427,6 +1141,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         num_experts,
         num_out_tokens,
         hidden_size,
+        with_unpad,
     ):
         """MLIR lowering using triton_call_lowering."""
         del num_out_tokens
@@ -1451,7 +1166,6 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         # Get min block size from autotune configs for consistency
         block_size = _get_min_block_size(_unpermute_bwd_with_merging_probs_kernel)
 
-        # Pass all 5 inputs including pad_offsets (even though FUSION_UNPAD=False)
         return triton_call_lowering(
             ctx,
             _unpermute_bwd_with_merging_probs_kernel,
@@ -1477,23 +1191,10 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
                 "num_experts": num_experts,
                 "hidden_size": hidden_size,
                 "PROBS_LOAD_WIDTH": triton.next_power_of_2(num_experts),
-                "FUSION_UNPAD": False,
+                "FUSION_UNPAD": with_unpad,
                 "BLOCK_SIZE": block_size,
             },
         )
-
-    @staticmethod
-    def batcher(
-        batched_args,
-        batch_dims,
-        *,
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-    ):
-        """Batching rule for vmap."""
-        raise NotImplementedError("vmap is not supported for UnpermuteBwdWithMergingProbsPrimitive")
 
     @staticmethod
     def infer_sharding_from_operands(
@@ -1501,12 +1202,13 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         num_experts,
         num_out_tokens,
         hidden_size,
+        with_unpad,
         mesh,
         arg_infos,
         result_infos,
     ):
         """Infer output sharding from input sharding."""
-        del num_tokens, num_experts, num_out_tokens, hidden_size, result_infos
+        del num_tokens, num_experts, num_out_tokens, hidden_size, with_unpad, result_infos
         fwd_output_grad_spec = get_padded_spec(arg_infos[0])
         merging_probs_spec = get_padded_spec(arg_infos[2])
         # fwd_input_grad has same token sharding as fwd_output_grad
@@ -1529,6 +1231,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         num_experts,
         num_out_tokens,
         hidden_size,
+        with_unpad,
         mesh,
         arg_infos,
         result_infos,
@@ -1554,7 +1257,8 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
 
         def sharded_impl(fwd_output_grad, fwd_input, merging_probs, row_id_map, pad_offsets):
             local_num_tokens = row_id_map.shape[0]
-            local_hidden_size = fwd_output_grad.shape[1]
+            # NOTE: local_num_out_tokens is obtained from the actual tensor shape,
+            # which reflects the data-dependent output size from the forward pass.
             local_num_out_tokens = fwd_input.shape[0]
             return UnpermuteBwdWithMergingProbsPrimitive.impl(
                 fwd_output_grad,
@@ -1565,7 +1269,8 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
                 num_tokens=local_num_tokens,
                 num_experts=num_experts,
                 num_out_tokens=local_num_out_tokens,
-                hidden_size=local_hidden_size,
+                hidden_size=hidden_size,  # hidden_size is not sharded
+                with_unpad=with_unpad,
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -1576,6 +1281,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         num_experts,
         num_out_tokens,
         hidden_size,
+        with_unpad,
         mesh,
         value_types,
         result_types,
@@ -1587,7 +1293,8 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         fwd_input_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
         merging_probs_spec = (f"{prefix}_tokens", f"{prefix}_experts")
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
-        pad_offsets_spec = (f"{prefix}_pad_off",)
+        # pad_offsets: (num_experts,) when with_unpad=True, or dummy (0,) otherwise
+        pad_offsets_spec = (f"{prefix}_experts",) if with_unpad else (f"{prefix}_pad_empty",)
         fwd_input_grad_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
         merging_probs_grad_spec = (f"{prefix}_tokens", f"{prefix}_experts")
 
@@ -1598,259 +1305,6 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
 
 
 register_primitive(UnpermuteBwdWithMergingProbsPrimitive)
-
-
-class UnpermuteBwdWithMergingProbsAndUnpadPrimitive(BasePrimitive):
-    """
-    Backward pass for unpermute with merging probabilities and fused unpadding.
-
-    This kernel computes gradients for both the input and merging_probs,
-    while handling padded outputs.
-    """
-
-    name = "te_unpermute_bwd_with_merging_probs_and_unpad_triton"
-    multiple_results = True
-    impl_static_args = (5, 6, 7, 8)  # num_tokens, num_experts, num_out_tokens, hidden_size
-    inner_primitive = None
-    outer_primitive = None
-
-    @staticmethod
-    def abstract(
-        fwd_output_grad_aval,
-        fwd_input_aval,
-        merging_probs_aval,
-        row_id_map_aval,
-        pad_offsets_aval,
-        *,
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-    ):
-        """Shape/dtype inference for unpermute backward with merging probs and unpadding."""
-        del fwd_input_aval, row_id_map_aval, pad_offsets_aval
-
-        # fwd_input_grad has same shape as fwd_input
-        fwd_input_grad_shape = (num_out_tokens, hidden_size)
-        fwd_input_grad_aval = jax.core.ShapedArray(fwd_input_grad_shape, fwd_output_grad_aval.dtype)
-
-        # merging_probs_grad has same shape as merging_probs
-        merging_probs_grad_shape = (num_tokens, num_experts)
-        merging_probs_grad_aval = jax.core.ShapedArray(
-            merging_probs_grad_shape, merging_probs_aval.dtype
-        )
-
-        return fwd_input_grad_aval, merging_probs_grad_aval
-
-    @staticmethod
-    def impl(
-        fwd_output_grad,
-        fwd_input,
-        merging_probs,
-        row_id_map,
-        pad_offsets,
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-    ):
-        """Forward to inner primitive."""
-        assert UnpermuteBwdWithMergingProbsAndUnpadPrimitive.inner_primitive is not None
-        return UnpermuteBwdWithMergingProbsAndUnpadPrimitive.inner_primitive.bind(
-            fwd_output_grad,
-            fwd_input,
-            merging_probs,
-            row_id_map,
-            pad_offsets,
-            num_tokens=num_tokens,
-            num_experts=num_experts,
-            num_out_tokens=num_out_tokens,
-            hidden_size=hidden_size,
-        )
-
-    @staticmethod
-    def lowering(
-        ctx,
-        fwd_output_grad,
-        fwd_input,
-        merging_probs,
-        row_id_map,
-        pad_offsets,
-        *,
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-    ):
-        """MLIR lowering using triton_call_lowering."""
-        del num_out_tokens
-
-        # Compute strides
-        row_id_stride_token = num_experts * 2 + 1
-        row_id_stride_expert = 1
-        fwd_output_grad_stride_token = hidden_size
-        fwd_output_grad_stride_hidden = 1
-        fwd_input_grad_stride_token = hidden_size
-        fwd_input_grad_stride_hidden = 1
-        fwd_input_stride_token = hidden_size
-        fwd_input_stride_hidden = 1
-        merging_probs_stride_token = num_experts
-        merging_probs_stride_expert = 1
-        merging_probs_grad_stride_token = num_experts
-        merging_probs_grad_stride_expert = 1
-
-        # Grid - one program per token
-        grid = (num_tokens,)
-
-        # Get min block size from autotune configs for consistency
-        block_size = _get_min_block_size(_unpermute_bwd_with_merging_probs_kernel)
-
-        return triton_call_lowering(
-            ctx,
-            _unpermute_bwd_with_merging_probs_kernel,
-            fwd_output_grad,
-            fwd_input,
-            merging_probs,
-            row_id_map,
-            pad_offsets,
-            grid=grid,
-            constexprs={
-                "stride_row_id_map_token": row_id_stride_token,
-                "stride_row_id_map_expert": row_id_stride_expert,
-                "stride_fwd_output_grad_token": fwd_output_grad_stride_token,
-                "stride_fwd_output_grad_hidden": fwd_output_grad_stride_hidden,
-                "stride_fwd_input_grad_token": fwd_input_grad_stride_token,
-                "stride_fwd_input_grad_hidden": fwd_input_grad_stride_hidden,
-                "stride_fwd_input_token": fwd_input_stride_token,
-                "stride_fwd_input_hidden": fwd_input_stride_hidden,
-                "stride_merging_probs_token": merging_probs_stride_token,
-                "stride_merging_probs_expert": merging_probs_stride_expert,
-                "stride_merging_probs_grad_token": merging_probs_grad_stride_token,
-                "stride_merging_probs_grad_expert": merging_probs_grad_stride_expert,
-                "num_experts": num_experts,
-                "hidden_size": hidden_size,
-                "PROBS_LOAD_WIDTH": triton.next_power_of_2(num_experts),
-                "FUSION_UNPAD": True,
-                "BLOCK_SIZE": block_size,
-            },
-        )
-
-    @staticmethod
-    def batcher(
-        batched_args,
-        batch_dims,
-        *,
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-    ):
-        """Batching rule for vmap."""
-        raise NotImplementedError(
-            "vmap is not supported for UnpermuteBwdWithMergingProbsAndUnpadPrimitive"
-        )
-
-    @staticmethod
-    def infer_sharding_from_operands(
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        """Infer output sharding from input sharding."""
-        del num_tokens, num_experts, num_out_tokens, hidden_size, result_infos
-        fwd_output_grad_spec = get_padded_spec(arg_infos[0])
-        merging_probs_spec = get_padded_spec(arg_infos[2])
-        fwd_input_grad_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(fwd_output_grad_spec[0], None),
-            desc="UnpermuteBwdWithMergingProbsAndUnpad.fwd_input_grad_sharding",
-        )
-        merging_probs_grad_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(merging_probs_spec[0], None),
-            desc="UnpermuteBwdWithMergingProbsAndUnpad.merging_probs_grad_sharding",
-        )
-        return fwd_input_grad_sharding, merging_probs_grad_sharding
-
-    @staticmethod
-    def partition(
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        """Partition the primitive for distributed execution."""
-        del result_infos
-        fwd_output_grad_spec = get_padded_spec(arg_infos[0])
-        merging_probs_spec = get_padded_spec(arg_infos[2])
-
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-
-        fwd_input_grad_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(fwd_output_grad_spec[0], None),
-            desc="UnpermuteBwdWithMergingProbsAndUnpad.fwd_input_grad_sharding",
-        )
-        merging_probs_grad_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(merging_probs_spec[0], None),
-            desc="UnpermuteBwdWithMergingProbsAndUnpad.merging_probs_grad_sharding",
-        )
-        out_shardings = (fwd_input_grad_sharding, merging_probs_grad_sharding)
-
-        def sharded_impl(fwd_output_grad, fwd_input, merging_probs, row_id_map, pad_offsets):
-            local_num_tokens = row_id_map.shape[0]
-            local_hidden_size = fwd_output_grad.shape[1]
-            local_num_out_tokens = fwd_input.shape[0]
-            return UnpermuteBwdWithMergingProbsAndUnpadPrimitive.impl(
-                fwd_output_grad,
-                fwd_input,
-                merging_probs,
-                row_id_map,
-                pad_offsets,
-                num_tokens=local_num_tokens,
-                num_experts=num_experts,
-                num_out_tokens=local_num_out_tokens,
-                hidden_size=local_hidden_size,
-            )
-
-        return mesh, sharded_impl, out_shardings, arg_shardings
-
-    @staticmethod
-    def shardy_sharding_rule(
-        num_tokens,
-        num_experts,
-        num_out_tokens,
-        hidden_size,
-        mesh,
-        value_types,
-        result_types,
-    ):
-        """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, num_out_tokens, hidden_size, mesh, result_types
-        prefix = "UnpermuteBwdWithMergingProbsAndUnpad"
-        fwd_output_grad_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
-        fwd_input_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
-        merging_probs_spec = (f"{prefix}_tokens", f"{prefix}_experts")
-        row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
-        pad_offsets_spec = (f"{prefix}_pad_off",)
-        fwd_input_grad_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
-        merging_probs_grad_spec = (f"{prefix}_tokens", f"{prefix}_experts")
-
-        return SdyShardingRule(
-            (fwd_output_grad_spec, fwd_input_spec, merging_probs_spec, row_id_map_spec, pad_offsets_spec),
-            (fwd_input_grad_spec, merging_probs_grad_spec),
-        )
-
-
-register_primitive(UnpermuteBwdWithMergingProbsAndUnpadPrimitive)
 
 
 def unpermute_bwd_with_merging_probs(
@@ -1894,7 +1348,7 @@ def unpermute_bwd_with_merging_probs(
     merging_probs_grad : jnp.ndarray
         Gradient w.r.t. merging_probs of shape `[num_tokens, num_experts]`.
     """
-    # Create dummy pad_offsets (not used when FUSION_UNPAD=False, but required by kernel signature)
+    # Create dummy pad_offsets (not used when with_unpad=False, but required by kernel signature)
     dummy_pad_offsets = jnp.zeros((0,), dtype=jnp.int32)
     # Pass arguments in kernel order: fwd_output_grad, fwd_input, merging_probs, row_id_map, pad_offsets
     return UnpermuteBwdWithMergingProbsPrimitive.outer_primitive.bind(
@@ -1907,6 +1361,7 @@ def unpermute_bwd_with_merging_probs(
         num_experts=num_experts,
         num_out_tokens=num_out_tokens,
         hidden_size=hidden_size,
+        with_unpad=False,
     )
 
 
@@ -1955,7 +1410,7 @@ def unpermute_bwd_with_merging_probs_and_unpad(
     merging_probs_grad : jnp.ndarray
         Gradient w.r.t. merging_probs of shape `[num_tokens, num_experts]`.
     """
-    return UnpermuteBwdWithMergingProbsAndUnpadPrimitive.outer_primitive.bind(
+    return UnpermuteBwdWithMergingProbsPrimitive.outer_primitive.bind(
         fwd_output_grad,
         fwd_input,
         merging_probs,
@@ -1965,6 +1420,7 @@ def unpermute_bwd_with_merging_probs_and_unpad(
         num_experts=num_experts,
         num_out_tokens=num_out_tokens,
         hidden_size=hidden_size,
+        with_unpad=True,
     )
 
 
@@ -2013,11 +1469,6 @@ class MakeChunkSortMapPrimitive(BasePrimitive):
                 "IDX_LOAD_WIDTH": triton.next_power_of_2(num_splits),
             },
         )
-
-    @staticmethod
-    def batcher(batched_args, batch_dims, *, num_tokens, num_splits):
-        """Batching rule for vmap."""
-        raise NotImplementedError("vmap is not supported for MakeChunkSortMapPrimitive")
 
     @staticmethod
     def infer_sharding_from_operands(num_tokens, num_splits, mesh, arg_infos, result_infos):
@@ -2149,13 +1600,6 @@ class SortChunksByMapPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def batcher(
-        batched_args, batch_dims, *, num_tokens, hidden_size, is_forward, with_probs
-    ):
-        """Batching rule for vmap."""
-        raise NotImplementedError("vmap is not supported for SortChunksByMapPrimitive")
-
-    @staticmethod
     def infer_sharding_from_operands(
         num_tokens, hidden_size, is_forward, with_probs, mesh, arg_infos, result_infos
     ):
@@ -2212,13 +1656,12 @@ class SortChunksByMapPrimitive(BasePrimitive):
 
         def sharded_impl(inp, row_id_map, probs):
             local_num_tokens = inp.shape[0]
-            local_hidden_size = inp.shape[1]
             return SortChunksByMapPrimitive.impl(
                 inp,
                 row_id_map,
                 probs,
                 num_tokens=local_num_tokens,
-                hidden_size=local_hidden_size,
+                hidden_size=hidden_size,  # hidden_size is not sharded
                 is_forward=is_forward,
                 with_probs=with_probs,
             )
@@ -2508,6 +1951,7 @@ def unpermute_with_mask_map(
         hidden_size=hidden_size,
         with_merging_probs=with_merging_probs,
         with_probs=with_probs,
+        with_unpad=False,
     )
 
     if not with_probs:
@@ -2565,7 +2009,7 @@ def unpermute_with_mask_map_and_unpad(
     if not with_probs:
         permuted_probs = jnp.zeros((0,), dtype=inp.dtype)
 
-    output, unpermuted_probs = UnpermuteWithMaskMapAndUnpadPrimitive.outer_primitive.bind(
+    output, unpermuted_probs = UnpermuteWithMaskMapPrimitive.outer_primitive.bind(
         inp,
         row_id_map,
         merging_probs,
@@ -2576,6 +2020,7 @@ def unpermute_with_mask_map_and_unpad(
         hidden_size=hidden_size,
         with_merging_probs=with_merging_probs,
         with_probs=with_probs,
+        with_unpad=True,
     )
 
     if not with_probs:
