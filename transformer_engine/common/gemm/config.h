@@ -44,8 +44,10 @@ struct GroupedMatmulConfig {
   // Number of streaming multiprocessors to use in GEMM kernel
   int sm_count = 0;
 
-  static constexpr size_t attr_sizes[] = {sizeof(avg_m), sizeof(avg_n), sizeof(avg_k),
-                                          sizeof(sm_count)};
+  // Note: API transfers the value type, not std::optional
+  static constexpr size_t attr_sizes[] = {sizeof(decltype(avg_m)::value_type),
+                                          sizeof(decltype(avg_n)::value_type),
+                                          sizeof(decltype(avg_k)::value_type), sizeof(sm_count)};
 };
 
 }  // namespace transformer_engine

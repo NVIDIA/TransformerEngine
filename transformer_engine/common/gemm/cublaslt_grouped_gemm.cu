@@ -214,7 +214,7 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
 // fallback to column-wise data when row-wise is absent.
 struct GroupedOperandSelection {
   const transformer_engine::GroupedTensor *tensor = nullptr;
-  const char *dptr = nullptr;
+  char *dptr = nullptr;
   transformer_engine::DType dtype = transformer_engine::DType::kNumTypes;
   bool trans = false;
   bool use_columnwise = false;
@@ -248,7 +248,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
     if (is_A) {
       if (!sel.trans) {
         NVTE_CHECK(has_col, "Grouped GEMM: A is missing column-wise data needed for FP8 TN layout");
-        sel.dptr = static_cast<const char *>(t->columnwise_data.dptr);
+        sel.dptr = static_cast<char *>(t->columnwise_data.dptr);
         sel.dtype = col_dtype;
         sel.trans = true;  // using pre-transposed storage
         sel.use_columnwise = true;
@@ -257,7 +257,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
     } else {  // B
       if (sel.trans) {
         NVTE_CHECK(has_col, "Grouped GEMM: B is missing column-wise data needed for FP8 TN layout");
-        sel.dptr = static_cast<const char *>(t->columnwise_data.dptr);
+        sel.dptr = static_cast<char *>(t->columnwise_data.dptr);
         sel.dtype = col_dtype;
         sel.trans = false;  // using pre-transposed storage
         sel.use_columnwise = true;
@@ -272,7 +272,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
     NVTE_CHECK(
         !is_fp8 || non_tn_fp8_ok,
         "Grouped GEMM: FP8 on Hopper requires row-wise data for this transpose configuration");
-    sel.dptr = static_cast<const char *>(t->columnwise_data.dptr);
+    sel.dptr = static_cast<char *>(t->columnwise_data.dptr);
     sel.dtype = col_dtype;
     sel.trans = !sel.trans;
     sel.use_columnwise = true;
@@ -280,7 +280,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   }
 
   // Default: use row-wise data (column-wise case already handled above)
-  sel.dptr = static_cast<const char *>(t->data.dptr);
+  sel.dptr = static_cast<char *>(t->data.dptr);
   sel.dtype = row_dtype;
   sel.use_columnwise = false;
   return sel;
@@ -414,7 +414,7 @@ __global__ void setup_grouped_gemm_kernel(
     void **A_ptrs, void **B_ptrs, void **C_ptrs, void **D_ptrs, int *M, int *N, int *K,
     float **alpha_ptrs, float **beta_ptrs,
     // Base pointers
-    const char *a_base, const char *b_base, const char *c_base, char *d_base,
+    char *a_base, char *b_base, char *c_base, char *d_base,
     // Dimension info (per tensor)
     TensorShapeInfo A_meta, TensorShapeInfo B_meta, TensorShapeInfo C_meta, TensorShapeInfo D_meta,
     // Element sizes
@@ -445,10 +445,9 @@ __global__ void setup_grouped_gemm_kernel(
       D_meta.offsets ? D_meta.offsets[idx] : (idx * D_meta.uniform_first * D_meta.uniform_last);
 
   // Compute data pointers
-  // Note: const_cast is safe here - cuBLAS requires void** but won't modify A/B/C data
-  A_ptrs[idx] = const_cast<char *>(a_base) + a_offset * a_elem_size;
-  B_ptrs[idx] = const_cast<char *>(b_base) + b_offset * b_elem_size;
-  C_ptrs[idx] = const_cast<char *>(c_base) + c_offset * c_elem_size;
+  A_ptrs[idx] = a_base + a_offset * a_elem_size;
+  B_ptrs[idx] = b_base + b_offset * b_elem_size;
+  C_ptrs[idx] = c_base + c_offset * c_elem_size;
   D_ptrs[idx] = d_base + d_offset * d_elem_size;
 
   // Compute M, N, K dimensions from tensor shapes
@@ -474,7 +473,7 @@ inline void launch_grouped_gemm_setup(
   TensorShapeInfo C_meta = TensorShapeInfo::create_shape_info_for_C(C, D);
   TensorShapeInfo D_meta = TensorShapeInfo::from_tensor(D);
 
-  const char *c_base = static_cast<const char *>(C->data.dptr);
+  char *c_base = static_cast<char *>(C->data.dptr);
   char *d_base = static_cast<char *>(D->data.dptr);
 
   const size_t a_elem_size = transformer_engine::typeToSize(A_sel.dtype);
