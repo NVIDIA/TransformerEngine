@@ -144,6 +144,7 @@ list(APPEND transformer_engine_cuda_sources
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
+     gemm/cublaslt_grouped_gemm.cu
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
      normalization/layernorm/ln_fwd_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
