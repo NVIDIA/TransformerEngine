@@ -841,13 +841,13 @@ __global__ static void row_col_rht_gemm_device(
 
           }
 
-          copy_if(tiled_r2g,
-                [&](auto coord){
-                  Tensor pSrc_view = group_modes<1,rank(pSrc)>(pSrc);
-                  return elem_less(pSrc_view(_0{},coord), shape(mD));
-                },
-                src, dst);
-          // 32bit vectorization copy 4 e4m3 SFD for per 64/(16,4):(0, 1)  element
+          Tensor pred_pSrc = cute::lazy::transform(make_tensor(counting_iterator<int>{}, replace<0>(shape(dst), _1{})), [&](auto coord){
+            Tensor pSrc_view = group_modes<1,rank(pSrc)>(pSrc);
+            return elem_less(pSrc_view(_0{},coord), shape(mD));
+          });
+          copy_if(tiled_r2g, pred_pSrc, src, dst);
+          // 32bit vectorization copy 4 e4m3 SFD for per 64 or(16,4):(0, 1) element
+
           constexpr int vec_len = 32 / sizeof_bits_v<TSFD>;
           Tensor  tDrSFD_v = recast<uint_bit_t<32>>(tDrSFD);
           Tensor  tDgSFD_v = recast<uint_bit_t<32>>(tDgSFD);
@@ -995,13 +995,12 @@ __global__ static void row_col_rht_gemm_device(
             }
           }
 
-          copy_if(tiled_r2g_QA,
-                  [&](auto coord){
-                    Tensor tQApQA_view = group_modes<1,rank(tQApQA_mn)>(tQApQA_mn);
-                    return elem_less(tQApQA_view(_0{}, coord), shape(mQA));
-                  },
-                  tQArQA, tQAgQA_mn);
-          // 32bit vectorization copy 4 e4m3 SFA for per 64/(16,4):(0, 1)  element
+          Tensor pred_tQApQA = cute::lazy::transform(make_tensor(counting_iterator<int>{}, replace<0>(shape(tQAgQA_mn), _1{})), [&](auto coord){
+            Tensor tQApQA_view = group_modes<1,rank(tQApQA_mn)>(tQApQA_mn);
+            return elem_less(tQApQA_view(_0{}, coord), shape(mQA));
+          });
+          copy_if(tiled_r2g_QA, pred_tQApQA, tQArQA, tQAgQA_mn);
+          // 32bit vectorization copy 4 e4m3 SFA for per 64 or (16,4):(0, 1)  element
           constexpr int vec_len = 32 / sizeof_bits_v<TSFD>;
           Tensor  tQArSFA_v = recast<uint_bit_t<32>>(filter(tQArSFA));
           Tensor  tQAgSFA_v = recast<uint_bit_t<32>>(filter(tQAgSFA_mn));
