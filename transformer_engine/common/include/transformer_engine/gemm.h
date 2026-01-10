@@ -57,24 +57,24 @@ NVTEMatmulConfig nvte_create_matmul_config();
 
 /*! \brief Query an option in matrix multiplication configuration.
  *
- *  \param[in] config Matrix multiplication configuration.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to write option value. Ignored if
- *                  NULL.
- *  \param[in] size_in_bytes Size of buf.
- *  \param[out] size_written Number of bytes that have been written to
- *                           buf. If buf is NULL, then the number of
- *                           bytes that would have been written.
+ *  \param[in]  config        Matrix multiplication configuration.
+ *  \param[in]  attr          Option type.
+ *  \param[out] buf           Memory address to write option value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
  */
 void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
                                       void *buf, size_t size_in_bytes, size_t *size_written);
 
 /*! \brief Set an option in matrix multiplication configuration.
  *
- *  \param[in] config Matrix multiplication configuration.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to read option value.
- *  \param[in] size_in_bytes Size of buf.
+ *  \param[in/out] config        Matrix multiplication configuration.
+ *  \param[in]     attr          Option type.
+ *  \param[in]     buf           Memory address to read option value.
+ *  \param[in]     size_in_bytes Size of buf.
  */
 void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
                                       const void *buf, size_t size_in_bytes);

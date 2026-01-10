@@ -286,6 +286,10 @@ class Tensor {
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
 
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
+    tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  }
+
   void to_cpu() const;
   void from_cpu() const;
   void set_scale(float scale);

@@ -739,6 +739,7 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
   NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
              "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
+  NVTE_CHECK(!output_.with_gemm_swizzled_scales, "Output must have scales in compact format.");
   const SimpleTensor &input = input_.data;
   SimpleTensor &global_amax = output_.amax;
   SimpleTensor &output_t = output_.data;

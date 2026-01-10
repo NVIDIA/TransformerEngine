@@ -6,12 +6,16 @@
 
 #include <transformer_engine/transformer_engine.h>
 
+#include <algorithm>
 #include <atomic>
 #include <climits>
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "common.h"
 #include "common/util/cuda_runtime.h"
@@ -778,7 +782,8 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
       t->columnwise_amax = *param;
       break;
     default:
-      NVTE_ERROR("Unknown tensor parameter!");
+      NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param_name),
+                 "). Consider using nvte_set_tensor_param_v2 instead.");
   }
 }
 
@@ -803,7 +808,148 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
     case kNVTEColumnwiseAmax:
       return t.columnwise_amax;
     default:
-      NVTE_ERROR("Unknown tensor parameter!");
+      NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param_name),
+                 "). Consider using nvte_set_tensor_param_v2 instead.");
+  }
+}
+
+void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const void *buf,
+                              size_t size_in_bytes) {
+  // Check attribute and buffer
+  NVTE_CHECK(param < kNVTENumTensorParams, "Invalid NVTETensorParam (got ", static_cast<int>(param),
+             ")");
+  NVTE_CHECK(tensor != nullptr, "Tensor pointer can't be NULL.");
+  auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
+  const auto &attr_size = transformer_engine::Tensor::attr_sizes[param];
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for tensor parameter "
+             "(parameter ",
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
+  NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
+
+  // Read from buffer
+  switch (param) {
+    case kNVTERowwiseData: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.data = *basic_tensor;
+      break;
+    }
+    case kNVTEColumnwiseData: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_data = *basic_tensor;
+      break;
+    }
+    case kNVTEScale: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.scale = *basic_tensor;
+      break;
+    }
+    case kNVTEAmax: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.amax = *basic_tensor;
+      break;
+    }
+    case kNVTERowwiseScaleInv: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.scale_inv = *basic_tensor;
+      break;
+    }
+    case kNVTEColumnwiseScaleInv: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_scale_inv = *basic_tensor;
+      break;
+    }
+    case kNVTEColumnwiseAmax: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_amax = *basic_tensor;
+      break;
+    }
+    case kNVTEWithGEMMSwizzledScales:
+      std::memcpy(&t.with_gemm_swizzled_scales, buf, attr_size);
+      break;
+    default:
+      NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
+  }
+}
+
+void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, void *buf,
+                              size_t size_in_bytes, size_t *size_written) {
+  using namespace transformer_engine;
+
+  // Check param
+  NVTE_CHECK(param < kNVTENumTensorParams, "Invalid NVTETensorParam (got ", static_cast<int>(param),
+             ")");
+
+  // Write attribute size if provided
+  const auto &attr_size = Tensor::attr_sizes[param];
+  if (size_written != nullptr) {
+    *size_written = attr_size;
+  }
+
+  // Return immediately if buffer is not provided
+  if (buf == nullptr) {
+    return;
+  }
+
+  // Check buffer size
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for tensor parameter "
+             "(parameter ",
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
+
+  // Get C++ tensor
+  const Tensor *t = convertNVTETensor(tensor);
+  std::optional<Tensor> dummy;
+  if (t == nullptr) {
+    // Make dummy tensor if provided tensor is invalid
+    dummy.emplace();
+    t = &(*dummy);
+  }
+
+  // Write to buffer
+  switch (param) {
+    case kNVTERowwiseData: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->data);
+      break;
+    }
+    case kNVTEColumnwiseData: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_data);
+      break;
+    }
+    case kNVTEScale: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->scale);
+      break;
+    }
+    case kNVTEAmax: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->amax);
+      break;
+    }
+    case kNVTERowwiseScaleInv: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->scale_inv);
+      break;
+    }
+    case kNVTEColumnwiseScaleInv: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_scale_inv);
+      break;
+    }
+    case kNVTEColumnwiseAmax: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_amax);
+      break;
+    }
+    case kNVTEWithGEMMSwizzledScales:
+      std::memcpy(buf, &t->with_gemm_swizzled_scales, attr_size);
+      break;
+    default:
+      NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
 }
 
@@ -854,10 +1000,12 @@ NVTEQuantizationConfig nvte_create_quantization_config() {
 void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, void *buf,
                                             size_t size_in_bytes, size_t *size_written) {
+  using namespace transformer_engine;
+
   // Write attribute size
   NVTE_CHECK(attr < kNVTEQuantizationConfigNumAttributes,
              "Invalid NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
-  const auto &attr_size = transformer_engine::QuantizationConfig::attr_sizes[attr];
+  const auto &attr_size = QuantizationConfig::attr_sizes[attr];
   if (size_written != nullptr) {
     *size_written = attr_size;
   }
@@ -876,7 +1024,7 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 
   // Write to buffer
   NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
-  const auto &config_ = *reinterpret_cast<const transformer_engine::QuantizationConfig *>(config);
+  const auto &config_ = *reinterpret_cast<const QuantizationConfig *>(config);
   switch (attr) {
     case kNVTEQuantizationConfigForcePow2Scales:
       std::memcpy(buf, &config_.force_pow_2_scales, attr_size);
@@ -887,9 +1035,12 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigNoopTensor:
       std::memcpy(buf, &config_.noop_tensor, attr_size);
       break;
-    case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
-      std::memcpy(buf, &config_.float8_block_scale_tensor_format, attr_size);
+    case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat: {
+      // Deprecated
+      const auto invalid = Float8BlockScaleTensorFormat::INVALID;
+      std::memcpy(buf, &invalid, attr_size);
       break;
+    }
     case kNVTEQuantizationConfigRNGState:
       std::memcpy(buf, &config_.rng_state, attr_size);
       break;
@@ -910,10 +1061,12 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, const void *buf,
                                             size_t size_in_bytes) {
+  using namespace transformer_engine;
+
   // Check attribute and buffer
   NVTE_CHECK(attr < kNVTEQuantizationConfigNumAttributes,
              "Invalid NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
-  const auto &attr_size = transformer_engine::QuantizationConfig::attr_sizes[attr];
+  const auto &attr_size = QuantizationConfig::attr_sizes[attr];
   NVTE_CHECK(size_in_bytes >= attr_size,
              "Buffer is too small for quantization config attribute "
              "(attribute ",
@@ -923,7 +1076,7 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
 
   // Read from buffer
   NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
-  auto &config_ = *reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
+  auto &config_ = *reinterpret_cast<QuantizationConfig *>(config);
   switch (attr) {
     case kNVTEQuantizationConfigForcePow2Scales:
       std::memcpy(&config_.force_pow_2_scales, buf, attr_size);
@@ -935,7 +1088,7 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       std::memcpy(&config_.noop_tensor, buf, attr_size);
       break;
     case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
-      std::memcpy(&config_.float8_block_scale_tensor_format, buf, attr_size);
+      // Deprecated
       break;
     case kNVTEQuantizationConfigRNGState:
       std::memcpy(&config_.rng_state, buf, attr_size);
