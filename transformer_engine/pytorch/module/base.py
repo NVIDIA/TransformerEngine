@@ -639,21 +639,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def module_setattr(self, name: str, value: Any) -> None:
         super().__setattr__(name, value)
 
-    def _warning_setattr(self, name: str, value: Any) -> None:
-        warnings.warn(
-            """The default implementation of torch.nn.Module introduces significant CPU overhead
-            when setting attributes and is therefore not recommended. Please use the explicit calls
-            (fast_setattr for setting regular values and module_setattr for setting parameters,
-            children modules and buffers).""",
-            RuntimeWarning,
-        )
-        self.module_setattr(name, value)
-
-    def _default_setattr(self, name: str, value: Any) -> None:
-        return self.module_setattr(name, value)
-
     def __setattr__(self, name: str, value: Any) -> None:
-        return self._default_setattr(name, value)
+        if "_initialized" in self.__dict__ and self.initialized:
+            warnings.warn(
+                """The default implementation of torch.nn.Module introduces significant CPU overhead
+                when setting attributes and is therefore not recommended. Please use the explicit
+                calls (fast_setattr for setting regular values and module_setattr for setting
+                parameters, children modules and buffers).""",
+                RuntimeWarning,
+            )
+        super().__setattr__(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """

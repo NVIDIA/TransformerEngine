@@ -482,7 +482,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         self.register_load_state_dict_post_hook(remove_extra_states_check)
 
-        self._default_setattr = self._warning_setattr
+        self._initialized = True
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
