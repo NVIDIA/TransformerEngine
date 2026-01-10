@@ -994,6 +994,7 @@ def get_attention_backend(
             window_size[1],
             return_max_logit,
             cuda_graph,
+            deterministic,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
@@ -1064,7 +1065,7 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
             fused_attention_backend = None
-        if is_training and device_compute_capability >= (10, 0):
+        if is_training and device_compute_capability >= (10, 0) and (cudnn_version < (9, 18, 0) or core_attention_bias_type != "no_bias"):
             logger.debug("Disabling FusedAttention for determinism reasons on Blackwell")
             use_fused_attention = False
             fused_attention_backend = None
