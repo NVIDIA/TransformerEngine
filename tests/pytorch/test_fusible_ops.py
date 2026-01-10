@@ -2072,6 +2072,70 @@ class TestBasicOps:
                 else:
                     assert b_test.grad is None
 
+    @pytest.mark.parametrize(
+        "input_shape,extra_input_shape",
+        (
+            ((3,4,5), (3,4,5)),
+            ((6,7), ()),
+            ((), (8,9)),
+            ((10,11,12), (11,1)),
+            ((1,15), (13,14,15)),
+        )
+    )
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    @pytest.mark.parametrize("extra_input_requires_grad", (False, True))
+    def test_multiply_extra_input(
+        self,
+        *,
+        input_shape: Iterable[int],
+        extra_input_shape: Iterable[int],
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+        input_requires_grad: bool,
+        extra_input_requires_grad: bool,
+    ) -> None:
+        """Multiply two tensors"""
+
+        # Random data
+        x1_ref, x1_test = make_reference_and_test_tensors(
+            input_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=input_requires_grad,
+        )
+        x2_ref, x2_test = make_reference_and_test_tensors(
+            extra_input_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=extra_input_requires_grad,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = x1_ref * x2_ref
+        if input_requires_grad or extra_input_requires_grad:
+            torch.square(y_ref).sum().backward()
+
+        # Implementation with fusible operation
+        op = te_ops.MultiplyExtraInput()
+        y_test = op(x1_test, x2_test)
+        if input_requires_grad or extra_input_requires_grad:
+            torch.square(y_test).sum().backward()
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        if input_requires_grad:
+            dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(dx1_test, x1_ref.grad, **tols)
+        else:
+            assert x1_test.grad is None
+        if extra_input_requires_grad:
+            dx2_test = x2_test.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(dx2_test, x2_ref.grad, **tols)
+        else:
+            assert x2_test.grad is None
+
 
 class TestFusedOps:
     """Tests for fused operations"""
