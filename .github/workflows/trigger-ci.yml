@@ -56,8 +56,8 @@ jobs:
            || github.actor == 'vcherepanov-nv'
            || github.actor == 'tdophung'
            || github.actor == 'vthumbe1503'
-           || github.actor == 'janekb04'
            || github.actor == 'shengfangd'
+           || github.actor == 'kainzhong'
          )
     steps:
       - name: Check if comment is issued by authorized person

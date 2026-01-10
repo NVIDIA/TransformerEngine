@@ -130,7 +130,7 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
  *  \param[in]     stream           CUDA stream used for the operation.
  */
 void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor dbias,
-                         NVTETensor workplace, cudaStream_t stream);
+                         NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes backward of GeLU operation on the input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the GeLU backward along columns.
@@ -263,7 +263,8 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
  *
  *  \param[in]      inputs           List of input tensors to be cast.
  *  \param[in,out]  outputs          List of output quantized tensors.
- *  \param[in]      quant_config    (Optional) Quantization configurations.
+ *  \param[in]      quant_config     (Optional) Quantization configurations.
+ *  \param[in]      num_tensors      Number of input and output tensors.
  *  \param[in]      stream           CUDA stream used for the operation.
  */
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,

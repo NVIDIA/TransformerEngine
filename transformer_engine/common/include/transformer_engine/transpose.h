@@ -231,7 +231,7 @@ void nvte_cast_transpose_dbias_dsrelu(const NVTETensor input, const NVTETensor a
  *  - columnwise data of `output` is equal to `transpose(cast(dact(input)))`
  *
  *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[in]     gated_act_input     Tensor used as input to the forward of
+ *  \param[in]     act_input           Tensor used as input to the forward of
  *                                     gated activation operation.
  *                                     Shape [N, H * 2].
  *  \param[in,out] output              Result of the cast.
@@ -250,7 +250,7 @@ void nvte_dgeglu_cast_transpose(const NVTETensor input, const NVTETensor act_inp
  *  - columnwise data of `output` is equal to `transpose(cast(dact(input)))`
  *
  *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[in]     gated_act_input     Tensor used as input to the forward of
+ *  \param[in]     act_input           Tensor used as input to the forward of
  *                                     gated activation operation.
  *                                     Shape [N, H * 2].
  *  \param[in,out] output              Result of the cast.
@@ -269,7 +269,7 @@ void nvte_dswiglu_cast_transpose(const NVTETensor input, const NVTETensor act_in
  *  - columnwise data of `output` is equal to `transpose(cast(dact(input)))`
  *
  *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[in]     gated_act_input     Tensor used as input to the forward of
+ *  \param[in]     act_input           Tensor used as input to the forward of
  *                                     gated activation operation.
  *                                     Shape [N, H * 2].
  *  \param[in,out] output              Result of the cast.
@@ -288,7 +288,7 @@ void nvte_dreglu_cast_transpose(const NVTETensor input, const NVTETensor act_inp
  *  - columnwise data of `output` is equal to `transpose(cast(dact(input)))`
  *
  *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[in]     gated_act_input     Tensor used as input to the forward of
+ *  \param[in]     act_input           Tensor used as input to the forward of
  *                                     gated activation operation.
  *                                     Shape [N, H * 2].
  *  \param[in,out] output              Result of the cast.
@@ -307,7 +307,7 @@ void nvte_dqgeglu_cast_transpose(const NVTETensor input, const NVTETensor act_in
  *  - columnwise data of `output` is equal to `transpose(cast(dact(input)))`
  *
  *  \param[in]     input               Input tensor of shape [N, H].
- *  \param[in]     gated_act_input     Tensor used as input to the forward of
+ *  \param[in]     act_input           Tensor used as input to the forward of
  *                                     gated activation operation.
  *                                     Shape [N, H * 2].
  *  \param[in,out] output              Result of the cast.
