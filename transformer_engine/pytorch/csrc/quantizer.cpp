@@ -2212,8 +2212,10 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   auto stream = at::cuda::getCurrentCUDAStream();
 
   QuantizationConfigWrapper quant_config;
+  QuantizationConfigWrapper quant_config_columnwise;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
+    quant_config_columnwise.set_noop_tensor(noop_flag->data());
   }
   quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
   quant_config.set_stochastic_rounding(this->stochastic_rounding);
@@ -2235,7 +2237,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // we need separate RNG states for each to ensure they use different random numbers.
   TensorWrapper te_rng_state;
   TensorWrapper te_rng_state_columnwise;
-  QuantizationConfigWrapper quant_config_columnwise;
 
   // Only need a separate rng state when:
   // 1. Stochastic rounding is enabled
@@ -2268,6 +2269,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       te_rng_state_columnwise = makeTransformerEngineTensor(rng_state_columnwise);
       quant_config_columnwise.set_stochastic_rounding(true);
       quant_config_columnwise.set_rng_state(te_rng_state_columnwise.data());
+      quant_config_columnwise.set_nvfp4_2d_quantization(this->with_2d_quantization);
     }
   }
 
