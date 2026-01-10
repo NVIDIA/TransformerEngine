@@ -490,7 +490,7 @@ class GroupedLinear(BasicOperation):
                     for dy in torch.split(grad_output, split_sizes_int)
                 ]
         else:
-            dys = torch.split(grad_output, split_sizes_int)
+            dys = torch.split(dy, split_sizes_int)
             if has_bias:
                 grad_biases = [
                     dy.reshape(-1, dy.size(-1)).sum(dim=0) for dy in dys
@@ -509,12 +509,7 @@ class GroupedLinear(BasicOperation):
                     if hasattr(weight_param, "__fsdp_param__"):
                         weight_param.main_grad = weight_param.get_main_grad()
                     accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
-                    if not hasattr(weight_param, "main_grad"):
-                        raise RuntimeError(
-                            "GroupLinear op is configured with "
-                            "accumulate_into_main_grad=True, "
-                            "but weight parameter does not have main_grad attribute"
-                        )
+                    grad_weights[group_idx] = weight_param.main_grad
             else:
                 weight_shape = ws[0].size()
                 device = grad_output.device

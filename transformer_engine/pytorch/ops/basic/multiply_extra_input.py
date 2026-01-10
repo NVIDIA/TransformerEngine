@@ -114,8 +114,6 @@ class MultiplyExtraInput(BasicOperation):
             ctx.input_shape = x1.size()
             ctx.extra_input_shape = extra_input.size()
             ctx.input_requires_grad = True
-            if isinstance(input_, torch.Tensor):
-                ctx.input_requires_grad = input_.requires_grad
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.save_for_backward(
                 x1 if ctx.extra_input_requires_grad else None,
