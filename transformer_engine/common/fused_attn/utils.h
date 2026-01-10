@@ -110,6 +110,7 @@ struct FADescriptor_v1 {
   NVTE_Softmax_Type softmax_type;
   std::int64_t window_size_left;
   std::int64_t window_size_right;
+  bool bottom_right_diagonal;
   bool deterministic;
   cudnn_frontend::DataType_t qkv_tensor_type;
   cudnn_frontend::DataType_t o_tensor_type;
@@ -121,15 +122,16 @@ struct FADescriptor_v1 {
     return std::tie(b, h, hg, s_q, s_kv, d_qk, d_v, num_pages_k, num_pages_v, page_size_k,
                     page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h,
                     attnScale, isTraining, dropoutProbability, layout, mask_type, softmax_type,
-                    window_size_left, window_size_right, deterministic, bias_type, qkv_tensor_type,
-                    o_tensor_type, do_tensor_type, dqkv_tensor_type, generate_max_sum_exp) <
+                    window_size_left, window_size_right, bottom_right_diagonal, deterministic,
+                    bias_type, qkv_tensor_type, o_tensor_type, do_tensor_type, dqkv_tensor_type,
+                    generate_max_sum_exp) <
            std::tie(rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d_qk, rhs.d_v, rhs.num_pages_k,
                     rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
                     rhs.max_pages_per_seq_v, rhs.bias_b, rhs.bias_h, rhs.attnScale, rhs.isTraining,
                     rhs.dropoutProbability, rhs.layout, rhs.mask_type, rhs.softmax_type,
-                    rhs.window_size_left, rhs.window_size_right, rhs.deterministic, rhs.bias_type,
-                    rhs.qkv_tensor_type, rhs.o_tensor_type, rhs.do_tensor_type,
-                    rhs.dqkv_tensor_type, rhs.generate_max_sum_exp);
+                    rhs.window_size_left, rhs.window_size_right, rhs.bottom_right_diagonal,
+                    rhs.deterministic, rhs.bias_type, rhs.qkv_tensor_type, rhs.o_tensor_type,
+                    rhs.do_tensor_type, rhs.dqkv_tensor_type, rhs.generate_max_sum_exp);
   }
 };
 
