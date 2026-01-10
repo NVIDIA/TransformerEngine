@@ -769,7 +769,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.set_meta_tensor(True, recipe)
         self.set_meta_tensor(False, recipe)
 
-        self.fp8_meta_tensors_initialized = True
+        self.fast_setattr("fp8_meta_tensors_initialized", True)
 
     def get_fp8_meta_tensors(self) -> None:
         """Get scales and amaxes."""
@@ -1010,7 +1010,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors(meta["recipe"])
-            self.fp8_initialized = True
+            self.fast_setattr("fp8_initialized", True)
 
             meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
 
