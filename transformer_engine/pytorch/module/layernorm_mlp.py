@@ -1960,7 +1960,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
-        self._default_setattr = self._warning_setattr
+        self._initialized = True
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -2094,7 +2094,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
         if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
-            self.bias_gelu_nvfusion = False
+            self.fast_setattr("bias_gelu_nvfusion", False)
 
         if is_grad_enabled:
             fwd_fn = _LayerNormMLP.apply

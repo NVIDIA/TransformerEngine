@@ -716,7 +716,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                     if name in (f"weight{i}", f"bias{i}"):
                         param.skip_backward_post_hook = True
 
-        self._default_setattr = self._warning_setattr
+        self._initialized = True
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""

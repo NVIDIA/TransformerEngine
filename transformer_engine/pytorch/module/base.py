@@ -10,7 +10,8 @@ import pickle
 import warnings
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing_extensions import Self
 from contextlib import contextmanager
 import logging
 from types import MethodType
@@ -634,26 +635,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             TEDebugState.initialize()
 
     def fast_setattr(self, name: str, value: Any) -> None:
+        """
+        Fast version of the Module's set attribute function.
+        Should be used for regular attributes, but not properties nor parameters/buffers.
+        """
         self.__dict__[name] = value
 
     def module_setattr(self, name: str, value: Any) -> None:
+        """
+        Regular version of the Module's set attribute function.
+        Should be used only when the fast version cannot be used - for the properties,
+        parameters and buffers.
+        """
         super().__setattr__(name, value)
 
-    def _warning_setattr(self, name: str, value: Any) -> None:
-        warnings.warn(
-            """The default implementation of torch.nn.Module introduces significant CPU overhead
-            when setting attributes and is therefore not recommended. Please use the explicit calls
-            (fast_setattr for setting regular values and module_setattr for setting parameters,
-            children modules and buffers).""",
-            RuntimeWarning,
-        )
-        self.module_setattr(name, value)
-
-    def _default_setattr(self, name: str, value: Any) -> None:
-        return self.module_setattr(name, value)
-
     def __setattr__(self, name: str, value: Any) -> None:
-        return self._default_setattr(name, value)
+        if "_initialized" in self.__dict__ and self._initialized:
+            warnings.warn(
+                """The default implementation of torch.nn.Module introduces significant CPU overhead
+                when setting attributes and is therefore not recommended. Please use the explicit
+                calls (fast_setattr for setting regular values and module_setattr for setting
+                parameters, children modules and buffers).""",
+                RuntimeWarning,
+            )
+        super().__setattr__(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """
@@ -774,7 +779,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.set_meta_tensor(True, recipe)
         self.set_meta_tensor(False, recipe)
 
-        self.fp8_meta_tensors_initialized = True
+        self.fast_setattr("fp8_meta_tensors_initialized", True)
 
     def get_fp8_meta_tensors(self) -> None:
         """Get scales and amaxes."""
@@ -1015,7 +1020,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors(meta["recipe"])
-            self.fp8_initialized = True
+            self.fast_setattr("fp8_initialized", True)
 
             meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
 
@@ -1039,7 +1044,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         allow_non_contiguous: bool = False,
         allow_different_data_and_param_types: bool = False,
     ) -> torch.Tensor:
-        """Checks and prepare for FWD execution."""
+        """Checks and prepares for FWD execution."""
         self.fast_setattr(
             "allow_different_data_and_param_types", allow_different_data_and_param_types
         )
@@ -1080,6 +1085,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         return inp
 
     def end_forward(self):
+        """
+        Required to be called at the end of the forward function to properly handle
+        DelayedScaling metadata handling and the NVTX ranges.
+        """
         delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
         if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
@@ -1093,10 +1102,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         allow_non_contiguous: bool = False,
         allow_different_data_and_param_types: bool = False,
     ) -> Generator[torch.Tensor, None, None]:
+        """Checks and prepares for FWD execution."""
         yield self.prepare_forward(
             inp, num_gemms, allow_non_contiguous, allow_different_data_and_param_types
         )
         self.end_forward()
+
+    def train(self, mode: bool = True) -> Self:
+        with warnings.catch_warnings(action="ignore", category=RuntimeWarning):
+            return super().train(mode)
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
@@ -1331,9 +1345,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 # Update the parameter based on its type
 
             if not is_dtensor:
-                setattr(self, name, param)
+                self.module_setattr(name, param)
             else:
-                setattr(self, name, dtensor_param)
+                self.module_setattr(name, dtensor_param)
 
     @abstractmethod
     def forward(self):

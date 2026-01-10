@@ -5,6 +5,7 @@
 import math
 import os
 from typing import Dict, List, Tuple, Optional
+import warnings
 import pytest
 import random
 
@@ -1296,14 +1297,15 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
     ).eval()
 
     # Share params
-    with torch.no_grad():
-        te_linear_ref.weight = Parameter(te_linear.weight.clone())
-        if bias:
-            te_linear_ref.bias = Parameter(te_linear.bias.clone())
-        if fuse_wgrad_accumulation:
-            weight = getattr(te_linear, f"weight")
-            weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
-            te_linear_ref.weight.main_grad = weight.main_grad.clone()
+    with warnings.catch_warnings(action="ignore", category=RuntimeWarning):
+        with torch.no_grad():
+            te_linear_ref.weight = Parameter(te_linear.weight.clone())
+            if bias:
+                te_linear_ref.bias = Parameter(te_linear.bias.clone())
+            if fuse_wgrad_accumulation:
+                weight = getattr(te_linear, f"weight")
+                weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
+                te_linear_ref.weight.main_grad = weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, delay_wgrad_compute=True)
     te_outputs_ref = _test_granular_accuracy(
@@ -1359,12 +1361,13 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
         ).eval()
 
     # Share params
-    with torch.no_grad():
-        te_linear_ref.weight = Parameter(te_linear.weight.clone())
-        if fuse_wgrad_accumulation:
-            weight = getattr(te_linear, f"weight")
-            weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
-            te_linear_ref.weight.main_grad = weight.main_grad.clone()
+    with warnings.catch_warnings(action="ignore", category=RuntimeWarning):
+        with torch.no_grad():
+            te_linear_ref.weight = Parameter(te_linear.weight.clone())
+            if fuse_wgrad_accumulation:
+                weight = getattr(te_linear, f"weight")
+                weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
+                te_linear_ref.weight.main_grad = weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, recipe=recipe)
     te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config, recipe=recipe)
@@ -1601,17 +1604,18 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
     ).eval()
 
     # Share params
-    with torch.no_grad():
-        ln_linear_ref.layer_norm_weight = Parameter(ln_linear.layer_norm_weight.clone())
-        if normalization != "RMSNorm":
-            ln_linear_ref.layer_norm_bias = Parameter(ln_linear.layer_norm_bias.clone())
-        ln_linear_ref.weight = Parameter(ln_linear.weight.clone())
-        if bias:
-            ln_linear_ref.bias = Parameter(ln_linear.bias.clone())
-        if fuse_wgrad_accumulation:
-            weight = getattr(ln_linear, f"weight")
-            weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
-            ln_linear_ref.weight.main_grad = weight.main_grad.clone()
+    with warnings.catch_warnings(action="ignore", category=RuntimeWarning):
+        with torch.no_grad():
+            ln_linear_ref.layer_norm_weight = Parameter(ln_linear.layer_norm_weight.clone())
+            if normalization != "RMSNorm":
+                ln_linear_ref.layer_norm_bias = Parameter(ln_linear.layer_norm_bias.clone())
+            ln_linear_ref.weight = Parameter(ln_linear.weight.clone())
+            if bias:
+                ln_linear_ref.bias = Parameter(ln_linear.bias.clone())
+            if fuse_wgrad_accumulation:
+                weight = getattr(ln_linear, f"weight")
+                weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
+                ln_linear_ref.weight.main_grad = weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(ln_linear, bs, dtype, config, delay_wgrad_compute=True)
     te_outputs_ref = _test_granular_accuracy(
@@ -1739,19 +1743,24 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     ).eval()
 
     # Share params
-    with torch.no_grad():
-        ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
-        ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
-        ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
-        ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
-        if bias:
-            ln_mlp_ref.fc1_bias = Parameter(ln_mlp.fc1_bias.clone())
-            ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
-        if fuse_wgrad_accumulation:
-            ln_mlp.fc1_weight.main_grad = torch.rand_like(ln_mlp.fc1_weight, dtype=torch.float32)
-            ln_mlp_ref.fc1_weight.main_grad = ln_mlp.fc1_weight.main_grad.clone()
-            ln_mlp.fc2_weight.main_grad = torch.rand_like(ln_mlp.fc2_weight, dtype=torch.float32)
-            ln_mlp_ref.fc2_weight.main_grad = ln_mlp.fc2_weight.main_grad.clone()
+    with warnings.catch_warnings(action="ignore", category=RuntimeWarning):
+        with torch.no_grad():
+            ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
+            ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
+            ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
+            ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
+            if bias:
+                ln_mlp_ref.fc1_bias = Parameter(ln_mlp.fc1_bias.clone())
+                ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
+            if fuse_wgrad_accumulation:
+                ln_mlp.fc1_weight.main_grad = torch.rand_like(
+                    ln_mlp.fc1_weight, dtype=torch.float32
+                )
+                ln_mlp_ref.fc1_weight.main_grad = ln_mlp.fc1_weight.main_grad.clone()
+                ln_mlp.fc2_weight.main_grad = torch.rand_like(
+                    ln_mlp.fc2_weight, dtype=torch.float32
+                )
+                ln_mlp_ref.fc2_weight.main_grad = ln_mlp.fc2_weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(ln_mlp, bs, dtype, config, delay_wgrad_compute=True)
     te_outputs_ref = _test_granular_accuracy(
@@ -1796,14 +1805,15 @@ def test_layernorm_mlp_accuracy_checkpoint(
     ).eval()
 
     # Share params
-    with torch.no_grad():
-        ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
-        ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
-        ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
-        ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
-        if bias:
-            ln_mlp_ref.fc1_bias = Parameter(ln_mlp.fc1_bias.clone())
-            ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
+    with warnings.catch_warnings(action="ignore", category=RuntimeWarning):
+        with torch.no_grad():
+            ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
+            ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
+            ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
+            ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
+            if bias:
+                ln_mlp_ref.fc1_bias = Parameter(ln_mlp.fc1_bias.clone())
+                ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
 
     te_outputs = _test_granular_accuracy(ln_mlp, bs, dtype, config, delay_wgrad_compute=False)
     te_outputs_ref = _test_granular_accuracy(
@@ -1952,9 +1962,13 @@ def test_grouped_linear_accuracy(
     # Share params
     with torch.no_grad():
         for i in range(num_gemms):
-            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            sequential_linear[i].module_setattr(
+                "weight", Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            )
             if bias:
-                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+                sequential_linear[i].module_setattr(
+                    "bias", Parameter(getattr(grouped_linear, f"bias{i}").clone())
+                )
             if fuse_wgrad_accumulation:
                 weight_i = getattr(grouped_linear, f"weight{i}")
                 weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
@@ -2096,9 +2110,13 @@ def test_grouped_linear_accuracy_save_original_input(
     # Share params
     with torch.no_grad():
         for i in range(num_gemms):
-            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            sequential_linear[i].module_setattr(
+                "weight", Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            )
             if bias:
-                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+                sequential_linear[i].module_setattr(
+                    "bias", Parameter(getattr(grouped_linear, f"bias{i}").clone())
+                )
             if fuse_wgrad_accumulation:
                 weight_i = getattr(grouped_linear, f"weight{i}")
                 weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
@@ -2298,8 +2316,7 @@ def test_padding_grouped_linear_accuracy(
     with torch.no_grad():
         inner_grouped_linear = grouped_linear.linear_fn
         for i in range(num_gemms):
-            setattr(
-                ref_grouped_linear,
+            ref_grouped_linear.module_setattr(
                 f"weight{i}",
                 Parameter(getattr(inner_grouped_linear, f"weight{i}").clone()),
             )
@@ -2375,8 +2392,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
     with torch.no_grad():
         inner_grouped_linear = grouped_linear.linear_fn
         for i in range(num_gemms):
-            setattr(
-                ref_grouped_linear,
+            ref_grouped_linear.module_setattr(
                 f"weight{i}",
                 Parameter(getattr(inner_grouped_linear, f"weight{i}").clone()),
             )

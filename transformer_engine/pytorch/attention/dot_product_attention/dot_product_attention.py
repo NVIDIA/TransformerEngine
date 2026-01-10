@@ -482,7 +482,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         self.register_load_state_dict_post_hook(remove_extra_states_check)
 
-        self._default_setattr = self._warning_setattr
+        self._initialized = True
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
@@ -678,9 +678,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         # assume attention uses the same fp8_group as GEMMs
         fp8_group = FP8GlobalStateManager.get_fp8_group()
 
-        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
-        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        self.fast_setattr("fp8_parameters", FP8GlobalStateManager.with_fp8_parameters())
+        self.fast_setattr("fp8", FP8GlobalStateManager.is_fp8_enabled())
+        self.fast_setattr("fp8_calibration", FP8GlobalStateManager.is_fp8_calibration())
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
         if self.fp8_parameters or fp8_enabled:
@@ -705,7 +705,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
         else:
             # If fp8 isn't enabled, turn off and return.
-            self.fp8_initialized = False
+            self.fast_setattr("fp8_initialized", False)
             return
 
         if self.fp8_parameters and not self.fp8_initialized:
@@ -723,7 +723,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors(fp8_recipes)
-            self.fp8_initialized = True
+            self.fast_setattr("fp8_initialized", True)
 
             self.fp8_meta["recipe"] = fp8_recipe_dpa
             if fp8_recipe != fp8_recipe_dpa:
