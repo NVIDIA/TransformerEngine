@@ -640,7 +640,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         super().__setattr__(name, value)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if "_initialized" in self.__dict__ and self.initialized:
+        if "_initialized" in self.__dict__ and self._initialized:
             warnings.warn(
                 """The default implementation of torch.nn.Module introduces significant CPU overhead
                 when setting attributes and is therefore not recommended. Please use the explicit
