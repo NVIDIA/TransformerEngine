@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -28,7 +28,6 @@ dtype = torch.bfloat16
 
 
 class TestDeferredInit:
-
     @staticmethod
     def get_module_args(module):
         hidden_size = num_heads * head_dim
@@ -81,4 +80,46 @@ class TestDeferredInit:
             f"{module_type.__name__}.reset_parameters() failed to materialize parameters "
             "on CUDA device"
         )
+        del module
+
+    @pytest.mark.parametrize("module_type", _core_modules)
+    def test_reset_parameters_doesnt_change_parameter_stats(
+        self,
+        module_type: torch.nn.Module,
+    ) -> None:
+        """Test for github issue #2528 and #2529 to ensure that reset_parameters() doesn't change
+        the parameter mean and std"""
+        args, kwargs = TestDeferredInit.get_module_args(module_type)
+        kwargs["device"] = "cuda"
+        module = module_type(*args, **kwargs)
+
+        param_stats = {
+            name: {"mean": param.mean(), "std": param.std()}
+            for name, param in module.named_parameters()
+        }
+
+        with torch.no_grad():
+            module.reset_parameters()
+
+        param_stats_after = {
+            name: {"mean": param.mean(), "std": param.std()}
+            for name, param in module.named_parameters()
+        }
+
+        for name, stats in param_stats_after.items():
+            torch.testing.assert_close(
+                stats["mean"],
+                param_stats[name]["mean"],
+                atol=1e-3,
+                rtol=1e-3,
+                msg=f"{name} mean changed after reset_parameters",
+            )
+            torch.testing.assert_close(
+                stats["std"],
+                param_stats[name]["std"],
+                atol=1e-3,
+                rtol=1e-3,
+                msg=f"{name} std changed after reset_parameters",
+            )
+
         del module

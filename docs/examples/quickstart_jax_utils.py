@@ -1,17 +1,13 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import jax
 import jax.numpy as jnp
 import time
-import math
 
 from typing import Callable, Any, Dict, Optional, Tuple
-from flax import linen as nn
 import transformer_engine.jax as te
-import transformer_engine.jax.flax as te_flax
-from transformer_engine.jax.flax.transformer import DotProductAttention as TEDotProductAttention
 
 
 def speedometer(

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Utility for the TE layer tests"""
@@ -45,6 +45,13 @@ def is_devices_enough(required):
     Check if the available GPUs is enough
     """
     return len(jax.devices()) >= required
+
+
+def is_devices_equal(required):
+    """
+    Check if the available GPUs is exactly equal
+    """
+    return len(jax.devices()) == required
 
 
 def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[int]:

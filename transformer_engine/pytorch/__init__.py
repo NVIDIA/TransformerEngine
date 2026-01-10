@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -34,6 +34,7 @@ from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.permutation import (
     moe_permute,
     moe_permute_with_probs,
+    moe_permute_and_pad_with_probs,
     moe_unpermute,
     moe_sort_chunks_by_index,
     moe_sort_chunks_by_index_with_probs,
