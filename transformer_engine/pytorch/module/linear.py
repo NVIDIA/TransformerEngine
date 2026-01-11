@@ -31,7 +31,6 @@ from ..utils import (
     clear_tensor_data,
     divide,
     init_method_constant,
-    requires_grad,
     needs_quantized_gemm,
     assert_dim_for_fp8_exec,
     assert_dim_for_all_gather,
