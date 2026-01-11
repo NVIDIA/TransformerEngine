@@ -360,6 +360,7 @@ class QuantizedTensor(torch.Tensor):
             requires_grad=requires_grad,
             device=torch.cuda.current_device() if device is None else device,
         )
+        instance._requires_grad = requires_grad
         instance._dtype = dtype
         return instance
 
