@@ -41,3 +41,4 @@ compile_commands.json
 .nfs
 tensor_dumps/
 artifacts/
+*.DS_Store
