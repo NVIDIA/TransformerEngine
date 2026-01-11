@@ -120,6 +120,11 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   // Set conditions for MXFP8 and NVFP4 gemm execution.
   const auto nvfp4 = is_nvfp_scaling(A.scaling_mode) && is_nvfp_scaling(B.scaling_mode);
   const auto mxfp8 = !nvfp4 && is_mxfp_scaling(A.scaling_mode) && is_mxfp_scaling(B.scaling_mode);
+  int is_nvte_non_tn_fp8_gemm_supported = 0; // needed only for per tensor scaling
+  if(is_tensor_scaling(A.scaling_mode) || is_tensor_scaling(B.scaling_mode))
+  {
+    is_nvte_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
+  }
 
   // Configure A matrix
   if (is_tensor_scaling(A.scaling_mode)) {
@@ -129,7 +134,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Atype = A.data.dtype;
     ret.A_scale_inv = A.scale_inv.dptr;
     ret.lda = is_A_transposed ? k : m;
-    int is_nvte_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
     if (!is_nvte_non_tn_fp8_gemm_supported && !is_A_transposed) {
       // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
       if (A.has_columnwise_data() && is_fp8_dtype(A.columnwise_data.dtype)) {
@@ -221,7 +225,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = B.data.dtype;
     ret.B_scale_inv = B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
-    int is_nvte_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
     if (!is_nvte_non_tn_fp8_gemm_supported && is_B_transposed) {
       // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
       if (B.has_columnwise_data() && is_fp8_dtype(B.columnwise_data.dtype)) {

@@ -143,7 +143,6 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     transpose.reset();
   }
   py::object transpose_py = with_transpose ? py::cast(*transpose) : py::none();
-  py::object transpose_py = with_transpose ? py::cast(*transpose) : py::none();
   // Initialize scale-inverse tensor
   if (!scale_inv) {
     scale_inv = at::reciprocal(scale);
@@ -156,18 +155,18 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   if (internal) {
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
+    PyObject* args = PyTuple_New(0);
     PyDict_SetItemString(kwargs, "data", data_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_scale_inv", scale_inv_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "data_transpose", transpose_py.ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "device", py::cast(device).ptr());
 
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
-                                     PyTuple_New(0), kwargs);
+                                     args, kwargs);
 
     Py_DECREF(kwargs);
-
+    Py_DECREF(args);
     NVTE_CHECK(result != nullptr, "Failed to create Float8TensorStorage instance");
     out_py = py::reinterpret_steal<py::object>(result);
   } else {
@@ -175,6 +174,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
 
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
+    PyObject* args = PyTuple_New(0);
     PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).ptr());
     PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
     PyDict_SetItemString(kwargs, "data", data_py.ptr());
@@ -184,9 +184,10 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
     PyDict_SetItemString(kwargs, "device", py::cast(device).ptr());
     PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass), PyTuple_New(0), kwargs);
+        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass), args, kwargs);
 
     Py_DECREF(kwargs);
+    Py_DECREF(args);
 
     NVTE_CHECK(result != nullptr, "Failed to create Float8Tensor instance");
     out_py = py::reinterpret_steal<py::object>(result);
@@ -393,11 +394,12 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "data_transpose", transpose_py.ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "device", py::cast(device).ptr());
 
+    PyObject* args = PyTuple_New(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
-                                     PyTuple_New(0), kwargs);
+                                     args, kwargs);
 
+    Py_DECREF(args);
     Py_DECREF(kwargs);
 
     NVTE_CHECK(result != nullptr, "Failed to create Float8TensorStorage instance");
@@ -414,9 +416,11 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     PyDict_SetItemString(kwargs, "data_transpose", transpose_py.ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
     PyDict_SetItemString(kwargs, "device", py::cast(device).ptr());
+    PyObject* args = PyTuple_New(0);
     PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass), PyTuple_New(0), kwargs);
+        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass), args, kwargs);
 
+    Py_DECREF(args);
     Py_DECREF(kwargs);
 
     NVTE_CHECK(result != nullptr, "Failed to create Float8Tensor instance");
@@ -693,10 +697,12 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).ptr());
     PyDict_SetItemString(kwargs, "data_format", py::cast(data_format).ptr());
 
+    PyObject* args = PyTuple_New(0);
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass),
-                      PyTuple_New(0), kwargs);
+                      args, kwargs);
 
+    Py_DECREF(args);
     Py_DECREF(kwargs);
 
     NVTE_CHECK(result != nullptr, "Failed to create Float8BlockwiseQTensorStorage instance");
@@ -714,10 +720,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
     PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).ptr());
     PyDict_SetItemString(kwargs, "data_format", py::cast(data_format).ptr());
-
+    PyObject* args = PyTuple_New(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass),
-                                     PyTuple_New(0), kwargs);
-
+                                     args, kwargs);
+    Py_DECREF(args);
     Py_DECREF(kwargs);
 
     NVTE_CHECK(result != nullptr, "Failed to create Float8BlockwiseQTensor instance");
@@ -1029,6 +1035,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   if (internal) {
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
+    PyObject* args = PyTuple_New(0);
     PyDict_SetItemString(kwargs, "rowwise_data", rowwise_data_py.ptr());
     PyDict_SetItemString(kwargs, "columnwise_data", columnwise_data_py.ptr());
     PyDict_SetItemString(kwargs, "rowwise_scale_inv", rowwise_scale_inv_py.ptr());
@@ -1037,8 +1044,9 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass),
-                                     PyTuple_New(0), kwargs);
+                                     args, kwargs);
 
+    Py_DECREF(args);
     Py_DECREF(kwargs);
 
     NVTE_CHECK(result != nullptr, "Failed to create MXFP8TensorStorage instance");
@@ -1055,9 +1063,11 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
+    PyObject* args = PyTuple_New(0);
     PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass), PyTuple_New(0), kwargs);
+        PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass), args, kwargs);
 
+    Py_DECREF(args);
     Py_DECREF(kwargs);
 
     NVTE_CHECK(result != nullptr, "Failed to create MXFP8Tensor instance");
@@ -1343,9 +1353,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "fp4_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
+    PyObject* args = PyTuple_New(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorStoragePythonClass),
-                                     PyTuple_New(0), kwargs);
-
+                                     args, kwargs);
+    Py_DECREF(args);
     Py_DECREF(kwargs);
 
     NVTE_CHECK(result != nullptr, "Failed to create NVFP4TensorStorage instance");
@@ -1364,9 +1375,11 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "fp4_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
+    PyObject* args = PyTuple_New(0);
     PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass), PyTuple_New(0), kwargs);
+        PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass), args, kwargs);
 
+    Py_DECREF(args);
     Py_DECREF(kwargs);
 
     NVTE_CHECK(result != nullptr, "Failed to create NVFP4Tensor instance");

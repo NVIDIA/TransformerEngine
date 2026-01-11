@@ -912,10 +912,12 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     @property
     def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
         return self._data.shape if self._data is not None else self._transpose.shape
 
     @property
     def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
         return self._data.is_cuda if self._data is not None else self._transpose.is_cuda
 
     @classmethod

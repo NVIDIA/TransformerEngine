@@ -366,26 +366,34 @@ class QuantizedTensor(torch.Tensor):
 
     @property
     def dtype(self) -> torch.dtype:
-        # Attribute access of custom tensors goes through an
-        # expensive Pyobject lookup. Since dtype for a tensor is never
-        # change after creation, we cache it in a member variable.
+        """
+        Return the high precision data type of the tensor
+        Attribute access of custom tensors goes through an
+        expensive Pyobject lookup. Since dtype for a tensor is never
+        change after creation, we cache it in a member variable and return
+        """
         return self._dtype
 
     @property
     def requires_grad(self) -> bool:
-        # Attribute access of custom tensors goes through an
-        # expensive Pyobject lookup. Since requires_grad is set during
-        # initialization and may be updated, we cache it in a member variable.
+        """
+        Return whether or not the tensor requires gradient.
+        Attribute access of custom tensors goes through an
+        expensive Pyobject lookup. Since requires_grad is set during
+        initialization and may be updated, we cache it in a member variable.
+        """
         return self._requires_grad
 
     @requires_grad.setter
     def requires_grad(self, value: bool) -> None:
+        """ Set requires_grad property so that autograd engine is aware of the change """
         # Update the cached value
         self._requires_grad = value
         # Call parent class to ensure autograd engine is aware of the change
         torch.Tensor.requires_grad.fset(self, value)
 
     def requires_grad_(self, requires_grad: bool = True) -> QuantizedTensor:
+        """ Cache requires_grad property and call parent class method """
         # pylint: disable=missing-function-docstring
         # Update the cached value
         self._requires_grad = requires_grad

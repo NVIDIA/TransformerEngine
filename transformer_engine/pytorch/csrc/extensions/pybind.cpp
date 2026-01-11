@@ -35,7 +35,7 @@ PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
 PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
-bool is_extension_initialized = false;
+std::once_flag extension_init_flag;
 
 void init_float8_extension() {
   auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.float8_tensor");
@@ -102,12 +102,12 @@ void init_nvfp4_extensions() {
 }
 
 void init_extension() {
-  if (is_extension_initialized) return;
-  init_float8_extension();
-  init_mxfp8_extension();
-  init_float8blockwise_extension();
-  init_nvfp4_extensions();
-  is_extension_initialized = true;
+  std::call_once(extension_init_flag, []() {
+    init_float8_extension();
+    init_mxfp8_extension();
+    init_float8blockwise_extension();
+    init_nvfp4_extensions();
+  });
 }
 
 }  // namespace transformer_engine::pytorch
