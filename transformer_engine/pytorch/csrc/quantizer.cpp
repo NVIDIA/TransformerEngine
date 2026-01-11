@@ -143,11 +143,12 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     transpose.reset();
   }
   py::object transpose_py = with_transpose ? py::cast(*transpose) : py::none();
-  py::object scale_inv_py = py::cast(scale_inv);
+  py::object transpose_py = with_transpose ? py::cast(*transpose) : py::none();
   // Initialize scale-inverse tensor
   if (!scale_inv) {
     scale_inv = at::reciprocal(scale);
   }
+  py::object scale_inv_py = py::cast(*scale_inv);
   at::Device device =
       with_data ? data->device() : (with_transpose ? transpose->device() : torch::kCUDA);
   // Construct Python FP8 tensor
