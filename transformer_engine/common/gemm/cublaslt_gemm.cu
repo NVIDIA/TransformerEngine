@@ -120,9 +120,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   // Set conditions for MXFP8 and NVFP4 gemm execution.
   const auto nvfp4 = is_nvfp_scaling(A.scaling_mode) && is_nvfp_scaling(B.scaling_mode);
   const auto mxfp8 = !nvfp4 && is_mxfp_scaling(A.scaling_mode) && is_mxfp_scaling(B.scaling_mode);
-  int is_nvte_non_tn_fp8_gemm_supported = 0; // needed only for per tensor scaling
-  if(is_tensor_scaling(A.scaling_mode) || is_tensor_scaling(B.scaling_mode))
-  {
+  int is_nvte_non_tn_fp8_gemm_supported = 0;  // needed only for per tensor scaling
+  if (is_tensor_scaling(A.scaling_mode) || is_tensor_scaling(B.scaling_mode)) {
     is_nvte_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
   }
 

@@ -162,8 +162,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     PyDict_SetItemString(kwargs, "data_transpose", transpose_py.ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
-    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
-                                     args, kwargs);
+    PyObject* result =
+        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass), args, kwargs);
 
     Py_DECREF(kwargs);
     Py_DECREF(args);
@@ -396,8 +396,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* args = PyTuple_New(0);
-    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
-                                     args, kwargs);
+    PyObject* result =
+        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass), args, kwargs);
 
     Py_DECREF(args);
     Py_DECREF(kwargs);
@@ -698,9 +698,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     PyDict_SetItemString(kwargs, "data_format", py::cast(data_format).ptr());
 
     PyObject* args = PyTuple_New(0);
-    PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass),
-                      args, kwargs);
+    PyObject* result = PyObject_Call(
+        reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass), args, kwargs);
 
     Py_DECREF(args);
     Py_DECREF(kwargs);
@@ -721,8 +720,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).ptr());
     PyDict_SetItemString(kwargs, "data_format", py::cast(data_format).ptr());
     PyObject* args = PyTuple_New(0);
-    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass),
-                                     args, kwargs);
+    PyObject* result =
+        PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass), args, kwargs);
     Py_DECREF(args);
     Py_DECREF(kwargs);
 
@@ -1043,8 +1042,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
-    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass),
-                                     args, kwargs);
+    PyObject* result =
+        PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass), args, kwargs);
 
     Py_DECREF(args);
     Py_DECREF(kwargs);
@@ -1354,8 +1353,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* args = PyTuple_New(0);
-    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorStoragePythonClass),
-                                     args, kwargs);
+    PyObject* result =
+        PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorStoragePythonClass), args, kwargs);
     Py_DECREF(args);
     Py_DECREF(kwargs);
 

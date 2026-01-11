@@ -386,14 +386,14 @@ class QuantizedTensor(torch.Tensor):
 
     @requires_grad.setter
     def requires_grad(self, value: bool) -> None:
-        """ Set requires_grad property so that autograd engine is aware of the change """
+        """Set requires_grad property so that autograd engine is aware of the change"""
         # Update the cached value
         self._requires_grad = value
         # Call parent class to ensure autograd engine is aware of the change
         torch.Tensor.requires_grad.fset(self, value)
 
     def requires_grad_(self, requires_grad: bool = True) -> QuantizedTensor:
-        """ Cache requires_grad property and call parent class method """
+        """Cache requires_grad property and call parent class method"""
         # pylint: disable=missing-function-docstring
         # Update the cached value
         self._requires_grad = requires_grad
