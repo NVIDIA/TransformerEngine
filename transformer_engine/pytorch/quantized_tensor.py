@@ -370,27 +370,27 @@ class QuantizedTensor(torch.Tensor):
         # change after creation, we cache it in a member variable.
         return self._dtype
 
-    # @property
-    # def requires_grad(self) -> bool:
-    #     # Attribute access of custom tensors goes through an
-    #     # expensive Pyobject lookup. Since requires_grad is set during
-    #     # initialization and may be updated, we cache it in a member variable.
-    #     return self._requires_grad
+    @property
+    def requires_grad(self) -> bool:
+        # Attribute access of custom tensors goes through an
+        # expensive Pyobject lookup. Since requires_grad is set during
+        # initialization and may be updated, we cache it in a member variable.
+        return self._requires_grad
 
-    # @requires_grad.setter
-    # def requires_grad(self, value: bool) -> None:
-    #     # Update the cached value
-    #     self._requires_grad = value
-    #     # Call parent class to ensure autograd engine is aware of the change
-    #     torch.Tensor.requires_grad.fset(self, value)
+    @requires_grad.setter
+    def requires_grad(self, value: bool) -> None:
+        # Update the cached value
+        self._requires_grad = value
+        # Call parent class to ensure autograd engine is aware of the change
+        torch.Tensor.requires_grad.fset(self, value)
 
-    # def requires_grad_(self, requires_grad: bool = True) -> QuantizedTensor:
-    #     # pylint: disable=missing-function-docstring
-    #     # Update the cached value
-    #     self._requires_grad = requires_grad
-    #     # Call parent class method to ensure autograd engine is aware
-    #     super().requires_grad_(requires_grad)
-    #     return self
+    def requires_grad_(self, requires_grad: bool = True) -> QuantizedTensor:
+        # pylint: disable=missing-function-docstring
+        # Update the cached value
+        self._requires_grad = requires_grad
+        # Call parent class method to ensure autograd engine is aware
+        super().requires_grad_(requires_grad)
+        return self
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Convert quantized data to standard PyTorch tensor"""
