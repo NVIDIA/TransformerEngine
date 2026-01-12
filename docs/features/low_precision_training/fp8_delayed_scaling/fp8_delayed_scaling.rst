@@ -6,11 +6,13 @@
 FP8 Delayed Scaling
 ===================================
 
-FP8 Delayed Scaling estimates scaling factors from historical amax values rather than computing them
-for each tensor. This reduces tensor reads per quantization from two to one, improving memory efficiency.
+FP8 Delayed Scaling recipe estimates scaling factors from historical amax values rather than computing them
+for each tensor. Compared to Current Scaling recipe, 
+this reduces tensor reads per quantization from two to one, 
+improving memory efficiency.
 
-Both this recipe and :doc:`FP8 Current Scaling <../fp8_current_scaling/fp8_current_scaling>` use 
-the same FP8 formats (E4M3/E5M2) with one float32 scaling factor per tensor. 
+Both this and :doc:`FP8 Current Scaling <../fp8_current_scaling/fp8_current_scaling>` recipe use 
+the same FP8 formats (E4M3/E5M2) with one FP32 scaling factor per tensor. 
 Reading the FP8 Current Scaling documentation first is recommended.
 
 Quantization with delayed scaling factors
@@ -27,7 +29,7 @@ The quantization process works as follows:
    
    ``scaling_factor = FP8_MAX / amax``
    
-   where ``amax`` is computed from history using either ``max`` (default) or ``most_recent`` algorithm.
+   where ``amax`` is computed from history using either ``max`` (maximum over window, default) or ``most_recent`` algorithm.
 
 2. **Quantize the tensor** (one tensor read):
    Apply the scaling factor and cast to FP8. Values exceeding FP8 range are clipped.
@@ -56,8 +58,8 @@ to position 0, and after the pass completes, the history is rotated:
    Before rotation: [amax_N, amax_1, amax_2, ..., amax_N-1]   (amax_N = current, amax_1 = oldest)
    After rotation:  [0,      amax_2, ..., amax_N-1, amax_N]   (amax_1 dropped, amax_N appended)
 
-The effective history length is ``amax_history_len - 1`` since position 0 is reserved 
-for the staging area.
+The scaling factor is computed **before** the rotation, so it uses all ``amax_history_len`` values.
+Position 0 serves as a staging area — it is zeroed after the scale update, ready for the next iteration's amax.
 
 The implementation differs between PyTorch and JAX:
 
@@ -70,25 +72,14 @@ The implementation differs between PyTorch and JAX:
       - Forward: shape ``(amax_history_len, num_gemms * 3)`` — three FP8 tensors per GEMM (input, weight, output)
       - Backward: shape ``(amax_history_len, num_gemms * 2)`` — two FP8 tensors per GEMM (grad_output, grad_input)
       
-      During the first forward pass, modules register their ``amax_history`` tensors 
-      to a **global buffer** associated with the autocast context. When the context exits,
-      a single CUDA kernel processes all registered tensors at once - performing both 
-      amax reduction across GPUs and history rotation.
-      
-      This batched approach (one kernel for all tensors instead of one kernel per tensor)
-      minimizes kernel launch overhead.
+      When the autocast context exits, a single CUDA kernel processes all tensors at once — 
+      performing amax reduction across GPUs and history rotation. This batched approach 
+      minimizes kernel launch overhead compared to updating each tensor separately.
 
    .. tab:: JAX
 
-      Each quantizer maintains its own ``amax_history`` as a Flax variable with shape ``(amax_history_len,)``.
-      There is no global buffer - each quantizer updates independently.
-      
-      The rotation is performed per-quantizer using ``jnp.roll``:
-      
-      .. code-block:: python
-      
-         updated_amax_history = jnp.roll(amax_history, -1, -1)
-         amax_history = updated_amax_history.at[0].set(0.0)
+      Each quantizer maintains its own ``amax_history`` with shape ``(amax_history_len,)``
+      and updates independently.
 
 Here's how to use FP8 Delayed Scaling in PyTorch and JAX:
 
@@ -124,8 +115,10 @@ Here's how to use FP8 Delayed Scaling in PyTorch and JAX:
 Distributed Training
 --------------------
 
-Since FP8 Delayed Scaling uses the same data formats as FP8 Current Scaling,
-transpose gather is not supported. However, amax reduction works slightly differently in different frameworks.
+FP8 Delayed Scaling uses the same data formats as FP8 Current Scaling - 
+all-gather of non-transposed tensors is supported.
+
+However, amax reduction works slightly differently in different frameworks.
 
 .. tabs::
 
@@ -149,7 +142,7 @@ transpose gather is not supported. However, amax reduction works slightly differ
       
       - **First iteration**: All modules must execute on all ranks to register 
         their ``amax_history`` tensors in the global buffer. Mismatched registration
-        causes the ``all_reduce`` to hang due to different tensor sizes across ranks.
+        would cause the ``all_reduce`` to hang due to different tensor sizes across ranks.
       - **Subsequent iterations**: The ``autocast`` context must be entered and exited
         on all ranks (this triggers the collective reduction). Individual modules can be
         skipped - if no rank executes a module, its history is not rotated and scale 

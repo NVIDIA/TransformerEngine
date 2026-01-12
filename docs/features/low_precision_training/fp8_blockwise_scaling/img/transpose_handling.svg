@@ -20,7 +20,6 @@
   <!-- LEFT SIDE: Original 1D Blockwise (Rowwise Quantization) -->
   <g id="rowwise-quantization">
     <text x="225" y="50" class="title">Rowwise Quantization</text>
-    <text x="225" y="70" class="label" style="font-size: 12px;">(240 × 120 tensor)</text>
     
     <!-- FP8 Tensor with horizontal stripes -->
     <g id="left-tensor">
@@ -104,7 +103,6 @@
   <!-- RIGHT SIDE: Transposed (Columnwise Quantization) -->
   <g id="columnwise-quantization">
     <text x="625" y="50" class="title">Columnwise Quantization</text>
-    <text x="625" y="70" class="label" style="font-size: 12px;">(120 × 240 tensor)</text>
     
     <!-- FP8 Tensor - transposed shape (120 wide × 240 tall) with HORIZONTAL stripes -->
     <g id="right-tensor">
@@ -201,7 +199,6 @@
   <!-- LEFT SIDE: Original 2D Blockwise (copied from combined_scaling.svg) -->
   <g id="2d-original">
     <text x="280" y="405" class="title">Rowwise Quantization</text>
-    <text x="280" y="425" class="label" style="font-size: 12px;">(180 × 120 tensor)</text>
     
     <!-- TOP: DATA TENSOR (20x20 blocks, with 3 extra columns on right) -->
     <g id="data-tensor-left">
@@ -272,7 +269,6 @@
   <!-- RIGHT SIDE: Transposed 2D Blockwise -->
   <g id="2d-transposed">
     <text x="605" y="405" class="title">Columnwise Quantization</text>
-    <text x="605" y="425" class="label" style="font-size: 12px;">(120 × 180 tensor)</text>
     
     <!-- DATA TENSOR TRANSPOSED (120x180 instead of 180x120) -->
     <g id="data-tensor-right">

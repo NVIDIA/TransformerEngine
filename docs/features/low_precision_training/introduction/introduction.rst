@@ -6,7 +6,8 @@
 Introduction
 ===================================
 
-Transformer Engine accelerates deep learning by leveraging low precision formats on NVIDIA GPUs.
+Transformer Engine accelerates deep learning on NVIDIA GPUs in several ways,
+with low precision training being one of the most important.
 This chapter introduces mixed precision training and FP8 support.
 
 
@@ -25,30 +26,33 @@ Let's compare these formats.
 The key differences between these formats are:
 
 * **FP32** (32 bits total): 1 sign bit + 8 exponent bits + 23 mantissa bits – standard single-precision format
-* **BF16** (16 bits total): 1 sign bit + 8 exponent bits + 7 mantissa bits – maintains FP32's exponent range but reduced precision
+* **BF16** (16 bits total): 1 sign bit + 8 exponent bits + 7 mantissa bits – maintains FP32's exponent range but has reduced precision
 * **FP16** (16 bits total): 1 sign bit + 5 exponent bits + 10 mantissa bits – reduced range but higher precision than BF16
 
 BF16's advantage is that it shares the same exponent range as FP32, 
 making it easier to convert between the two formats without overflow/underflow issues. 
-FP16 offers better precision for smaller values but has a more limited dynamic range,
+FP16 offers better precision for smaller values but has a limited dynamic range,
 which results in the need to perform loss scaling to avoid overflow/underflow—see `this paper on loss scaling <https://arxiv.org/pdf/1710.03740>`__ for more details.
 
 **Mixed precision**
 
-Not all operations can run in reduced precision.
-Modern deep learning frameworks use *mixed precision training*, where:
+Not all operations should be run in reduced precision to preserve accuracy.
+Modern deep learning frameworks use *mixed precision training*, 
+where different operations use different precisions based on their numerical properties:
 
-* *Low precision* is used for matrix multiplications and other compute-heavy operations, which remain numerically stable at lower precision,
-* *High precision (FP32)* must be used for numerically sensitive operations to maintain training stability. These include layer normalization, softmax, and loss computations—operations that involve division or exponentiation, where small rounding errors can amplify and propagate through the network, leading to gradient instability or degraded convergence.
+* Matrix multiplications are compute-heavy and remain numerically stable at lower precision, making them ideal candidates for acceleration.
+* Operations like layer normalization and softmax can work with low precision inputs and outputs, but may use high precision internally or for their weights.
+* Operations like loss computation and exponentiation need high precision throughout.
 
 **Master weights**
 
-Mixed precision training also raises the question of how to store model weights.
+Another consideration in mixed precision training is how to store the model weights.
 Lower precision formats like FP16 and BF16 have limited representational granularity, 
 which becomes problematic during gradient updates. 
 When a small gradient is added to a not so small weight stored in low precision, 
 the result may round back to the original value if the update falls below the format's precision threshold.
-Moreover, some elements of the gradient itself can be too small to be represented in low precision.
+Moreover, some elements of the gradient itself can be too small to be represented in low precision, 
+especially after the accumulation from multiple GPUs in the data parallel training setting.
 
 The solution is to maintain *master weights* in FP32. 
 During training, weights are cast to lower precision for forward and backward passes, 
@@ -62,7 +66,10 @@ There are two common software approaches to storing master weights:
   while the optimizer maintains FP32 copies alongside momentum and other state. 
   During each step, 
   the optimizer updates its FP32 copy and casts the result back to the model's low-precision weights. 
-  This makes it easier to shard master weights together with other optimizer state, for example in ZeRO optimizer.
+  
+  This approach makes it easier to shard master weights together with other optimizer state, for example in ZeRO optimizer.
+
+  Since the casting happens only during the optimizer step, this approach is also faster when optimizer runs less frequently than the model, e.g. when performing gradient accumulation or pipeline parallel training.
 
 * *In the model*: 
   The model stores weights directly in FP32, 
@@ -78,14 +85,11 @@ There are two common software approaches to storing master weights:
 
    .. tab:: PyTorch
 
-      The PyTorch API of Transformer Engine provides two mechanisms to control precision:
+      The PyTorch API of Transformer Engine provides several mechanisms to control precision:
       
       * **Weight precision**: Use the ``params_dtype`` argument in any TE layer constructor.
-      * **Computation precision**: Use the ``torch.autocast`` context manager.
-      
-      If parameters are set to be in lower precision and no autocast is used, then lower precision is used for computation.
-      Input is cast to lower precision before the computation inside the layer.
-      Output precision is the same as autocast precision.
+      * **Computation precision**: Use the ``torch.autocast`` context manager. When enabled, inputs are cast to the autocast dtype before computation.
+      * **Input dtype**: When ``torch.autocast`` is not used, the input tensor's dtype determines the computation precision. In this case, inputs and parameters must have matching dtypes.
 
       .. literalinclude:: bf16_fp16_training_pytorch.py
          :language: python
@@ -132,7 +136,8 @@ Let's now see how we can train in lower precisions in supported frameworks.
       :class:`~transformer_engine.common.recipe.Recipe`.
 
       Forward computations need to be performed inside the ``autocast`` context manager,
-      while the ``.backward()`` call should be outside of it.
+      while the ``.backward()`` call should be outside of it (it inherits the setting from the
+      corresponding forward pass).
 
       Here is a basic example:
 
@@ -234,7 +239,7 @@ used throughout the rest of the documentation.
 
 Not all operations run in low precision:
 
-- **Non-attention linear operations**: run in low precision.
+- **Linear operations**: run in low precision.
 - **Attention computations**: run in high precision by default (some recipes allow low precision as an option).
 - **Other operations** (layer normalization, softmax, etc.): run in high precision.
 
@@ -246,7 +251,7 @@ Within high-precision operations, there are two categories:
 .. raw:: html
    :file: img/mixed_precision_operations.svg
 
-*Figure 3: Default single-device forward pass of TransformerLayer operations precision – only linear operations (outside of dot product attention) are in lower precision.*
+*Figure 3: Default precision of operations in a TransformerLayer forward pass. Only linear operations are in lower precision. Dot product attention is shown as three separate operations (QK^T, Softmax, Scores * V), though in practice these may be fused into a single kernel.*
 
 **Linear layer data flow**
 

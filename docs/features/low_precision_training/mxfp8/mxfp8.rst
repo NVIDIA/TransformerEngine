@@ -26,6 +26,7 @@ where
 
 * ``x_fp8`` is the FP8 value in E4M3 format,
 * ``s_block`` is a local **E8M0** scaling factor shared by a block of 32 elements.
+  E8M0 is an 8-bit format with 8 exponent bits and 0 mantissa bits, representing only powers of 2.
 
 
 **FP8 format**
@@ -85,9 +86,9 @@ does not require explicit transposition. However, rowwise and columnwise quantiz
 - *Rowwise* - 1 scaling factor per 32 consecutive elements along a row (1×32 blocks).
 - *Columnwise* - 1 scaling factor per 32 consecutive elements along a column (32×1 blocks).
 
-Because the scaling factor blocks have different orientations, rowwise and columnwise MXFP8 tensors
+Since the scaling factor blocks have different orientations, rowwise and columnwise MXFP8 tensors
 are numerically different — one cannot derive one from the other. Both must be quantized
-independently from full-precision data.
+independently from the full-precision data.
 
 .. raw:: html 
    :file: img/mxfp8_row_col.svg

@@ -66,9 +66,9 @@ The scaling factors are computed as follows:
 
 *Figure 2. NVFP4 hierarchical scaling structure showing the combination of block-level and global scaling factors.*
 
-This hierarchical structure uses fine-grained block scaling 
-to adapt to local magnitude variations and global scaling 
-to handle the overall dynamic range.
+This hierarchical structure uses fine-grained block scaling to handle the tensor's dynamic range,
+while the FP4 values represent the block-level dynamic range. The global scaling factor
+aligns values to the representable range of the E4M3 × E2M1 combination.
 
 **2D weight scaling**
 
@@ -114,9 +114,9 @@ Random Hadamard Transform
 Random Hadamard Transform (RHT) applies an orthogonal rotation to the tensor **before quantization**,
 smoothing outliers in the tensor distributions and making them easier to represent accurately in NVFP4.
 RHT is applied to columnwise quantization of inputs and gradients, which are operands
-for the **wgrad GEMM**. This GEMM – according to the paper – is particularly sensitive
+for the **wgrad GEMM**. This GEMM is particularly sensitive
 to quantization errors, hence the additional outlier smoothing.
-RHT is supported only for BF16 inputs/gradients; other dtypes will raise an error.
+RHT is supported only for BF16 inputs/gradients.
 
 The transform is defined as:
 
@@ -258,4 +258,5 @@ Here's how to use NVFP4 recipe in PyTorch and JAX. The examples show how to conf
 Supported devices
 -----------------
 
-Blackwell and later (SM 10.0+)
+* **Training**: SM 10.0, SM 10.3
+* **Inference**: SM 10.0+

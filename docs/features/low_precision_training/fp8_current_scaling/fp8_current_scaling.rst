@@ -6,7 +6,7 @@
 FP8 Current Scaling
 ===================================
 
-FP8 current scaling is the simplest low precision recipe provided by Transformer Engine. 
+FP8 current scaling recipe is the simplest low precision recipe provided by Transformer Engine. 
 To understand how this recipe works, we first need to examine what the FP8 data type is and how it differs from other floating point formats.
 
 
@@ -28,7 +28,7 @@ The FP8 datatype, introduced in Hopper architecture, is actually 2 distinct data
 
 By default, Transformer Engine uses a hybrid approach:
 
-* *Forward pass* - activations and weights require more precision, so E4M3 datatype is best used.
+* *Forward pass* - activations and weights require more precision, so E4M3 datatype is used to store them.
 * *Backward pass* - gradients are less susceptible to precision loss but require higher dynamic range, so E5M2 datatype is preferred. 
 
 The user can configure this behavior via the ``fp8_format`` parameter of the recipe.
@@ -38,9 +38,8 @@ Scaling factors
 ---------------
 
 
-FP8's limited dynamic range is insufficient for many tensors. 
-To address this, scaling factors are used. In FP8 Current Scaling there is one **FP32** scale factor per tensor.
-The representation of a tensor element ``x`` in FP8 precision is given by:
+Limited dynamic range of FP8 datatype is insufficient for many tensors. 
+To address this, values in the tensor are scaled. FP8 Current Scaling recipe uses one **FP32** scale factor per tensor. The representation of a tensor element ``x`` in FP8 precision is given by:
 
 .. code-block:: python
 
@@ -53,13 +52,13 @@ where
 
 **FP8 Current Scaling quantization**
 
-Let's look more closely at how quantization to FP8 with scaling factor is implemented in
+Let's take a closer look at how quantization to FP8 with scaling factor is implemented in
 the FP8 Current Scaling recipe.
 
 .. raw:: html
    :file: img/fp8_scaling_concept.svg
 
-*Figure 3: Quantization to FP8 consists of amax computation, scaling to fit the FP8 range and casting to the respective FP8 format.*
+*Figure 3: Quantization to FP8 consists of amax (absolute maximum) computation, scaling to fit the FP8 range and casting to the respective FP8 format.*
 
 Quantization to FP8 consists of 3 steps:
 
@@ -86,7 +85,6 @@ Hardware support
 
 The Hopper architecture introduced FP8 support in Tensor Cores, enabling efficient low-precision computation. 
 Tensor Cores support every combination of E4M3 and E5M2 formats as inputs, allowing flexible precision choices for different operands.
-The inputs to an FP8 Tensor Core operation consist of chunks of FP8 tensors along with their corresponding scaling factors.
 The Tensor Core performs the matrix multiplication in FP8 precision and produces output in higher precision (FP16, BF16, or FP32).
 
 .. raw:: html

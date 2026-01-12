@@ -42,7 +42,7 @@
   <path d="M 629 110 L 629 145" class="arrow"/>
   
   <rect x="572" y="145" width="115" height="50" rx="5" class="hp"/>
-  <text x="629" y="175" class="text">Attn * V</text>
+  <text x="629" y="175" class="text">Scores * V</text>
   
   <path d="M 572 170 L 549 170" class="arrow"/>
   

@@ -132,10 +132,10 @@ TE will use best possible fusion for given recipe and TE module configuration:
 
 3. *Computation of quantized tensor in rowwise usage in forward pass and transpose to columnwise usage in backward pass*. 
 
-   This is not possible for all recipes, but if it is possible it is more memory efficient than Option 1.
+   It is more memory efficient than Option 1, but not all recipes can utilize it (otherwise
+   the quantization accuracy would drop due to double quantization errors).
 
-Transformer Engine uses the best possible fusion internally, so users do not need to worry about the details.
-We showcase this issue in the documentation to understand memory consequences of different fusion scenarios.
+Transformer Engine chooses the best possible fusion internally taking the recipe and the operation into account.
 
 .. raw:: html
    :file: img/transpose_fusion.svg
@@ -152,16 +152,16 @@ Contrary to intuition, FP8 training does not always reduce memory compared to BF
 
 *Master weights*
 
-Transformer Engine stores weights in high precision and quantizes them to low precision before each GEMM.
+Transformer Engine by default stores weights in high precision and quantizes them to low precision before each GEMM.
 Moreover, one can specify the precision of the weights stored in the model - if this can be FP32 or 
 BF16/FP16 -- or do not store high precision weights in the model at all. There are multiple scenarios to consider,
 three of them are listed below:
 
 1. model weights are in FP32, quantized to low precision before each GEMM,
 2. model weights are in BF16/FP16, quantized to low precision before each GEMM, master weights in optimizer are in FP32.
-3. model weight are stored directly in low precision, and master weights in optimizer are in FP32.
+3. model weights are stored directly in low precision, and master weights in optimizer are in FP32.
 
-Note that all these scenarios may have different memory footprints.
+Note that each of these scenarios may have different memory footprint.
 
 *Activations saved for backward*
 
@@ -169,8 +169,8 @@ Unlike weights, activations do not require a high precision copy for optimizer u
 As shown in Table 2, the input needs rowwise usage in forward and columnwise usage 
 for weight gradient computation in backward — so it must be saved between passes.
 
-The memory impact depends on which scenario from Figure 3.
-Additionally, on architectures where rowwise and columnwise share the same memory layout 
+The memory impact depends on which scenario from Figure 3 is used.
+Additionally, on architectures where rowwise and columnwise usage tensors share the same memory layout 
 (e.g., FP8 on Blackwell, as shown in Figure 2), a single quantized tensor serves both usages, 
 reducing memory overhead compared to architectures requiring separate tensors.
 
@@ -386,7 +386,7 @@ Fused layers
 ------------
 
 
-Transformer Engine provides fused layers such as ``LayerNormLinear`` and ``LayerNormMLP`` 
+Transformer Engine provides fused layers such as ``LayerNormLinear`` (``LayerNormDenseGeneral`` in JAX) and ``LayerNormMLP`` 
 that enable kernel fusion optimizations. One key optimization is fusing layer normalization 
 with quantization.
 
@@ -394,7 +394,7 @@ In a typical Transformer architecture, LayerNorm precedes a Linear layer. Withou
 the LayerNorm outputs in FP32, and the Linear layer must then quantize this input before 
 performing the GEMM — adding overhead. With ``LayerNormLinear``, these operations are fused 
 into a single kernel: the LayerNorm output is quantized directly, eliminating the separate 
-quantization step and reducing memory bandwidth.
+quantization step and reducing memory movement.
 
 
 .. raw:: html
@@ -425,7 +425,7 @@ Let's see how we can use fused layers in different frameworks.
       
       The fused ``LayerNormLinear`` layer is particularly efficient in FP8 training because 
       it avoids an intermediate quantization step. The LayerNorm output is directly quantized 
-      for the GEMM operation, reducing memory bandwidth and improving performance.
+      for the GEMM operation, reducing memory movement and improving performance.
 
    .. tab:: JAX
 
@@ -445,7 +445,7 @@ Let's see how we can use fused layers in different frameworks.
       
       The fused ``LayerNormDenseGeneral`` layer is particularly efficient in FP8 training because 
       it avoids an intermediate quantization step. The LayerNorm output is directly quantized 
-      for the GEMM operation, reducing memory bandwidth and improving performance.
+      for the GEMM operation, reducing memory movement and improving performance.
 
 
 Distributed training
@@ -461,7 +461,7 @@ tensors where low precision communication matters: **input** and **output gradie
 
 For sequence parallelism, TE supports all-gather of quantized tensors. This provides several benefits:
 
-1. *Reduced memory* — no need to store high precision tensors for backward pass.
+1. *Reduced memory usage* — no need to store high precision tensors for backward pass.
 2. *Reduced communication* — smaller tensors mean less data to transfer.
 3. *Parallelized quantization* — quantization work is distributed across GPUs.
 

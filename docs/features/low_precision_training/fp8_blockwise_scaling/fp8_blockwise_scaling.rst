@@ -6,7 +6,7 @@
 FP8 Blockwise Scaling
 ===================================
 
-FP8 Blockwise Scaling is inspired by the quantization scheme used to train the `DeepSeek-v3 model <https://arxiv.org/abs/2412.19437>`__ –
+FP8 Blockwise Scaling recipe is inspired by the quantization scheme used to train the `DeepSeek-v3 model <https://arxiv.org/abs/2412.19437>`__ –
 the first open-source large-scale LLM trained entirely in FP8 precision.
 Unlike the previous recipes, it assigns a dedicated scaling factor to each block of elements.
 
@@ -32,13 +32,13 @@ where
 *Figure 1. Top: Comparison of standard FP8 scaling (left) using a single scaling factor per tensor versus 
 FP8 blockwise scaling in 1 dimension (right) using multiple scaling factors, one per block of 128 elements.
 Bottom: FP8 blockwise scaling in 2 dimensions where each 128×128 block in the data tensor has a corresponding
-scaling factor, providing fine-grained spatial control over quantization precision.*
+scaling factor.*
 
 **FP8 format**
 
 Unlike FP8 Current/Delayed Scaling, E4M3 is used by default for both forward and backward passes.
-Previous recipes used E5M2 for gradients due to its higher dynamic range,
-but with multiple scaling factors per tensor, E4M3 is usually sufficient.
+Tensor-scaled recipes used E5M2 for gradients due to its higher dynamic range,
+but with multiple scaling factors per tensor the dynamic range requirement is lowered, so E4M3 is usually sufficient.
 The ``fp8_format`` parameter also supports ``HYBRID`` mode (E4M3 for forward, E5M2 for backward).
 Pure E5M2 training is not supported.
 
@@ -76,7 +76,8 @@ There are some assumptions on the dimensions of the tensor (for both 1D and 2D s
 
 Scaling factors are stored as 32-bit floating point numbers.
 By default, they are constrained to powers of 2 (utilizing the 8 exponent bits of FP32).
-This constraint can be relaxed by setting the environment variable ``NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1``.
+On Hopper, this constraint can be relaxed by setting the environment variable ``NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1``.
+On Blackwell, only powers of 2 are supported.
 
 Each block's scaling factor is computed through the following steps:
 
