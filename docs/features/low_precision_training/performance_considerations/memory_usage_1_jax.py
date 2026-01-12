@@ -31,6 +31,7 @@ def measure_memory():
 
     # Forward pass in high precision
     output = layer.apply(params, x)
+    del x  # Input is saved by model for backward, not by user script
 
     mem_after_forward = get_gpu_memory_mb() - init_memory
     return mem_after_forward

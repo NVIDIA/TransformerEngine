@@ -20,20 +20,20 @@ def measure_memory():
 
     init_memory = torch.cuda.memory_allocated()
     layer = te.Linear(1024, 1024, params_dtype=torch.bfloat16)
-    memory = torch.cuda.memory_allocated() - init_memory
 
     inp = torch.randn(1024, 1024, dtype=torch.bfloat16, device="cuda")
     out = layer(inp)
-    mem_after_forward = torch.cuda.memory_allocated() - init_memory
+    del inp  # Input is saved by model for backward, not by user script
 
-    return memory, mem_after_forward
+    mem_after_forward = torch.cuda.memory_allocated() - init_memory
+    return mem_after_forward
 
 
 # Warmup run
 measure_memory()
 
 # Actual measurement
-memory, mem_after_forward = measure_memory()
+mem_after_forward = measure_memory()
 print(f"Memory usage after forward pass: {mem_after_forward/1024**2:.2f} MB")
 # END_MEMORY_USAGE_1
 print("# END_MEMORY_USAGE_1")

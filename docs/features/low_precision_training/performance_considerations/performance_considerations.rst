@@ -213,7 +213,7 @@ and columnwise tensors require separate memory layouts.
             :end-before: # END_MEMORY_USAGE_1
       
       Layer size is ``1024 * 1024 * 2 (2 bytes per parameter) = 2MB``.
-      Memory after forward pass is ``2 MB (weight) + 2 MB (input) + 2 MB (output) = 6 MB``.
+      Memory after forward pass is ``2 MB (weight) + 2 MB (input saved for backward) + 2 MB (output) = 6 MB``.
       
       **2. FP8 training with model weights in BF16**
 
@@ -243,11 +243,12 @@ and columnwise tensors require separate memory layouts.
             :start-after: # START_MEMORY_USAGE_2
             :end-before: # END_MEMORY_USAGE_2
       
-      Total memory usage is ``2 MB (weight) + 1 MB (weight in FP8) + 2 MB (input) + 1 MB (input in FP8) + 2 MB (output) = 8 MB``.
+      Total memory usage is ``2 MB (weight) + 1 MB (weight in FP8) + 1 MB (input in FP8 saved for backward) + 2 MB (output) = 6 MB``.
       
-      **3. FP8 training with model weights stored directly in low precision**
+      **3. FP8 inference with model weights stored directly in low precision**
 
-      When model weights are stored directly in low precision, master weights are not needed.
+      For inference scenarios, model weights can be stored directly in low precision. Since we are only 
+      performing forward passes without gradient updates, master weights in high precision are not needed.
 
       .. raw:: html
 
@@ -273,9 +274,8 @@ and columnwise tensors require separate memory layouts.
             :start-after: # START_MEMORY_USAGE_3
             :end-before: # END_MEMORY_USAGE_3
 
-      Total memory usage is ``1 MB (weight in FP8) + 2 MB (input) + 1 MB (input in FP8) + 2 MB (output) = 6 MB``.
-      Note that columnwise FP8 weight is not computed during initialization with ``torch.no_grad()``.
-      It will be computed on the first backward pass from the rowwise FP8 weight.
+      Total memory usage is ``1 MB (weight in FP8) + 1 MB (input in FP8) + 2 MB (output) = 4 MB``.
+      This is lower than the BF16 baseline (6 MB) since no high precision copies are needed.
       
       **4. Saving original input instead of quantized**
 
@@ -342,7 +342,7 @@ and columnwise tensors require separate memory layouts.
             :end-before: # END_MEMORY_USAGE_1
       
       Layer size is ``1024 * 1024 * 2 (2 bytes per parameter) = 2MB``.
-      Memory after forward pass is ``2 MB (weight) + 2 MB (input) + 2 MB (output) = 6 MB``.
+      Memory after forward pass is ``2 MB (weight) + 2 MB (input saved for backward) + 2 MB (output) = 6 MB``.
       
       **2. FP8 training with master weights in BF16**
 

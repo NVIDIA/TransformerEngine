@@ -20,12 +20,13 @@ def measure_memory():
 
     init_memory = torch.cuda.memory_allocated()
     layer = te.Linear(1024, 1024, params_dtype=torch.bfloat16)
-    inp = torch.randn(1024, 1024, dtype=torch.bfloat16, device="cuda")
 
+    inp = torch.randn(1024, 1024, dtype=torch.bfloat16, device="cuda")
     with te.autocast(enabled=True):
         out = layer(inp)
-    mem_after_forward = torch.cuda.memory_allocated() - init_memory
+    del inp  # Input is saved by model for backward, not by user script
 
+    mem_after_forward = torch.cuda.memory_allocated() - init_memory
     return mem_after_forward
 
 

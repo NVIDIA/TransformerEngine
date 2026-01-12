@@ -20,25 +20,26 @@ def measure_memory():
 
     init_memory = torch.cuda.memory_allocated()
 
-    # FP8 forward and backward with FP8 weights
+    # FP8 inference with FP8 weights
     with te.quantized_model_init(enabled=True), torch.no_grad():
         layer_fp8 = te.Linear(1024, 1024, params_dtype=torch.bfloat16)
-    memory = torch.cuda.memory_allocated() - init_memory
 
-    inp = torch.randn(1024, 1024, dtype=torch.bfloat16, device="cuda")
-    with te.autocast(enabled=True):
-        out = layer_fp8(inp)
+    with torch.no_grad():
+        inp = torch.randn(1024, 1024, dtype=torch.bfloat16, device="cuda")
+        with te.autocast(enabled=True):
+            out = layer_fp8(inp)
+        del inp  # Input is not saved by model for backward in inference
 
     mem_after_forward = torch.cuda.memory_allocated() - init_memory
 
-    return memory, mem_after_forward
+    return mem_after_forward
 
 
 # Warmup run
 measure_memory()
 
 # Actual measurement
-memory, mem_after_forward = measure_memory()
+mem_after_forward = measure_memory()
 print(f"Memory after forward pass: {mem_after_forward/1024**2:.2f} MB")
 # END_MEMORY_USAGE_3
 print("# END_MEMORY_USAGE_3")
