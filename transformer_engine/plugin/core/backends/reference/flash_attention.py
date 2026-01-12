@@ -42,12 +42,19 @@ class FlashAttentionTorch(FlashAttentionBase):
         """Convert tensor from various layouts to [batch, heads, seq, dim] format."""
         layout = layout.lower()
 
+        # Handle combined layouts like "sbhd_sbhd_sbhd" - extract the first part
+        if "_" in layout:
+            layout = layout.split("_")[0]
+
         if layout in ("sbhd", "sbh3d", "sb3hd"):
             return tensor.permute(1, 2, 0, 3)
         elif layout in ("bshd", "bsh3d", "bs3hd"):
             return tensor.permute(0, 2, 1, 3)
-        elif layout == "bhsd":
+        elif layout in ("bhsd",):
             return tensor
+        elif layout in ("thd",):
+            # thd is packed format, should not reach here for 4D tensors
+            raise ValueError(f"thd layout requires 3D tensor, got {tensor.dim()}D")
         else:
             raise ValueError(f"Unsupported qkv_layout: {layout}")
 
@@ -59,12 +66,18 @@ class FlashAttentionTorch(FlashAttentionBase):
         """Convert tensor from [batch, heads, seq, dim] back to original layout."""
         layout = layout.lower()
 
+        # Handle combined layouts like "sbhd_sbhd_sbhd" - extract the first part
+        if "_" in layout:
+            layout = layout.split("_")[0]
+
         if layout in ("sbhd", "sbh3d", "sb3hd"):
             return tensor.permute(2, 0, 1, 3)
         elif layout in ("bshd", "bsh3d", "bs3hd"):
             return tensor.permute(0, 2, 1, 3)
-        elif layout == "bhsd":
+        elif layout in ("bhsd",):
             return tensor
+        elif layout in ("thd",):
+            raise ValueError(f"thd layout requires 3D tensor, got {tensor.dim()}D")
         else:
             raise ValueError(f"Unsupported qkv_layout: {layout}")
 
@@ -209,27 +222,43 @@ class FlashAttentionTorch(FlashAttentionBase):
         if alibi_slopes is not None:
             raise NotImplementedError("ALiBi slopes are not supported in PyTorch SDPA backend")
 
-        use_packed_format = cu_seqlens_q is not None or cu_seqlens_kv is not None
-        padding_mask_q = None
-        padding_mask_kv = None
         query_original_shape = query_layer.shape
 
-        if use_packed_format:
-            if cu_seqlens_q is not None:
-                query, padding_mask_q = self._unpack_tensor(query_layer, cu_seqlens_q, max_seqlen_q)
-            else:
-                query = self._convert_layout_to_bhsd(query_layer, qkv_layout)
+        # Check if input is in standard 4D format - same as flagos backend
+        # If tensor is 4D, treat it as standard format and just do layout conversion
+        # Only use unpack logic for true packed format (3D tensors with thd layout)
+        is_standard_4d = query_layer.dim() == 4
 
-            if cu_seqlens_kv is not None:
-                key, padding_mask_kv = self._unpack_tensor(key_layer, cu_seqlens_kv, max_seqlen_kv)
-                value, _ = self._unpack_tensor(value_layer, cu_seqlens_kv, max_seqlen_kv)
-            else:
-                key = self._convert_layout_to_bhsd(key_layer, qkv_layout)
-                value = self._convert_layout_to_bhsd(value_layer, qkv_layout)
-        else:
+        if is_standard_4d:
+            # Standard 4D tensor format - just convert layout like flagos does
             query = self._convert_layout_to_bhsd(query_layer, qkv_layout)
             key = self._convert_layout_to_bhsd(key_layer, qkv_layout)
             value = self._convert_layout_to_bhsd(value_layer, qkv_layout)
+            use_packed_format = False
+            padding_mask_q = None
+            padding_mask_kv = None
+        else:
+            # True packed format (thd layout, 3D tensor) - use unpack logic
+            use_packed_format = cu_seqlens_q is not None or cu_seqlens_kv is not None
+            padding_mask_q = None
+            padding_mask_kv = None
+
+            if use_packed_format:
+                if cu_seqlens_q is not None:
+                    query, padding_mask_q = self._unpack_tensor(query_layer, cu_seqlens_q, max_seqlen_q)
+                else:
+                    query = self._convert_layout_to_bhsd(query_layer, qkv_layout)
+
+                if cu_seqlens_kv is not None:
+                    key, padding_mask_kv = self._unpack_tensor(key_layer, cu_seqlens_kv, max_seqlen_kv)
+                    value, _ = self._unpack_tensor(value_layer, cu_seqlens_kv, max_seqlen_kv)
+                else:
+                    key = self._convert_layout_to_bhsd(key_layer, qkv_layout)
+                    value = self._convert_layout_to_bhsd(value_layer, qkv_layout)
+            else:
+                query = self._convert_layout_to_bhsd(query_layer, qkv_layout)
+                key = self._convert_layout_to_bhsd(key_layer, qkv_layout)
+                value = self._convert_layout_to_bhsd(value_layer, qkv_layout)
 
         batch_size, num_heads_q, seq_len_q, head_dim = query.shape
         num_heads_kv = key.shape[1]
