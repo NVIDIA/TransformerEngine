@@ -141,7 +141,7 @@ class RowIdMapPass1Primitive(BasePrimitive):
             PartitionSpec(None, None),
             desc="RowIdMapPass1.workspace_sharding",
         )
-        return row_id_map_sharding, workspace_sharding
+        return [row_id_map_sharding, workspace_sharding]
 
     @staticmethod
     def partition(num_tokens, num_experts, block_size, mesh, arg_infos, result_infos):
@@ -163,7 +163,7 @@ class RowIdMapPass1Primitive(BasePrimitive):
             PartitionSpec(None, None),
             desc="RowIdMapPass1.workspace_sharding",
         )
-        out_shardings = (row_id_map_sharding, workspace_sharding)
+        out_shardings = [row_id_map_sharding, workspace_sharding]
 
         def sharded_impl(routing_map):
             # Each shard processes its local tokens
@@ -277,7 +277,7 @@ class RowIdMapPass2Primitive(BasePrimitive):
             PartitionSpec(None, None),
             desc="RowIdMapPass2.workspace_sharding",
         )
-        return row_id_map_sharding, workspace_sharding
+        return [row_id_map_sharding, workspace_sharding]
 
     @staticmethod
     def partition(num_tokens, num_experts, block_size, mesh, arg_infos, result_infos):
@@ -299,7 +299,7 @@ class RowIdMapPass2Primitive(BasePrimitive):
             PartitionSpec(None, None),
             desc="RowIdMapPass2.workspace_sharding",
         )
-        out_shardings = (row_id_map_sharding, workspace_sharding)
+        out_shardings = [row_id_map_sharding, workspace_sharding]
 
         def sharded_impl(row_id_map, workspace):
             local_num_tokens = row_id_map.shape[0]
@@ -627,7 +627,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
                 PartitionSpec(None),
                 desc="PermuteWithMaskMap.permuted_probs_sharding_empty",
             )
-        return output_sharding, permuted_probs_sharding
+        return [output_sharding, permuted_probs_sharding]
 
     @staticmethod
     def partition(
@@ -673,7 +673,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
                 PartitionSpec(None),
                 desc="PermuteWithMaskMap.permuted_probs_sharding_empty",
             )
-        out_shardings = (output_sharding, permuted_probs_sharding)
+        out_shardings = [output_sharding, permuted_probs_sharding]
 
         # Get number of data parallel devices from the batch sharding axis
         batch_axis = inp_spec[0]
@@ -955,7 +955,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
                 PartitionSpec(None),
                 desc="UnpermuteWithMaskMap.unpermuted_probs_sharding_empty",
             )
-        return output_sharding, unpermuted_probs_sharding
+        return [output_sharding, unpermuted_probs_sharding]
 
     @staticmethod
     def partition(
@@ -994,7 +994,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
                 PartitionSpec(None),
                 desc="UnpermuteWithMaskMap.unpermuted_probs_sharding_empty",
             )
-        out_shardings = (output_sharding, unpermuted_probs_sharding)
+        out_shardings = [output_sharding, unpermuted_probs_sharding]
 
         def sharded_impl(inp, row_id_map, merging_probs, permuted_probs, pad_offsets):
             # Each shard processes its local tokens
@@ -1223,7 +1223,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
             PartitionSpec(merging_probs_spec[0], None),
             desc="UnpermuteBwdWithMergingProbs.merging_probs_grad_sharding",
         )
-        return fwd_input_grad_sharding, merging_probs_grad_sharding
+        return [fwd_input_grad_sharding, merging_probs_grad_sharding]
 
     @staticmethod
     def partition(
@@ -1253,7 +1253,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
             PartitionSpec(merging_probs_spec[0], None),
             desc="UnpermuteBwdWithMergingProbs.merging_probs_grad_sharding",
         )
-        out_shardings = (fwd_input_grad_sharding, merging_probs_grad_sharding)
+        out_shardings = [fwd_input_grad_sharding, merging_probs_grad_sharding]
 
         def sharded_impl(fwd_output_grad, fwd_input, merging_probs, row_id_map, pad_offsets):
             local_num_tokens = row_id_map.shape[0]
@@ -1623,7 +1623,7 @@ class SortChunksByMapPrimitive(BasePrimitive):
                 PartitionSpec(None),
                 desc="SortChunksByMap.permuted_probs_sharding_empty",
             )
-        return output_sharding, permuted_probs_sharding
+        return [output_sharding, permuted_probs_sharding]
 
     @staticmethod
     def partition(
@@ -1652,7 +1652,7 @@ class SortChunksByMapPrimitive(BasePrimitive):
                 PartitionSpec(None),
                 desc="SortChunksByMap.permuted_probs_sharding_empty",
             )
-        out_shardings = (output_sharding, permuted_probs_sharding)
+        out_shardings = [output_sharding, permuted_probs_sharding]
 
         def sharded_impl(inp, row_id_map, probs):
             local_num_tokens = inp.shape[0]
