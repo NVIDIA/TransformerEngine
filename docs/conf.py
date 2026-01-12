@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -88,6 +88,8 @@ html_css_files = [
     "css/diagram-colors.css",
     "css/sphinx_tabs.css",
     "css/svg-responsive.css",
+    "css/rtabs.css",
+    "css/output-style.css",
 ]
 
 html_theme_options = {

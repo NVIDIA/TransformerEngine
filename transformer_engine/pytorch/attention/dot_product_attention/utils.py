@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -532,9 +532,6 @@ def get_attention_backend(
         if use_flash_attention:
             use_flash_attention = False
             logger.debug("Disabling FlashAttention for max_logit")
-        if use_fused_attention and qkv_format == "thd":
-            use_fused_attention = False
-            logger.debug("Disabling FusedAttention for max_logit with qkv_format = thd")
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             use_flash_attention = False
             use_fused_attention = False
@@ -677,9 +674,6 @@ def get_attention_backend(
 
     # Filter: QKV layout
     if qkv_format == "thd":
-        if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
-            use_unfused_attention = False
         if pad_between_seqs:
             if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
                 use_flash_attention_3 and FlashAttentionUtils.v3_is_installed

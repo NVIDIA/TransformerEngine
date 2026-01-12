@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -241,13 +241,9 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
     cuda_root = Path(nvidia.__file__).parent
     return [
-        cuda_root / "cuda_nvcc" / "include",
-        cuda_root / "cublas" / "include",
-        cuda_root / "cuda_runtime" / "include",
-        cuda_root / "cudnn" / "include",
-        cuda_root / "cuda_cccl" / "include",
-        cuda_root / "nvtx" / "include",
-        cuda_root / "cuda_nvrtc" / "include",
+        subdir / "include"
+        for subdir in cuda_root.iterdir()
+        if subdir.is_dir() and (subdir / "include").is_dir()
     ]
 
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -13,13 +13,39 @@ from typing import List
 
 
 def install_requirements() -> List[str]:
-    """Install dependencies for TE/PyTorch extensions."""
-    return ["torch>=2.1", "einops", "onnxscript", "onnx"]
+    """Install dependencies for TE/PyTorch extensions.
+
+    IMPORTANT - PyTorch Index Required for pytorch-triton:
+        These dependencies MUST be installed using PyTorch's package index:
+
+            pip install pytorch-triton --index-url https://download.pytorch.org/whl/<version??>
+
+        - pytorch-triton is only available from PyTorch's index (not PyPI)
+        - The 'pytorch-triton' package on PyPI is a placeholder that will fail
+        - torch.compile() requires pytorch-triton, not OpenAI's 'triton' package
+    """
+    return [
+        "torch>=2.1",
+        "einops",
+        "onnxscript",
+        "onnx",
+        "packaging",
+        "pydantic",
+        "nvdlfw-inspect",
+        "pytorch-triton",
+    ]
 
 
 def test_requirements() -> List[str]:
-    """Test dependencies for TE/JAX extensions."""
-    return ["numpy", "torchvision", "transformers", "torchao==0.13"]
+    """Test dependencies for TE/PyTorch extensions."""
+    return [
+        "numpy",
+        "torchvision",
+        "transformers",
+        "torchao==0.13",
+        "onnxruntime",
+        "onnxruntime_extensions",
+    ]
 
 
 def setup_pytorch_extension(
