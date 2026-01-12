@@ -5,7 +5,7 @@
 from typing import Optional, List
 import torch
 import flag_gems
-
+from transformer_engine.plugin.core.backends.flagos.utils import gems_context
 
 def multi_tensor_adam_fl(
     chunk_size: int,
@@ -22,7 +22,8 @@ def multi_tensor_adam_fl(
     inv_scale: Optional[float] = 1.0,
     out_dtype: Optional[torch.dtype] = None,
 ) -> None:
-    with flag_gems.use_gems():
+
+    with gems_context():
         num_lists = len(tensor_lists)
         assert num_lists in [4, 5], f"Expected 4 or 5 tensor lists, got {num_lists}"
 

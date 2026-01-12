@@ -6,9 +6,11 @@ import torch
 from torch.distributed._tensor import DTensor
 import flag_gems
 
+from transformer_engine.plugin.core.backends.flagos.utils import gems_context
 
 def multi_tensor_l2_norm_fl(chunk_size, noop_flag, tensor_lists, per_tensor, *args):
-    with flag_gems.use_gems():
+
+    with gems_context():
         tensors = tensor_lists[0]
 
         if per_tensor:
@@ -21,6 +23,7 @@ def multi_tensor_l2_norm_fl(chunk_size, noop_flag, tensor_lists, per_tensor, *ar
 
 
 def multi_tensor_scale_fl(chunk_size, noop_flag, tensor_lists, scale):
-    with flag_gems.use_gems():
+
+    with gems_context():
         for src, dst in zip(tensor_lists[0], tensor_lists[1]):
             dst.copy_(src * scale)

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 
 import flag_gems
+from transformer_engine.plugin.core.backends.flagos.utils import gems_context
 
 __all__ = [
     "generic_gemm_fl",
@@ -63,7 +64,8 @@ def generic_gemm_fl(
     alpha: float = 1.0,
     beta: Optional[float] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-    with flag_gems.use_gems():
+
+    with gems_context():
         assert not gelu and gelu_in is None, "Triton-Based General Gemm do not support gelu now"
         assert quantizer is None, "Triton-Based General Gemm do not support quantization now"
         assert bias is None, "Triton-Based General Gemm do not support bias now"

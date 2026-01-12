@@ -5,6 +5,7 @@
 import torch
 import flag_gems
 
+from transformer_engine.plugin.core.backends.flagos.utils import gems_context
 
 def rmsnorm_fwd_fl(
     input,
@@ -16,7 +17,7 @@ def rmsnorm_fwd_fl(
     sm_margin,
     zero_centered_gamma,
 ):
-    with flag_gems.use_gems():
+    with gems_context():
         if zero_centered_gamma:
             weight_adj = 1 + weight
         else:
@@ -44,7 +45,7 @@ def rmsnorm_bwd_fl(
     zero_centered_gamma,
     eps,
 ):
-    with flag_gems.use_gems():
+    with gems_context():
         # When zero_centered_gamma is True, forward uses (1 + gamma) as weight
         # So backward needs to use (1 + gamma) for computing dx
         if zero_centered_gamma:
