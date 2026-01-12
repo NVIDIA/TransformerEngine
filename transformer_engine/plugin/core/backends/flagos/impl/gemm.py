@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 
 import flag_gems
-from transformer_engine.plugin.core.backends.flagos.utils import gems_context
 
 __all__ = [
     "generic_gemm_fl",
@@ -65,51 +64,50 @@ def generic_gemm_fl(
     beta: Optional[float] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
 
-    with gems_context():
-        assert not gelu and gelu_in is None, "Triton-Based General Gemm do not support gelu now"
-        assert quantizer is None, "Triton-Based General Gemm do not support quantization now"
-        assert bias is None, "Triton-Based General Gemm do not support bias now"
+    assert not gelu and gelu_in is None, "Triton-Based General Gemm do not support gelu now"
+    assert quantizer is None, "Triton-Based General Gemm do not support quantization now"
+    assert bias is None, "Triton-Based General Gemm do not support bias now"
 
-        alpha = validate_gemm_scale(alpha, True)
-        beta = validate_gemm_scale(beta, accumulate)
+    alpha = validate_gemm_scale(alpha, True)
+    beta = validate_gemm_scale(beta, accumulate)
 
-        s = -1
-        b = -1
-        orig_A_shape = A.shape
-        orig_B_shape = B.shape
-        shape_a_changed = False
-        shape_b_changed = False
+    s = -1
+    b = -1
+    orig_A_shape = A.shape
+    orig_B_shape = B.shape
+    shape_a_changed = False
+    shape_b_changed = False
 
-        if A.ndim == 3:
-            A = A.view(-1, A.shape[-1])
-            shape_a_changed = True
+    if A.ndim == 3:
+        A = A.view(-1, A.shape[-1])
+        shape_a_changed = True
 
-        if B.ndim == 3:
-            s, b, _ = B.shape
-            B = B.view(-1, B.shape[-1])
-            shape_b_changed = True
+    if B.ndim == 3:
+        s, b, _ = B.shape
+        B = B.view(-1, B.shape[-1])
+        shape_b_changed = True
 
-        A_comp = A.T if transA else A
-        B_comp = B.T if transB else B
+    A_comp = A.T if transA else A
+    B_comp = B.T if transB else B
 
-        out1 = flag_gems.mm(B_comp, A_comp)
+    out1 = flag_gems.mm(B_comp, A_comp)
 
-        if shape_b_changed:
-            out1 = out1.view(s, b, -1)
+    if shape_b_changed:
+        out1 = out1.view(s, b, -1)
 
-        torch_out_dtype = _convert_dtype(output_dtype)
-        if torch_out_dtype is not None and out1.dtype != torch_out_dtype:
-            out1 = out1.to(torch_out_dtype)
+    torch_out_dtype = _convert_dtype(output_dtype)
+    if torch_out_dtype is not None and out1.dtype != torch_out_dtype:
+        out1 = out1.to(torch_out_dtype)
 
-        bias_grad = None
-        gelu_input = None
-        extra_output_ret = None
+    bias_grad = None
+    gelu_input = None
+    extra_output_ret = None
 
-        if D is not None:
-            if accumulate:
-                D.add_(out1)
-            else:
-                D.copy_(out1)
-            return D, bias_grad, gelu_input, extra_output_ret
+    if D is not None:
+        if accumulate:
+            D.add_(out1)
         else:
-            return out1, bias_grad, gelu_input, extra_output_ret
+            D.copy_(out1)
+        return D, bias_grad, gelu_input, extra_output_ret
+    else:
+        return out1, bias_grad, gelu_input, extra_output_ret

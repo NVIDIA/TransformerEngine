@@ -35,7 +35,6 @@ from transformer_engine.plugin.core.ops import FlashAttentionBase
 
 import flag_gems
 
-from transformer_engine.plugin.core.backends.flagos.utils import gems_context
 
 class AttnFuncFL(torch.autograd.Function):
     @staticmethod
@@ -73,25 +72,24 @@ class AttnFuncFL(torch.autograd.Function):
 
         is_causal = attn_mask_type == 'causal'
 
-        with gems_context():
-            # FlagGems requires contiguous tensors, so we must call contiguous() after permute
-            q_permuted = q.permute(1, 2, 0, 3).contiguous()
-            k_permuted = k.permute(1, 2, 0, 3).contiguous()
-            v_permuted = v.permute(1, 2, 0, 3).contiguous()
 
-            (out_permuted, m) = flag_gems.scaled_dot_product_attention_forward(
-                q_permuted,
-                k_permuted,
-                v_permuted,
-                attn_mask=None,
-                dropout_p=dropout_p,
-                is_causal=is_causal,
-                scale=attn_scale,
-                enable_gqa=True,
-            )
+        q_permuted = q.permute(1, 2, 0, 3).contiguous()
+        k_permuted = k.permute(1, 2, 0, 3).contiguous()
+        v_permuted = v.permute(1, 2, 0, 3).contiguous()
 
-            # Must be contiguous for .view() in FlashAttentionFL.forward
-            out = out_permuted.permute(2, 0, 1, 3).contiguous()
+        (out_permuted, m) = flag_gems.scaled_dot_product_attention_forward(
+            q_permuted,
+            k_permuted,
+            v_permuted,
+            attn_mask=None,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            scale=attn_scale,
+            enable_gqa=True,
+        )
+        # Must be contiguous for .view() in FlashAttentionFL.forward
+        out = out_permuted.permute(2, 0, 1, 3).contiguous()
+
         aux_ctx_tensors = [out_permuted, m]
         out_ret = out
         qkvo_tensors = (q_permuted, k_permuted, v_permuted, out_permuted)
@@ -162,34 +160,34 @@ class AttnFuncFL(torch.autograd.Function):
 
             dqkv_te_dtype = TE_DType[d_out.dtype]
 
-            with gems_context():
-                # Ensure all tensors are contiguous for FlagGems backward
-                q_permuted = q_permuted.contiguous() if not q_permuted.is_contiguous() else q_permuted
-                k_permuted = k_permuted.contiguous() if not k_permuted.is_contiguous() else k_permuted
-                v_permuted = v_permuted.contiguous() if not v_permuted.is_contiguous() else v_permuted
-                out_permuted = out_permuted.contiguous() if not out_permuted.is_contiguous() else out_permuted
-                m = m.contiguous() if not m.is_contiguous() else m
 
-                # d_out is (seq, batch, heads, dim) from autograd, permute to (batch, heads, seq, dim)
-                d_out_permuted = d_out.permute(1, 2, 0, 3).contiguous()
+            q_permuted = q_permuted.contiguous() if not q_permuted.is_contiguous() else q_permuted
+            k_permuted = k_permuted.contiguous() if not k_permuted.is_contiguous() else k_permuted
+            v_permuted = v_permuted.contiguous() if not v_permuted.is_contiguous() else v_permuted
+            out_permuted = out_permuted.contiguous() if not out_permuted.is_contiguous() else out_permuted
+            m = m.contiguous() if not m.is_contiguous() else m
 
-                dq_permuted, dk_permuted, dv_permuted = flag_gems.scaled_dot_product_attention_backward(
-                    d_out_permuted,
-                    q_permuted,
-                    k_permuted,
-                    v_permuted,
-                    out_permuted,
-                    m,
-                    attn_mask=None,
-                    dropout_p=ctx.dropout_p,
-                    is_causal=ctx.is_causal,
-                    scale=ctx.attn_scale,
-                    enable_gqa=True,
-                )
+            # d_out is (seq, batch, heads, dim) from autograd, permute to (batch, heads, seq, dim)
+            d_out_permuted = d_out.permute(1, 2, 0, 3).contiguous()
 
-                dq = dq_permuted.permute(2, 0, 1, 3)
-                dk = dk_permuted.permute(2, 0, 1, 3)
-                dv = dv_permuted.permute(2, 0, 1, 3)
+            dq_permuted, dk_permuted, dv_permuted = flag_gems.scaled_dot_product_attention_backward(
+                d_out_permuted,
+                q_permuted,
+                k_permuted,
+                v_permuted,
+                out_permuted,
+                m,
+                attn_mask=None,
+                dropout_p=ctx.dropout_p,
+                is_causal=ctx.is_causal,
+                scale=ctx.attn_scale,
+                enable_gqa=True,
+            )
+
+            dq = dq_permuted.permute(2, 0, 1, 3)
+            dk = dk_permuted.permute(2, 0, 1, 3)
+            dv = dv_permuted.permute(2, 0, 1, 3)
+
             rest = None
 
         return (

@@ -5,7 +5,6 @@
 import torch
 import flag_gems
 
-from transformer_engine.plugin.core.backends.flagos.utils import gems_context
 
 def rmsnorm_fwd_fl(
     input,
@@ -17,23 +16,22 @@ def rmsnorm_fwd_fl(
     sm_margin,
     zero_centered_gamma,
 ):
-    with gems_context():
-        if zero_centered_gamma:
-            weight_adj = 1 + weight
-        else:
-            weight_adj = weight
+    if zero_centered_gamma:
+        weight_adj = 1 + weight
+    else:
+        weight_adj = weight
 
-        y, rstdevs = flag_gems.rms_norm_forward(
-            input,
-            [input.shape[-1]],
-            weight_adj,
-            eps,
-        )
+    y, rstdevs = flag_gems.rms_norm_forward(
+        input,
+        [input.shape[-1]],
+        weight_adj,
+        eps,
+    )
 
-        if rstdevs.shape != input.shape[:-1]:
-            rstdevs = rstdevs.view(input.shape[:-1])
+    if rstdevs.shape != input.shape[:-1]:
+        rstdevs = rstdevs.view(input.shape[:-1])
 
-        return y, None, rstdevs
+    return y, None, rstdevs
 
 
 def rmsnorm_bwd_fl(
@@ -45,20 +43,19 @@ def rmsnorm_bwd_fl(
     zero_centered_gamma,
     eps,
 ):
-    with gems_context():
-        # When zero_centered_gamma is True, forward uses (1 + gamma) as weight
-        # So backward needs to use (1 + gamma) for computing dx
-        if zero_centered_gamma:
-            gamma_adj = 1 + gamma
-        else:
-            gamma_adj = gamma
+    # When zero_centered_gamma is True, forward uses (1 + gamma) as weight
+    # So backward needs to use (1 + gamma) for computing dx
+    if zero_centered_gamma:
+        gamma_adj = 1 + gamma
+    else:
+        gamma_adj = gamma
 
-        dx, dw = flag_gems.rms_norm_backward(
-            dy,
-            x,
-            rsigma,
-            [x.shape[-1]],
-            gamma_adj,
-            eps,
-        )
-        return dx, dw
+    dx, dw = flag_gems.rms_norm_backward(
+        dy,
+        x,
+        rsigma,
+        [x.shape[-1]],
+        gamma_adj,
+        eps,
+    )
+    return dx, dw
