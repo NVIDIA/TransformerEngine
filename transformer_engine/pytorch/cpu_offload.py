@@ -524,11 +524,13 @@ class OffloadSynchronizer:
         self.previous_bwd_layer_id = layer_num
         self.current_layer_id = layer_num
 
-    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor:
+    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor | tuple[list, list]:
         """Default push tensor method"""
         return self.layer_states[self.num_of_fwds].push_tensor(tensor)
 
-    def pop_tensor(self, tensor_or_tensor_id: torch.Tensor | int) -> torch.Tensor:
+    def pop_tensor(
+        self, tensor_or_tensor_id: torch.Tensor | int | tuple[list, list]
+    ) -> torch.Tensor:
         """Default pop tensor method"""
         return self.layer_states[self.current_layer_id].pop_tensor(tensor_or_tensor_id)
 
