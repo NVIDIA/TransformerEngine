@@ -31,6 +31,7 @@ size_t create_seed_from_tensor_name(const std::string& tensor_name) {
 
 std::vector<DType> all_fp_types = {DType::kFloat32,
                                    DType::kFloat16,
+                                   DType::kFloat64,
                                    DType::kBFloat16,
                                    DType::kFloat8E5M2,
                                    DType::kFloat8E4M3};
@@ -57,6 +58,7 @@ const std::string &typeName(DType type) {
     {DType::kByte, "byte"},
     {DType::kInt32, "int32"},
     {DType::kInt64, "int64"},
+    {DType::kFloat64, "float64"},
     {DType::kFloat32, "float32"},
     {DType::kFloat16, "float16"},
     {DType::kBFloat16, "bfloat16"},
