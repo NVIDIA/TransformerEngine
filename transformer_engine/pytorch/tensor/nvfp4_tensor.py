@@ -689,6 +689,9 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 )
                 # pylint: disable=unnecessary-dunder-call
                 super(NVFP4Tensor, type(self)).data.__set__(self, dummy_tensor)
+            # Cache the attributes
+            self._dtype = tensor.dtype
+            self._requires_grad = tensor.requires_grad
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
             self._quantizer = tensor._quantizer

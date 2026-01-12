@@ -785,6 +785,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 )
                 # pylint: disable=unnecessary-dunder-call
                 super(MXFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
+            # Cache the attributes
+            self._dtype = tensor.dtype
+            self._requires_grad = tensor.requires_grad
+
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
             self._quantizer = tensor._quantizer.copy()
@@ -803,6 +807,15 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     # Cast to FP8 when setting MXFP8Tensor.data
     data = property(_get_data, _set_data)
 
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        return self._rowwise_data.shape if self._rowwise_data is not None else self._columnwise_data.shape
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        return self._rowwise_data.is_cuda if self._rowwise_data is not None else self._columnwise_data.is_cuda
 
 class _ViewFunc(torch.autograd.Function):
     """View function

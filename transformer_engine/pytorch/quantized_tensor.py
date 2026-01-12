@@ -392,6 +392,13 @@ class QuantizedTensor(torch.Tensor):
         # Call parent class to ensure autograd engine is aware of the change
         torch.Tensor.requires_grad.fset(self, value)
 
+    @dtype.setter
+    def dtype(self, value: torch.dtype) -> None:
+        """Set dtype property"""
+        # Update the cached value
+        self._dtype = value
+        warnings.warn("Dtype of QuantizedTensor has been changed. Ensure this is intended.")
+
     def requires_grad_(self, requires_grad: bool = True) -> QuantizedTensor:
         """Cache requires_grad property and call parent class method"""
         # pylint: disable=missing-function-docstring
