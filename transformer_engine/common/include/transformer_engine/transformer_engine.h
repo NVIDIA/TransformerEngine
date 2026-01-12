@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -51,8 +51,11 @@ struct NVTEShape {
  *  It does not own the memory it points to.
  */
 struct NVTEBasicTensor {
+  /*! Pointer to data buffer. */
   void *data_ptr;
+  /*! Data type. */
   NVTEDType dtype;
+  /*! Tensor shape. */
   NVTEShape shape;
 };
 
@@ -144,7 +147,7 @@ void *nvte_tensor_columnwise_data(const NVTETensor tensor);
  *
  *  \param[data] Pointer to start of shape array. If NULL, the shape
  *               will be filled with zeros.
- *  \param[data] Number of dimensions (must be <= 14)
+ *  \param[ndim] Number of dimensions (must be <= 14)
  *
  *  \return A shape. The shape will own its own copy of the data.
  */
@@ -177,7 +180,7 @@ size_t nvte_tensor_ndims(const NVTETensor tensor);
 /*! \brief Get the size of a specific tensor dimension.
  *
  *  \param[in] tensor Tensor.
- *  \param[in] size_t Dimension index.
+ *  \param[in] dim    Dimension index.
  *
  *  \return Size of the tensor at the specified dimension.
  */
@@ -258,8 +261,7 @@ NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor);
 /*! \brief Reset tensor value to zero.
  *
  *  \param[in] tensor Tensor.
- *
- *  \return A scale_inv shape of the input tensor.
+ *  \param[in] stream CUDA stream to use for the operation.
  */
 void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
 
@@ -337,6 +339,12 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigNVFP42DQuantization = 5,
   /*! Whether to enable stochastic rounding */
   kNVTEQuantizationConfigStochasticRounding = 6,
+  /*! Whether to enable fast math operations with reduced accuracy.
+   *
+   *  Optimizations are kernel-specific and they may be applied
+   *  inconsistently between kernels.
+   */
+  kNVTEQuantizationConfigUseFastMath = 7,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -533,7 +541,7 @@ enum class DType {
 /*! \brief Check if TE datatype is FP8
  *
  * Return true if TE datatype is FP8
- *  \param[in] DType      TE Datatype of interest
+ *  \param[in] t      TE Datatype of interest
  */
 inline bool is_fp8_dtype(const DType t) {
   return t == DType::kFloat8E4M3 || t == DType::kFloat8E5M2;
@@ -542,14 +550,14 @@ inline bool is_fp8_dtype(const DType t) {
 /*! \brief Check if TE datatype is FP4
  *
  * Return true if TE datatype is FP4
- *  \param[in] DType      TE Datatype of interest
+ *  \param[in] t      TE Datatype of interest
  */
 inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
 
 /*! \brief Check if TE datatype is high precision (FP32, FP16, BF16)
  *
  * Return true if TE datatype is high precision
- *  \param[in] DType      TE Datatype of interest
+ *  \param[in] t      TE Datatype of interest
  */
 inline bool is_high_precision_dtype(const DType t) {
   return t == DType::kFloat32 || t == DType::kBFloat16 || t == DType::kFloat16;
@@ -573,6 +581,7 @@ class TensorWrapper {
    *  \param[in] scale_dptr      Pointer to the scale value.
    *  \param[in] scale_inv_shape Shape of scale_inv
    *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
+   *  \param[in] scaling_mode    Tensor data format.
    */
   TensorWrapper(void *dptr, const NVTEShape &shape, const DType dtype, float *amax_dptr = nullptr,
                 float *scale_dptr = nullptr, float *scale_inv_dptr = nullptr,
@@ -609,6 +618,7 @@ class TensorWrapper {
    *  \param[in] scale_dptr      Pointer to the scale value.
    *  \param[in] scale_inv_shape Shape of scale_inv
    *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
+   *  \param[in] scaling_mode    Tensor data format.
    */
   TensorWrapper(void *dptr, const std::vector<size_t> &shape, const DType dtype,
                 float *amax_dptr = nullptr, float *scale_dptr = nullptr,
@@ -760,7 +770,7 @@ class TensorWrapper {
 
   /*! \brief Get the size of this TensorWrapper in the given dimension.
    *
-   *  \param[in] size_t Dimension index.
+   *  \param[in] dim Dimension index.
    *
    *  \return Size of this TensorWrapper in given dimension.
    */
@@ -929,9 +939,11 @@ class QuantizationConfigWrapper {
   QuantizationConfigWrapper(const QuantizationConfigWrapper &) = delete;
   QuantizationConfigWrapper &operator=(const QuantizationConfigWrapper &) = delete;
 
+  /*! \brief Move constructor. */
   QuantizationConfigWrapper(QuantizationConfigWrapper &&other) : config_{other.config_} {
     other.config_ = nullptr;
   }
+  /*! \brief Move-assignment operator. */
   QuantizationConfigWrapper &operator=(QuantizationConfigWrapper &&other) {
     if (config_ != nullptr) {
       nvte_destroy_quantization_config(config_);
@@ -995,6 +1007,12 @@ class QuantizationConfigWrapper {
   void set_stochastic_rounding(bool stochastic_rounding) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
                                            &stochastic_rounding, sizeof(bool));
+  }
+
+  /*! \brief Set whether to enable fast math operations */
+  void set_use_fast_math(bool use_fast_math) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath,
+                                           &use_fast_math, sizeof(bool));
   }
 
  private:

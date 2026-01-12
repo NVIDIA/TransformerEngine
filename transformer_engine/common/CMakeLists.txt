@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -174,6 +174,8 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      hadamard_transform/group_hadamard_transform.cu
      hadamard_transform/hadamard_transform.cu
      hadamard_transform/hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
      transpose/quantize_transpose_square_blockwise.cu
