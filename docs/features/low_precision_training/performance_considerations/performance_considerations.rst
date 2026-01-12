@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -153,9 +153,9 @@ Contrary to intuition, FP8 training does not always reduce memory compared to BF
 *Master weights*
 
 Transformer Engine by default stores weights in high precision and quantizes them to low precision before each GEMM.
-Moreover, one can specify the precision of the weights stored in the model - if this can be FP32 or 
-BF16/FP16 -- or do not store high precision weights in the model at all. There are multiple scenarios to consider,
-three of them are listed below:
+Moreover, one can specify which high precision should be used to store the weights in the
+model (FP32/BF16/FP16) -- or choose not to store high precision weights in the model at all.
+There are multiple scenarios to consider, three of them are listed below:
 
 1. model weights are in FP32, quantized to low precision before each GEMM,
 2. model weights are in BF16/FP16, quantized to low precision before each GEMM, master weights in optimizer are in FP32.
@@ -391,7 +391,7 @@ that enable kernel fusion optimizations. One key optimization is fusing layer no
 with quantization.
 
 In a typical Transformer architecture, LayerNorm precedes a Linear layer. Without fusion, 
-the LayerNorm outputs in FP32, and the Linear layer must then quantize this input before 
+the LayerNorm outputs in high precision, and the Linear layer must then quantize this input before 
 performing the GEMM — adding overhead. With ``LayerNormLinear``, these operations are fused 
 into a single kernel: the LayerNorm output is quantized directly, eliminating the separate 
 quantization step and reducing memory movement.

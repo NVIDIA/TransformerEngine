@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -20,7 +20,7 @@ layer = te.Linear(1024, 1024, params_dtype=torch.bfloat16)
 # Forward and backward pass
 inp = torch.randn(32, 128, 1024, dtype=torch.bfloat16, device="cuda")
 
-with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+with te.autocast(enabled=True, fp8_recipe=recipe):
     output = layer(inp)
     loss = output.sum()
 

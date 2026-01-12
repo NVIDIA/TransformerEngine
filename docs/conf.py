@@ -89,7 +89,6 @@ html_css_files = [
     "css/sphinx_tabs.css",
     "css/svg-responsive.css",
     "css/rtabs.css",
-    "css/output-style.css",
 ]
 
 html_theme_options = {
