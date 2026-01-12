@@ -47,3 +47,11 @@ def register_builtins(registry: OpRegistry) -> None:
     except Exception as e:
         # CUDA may not be available, this is expected
         pass
+
+    # Register HYGON (VENDOR) implementations
+    try:
+        from .backends.vendor.hygon.register_ops import register_builtins as register_hygon
+        register_hygon(registry)
+    except Exception as e:
+        # HYGON may not be available, this is expected
+        pass
