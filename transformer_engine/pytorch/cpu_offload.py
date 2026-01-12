@@ -628,7 +628,7 @@ class DefaultOffloadSynchronizer(OffloadSynchronizer):
         for layer in self.start_reload_map[layer_num]:
             self.layer_states[layer].start_reload()
 
-    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor:
+    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor | tuple[list, list]:
         """Push tensor - skip processing if layer won't be offloaded to reduce CPU overhead."""
         if not self.offload_layer_map.get(self.num_of_fwds, False):
             return tensor
@@ -679,7 +679,7 @@ def get_cpu_offload_context(
     offload_weights: bool = False,
     double_buffering: bool = False,  # pylint: disable=unused-argument
     manual_synchronization: bool = False,
-    retain_pinned_cpu_buffers: bool = True,
+    retain_pinned_cpu_buffers: bool = False,
     offload_stream: Optional[torch.cuda.Stream] = None,
 ):
     """
