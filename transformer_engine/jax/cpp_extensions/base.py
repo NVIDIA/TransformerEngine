@@ -224,7 +224,9 @@ for _name, _value in transformer_engine_jax.registrations().items():
     ffi.register_ffi_target(_name, _value, platform="CUDA")
     _registered_at_least_one_primitive = True
 
-assert _registered_at_least_one_primitive, "No JAX primitives were registered from the C++ extension! This likely indicates an installation issue with Transformer Engine JAX. Please ensure you are using `--no-build-isolation` when installing TE/JAX. This applies to `pip install --no-build-isolation <TE_DIR_OR_WHEEL>`. However, if you are building TE wheels yourself, for example `uv build --wheel --no-build-isolation -v` and then `uv pip install --no-build-isolation <TE_WHEEL_PATH>`, you must also use `--no-build-isolation` during the wheel build. If you do not use `--no-build-isolation`, the TE JAX C++ extension will not be built into the wheel properly, leading to this error during runtime."  # noqa: E501
+assert (
+    _registered_at_least_one_primitive
+), "No JAX primitives were registered from the C++ extension! This likely indicates an installation issue with Transformer Engine JAX. Please ensure you are using `--no-build-isolation` when installing TE/JAX. This applies to `pip install --no-build-isolation <TE_DIR_OR_WHEEL>`. However, if you are building TE wheels yourself, for example `uv build --wheel --no-build-isolation -v` and then `uv pip install --no-build-isolation <TE_WHEEL_PATH>`, you must also use `--no-build-isolation` during the wheel build. If you do not use `--no-build-isolation`, the TE JAX C++ extension will not be built into the wheel properly, leading to this error during runtime."  # noqa: E501
 
 
 def manage_primitives(enable_names=None, disable_names=None, disable_all_first=False):
