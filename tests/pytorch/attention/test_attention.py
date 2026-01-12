@@ -75,9 +75,9 @@ if fp8_available and (device_compute_capability < (9, 0) or device_compute_capab
 
 # Get determinism
 _deterministic = (
-        not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
-        or torch.are_deterministic_algorithms_enabled()
-    )
+    not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    or torch.are_deterministic_algorithms_enabled()
+)
 
 
 # Reset RNG seed and states
