@@ -149,6 +149,10 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 // CuBLAS helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 
+// Fused TopK with Score Function
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
+
 }  // namespace jax
 }  // namespace transformer_engine
 
