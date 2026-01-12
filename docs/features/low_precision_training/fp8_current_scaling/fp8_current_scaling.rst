@@ -102,7 +102,7 @@ Transpose handling
 
 On Ada and Hopper, the backward pass requires a transposed FP8 tensor.
 The columnwise layout is physically different from the rowwise layout, so a transpose operation is needed.
-All 3 options from :ref:`introduction Transpose handling section <handling_transposes>` are supported.
+All 3 options from :ref:`Performance Considerations Transpose handling section <handling_transposes>` are supported.
 
 *Blackwell and later*
 

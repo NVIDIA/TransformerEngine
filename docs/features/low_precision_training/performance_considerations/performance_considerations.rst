@@ -274,8 +274,8 @@ and columnwise tensors require separate memory layouts.
             :start-after: # START_MEMORY_USAGE_3
             :end-before: # END_MEMORY_USAGE_3
 
-      Total memory usage is ``1 MB (weight in FP8) + 1 MB (input in FP8) + 2 MB (output) = 4 MB``.
-      This is lower than the BF16 baseline (6 MB) since no high precision copies are needed.
+      Total memory usage is ``1 MB (weight in FP8) + 2 MB (output) = 3 MB``.
+      This is lower than the BF16 baseline (6 MB) since no copies are saved for backward in inference mode.
       
       **4. Saving original input instead of quantized**
 
