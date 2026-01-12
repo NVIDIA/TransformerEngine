@@ -2,12 +2,11 @@
 #
 # See LICENSE for license information.
 
-import jax
-
 # Check for Blackwell or newer GPU
-gpu = jax.devices("gpu")[0]
-major, minor = gpu.compute_capability.split(".")
-assert int(major) >= 10, f"MXFP8 requires SM100 (Blackwell) or later, got SM{major}{minor}"
+from transformer_engine_jax import get_device_compute_capability
+
+major_minor = get_device_compute_capability(0)
+assert major_minor >= 100, f"MXFP8 requires SM100 (Blackwell) or later, got SM{major_minor}"
 
 # START_MXFP8_EXAMPLE
 
