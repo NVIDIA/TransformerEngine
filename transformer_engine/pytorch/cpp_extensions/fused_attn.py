@@ -260,13 +260,10 @@ def fused_attn_fwd(
     """
 
     if bottom_right_diagonal is None:
-        if attn_mask_type in {
+        bottom_right_diagonal = attn_mask_type in {
             "causal_bottom_right",
             "padding_causal_bottom_right",
-        }:
-            bottom_right_diagonal = True
-        else:
-            bottom_right_diagonal = False
+        }
 
     if attn_scale is None:
         d = q.size(-1)
@@ -480,11 +477,11 @@ def fused_attn_bwd(
                 gradient tensor of softmax offset of shape [1, h_q, 1, 1].
                 See softmax_type in DotProductAttention for details.
     """
-    bottom_right_diagonal = (
-        bottom_right_diagonal
-        if bottom_right_diagonal is not None
-        else "bottom_right" in attn_mask_type
-    )
+    if bottom_right_diagonal is None:
+        bottom_right_diagonal = attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }
 
     if attn_scale is None:
         d = q.size(-1)
