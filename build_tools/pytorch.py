@@ -24,15 +24,7 @@ def install_requirements() -> List[str]:
         - The 'pytorch-triton' package on PyPI is a placeholder that will fail
         - torch.compile() requires pytorch-triton, not OpenAI's 'triton' package
     """
-    return [
-        "torch>=2.1",
-        "einops",
-        "onnxscript",
-        "onnx",
-        "packaging",
-        "pydantic",
-        "nvdlfw-inspect"
-    ]
+    return ["torch>=2.1", "einops", "onnxscript", "onnx", "packaging", "pydantic", "nvdlfw-inspect"]
 
 
 def test_requirements() -> List[str]:
