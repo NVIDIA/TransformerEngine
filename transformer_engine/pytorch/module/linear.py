@@ -437,6 +437,7 @@ class _Linear(torch.autograd.Function):
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
+            ctx.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # Keep weakref to weight to preserve attributes like main_grad
@@ -972,7 +973,7 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
-        if ctx.fp8 and not isinstance(origin_weight_python_object, QuantizedTensorStorage):
+        if ctx.fp8 and not ctx.is_weight_param_quantized:
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
