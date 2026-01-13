@@ -771,7 +771,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.fc2_weight_python_object_ref = (
                     weakref.ref(fc2_weight) if fc2_weight.requires_grad else None
                 )
-                # Save overwrite_main_grad flags now while we have access to weight objects
                 ctx.fc1_weight_overwrites_main_grad = getattr(
                     fc1_weight, "overwrite_main_grad", False
                 )

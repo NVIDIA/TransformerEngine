@@ -474,7 +474,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 # Keep weakref to weight to preserve attributes like main_grad
                 # when we need to modify the weight python object
                 ctx.origin_weight_ref = weakref.ref(weight)
-                # Save overwrite_main_grad flag now while we have access to weight object
+                # Save overwrite_main_grad flag now while we have access to weight objec
                 ctx.origin_weight_overwrites_main_grad = getattr(
                     weight, "overwrite_main_grad", False
                 )

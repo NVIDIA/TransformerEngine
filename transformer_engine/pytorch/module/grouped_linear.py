@@ -257,7 +257,6 @@ class _GroupedLinear(torch.autograd.Function):
                 # Keep weakrefs to weights to preserve attributes like main_grad
                 # when we need to modify the weight python objects
                 ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
-                # Save overwrite_main_grad flag now while we have access to weight objects
                 ctx.origin_weights_overwrite_main_grad = getattr(
                     weights[0], "overwrite_main_grad", False
                 )
