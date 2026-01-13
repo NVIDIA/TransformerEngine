@@ -187,9 +187,6 @@ Let's now see how we can train in lower precisions in supported frameworks.
       The key difference is that in JAX, model initialization must happen inside the ``autocast`` context
       to properly capture quantization metadata in the parameter tree.
 
-      Additionally, JAX requires a ``global_shard_guard(MeshResource())`` context (even for single GPU)
-      and the ``mesh_resource`` argument in the ``autocast`` call.
-
       Here is a basic example:
 
       .. raw:: html
