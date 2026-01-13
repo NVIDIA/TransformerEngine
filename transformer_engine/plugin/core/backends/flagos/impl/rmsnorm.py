@@ -17,7 +17,8 @@ def rmsnorm_fwd_fl(
     zero_centered_gamma,
 ):
     if zero_centered_gamma:
-        weight_adj = 1 + weight
+        # weight_adj = 1 + weight
+        weight_adj = flag_gems.add(1, weight)
     else:
         weight_adj = weight
 
@@ -46,7 +47,7 @@ def rmsnorm_bwd_fl(
     # When zero_centered_gamma is True, forward uses (1 + gamma) as weight
     # So backward needs to use (1 + gamma) for computing dx
     if zero_centered_gamma:
-        gamma_adj = 1 + gamma
+        gamma_adj = flag_gems.add(1, gamma)
     else:
         gamma_adj = gamma
 

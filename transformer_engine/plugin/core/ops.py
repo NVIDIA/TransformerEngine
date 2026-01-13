@@ -13,8 +13,6 @@ import torch
 from .logger_manager import get_logger
 logger = get_logger()
 
-from .backend_switch import backend_context_switch
-
 class DType(IntEnum):
     kByte = 0
     kInt32 = 2
@@ -1176,9 +1174,6 @@ class FlashAttentionBase(torch.nn.Module, ABC):
 
                 for impl in snap.impls_by_op.get(layer_key, []):
                     if impl.impl_id == class_name_lower or class_name_lower.startswith(impl.impl_id):
-                        # control context switch for different backends for every op impl call
-                        backend_context_switch(impl.kind)
-
                         impl_id = impl.impl_id
                         break
 
@@ -1267,11 +1262,7 @@ class FlashAttentionBase(torch.nn.Module, ABC):
             try:
                 # Check if this impl creates our current class
                 impl_class = impl.fn()
-
                 if impl_class == current_class:
-                    # control context switch for different backends for every op impl call
-                    backend_context_switch(impl.kind)
-
                     current_impl_id = impl.impl_id
                     break
             except:
@@ -1329,10 +1320,6 @@ class FlashAttentionBase(torch.nn.Module, ABC):
             try:
                 # All attempts here are fallbacks (since we skipped current impl)
                 # Get fallback class and create instance
-
-                # control context switch for different backends for every op impl call
-                backend_context_switch(impl.kind)
-
                 fallback_class = impl.fn()
                 fallback_instance = fallback_class(**self._init_params)
                 # Set manager for nested fallback support

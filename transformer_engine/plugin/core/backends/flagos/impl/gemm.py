@@ -7,6 +7,7 @@ import torch
 
 import flag_gems
 
+
 __all__ = [
     "generic_gemm_fl",
 ]
@@ -105,9 +106,9 @@ def generic_gemm_fl(
 
     if D is not None:
         if accumulate:
-            D.add_(out1)
+            flag_gems.add_(D, out1)
         else:
-            D.copy_(out1)
+            flag_gems.copy_(D, out1)
         return D, bias_grad, gelu_input, extra_output_ret
     else:
         return out1, bias_grad, gelu_input, extra_output_ret

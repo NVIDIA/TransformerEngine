@@ -17,7 +17,6 @@ from .logger_manager import get_logger
 
 logger = get_logger()
 
-from .backend_switch import backend_context_switch
 
 @dataclass
 class _OpManagerState:
@@ -355,9 +354,6 @@ class OpManager:
             snap = self._registry.snapshot()
             for impl in snap.impls_by_op.get(op_name, []):
                 if impl.impl_id == impl_id:
-                    # control context switch for different backends for every op impl call
-                    backend_context_switch(impl.kind)
-
                     # Only log if first time or implementation actually changed
                     if last_impl_id is None:
                         logger.info_once(
@@ -382,9 +378,6 @@ class OpManager:
 
         for idx, impl in enumerate(candidates):
             try:
-                # control context switch for different backends for every op impl call
-                backend_context_switch(impl.kind)
-
                 result = impl.fn(*args, **kwargs)
 
                 # Log on success

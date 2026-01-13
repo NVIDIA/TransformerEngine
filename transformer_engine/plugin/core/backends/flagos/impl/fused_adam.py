@@ -6,6 +6,7 @@ from typing import Optional, List
 import torch
 import flag_gems
 
+
 def multi_tensor_adam_fl(
     chunk_size: int,
     noop_flag: torch.Tensor,
@@ -50,27 +51,27 @@ def multi_tensor_adam_fl(
             g = g.contiguous()
 
         if inv_scale is not None and inv_scale != 1.0:
-            g = g * inv_scale
+            g = flag_gems.mul(g, inv_scale)
 
-        m.mul_(beta1).add_(g, alpha=1 - beta1)
-        v.mul_(beta2).add_(g.mul(g).mul_(1 - beta2))
+        m = flag_gems.add_(flag_gems.mul_(m, beta1), g, alpha=1-beta1)
+        v = flag_gems.add_(flag_gems.mul_(v, beta2), flag_gems.mul_(flag_gems.mul_(g, g), 1 - beta2))
 
         m_corr = m.clone()
         v_corr = v.clone()
         if bias_correction == 1:
-            m_corr = m_corr / bias_correction1
-            v_corr = v_corr / bias_correction2
+            m_corr = flag_gems.true_divide(m_corr, bias_correction1)
+            v_corr = flag_gems.true_divide(v_corr, bias_correction2)
 
-        update = m_corr / (v_corr.sqrt() + eps)
+        update = flag_gems.true_divide(m_corr, flag_gems.add(flag_gems.sqrt(v_corr), eps))
 
         if is_adamw:
-            p.data.mul_(1 - lr * weight_decay)
+            p = flag_gems.mul_(p, 1 - lr * weight_decay)
         else:
-            update.add_(p, alpha=weight_decay)
+            update = flag_gems.add_(update, p, alpha=weight_decay)
 
-        p.data.add_(update, alpha=-lr)
+        p = flag_gems.add_(p, update, alpha=-lr)
 
         if p_master is not None:
-            p_master.data.copy_(p.data)
+            flag_gems.copy_(p_master, p)
             out_dtype = p_master.dtype if out_dtype is None else out_dtype
             p.data = p.data.to(out_dtype)
