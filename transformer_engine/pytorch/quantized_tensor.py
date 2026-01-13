@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -18,11 +18,6 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
     _stride_from_shape,
-)
-
-_quantized_tensor_cpu_supported_ops = (
-    torch.ops.aten.empty_like.default,
-    torch.ops.aten.copy_.default,
 )
 
 
@@ -538,15 +533,6 @@ class QuantizedTensor(torch.Tensor):
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-
-        def check_if_cpu(arg):
-            if isinstance(cls, QuantizedTensor) and arg.device.type == "cpu":
-                assert (
-                    func in _quantized_tensor_cpu_supported_ops
-                ), f"QuantizedTensor on CPU does not support this operation: {func}"
-            return arg
-
-        args = tree_map(check_if_cpu, args)
 
         # Do not force the QuantizedTensor type on the returned tensor
         return torch._C._disabled_torch_function_impl(func, types, args, kwargs)

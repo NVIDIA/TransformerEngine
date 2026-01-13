@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
@@ -668,14 +668,24 @@ class FusedAttnRunner:
                         (self.offsets_q, self.offsets_kv),
                     )
                 case SeqDescFormat.SegmentIDs:
+                    # Exercise the path to generate the segment_pos in from_segment_ids_and_pos()
+                    # if no CP and load balancing, else explicitly pass the segment_pos
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (
                             self.cp_reorder_fn(self.segment_ids_q),
                             self.cp_reorder_fn(self.segment_ids_kv),
                         ),
                         (
-                            self.cp_reorder_fn(self.segment_pos_q),
-                            self.cp_reorder_fn(self.segment_pos_kv),
+                            (
+                                self.cp_reorder_fn(self.segment_pos_q),
+                                self.cp_reorder_fn(self.segment_pos_kv),
+                            )
+                            if self.cp_size > 1 and self.cp_load_balanced
+                            else None
+                        ),
+                        is_thd=self.qkv_layout.is_thd(),
+                        is_segment_ids_reordered=(
+                            True if self.cp_size > 1 and self.cp_load_balanced else False
                         ),
                     )
                 case _:
@@ -704,6 +714,8 @@ class FusedAttnRunner:
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (self.segment_ids_q, self.segment_ids_kv),
                         None,
+                        is_thd=self.qkv_layout.is_thd(),
+                        is_segment_ids_reordered=False,
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
@@ -1056,21 +1068,45 @@ class FusedAttnRunner:
     ],
 )
 @pytest.mark.parametrize(
-    "qkv_layout",
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
     [
-        pytest.param(QKVLayout.BS3HD, id="QKV_PACKED"),
-        pytest.param(QKVLayout.BSHD_BS2HD, id="KV_PACKED"),
-        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="SEPARATE"),
-        pytest.param(QKVLayout.T3HD, id="RAGGED_QKV_PACKED"),
-        pytest.param(QKVLayout.THD_T2HD, id="RAGGED_KV_PACKED"),
-        pytest.param(QKVLayout.THD_THD_THD, id="RAGGED_SEPARATE"),
-    ],
-)
-@pytest.mark.parametrize(
-    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
-    [
+        # large data size + bf16 + qkv packed
         pytest.param(
-            2, 2048, 2048, 12, 12, 64, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-64-BF16-SELF"
+            2,
+            2048,
+            2048,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BS3HD,
+            id="2-2048-2048-12-12-64-64-BF16-SELF-QKV_PACKED",
+        ),
+        pytest.param(
+            2,
+            2048,
+            2048,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.T3HD,
+            id="2-2048-2048-12-12-64-64-BF16-SELF-RAGGED_QKV_PACKED",
+        ),
+        # mid data size + bf16 + cross attn + kv packed
+        pytest.param(
+            2,
+            512,
+            1024,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BS2HD,
+            id="2-512-1024-12-12-64-64-BF16-CROSS-KV_PACKED",
         ),
         pytest.param(
             2,
@@ -1081,16 +1117,21 @@ class FusedAttnRunner:
             64,
             64,
             jnp.bfloat16,
-            id="2-512-1024-12-12-64-64-BF16-CROSS",
+            QKVLayout.THD_T2HD,
+            id="2-512-1024-12-12-64-64-BF16-CROSS-RAGGED_KV_PACKED",
         ),
+        # large data size + bf16 + cross attn + diff hidden v dim + qkv separate
         pytest.param(
-            2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
-        ),
-        pytest.param(
-            4, 128, 128, 16, 16, 64, 64, jnp.float16, id="4-128-128-16-16-64-64-FP16-SELF"
-        ),
-        pytest.param(
-            4, 128, 128, 16, 16, 64, 32, jnp.float16, id="4-128-128-16-16-64-32-FP16-SELF"
+            2,
+            2048,
+            1024,
+            12,
+            12,
+            64,
+            32,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS-SEPARATE",
         ),
         pytest.param(
             2,
@@ -1101,10 +1142,108 @@ class FusedAttnRunner:
             64,
             32,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-32-BF16-CROSS",
+            QKVLayout.THD_THD_THD,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS-RAGGED_SEPARATE",
+        ),
+        # large data size + bf16 + gqa + kv packed
+        pytest.param(
+            2,
+            2048,
+            2048,
+            12,
+            6,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BS2HD,
+            id="2-2048-2048-12-6-64-64-BF16-GQA-KV_PACKED",
         ),
         pytest.param(
-            2, 2048, 2048, 12, 6, 128, 64, jnp.float16, id="2-2048-2048-12-6-128-64-FP16-GQA"
+            2,
+            2048,
+            2048,
+            12,
+            6,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.THD_T2HD,
+            id="2-2048-2048-12-6-64-64-BF16-GQA-RAGGED_KV_PACKED",
+        ),
+        # small data size + fp16 + diff hidden v dim + qkv packed
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            32,
+            jnp.float16,
+            QKVLayout.BS3HD,
+            id="4-128-128-16-16-64-32-FP16-SELF-QKV_PACKED",
+        ),
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            32,
+            jnp.float16,
+            QKVLayout.T3HD,
+            id="4-128-128-16-16-64-32-FP16-SELF-RAGGED_QKV_PACKED",
+        ),
+        # small data size + fp16 + kv packed
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            64,
+            jnp.float16,
+            QKVLayout.BSHD_BS2HD,
+            id="4-128-128-16-16-64-64-FP16-SELF-KV_PACKED",
+        ),
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            64,
+            jnp.float16,
+            QKVLayout.THD_T2HD,
+            id="4-128-128-16-16-64-64-FP16-SELF-RAGGED_KV_PACKED",
+        ),
+        # large data size + fp16 + cross attn + gqa + diff hidden v dim + qkv separate
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.float16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-SEPARATE",
+        ),
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.float16,
+            QKVLayout.THD_THD_THD,
+            id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-RAGGED_SEPARATE",
         ),
     ],
 )

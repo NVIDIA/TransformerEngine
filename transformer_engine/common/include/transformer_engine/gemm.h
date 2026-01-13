@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -255,9 +255,11 @@ class MatmulConfigWrapper {
   MatmulConfigWrapper(const MatmulConfigWrapper &) = delete;
   MatmulConfigWrapper &operator=(const MatmulConfigWrapper &) = delete;
 
+  /*! \brief Move constructor. */
   MatmulConfigWrapper(MatmulConfigWrapper &&other) : config_{other.config_} {
     other.config_ = nullptr;
   }
+  /*! \brief Move-assignment operator. */
   MatmulConfigWrapper &operator=(MatmulConfigWrapper &&other) {
     if (config_ != nullptr) {
       nvte_destroy_matmul_config(config_);
