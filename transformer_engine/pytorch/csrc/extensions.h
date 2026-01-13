@@ -414,7 +414,8 @@ void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
                              std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
 
 void multi_tensor_scale_tensor_cuda(int chunk_size, at::Tensor noop_flag,
-                                    std::vector<std::vector<at::Tensor>> tensor_lists, at::Tensor scale);
+                                    std::vector<std::vector<at::Tensor>> tensor_lists,
+                                    at::Tensor scale);
 
 std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
