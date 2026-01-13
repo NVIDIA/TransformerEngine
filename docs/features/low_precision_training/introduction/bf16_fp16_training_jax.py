@@ -6,7 +6,6 @@
 
 import jax
 import jax.numpy as jnp
-import optax
 from transformer_engine.jax.flax import TransformerLayer
 
 
@@ -24,10 +23,6 @@ def run_forward_backward(params_dtype, compute_dtype):
     x = jax.random.normal(init_key, (32, 128, 1024), dtype=compute_dtype)
     params = layer.init({"params": init_key, "dropout": dropout_key}, x)
 
-    # Create optimizer
-    optimizer = optax.sgd(learning_rate=0.01)
-    opt_state = optimizer.init(params)
-
     # Forward and backward pass
     def loss_fn(params):
         output = layer.apply(params, x, rngs={"dropout": dropout_key})
@@ -35,10 +30,6 @@ def run_forward_backward(params_dtype, compute_dtype):
         return output.sum()
 
     loss, grads = jax.value_and_grad(loss_fn)(params)
-
-    # Update parameters
-    updates, opt_state = optimizer.update(grads, opt_state, params)
-    params = optax.apply_updates(params, updates)
 
 
 run_forward_backward(jnp.float32, jnp.float32)  # high precision training
