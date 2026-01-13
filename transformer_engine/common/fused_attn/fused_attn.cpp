@@ -441,7 +441,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         (cudnn_runtime_version >= 91301 ||
          (cudnn_runtime_version < 91301 &&
           softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)) &&
-        !(sm_arch_ >= 100 && is_training && deterministic &&
+	!(sm_arch_ >= 100 && is_training && deterministic && (cudnn_runtime_version < 91800 || bias_type != NVTE_Bias_Type::NVTE_NO_BIAS || dropout != 0.0))) {
           (cudnn_runtime_version < 91800 || bias_type != NVTE_Bias_Type::NVTE_NO_BIAS ||
            dropout != 0.0))) {
       flag_arb = true;
