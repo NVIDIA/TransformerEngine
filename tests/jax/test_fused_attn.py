@@ -420,7 +420,7 @@ class FusedAttnRunner:
             and (
                 self.dropout_prob != 0.0
                 or self.attn_bias_type != AttnBiasType.NO_BIAS
-                or get_cudn_version() < (9, 18, 0)
+                or get_cudnn_version() < (9, 18, 0)
             )
         ):
             pytest.skip(
