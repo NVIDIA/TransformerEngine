@@ -31,8 +31,7 @@ def install_requirements() -> List[str]:
         "onnx",
         "packaging",
         "pydantic",
-        "nvdlfw-inspect",
-        "pytorch-triton",
+        "nvdlfw-inspect"
     ]
 
 
