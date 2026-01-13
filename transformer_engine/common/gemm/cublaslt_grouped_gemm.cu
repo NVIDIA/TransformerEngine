@@ -243,15 +243,13 @@ inline TensorShapeInfo create_shape_info(const transformer_engine::GroupedTensor
   NVTE_CHECK(has_last || t->all_same_last_dim(),
              "GroupedTensor is missing last_dims for varying shapes");
 
-  const int64_t *first_ptr =
-      has_first ? static_cast<const int64_t *>(t->first_dims.dptr) : nullptr;
+  const int64_t *first_ptr = has_first ? static_cast<const int64_t *>(t->first_dims.dptr) : nullptr;
   const int64_t *last_ptr = has_last ? static_cast<const int64_t *>(t->last_dims.dptr) : nullptr;
   const int64_t uniform_first = has_first ? 0 : static_cast<int64_t>(t->get_common_first_dim());
   const int64_t uniform_last = has_last ? 0 : static_cast<int64_t>(t->get_common_last_dim());
 
-  const int64_t *offsets_ptr = t->tensor_offsets.has_data()
-                                   ? static_cast<const int64_t *>(t->tensor_offsets.dptr)
-                                   : nullptr;
+  const int64_t *offsets_ptr =
+      t->tensor_offsets.has_data() ? static_cast<const int64_t *>(t->tensor_offsets.dptr) : nullptr;
 
   if (swap_dims) {
     // Swap first/last to account for columnwise (transposed) storage
@@ -448,14 +446,12 @@ inline cublasLtMatmulAlgo_t select_grouped_gemm_algo(cublasLtHandle_t handle,
 // We bridge the mismatch on GPU by computing per-group pointers and storage dims in one kernel.
 __global__ void setup_grouped_gemm_kernel(
     // Output arrays
-    void **A_ptrs, void **B_ptrs, void **C_ptrs, void **D_ptrs,
-    int *a_rows, int *a_cols, int *b_rows, int *b_cols, int *d_rows, int *d_cols,
-    float **alpha_ptrs, float **beta_ptrs,
+    void **A_ptrs, void **B_ptrs, void **C_ptrs, void **D_ptrs, int *a_rows, int *a_cols,
+    int *b_rows, int *b_cols, int *d_rows, int *d_cols, float **alpha_ptrs, float **beta_ptrs,
     // Inputs
-    char *a_base, char *b_base, char *c_base, char *d_base,
-    TensorShapeInfo A_meta, TensorShapeInfo B_meta, TensorShapeInfo C_meta, TensorShapeInfo D_meta,
-    size_t a_elem_size, size_t b_elem_size, size_t c_elem_size, size_t d_elem_size,
-    float *alpha_ptr, float *beta_ptr,
+    char *a_base, char *b_base, char *c_base, char *d_base, TensorShapeInfo A_meta,
+    TensorShapeInfo B_meta, TensorShapeInfo C_meta, TensorShapeInfo D_meta, size_t a_elem_size,
+    size_t b_elem_size, size_t c_elem_size, size_t d_elem_size, float *alpha_ptr, float *beta_ptr,
     size_t num_tensors) {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_tensors) return;
@@ -527,8 +523,8 @@ inline void launch_grouped_gemm_setup(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
       ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, A_sel.dptr, B_sel.dptr, c_base, d_base,
       A_meta, B_meta, C_meta, D_meta, a_elem_size, b_elem_size, c_elem_size, d_elem_size,
-      static_cast<float *>(alpha_tensor->data.dptr),
-      static_cast<float *>(beta_tensor->data.dptr), num_tensors);
+      static_cast<float *>(alpha_tensor->data.dptr), static_cast<float *>(beta_tensor->data.dptr),
+      num_tensors);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -620,8 +616,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   // Use original inputA and transa for heuristics (not modified A_sel.trans)
   int64_t avg_m_val = config_.avg_m.value_or(compute_avg_first_dim(outputD));
   int64_t avg_n_val = config_.avg_n.value_or(compute_avg_last_dim(outputD));
-  int64_t avg_k_val = config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA)
-                                                    : compute_avg_last_dim(inputA));
+  int64_t avg_k_val =
+      config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
 
   // Heuristic selection
   cublasLtMatmulAlgo_t algo = select_grouped_gemm_algo(handle, matmulDesc, descA, descB, descC,
