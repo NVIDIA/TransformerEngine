@@ -214,9 +214,9 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
             if not getattr(p, "grad_added_to_main_grad", False):
                 failed_grad_added_flags.append(name)
     assert len(failed_grads) == 0, f"Gradient not accumulated for {failed_grads}."
-    assert len(failed_grad_added_flags) == 0, (
-        f"grad_added_to_main_grad not set to True for {failed_grad_added_flags}."
-    )
+    assert (
+        len(failed_grad_added_flags) == 0
+    ), f"grad_added_to_main_grad not set to True for {failed_grad_added_flags}."
 
 
 def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
