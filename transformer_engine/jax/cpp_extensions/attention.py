@@ -3572,7 +3572,7 @@ def fused_attn_bwd(
     ):
         assert (
             attn_bias_type == AttnBiasType.NO_BIAS
-            and dropout_probability == 0
+            and dropout_probability == 0.0
             and get_cudnn_version() >= (9, 18, 0)
         ), (
             "For sm100+, bprop determinism is only supported by cuDNN 9.18+ and for no_bias and"
