@@ -52,7 +52,7 @@ if is_bf16_available():  # bf16 requires sm_80 or higher
 _devices: list[torch.device] = [torch.device("cpu"), torch.device("cuda")]
 
 # Supported quantization recipes
-_quantization_list: list[Optional[str]] = []
+_quantization_list: list[Optional[str]] = [None]
 if fp8_available:
     _quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
 if mxfp8_available:
