@@ -80,18 +80,6 @@ This is a significant overhead compared to other recipes, which typically requir
 
 *Figure 4: FP8 quantization with current scaling recipe - two tensor reads are needed, one to compute amax and one to apply the scaling factor and cast to FP8.*
 
-Hardware support
-----------------
-
-The Hopper architecture introduced FP8 support in Tensor Cores, enabling efficient low-precision computation. 
-Tensor Cores support every combination of E4M3 and E5M2 formats as inputs, allowing flexible precision choices for different operands.
-The Tensor Core performs the matrix multiplication in FP8 precision and produces output in higher precision (FP16, BF16, or FP32).
-
-.. raw:: html
-   :file: img/fp8_tensor_core.svg
-
-*Figure 5: FP8 Tensor Cores process two input tensors (A and B) with their respective scaling factors and perform matrix multiplication to accumulate higher-precision output.*
-
 
 Transpose handling
 ------------------
@@ -119,11 +107,9 @@ The rowwise and columnwise tensors share the same physical memory layout.
 Distributed training 
 --------------------
 
-**All-gather of columnwise tensors**
+**Quantized all-gather**
 
-Supported for Blackwell and later, since rowwise and columnwise tensors share the same memory layout.
-For Hopper and Ada, all-gather of transposed FP8 tensors is not supported. 
-The rowwise tensor is gathered and then it is transposed to columnwise tensor.
+FP8 all-gather is supported on all architectures (Ada and later).
 
 **Amax reduction**
 
@@ -174,3 +160,21 @@ Here's how to use FP8 Current Scaling recipe in PyTorch and JAX:
          :language: python
          :start-after: # START_CURRENT_SCALING_EXAMPLE
          :end-before: # END_CURRENT_SCALING_EXAMPLE
+
+
+----
+
+Developer Notes
+---------------
+
+This section contains implementation details that may be useful for developers
+but are not required for using FP8 Current Scaling in practice.
+
+All-gather of columnwise tensors
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+On Blackwell and later, rowwise and columnwise tensors share the same memory layout,
+so all-gather of columnwise tensors is directly supported.
+
+For Hopper and Ada, all-gather of transposed FP8 tensors is not supported. 
+The rowwise tensor is gathered first, then transposed to columnwise format.

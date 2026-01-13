@@ -54,7 +54,7 @@ There are some assumptions on the dimensions of the tensor:
 Scaling factors are stored as E8M0 (8 exponent bits, 0 mantissa bits), which inherently represents
 powers of 2. This differs from FP8 Blockwise Scaling, which uses 32-bit floating point numbers
 optionally constrained to powers of 2. Note that FP32 also has 8 exponent bits, so the representable
-ranges are similar when the power-of-2 constraint is enabled.
+ranges are the same when the power-of-2 constraint is enabled.
 
 Each block's scaling factor is computed through the following steps:
 
@@ -96,53 +96,6 @@ independently from the full-precision data.
 *Figure 2. MXFP8 rowwise vs columnwise quantization layout.*
 
 
-Swizzling scaling factors
--------------------------
-
-Like :doc:`FP8 Blockwise Scaling <../fp8_blockwise_scaling/fp8_blockwise_scaling>`, MXFP8 uses different data layouts for communication and computation.
-MXFP8 GEMMs require scaling factors in a specific hardware layout
-(see `cuBLAS documentation <https://docs.nvidia.com/cuda/cublas/index.html#block-scaling-factors-layout>`__).
-The conversion to this GEMM-ready layout is called *swizzling*. Because swizzled scaling factors
-cannot be communicated across devices, Transformer Engine performs swizzling after any required
-communication, just before each GEMM operation.
-
-.. raw:: html
-   :file: img/mxfp8_swizzle_both_tensors.svg
-
-*Figure 3. MXFP8 swizzling process: standard scaling factors are rearranged into the hardware-required layout.*
-
-
-Blackwell Tensor Cores compute matrix multiplications using ``128x128`` tiles.
-Scaling factors are stored in row-major order, but to process a tile, we need a ``128x4`` vertical
-slice of scaling factors. In row-major storage, these vertical slices are scattered in memory
-with gaps between each row. The hardware requires them to be stored contiguously.
-
-.. raw:: html
-   :file: img/mxfp8_tensor_scaling_layout.svg
-
-*Figure 4. FP8 tensor (left) is divided into 128x128 tiles. Each tile requires a 128x4 block of scaling factors (right). These vertical blocks are not contiguous in memory.*
-
-Swizzling transforms the layout to meet hardware requirements by:
-
-1.  **Linearizing** the ``128x4`` blocks so they are stored contiguously one after another.
-2.  **Permuting** the 4-byte elements within each block.
-
-Specifically, if we index the 128 4-byte elements in a scaling factor block as :math:`0, 1, \dots, 127`, the hardware expects them in the following interleaved order:
-
-.. code-block:: text
-
-   0, 32, 64, 96, 1, 33, 65, 97, ..., k, 32 + k, 64 + k, 96 + k, ..., 31, 63, 95, 127
-
-
-.. raw:: html
-   :file: img/mxfp8_scale_linearize_and_swizzle.svg
-
-*Figure 5. Linearization and swizzling of scaling factors. The 2D grid of scaling factors is first flattened into a contiguous sequence of blocks (top), then the rows within each block are interleaved to match the hardware access pattern (bottom).*
-
-For columnwise scaling factors, the process is analogous but with ``4x128`` horizontal blocks instead of ``128x4`` vertical blocks.
-
-
-
 Distributed training
 --------------------
 
@@ -154,10 +107,7 @@ unlike :doc:`FP8 Current <../fp8_current_scaling/fp8_current_scaling>`/:doc:`Del
 
 **Quantized all-gather**
 
-All-gather of columnwise tensors is supported and necessary because:
-
-- columnwise quantized tensors cannot be computed from rowwise quantized ones (as mentioned earlier),
-- gathering high-precision tensors is avoided in most cases for performance reasons.
+MXFP8 all-gather is supported.
 
 
 Examples
@@ -198,3 +148,66 @@ Supported devices
 -----------------
 
 Blackwell and later (SM 10.0+)
+
+
+----
+
+Developer Notes
+---------------
+
+This section contains implementation details that may be useful for developers
+but are not required for using MXFP8 in practice.
+
+Swizzling scaling factors
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Like :doc:`FP8 Blockwise Scaling <../fp8_blockwise_scaling/fp8_blockwise_scaling>`, MXFP8 uses different data layouts for communication and computation.
+MXFP8 GEMMs require scaling factors in a specific hardware layout
+(see `cuBLAS documentation <https://docs.nvidia.com/cuda/cublas/index.html#block-scaling-factors-layout>`__).
+The conversion to this GEMM-ready layout is called *swizzling*. When no communication is needed,
+swizzling can be fused with quantization. When communication is required, swizzled scaling factors
+cannot be communicated across devices, so Transformer Engine performs swizzling after communication,
+just before each GEMM operation.
+
+.. raw:: html
+   :file: img/mxfp8_swizzle_both_tensors.svg
+
+*Figure 3. MXFP8 swizzling process: standard scaling factors are rearranged into the hardware-required layout.*
+
+
+Blackwell Tensor Cores compute matrix multiplications using ``128x128`` tiles.
+Scaling factors are stored in row-major order, but to process a tile, we need a ``128x4`` vertical
+slice of scaling factors. In row-major storage, these vertical slices are scattered in memory
+with gaps between each row. The hardware requires them to be stored contiguously.
+
+.. raw:: html
+   :file: img/mxfp8_tensor_scaling_layout.svg
+
+*Figure 4. FP8 tensor (left) is divided into 128x128 tiles. Each tile requires a 128x4 block of scaling factors (right). These vertical blocks are not contiguous in memory.*
+
+Swizzling transforms the layout to meet hardware requirements by:
+
+1.  **Linearizing** the ``128x4`` blocks so they are stored contiguously one after another.
+2.  **Permuting** the 4-byte elements within each block.
+
+Specifically, if we index the 128 4-byte elements in a scaling factor block as :math:`0, 1, \dots, 127`, the hardware expects them in the following interleaved order:
+
+.. code-block:: text
+
+   0, 32, 64, 96, 1, 33, 65, 97, ..., k, 32 + k, 64 + k, 96 + k, ..., 31, 63, 95, 127
+
+
+.. raw:: html
+   :file: img/mxfp8_scale_linearize_and_swizzle.svg
+
+*Figure 5. Linearization and swizzling of scaling factors. The 2D grid of scaling factors is first flattened into a contiguous sequence of blocks (top), then the rows within each block are interleaved to match the hardware access pattern (bottom).*
+
+For columnwise scaling factors, the process is analogous but with ``4x128`` horizontal blocks instead of ``128x4`` vertical blocks.
+
+All-gather of columnwise tensors
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+All-gather of columnwise tensors is supported and necessary because:
+
+- columnwise quantized tensors cannot be computed from rowwise quantized ones,
+- gathering high-precision tensors is avoided in most cases for performance reasons.

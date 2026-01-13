@@ -185,18 +185,6 @@ second dimension to a multiple of 4 (e.g. rowwise: ``[roundup(A, 128), roundup(B
 *Figure 5. NVFP4 rowwise vs columnwise quantization layout. Unlike MXFP8, columnwise scales are stored transposed.*
 
 
-Swizzling scaling factors
--------------------------
-
-NVFP4 requires swizzling of block scaling factors (``s_block``) before GEMM operations,
-similar to :doc:`MXFP8 <../mxfp8/mxfp8>`. Key differences:
-
-- Block size is 16 (vs 32 for MXFP8)
-- Both rowwise and columnwise scaling factors are swizzled, but thanks to the transposed
-  columnwise layout, a single rowwise swizzle kernel handles both cases.
-- Scaling factors are stored as FP8 E4M3 (vs E8M0 for MXFP8)
-
-
 Distributed training
 --------------------
 
@@ -212,9 +200,7 @@ If before synchronization there was ``amax_1`` on node 1,
 
 **Quantized all-gather**
 
-All-gather of columnwise tensors is supported. To enable quantized all-gather, 
-all nodes must use the same ``s_global``, which is computed from the synchronized global amax.
-This is automatically enabled for column-parallel and row-parallel linear layers.
+NVFP4 all-gather is supported.
 
 .. raw:: html
    :file: img/nvfp4_all_gather.svg
@@ -260,3 +246,30 @@ Supported devices
 
 * **Training**: SM 10.0, SM 10.3
 * **Inference**: SM 10.0+
+
+
+----
+
+Developer Notes
+---------------
+
+This section contains implementation details that may be useful for developers
+but are not required for using NVFP4 in practice.
+
+Swizzling scaling factors
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+NVFP4 requires swizzling of block scaling factors (``s_block``) before GEMM operations,
+similar to :doc:`MXFP8 <../mxfp8/mxfp8>`. Key differences:
+
+- Block size is 16 (vs 32 for MXFP8)
+- Both rowwise and columnwise scaling factors are swizzled, but thanks to the transposed
+  columnwise layout, a single rowwise swizzle kernel handles both cases.
+- Scaling factors are stored as FP8 E4M3 (vs E8M0 for MXFP8)
+
+All-gather of columnwise tensors
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+All-gather of columnwise tensors is supported. To enable quantized all-gather, 
+all nodes must use the same ``s_global``, which is computed from the synchronized global amax.
+This is automatically enabled for column-parallel and row-parallel linear layers.

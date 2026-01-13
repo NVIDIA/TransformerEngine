@@ -115,9 +115,7 @@ Here's how to use FP8 Delayed Scaling in PyTorch and JAX:
 Distributed Training
 --------------------
 
-FP8 Delayed Scaling uses the same data formats as FP8 Current Scaling - 
-all-gather of non-transposed tensors is supported.
-
+FP8 Delayed Scaling uses the same data formats as FP8 Current Scaling - qunatized all-gather is supported.
 However, amax reduction works slightly differently in different frameworks.
 
 .. tabs::

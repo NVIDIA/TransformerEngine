@@ -39,6 +39,7 @@ The figure below illustrates these access patterns:
 
 .. figure:: img/gemm_access_pattern.svg
    :align: center
+   :width: 60%
    :alt: Matrix multiplication access pattern showing rowwise access for first tensor and columnwise access for second tensor
 
    Figure 1: Access patterns in matrix multiplication for matrices in ``A * B`` and ``A * B^T`` operations.

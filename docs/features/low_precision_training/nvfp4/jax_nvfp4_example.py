@@ -14,14 +14,13 @@ import jax
 import jax.numpy as jnp
 import transformer_engine.jax as te
 from transformer_engine.jax.flax import DenseGeneral
-from transformer_engine.common.recipe import NVFP4BlockScaling, Format
+from transformer_engine.common.recipe import NVFP4BlockScaling
 
 # Define NVFP4 recipe
-recipe = NVFP4BlockScaling(
-    fp8_format=Format.E4M3,
-    use_2d_weight_quantization=True,
-    use_rht=True,
-)
+# 2D weight quantization and RHT are enabled by default
+recipe = NVFP4BlockScaling()
+# To disable features, use:
+#   recipe = NVFP4BlockScaling(disable_rht=True, disable_2d_quantization=True)
 
 with te.autocast(enabled=True, recipe=recipe):
     # Initialize layer and data

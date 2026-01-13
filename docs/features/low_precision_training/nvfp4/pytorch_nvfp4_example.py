@@ -12,15 +12,13 @@ assert major >= 10, f"NVFP4 requires SM100 (Blackwell) or later, got SM{major}{m
 
 import torch
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import NVFP4BlockScaling, Format
+from transformer_engine.common.recipe import NVFP4BlockScaling
 
 # Define NVFP4 recipe
-# Key features like 2D weight quantization and RHT can be enabled here
-recipe = NVFP4BlockScaling(
-    fp8_format=Format.E4M3,
-    use_2d_weight_quantization=True,
-    use_rht=True,
-)
+# 2D weight quantization and RHT are enabled by default
+recipe = NVFP4BlockScaling()
+# To disable features, use:
+#   recipe = NVFP4BlockScaling(disable_rht=True, disable_2d_quantization=True)
 
 # Create a linear layer with bfloat16 parameters
 layer = te.Linear(1024, 1024, params_dtype=torch.bfloat16)

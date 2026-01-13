@@ -128,8 +128,64 @@ For 2D scaling, columnwise data can be created from rowwise data by transposing
 both the quantized data and the scaling factors. Each 128×128 block covers the same 
 elements regardless of access direction, so the scaling factors remain valid.
 
+
+Distributed training
+-----------------------
+
+**Scale synchronization**
+
+The blockwise scaled tensor does not need any scale synchronization among the nodes.
+This is because each scaling factor is local to its 128 or 128×128 element block,
+unlike FP8 Current/Delayed Scaling where a single global scale applies to the entire tensor, even when sharded.
+
+**Quantized all-gather**
+
+FP8 Blockwise Scaling all-gather is supported.
+
+
+Examples
+--------
+
+Here's how to use the FP8 Blockwise Scaling recipe in PyTorch and JAX:
+
+.. note::
+
+   Requires SM90 (Hopper) or later.
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      .. literalinclude:: pytorch_blockwise_scaling_example.py
+         :language: python
+         :start-after: # START_BLOCKWISE_SCALING_EXAMPLE
+         :end-before: # END_BLOCKWISE_SCALING_EXAMPLE
+
+   .. tab:: JAX
+
+      .. literalinclude:: jax_blockwise_scaling_example.py
+         :language: python
+         :start-after: # START_BLOCKWISE_SCALING_EXAMPLE
+         :end-before: # END_BLOCKWISE_SCALING_EXAMPLE
+
+Supported devices
+-----------------
+
+Hopper (SM 9.0)
+
+Blackwell and later (SM >= 10.0) – recipe is emulated with MXFP8. Note that this is done mainly for compatibility, MXFP8 is the preferred recipe on Blackwell.
+
+
+----
+
+Developer Notes
+---------------
+
+This section contains implementation details that may be useful for developers
+but are not required for using FP8 Blockwise Scaling in practice.
+
 Swizzle of scaling factors
---------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 FP8 Blockwise Scaling supports all-gather of both rowwise and columnwise tensors.
 To support that, it implements different data layouts for communication (all-gather)
@@ -187,52 +243,10 @@ when no all-gather is needed, or performed separately after all-gather.
 compact format, then swizzle is performed separately after communication. Bottom: Without all-gather – 
 quantize and swizzle are fused into a single operation, directly producing GEMM-ready format.*
 
-
-Distributed training
------------------------
-
-**Scale synchronization**
-
-The blockwise scaled tensor does not need any scale synchronization among the nodes.
-This is because each scaling factor is local to its 128 or 128×128 element block,
-unlike FP8 Current/Delayed Scaling where a single global scale applies to the entire tensor, even when sharded.
-
-**Quantized all-gather**
+All-gather of columnwise tensors
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 All-gather of columnwise tensors is supported and necessary because:
 
-- columnwise quantized tensors cannot be computed from rowwise quantized ones (as mentioned earlier),
+- columnwise quantized tensors cannot be computed from rowwise quantized ones,
 - gathering high-precision tensors is avoided in most cases for performance reasons.
-
-
-Examples
---------
-
-Here's how to use the FP8 Blockwise Scaling recipe in PyTorch and JAX:
-
-.. note::
-
-   Requires SM90 (Hopper) or later.
-
-.. tabs::
-
-   .. tab:: PyTorch
-
-      .. literalinclude:: pytorch_blockwise_scaling_example.py
-         :language: python
-         :start-after: # START_BLOCKWISE_SCALING_EXAMPLE
-         :end-before: # END_BLOCKWISE_SCALING_EXAMPLE
-
-   .. tab:: JAX
-
-      .. literalinclude:: jax_blockwise_scaling_example.py
-         :language: python
-         :start-after: # START_BLOCKWISE_SCALING_EXAMPLE
-         :end-before: # END_BLOCKWISE_SCALING_EXAMPLE
-
-Supported devices
------------------
-
-Hopper (SM 9.0)
-
-Blackwell and later (SM >= 10.0) – recipe is emulated with MXFP8. Note that this is done mainly for compatibility, MXFP8 is the preferred recipe on Blackwell.
