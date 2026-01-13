@@ -436,6 +436,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
     multiple_results = True
     # scale, permuted_scale are dummy inputs (not used when PERMUTE_SCALE=False)
     # pad_offsets can be shape (0,) when not doing padding, or (num_experts,) when padding
+    # output_buf, permuted_probs_buf are pre-zeroed buffers for the inner primitive only
     impl_static_args = (
         6,
         7,
@@ -456,6 +457,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         scale_aval,  # dummy, same shape as inp
         permuted_scale_aval,  # dummy, same shape as inp
         pad_offsets_aval,
+        output_buf_aval=None,  # Pre-zeroed output buffer (inner primitive only)
+        permuted_probs_buf_aval=None,  # Pre-zeroed permuted_probs buffer (inner primitive only)
         *,
         num_tokens,
         num_experts,
@@ -468,6 +471,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         """Shape/dtype inference for permute."""
         del row_id_map_aval, scale_aval, permuted_scale_aval, pad_offsets_aval
         del num_tokens, num_experts, with_pad, align_size
+        del output_buf_aval, permuted_probs_buf_aval  # Used for input_output_aliases only
 
         output_shape = (num_out_tokens, hidden_size)
         output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
@@ -498,6 +502,21 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         """Forward to inner primitive."""
         # align_size is only used for sharding, but must be passed since abstract() requires it
         assert PermuteWithMaskMapPrimitive.inner_primitive is not None
+
+        # When padding is enabled, create pre-zeroed output buffers for the inner primitive.
+        # This ensures padding positions contain zeros instead of uninitialized memory.
+        # These buffers are aliased to the outputs via input_output_aliases in the lowering.
+        if with_pad:
+            output_buf = jnp.zeros((num_out_tokens, hidden_size), dtype=inp.dtype)
+            if with_probs:
+                permuted_probs_buf = jnp.zeros((num_out_tokens,), dtype=probs.dtype)
+            else:
+                permuted_probs_buf = jnp.zeros((0,), dtype=inp.dtype)
+        else:
+            # When not padding, use dummy buffers (not used by lowering)
+            output_buf = jnp.zeros((0,), dtype=inp.dtype)
+            permuted_probs_buf = jnp.zeros((0,), dtype=inp.dtype)
+
         return PermuteWithMaskMapPrimitive.inner_primitive.bind(
             inp,
             row_id_map,
@@ -505,6 +524,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             scale,
             permuted_scale,
             pad_offsets,
+            output_buf,
+            permuted_probs_buf,
             num_tokens=num_tokens,
             num_experts=num_experts,
             num_out_tokens=num_out_tokens,
@@ -523,6 +544,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         scale,
         permuted_scale,
         pad_offsets,
+        output_buf,  # Pre-zeroed output buffer (used when with_pad=True)
+        permuted_probs_buf,  # Pre-zeroed permuted_probs buffer (used when with_pad=True)
         *,
         num_tokens,
         num_experts,
@@ -560,6 +583,16 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         block_size = _get_min_block_size(_permute_kernel)
         grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
+        # When padding is enabled, use input_output_aliases to alias the pre-zeroed
+        # buffers to the outputs. This ensures padding positions contain zeros.
+        # Input indices: 0=inp, 1=row_id_map, 2=probs, 3=scale, 4=permuted_scale,
+        #                5=pad_offsets, 6=output_buf, 7=permuted_probs_buf
+        # Output indices: 0=output, 1=permuted_probs
+        if with_pad:
+            input_output_aliases = {6: 0, 7: 1}  # output_buf->output, permuted_probs_buf->permuted_probs
+        else:
+            input_output_aliases = None
+
         return triton_call_lowering(
             ctx,
             _permute_kernel,
@@ -569,7 +602,10 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             scale,
             permuted_scale,
             pad_offsets,
+            output_buf,
+            permuted_probs_buf,
             grid=grid,
+            input_output_aliases=input_output_aliases,
             constexprs={
                 "scale_hidden_dim": 0,
                 "num_tokens": num_tokens,

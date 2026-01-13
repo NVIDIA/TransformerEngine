@@ -157,8 +157,7 @@ def permute_with_mask_map(
     scale_hidden_dim : int
         Hidden size of the scale tensor.
     """
-    # Use torch.zeros when pad_offsets is provided to ensure padding regions are zeroed,
-    # since the kernel doesn't write to padding positions.
+    # Use torch.zeros when pad_offsets is provided to ensure padding regions are zeroed.
     alloc = torch.zeros if pad_offsets is not None else torch.empty
     output = alloc((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     permuted_probs = (
@@ -179,6 +178,8 @@ def permute_with_mask_map(
         permuted_scale,
         pad_offsets,
         scale_hidden_dim,
+        num_tokens,
+        num_out_tokens,
         row_id_map.stride(0),
         row_id_map.stride(1),
         inp.stride(0),
