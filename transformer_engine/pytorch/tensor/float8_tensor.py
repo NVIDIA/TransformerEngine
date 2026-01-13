@@ -915,9 +915,11 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
         if self._data is not None:
             return self._data.shape
-        else:
+        elif self._transpose is not None:
             transpose_shape = self._transpose.shape
             return tuple(transpose_shape[1:]) + (transpose_shape[0],)
+        else:
+            raise RuntimeError("Both data and transpose are None")
 
     @property
     def is_cuda(self):
