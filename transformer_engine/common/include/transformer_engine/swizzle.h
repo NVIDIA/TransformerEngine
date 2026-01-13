@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -34,6 +34,7 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
  *
  *  \param[in]     inputs       Input tensors with non-swizzled scale_inv.
  *  \param[in,out] outputs      Output tensors which hosts swizzled scale_inv.
+ *  \param[in]     num_tensors  Number of input and output tensors.
  *  \param[in]     stream       CUDA stream used for the operation.
  *
  *  Requirements:
