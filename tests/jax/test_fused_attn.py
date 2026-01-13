@@ -413,14 +413,16 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
-        # TODO(KshitijLakhani): Set the upper limit for skipping this test when cuDNN adds support
         if (
             get_device_compute_capability(0) >= 100
-            and self.dropout_prob == 0.1
-            and self.attn_bias_type is not AttnBiasType.NO_BIAS
+            and self.is_training
+            and not FusedAttnHelper.is_non_deterministic_allowed()
+            and (self.dropout_prob != 0.0
+            or self.attn_bias_type != AttnBiasType.NO_BIAS
+            or get_cudn_version() < (9, 18, 0))
         ):
             pytest.skip(
-                "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
+                "For sm100+, bprop determinism is only supported by cuDNN 9.18+ and for no_bias and dropout = 0.0"
             )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
