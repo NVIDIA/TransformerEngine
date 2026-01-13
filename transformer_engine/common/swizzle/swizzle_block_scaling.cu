@@ -113,7 +113,7 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
   }
 
   // pack the exponent bits of the scaling factors
-  uint32_t packed_exponents =
+  uint32_t packed_exponents = ((sf.x >> 23) & 0xFF) | (((sf.y >> 23) & 0xFF) << 8) | (((sf.z >> 23) & 0xFF) << 16) | (((sf.w >> 23) & 0xFF) << 24);
       (sf.x >> 23) | ((sf.y >> 23) << 8) | (sf.z >> 23) << 16 | (sf.w >> 23) << 24;
 
   // partially swizzle the scaling factors
