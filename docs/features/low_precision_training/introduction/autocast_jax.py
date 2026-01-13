@@ -83,9 +83,7 @@ with te.autocast(enabled=True, recipe=outer_recipe):
 
     with te.autocast(enabled=True, recipe=inner_recipe):
         # layer2 uses inner_recipe (overrides outer)
-        layer2 = TransformerLayer(
-            hidden_size=1024, mlp_hidden_size=4096, num_attention_heads=16
-        )
+        layer2 = TransformerLayer(hidden_size=1024, mlp_hidden_size=4096, num_attention_heads=16)
         params2 = layer2.init({"params": init_key, "dropout": dropout_key}, hidden)
         hidden = layer2.apply(params2, hidden, rngs={"dropout": dropout_key})
 
