@@ -199,8 +199,9 @@ void __global__ __launch_bounds__(WARPS_X_PER_TB* WARPS_Y_PER_TB* WARP_SIZE)
   uint32_t sf = *reinterpret_cast<const uint32_t*>(warp_src);
 
   // broadcast it to four scaling factors for 1x32 tiles
-  sf = (sf << 1) | (sf >> 7);
-  sf = sf | (sf >> 16);
+  // extract and broadcast the exponent byte to four bytes for E8M0 format
+  uint32_t exp_byte = (sf >> 23) & 0xFF;
+  sf = exp_byte | (exp_byte << 8) | (exp_byte << 16) | (exp_byte << 24);
 
   // broadcast it to sixteen scaling factors for 1x32 tiles
   const uint4 sf4{sf, sf, sf, sf};
