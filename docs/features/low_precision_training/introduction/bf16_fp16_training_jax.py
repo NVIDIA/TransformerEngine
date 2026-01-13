@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -6,8 +6,8 @@
 
 import jax
 import jax.numpy as jnp
+import optax
 from transformer_engine.jax.flax import TransformerLayer
-from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 
 def run_forward_backward(params_dtype, compute_dtype):
@@ -19,21 +19,26 @@ def run_forward_backward(params_dtype, compute_dtype):
         dtype=params_dtype,
     )
 
-    # Initialize parameters
+    # Initialize parameters and optimizer
     init_key, dropout_key = jax.random.split(jax.random.PRNGKey(0))
     x = jax.random.normal(init_key, (32, 128, 1024), dtype=compute_dtype)
+    params = layer.init({"params": init_key, "dropout": dropout_key}, x)
 
-    # TransformerLayer requires mesh resource context
-    with global_shard_guard(MeshResource()):
-        params = layer.init({"params": init_key, "dropout": dropout_key}, x)
+    # Create optimizer
+    optimizer = optax.sgd(learning_rate=0.01)
+    opt_state = optimizer.init(params)
 
-        # Forward and backward pass
-        def loss_fn(params):
-            output = layer.apply(params, x, rngs={"dropout": dropout_key})
-            assert output.dtype == compute_dtype
-            return output.sum()
+    # Forward and backward pass
+    def loss_fn(params):
+        output = layer.apply(params, x, rngs={"dropout": dropout_key})
+        assert output.dtype == compute_dtype
+        return output.sum()
 
-        loss, grads = jax.value_and_grad(loss_fn)(params)
+    loss, grads = jax.value_and_grad(loss_fn)(params)
+
+    # Update parameters
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    params = optax.apply_updates(params, updates)
 
 
 run_forward_backward(jnp.float32, jnp.float32)  # high precision training
