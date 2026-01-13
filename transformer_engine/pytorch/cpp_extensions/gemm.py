@@ -12,10 +12,7 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
-from ..quantized_tensor import Quantizer, QuantizedTensor, QuantizedTensorStorage
-from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
-from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
+from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
@@ -46,8 +43,10 @@ def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Ten
 
     if ub:
         return torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device
-        ).repeat(_NUM_MAX_UB_STREAMS)
+            get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS,
+            dtype=torch.uint8,
+            device=device,
+        )
     if grouped_gemm:
         _multi_stream_cublas_workspace = []
         for _ in range(tex.get_num_cublas_streams()):
@@ -69,29 +68,25 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
 
 
 def get_tensor_device(tensor: torch.Tensor) -> int:
-    """Returns tensor device as an integer"""
-    if not isinstance(tensor, QuantizedTensorStorage):
+    """
+    Returns tensor device as an integer.
+
+    This method is used because checking instances of
+    QuantizedTensor or Storage incurs more CPU overhead.
+    The order of attributes checked is important to also
+    minimize overhead.
+    """
+    if hasattr(tensor, "device"):
         return tensor.device.index
-    if isinstance(tensor, QuantizedTensor):
-        return tensor.device.index
-    if isinstance(tensor, (Float8BlockwiseQTensorStorage, MXFP8TensorStorage, NVFP4TensorStorage)):
-        return (
-            tensor._rowwise_data.device.index
-            if tensor._rowwise_data is not None
-            else tensor._columnwise_data.device.index
-        )
-    if isinstance(tensor, Float8TensorStorage):
-        return (
-            tensor._data.device.index
-            if tensor._data is not None
-            else tensor._transpose.device.index
-        )
-    try:
-        return (
-            tensor._data.device.index if tensor._data is not None else tensor._data_t.device.index
-        )
-    except AttributeError:
-        return torch.cuda.current_device()
+    if hasattr(tensor, "_rowwise_data") and tensor._rowwise_data is not None:
+        return tensor._rowwise_data.device.index
+    if hasattr(tensor, "_columnwise_data") and tensor._columnwise_data is not None:
+        return tensor._columnwise_data.device.index
+    if hasattr(tensor, "_data") and tensor._data is not None:
+        return tensor._data.device.index
+    if hasattr(tensor, "_transpose") and tensor._transpose is not None:
+        return tensor._transpose.device.index
+    return torch.cuda.current_device()
 
 
 def general_gemm(
@@ -119,7 +114,6 @@ def general_gemm(
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    # assert quantization_params is None, "FP8 output not supported yet"
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
@@ -220,6 +214,7 @@ def general_grouped_gemm(
     A: List[torch.Tensor],
     B: List[torch.Tensor],
     out: List[torch.Tensor],
+    quantization_params: List[Optional[Quantizer]],
     out_dtype: torch.dtype,
     layout: str = "TN",
     m_splits: Optional[List[int]] = None,
@@ -252,7 +247,7 @@ def general_grouped_gemm(
 
     if grad and use_bias:
         grad_bias = [
-            torch.empty(B[i].shape[1], dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
+            torch.empty(B[i].size(1), dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
         ]
     else:
         grad_bias = empty_tensors
@@ -261,6 +256,36 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
+
+    if isinstance(quantization_params[0], DebugQuantizer):
+        assert not gelu, "GELU not supported in debug mode"
+        if single_output:
+            out_init = out[0]
+            start_idx = 0
+            out = [None] * num_gemms
+            for i in range(num_gemms):
+                size = m_splits[i]
+                out[i] = out_init[start_idx : start_idx + size]
+                start_idx += size
+        for i in range(num_gemms):
+            _, bias_or_grad, _, _ = general_gemm(
+                A[i],
+                B[i],
+                quantization_params=quantization_params[i],
+                out_dtype=out[0].dtype,
+                layout=layout,
+                accumulate=accumulate,
+                out=out[i],
+                bias=bias[i] if use_bias else None,
+                use_split_accumulator=use_split_accumulator,
+                grad=grad,
+            )
+            if grad and use_bias:
+                grad_bias[i] = bias_or_grad
+        if single_output:
+            out = out_init
+
+        return out, grad_bias if grad else bias, None
 
     if gelu:
         gelu_input = [

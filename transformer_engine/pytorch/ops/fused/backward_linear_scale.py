@@ -119,13 +119,13 @@ def fuse_backward_linear_scale(
 
     Parameters
     ----------
-    ops: list of tuples
+    ops : list of tuples
         Backward pass operations and the indices of the corresponding
         basic operations.
 
     Returns
     -------
-    ops: list of tuples
+    ops : list of tuples
         Updated backward pass operations
 
     """
