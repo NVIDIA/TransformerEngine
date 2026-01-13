@@ -266,7 +266,7 @@ static void FusedAttnForwardImpl(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
       bias_type, mask_type, softmax_type, dropout_probability, attn_heads, num_gqa_groups,
       q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
-      false, false, true);
+      false, false, deterministic);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -522,7 +522,7 @@ static void FusedAttnBackwardImpl(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
       bias_type, mask_type, softmax_type, dropout_probability, attn_heads, num_gqa_groups,
       q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
-      false, false, true);
+      false, false, deterministic);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);
