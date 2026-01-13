@@ -203,6 +203,8 @@ def _permute_kernel(
     pad_offsets_ptr,
     # sizes
     scale_hidden_dim,
+    num_tokens,
+    num_out_tokens,
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -234,6 +236,44 @@ def _permute_kernel(
     pid_h = tl.program_id(1)
     cur_off = pid_h * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = cur_off < hidden_size
+
+    # =========================================================================
+    # Zero-fill phase: When padding is enabled, each thread zeros a portion of
+    # the output buffers. This ensures padding positions contain zeros instead
+    # of uninitialized memory, which is important for downstream operations.
+    # Each thread handles a contiguous chunk of output rows.
+    # =========================================================================
+    if FUSION_PAD:
+        # Compute which output rows this thread is responsible for zeroing
+        # Divide num_out_tokens among num_tokens threads
+        rows_per_thread = tl.cdiv(num_out_tokens, num_tokens)
+        zero_start = pid_t * rows_per_thread
+        zero_end = tl.minimum(zero_start + rows_per_thread, num_out_tokens)
+
+        # Zero output, permuted_probs, and permuted_scale for this thread's chunk
+        for zero_row in tl.range(zero_start, zero_end):
+            zero_row_i64 = zero_row.to(tl.int64)
+            # Zero output tensor
+            zero_off = zero_row_i64 * stride_output_token + cur_off * stride_output_hidden
+            tl.store(output_ptr + zero_off, 0.0, mask=mask)
+
+            # Zero permuted_probs (only first hidden block handles this 1D tensor)
+            if PERMUTE_PROBS and pid_h == 0:
+                zero_prob_off = zero_row_i64 * stride_permuted_probs_token
+                tl.store(permuted_probs_ptr + zero_prob_off, 0.0)
+
+            # Zero permuted_scale
+            if PERMUTE_SCALE:
+                mask_scale_zero = cur_off < scale_hidden_dim
+                zero_scale_off = (
+                    zero_row_i64 * stride_permuted_scale_token
+                    + cur_off * stride_permuted_scale_hidden
+                )
+                tl.store(permuted_scale_ptr + zero_scale_off, 0.0, mask=mask_scale_zero)
+
+    # =========================================================================
+    # Permute phase: Write actual values to destination positions
+    # =========================================================================
     src_row = pid_t.to(tl.int64)
     input_off = src_row * stride_input_token + cur_off * stride_input_hidden
     inp = tl.load(input_ptr + input_off, mask=mask)

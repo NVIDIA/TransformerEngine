@@ -240,6 +240,7 @@ def _token_dispatch_fwd_rule(
             num_experts,
             worst_case_out_tokens,
             hidden_size,
+            align_size=align_size,
         )
     else:
         # No padding
@@ -502,6 +503,8 @@ def _token_combine_bwd_rule(
     else:
         # Simple case: just permute gradients back
         if pad_offsets is not None:
+            # Note: align_size uses default (128) since buffer sizes are already
+            # determined from forward pass (stored in residuals as num_out_tokens)
             inp_grad, _ = permute_with_mask_map_and_pad(
                 output_grad,
                 row_id_map,
@@ -511,6 +514,7 @@ def _token_combine_bwd_rule(
                 num_experts,
                 num_out_tokens,
                 hidden_size,
+                align_size=128,  # Default, sizes already computed in forward
             )
             # The permute kernel only writes to positions that tokens map to.
             # Padded positions may contain uninitialized (NaN) values - replace with zeros.

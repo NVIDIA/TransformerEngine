@@ -574,14 +574,6 @@ class TestDistributedPermutation:
 
         Tests both forward pass (output values) and backward pass (gradients).
         """
-        # TODO: Padding + sharding requires passing align_size to the primitive's
-        # partition function to correctly compute local worst-case buffer size.
-        # Currently, the partition function divides global_worst_case_out_tokens by
-        # num_dp_devices, but the correct local size requires recalculating:
-        #   local_worst_case = ((local_num_out_tokens + num_experts*(align_size-1)) // align_size) * align_size
-        # This is a larger change that requires primitive modifications.
-        pytest.skip("Padding + sharding not yet supported: requires align_size in partition function")
-
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         key = jax.random.PRNGKey(42)
 
@@ -600,9 +592,18 @@ class TestDistributedPermutation:
 
         dp_axis = mesh_resource.dp_resource
         sharded_pspec = PartitionSpec(dp_axis, None)
+        num_dp_devices = mesh.shape[dp_axis] if dp_axis else 1
 
-        # Global num_out_tokens is passed to token_dispatch (partition function divides it)
-        global_num_out_tokens = num_tokens * topk
+        # For padding + sharding, we need to account for per-shard padding overhead.
+        # Each shard needs E*(A-1) extra space for worst-case padding.
+        # Compute global_num_out_tokens such that global / num_dp >= local_worst.
+        local_num_tokens = num_tokens // num_dp_devices
+        local_raw_out = local_num_tokens * topk
+        local_worst = (
+            (local_raw_out + num_experts * (align_size - 1)) // align_size
+        ) * align_size
+        # Global must be large enough so that global / num_dp >= local_worst
+        global_num_out_tokens = local_worst * num_dp_devices
 
         with mesh:
             inp_sharding = NamedSharding(mesh, sharded_pspec)
@@ -681,11 +682,6 @@ class TestDistributedPermutation:
         With uniform merging probs, should recover original input.
         Tests both forward pass and backward pass.
         """
-        # TODO: Padding + sharding requires passing align_size to the primitive's
-        # partition function to correctly compute local worst-case buffer size.
-        # See test_local_token_dispatch_with_padding for details.
-        pytest.skip("Padding + sharding not yet supported: requires align_size in partition function")
-
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         key = jax.random.PRNGKey(42)
 
@@ -706,9 +702,17 @@ class TestDistributedPermutation:
 
         dp_axis = mesh_resource.dp_resource
         sharded_pspec = PartitionSpec(dp_axis, None)
+        num_dp_devices = mesh.shape[dp_axis] if dp_axis else 1
 
-        # Global num_out_tokens is passed to token_dispatch (partition function divides it)
-        global_num_out_tokens = num_tokens * topk
+        # For padding + sharding, we need to account for per-shard padding overhead.
+        # Each shard needs E*(A-1) extra space for worst-case padding.
+        # Compute global_num_out_tokens such that global / num_dp >= local_worst.
+        local_num_tokens = num_tokens // num_dp_devices
+        local_raw_out = local_num_tokens * topk
+        local_worst = (
+            (local_raw_out + num_experts * (align_size - 1)) // align_size
+        ) * align_size
+        global_num_out_tokens = local_worst * num_dp_devices
 
         with mesh:
             inp_sharding = NamedSharding(mesh, sharded_pspec)

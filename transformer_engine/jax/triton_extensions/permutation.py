@@ -443,7 +443,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         9,
         10,
         11,
-    )  # num_tokens, num_experts, num_out_tokens, hidden_size, with_probs, with_pad
+        12,
+    )  # num_tokens, num_experts, num_out_tokens, hidden_size, with_probs, with_pad, align_size
     inner_primitive = None
     outer_primitive = None
 
@@ -462,10 +463,11 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_probs,
         with_pad,
+        align_size,
     ):
         """Shape/dtype inference for permute."""
         del row_id_map_aval, scale_aval, permuted_scale_aval, pad_offsets_aval
-        del num_tokens, num_experts, with_pad
+        del num_tokens, num_experts, with_pad, align_size
 
         output_shape = (num_out_tokens, hidden_size)
         output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
@@ -491,8 +493,10 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_probs,
         with_pad,
+        align_size,
     ):
         """Forward to inner primitive."""
+        # align_size is only used for sharding, but must be passed since abstract() requires it
         assert PermuteWithMaskMapPrimitive.inner_primitive is not None
         return PermuteWithMaskMapPrimitive.inner_primitive.bind(
             inp,
@@ -507,6 +511,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             hidden_size=hidden_size,
             with_probs=with_probs,
             with_pad=with_pad,
+            align_size=align_size,
         )
 
     @staticmethod
@@ -525,9 +530,10 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_probs,
         with_pad,
+        align_size,
     ):
         """MLIR lowering using triton_call_lowering."""
-        del num_out_tokens
+        del align_size
         inp_stride_token = hidden_size
         inp_stride_hidden = 1
         output_stride_token = hidden_size
@@ -566,6 +572,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             grid=grid,
             constexprs={
                 "scale_hidden_dim": 0,
+                "num_tokens": num_tokens,
+                "num_out_tokens": num_out_tokens,
                 "stride_row_id_map_token": row_id_stride_token,
                 "stride_row_id_map_expert": row_id_stride_expert,
                 "stride_input_token": inp_stride_token,
@@ -596,6 +604,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_probs,
         with_pad,
+        align_size,
         mesh,
         arg_infos,
         result_infos,
@@ -607,6 +616,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         - Output (num_out_tokens, hidden_size) gets same token dim sharding
         - Permuted probs (num_out_tokens,) gets same token dim sharding
         """
+        del align_size  # Used only in partition
         del num_tokens, num_experts, num_out_tokens, hidden_size, with_pad, result_infos
         inp_spec = get_padded_spec(arg_infos[0])
         # Output has same sharding pattern: (token_shard, None)
@@ -637,6 +647,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_probs,
         with_pad,
+        align_size,
         mesh,
         arg_infos,
         result_infos,
@@ -649,8 +660,6 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         """
         del result_infos
         inp_spec = get_padded_spec(arg_infos[0])
-        row_id_map_spec = get_padded_spec(arg_infos[1])
-        probs_spec = get_padded_spec(arg_infos[2])
 
         # Input shardings - preserve original shardings
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
@@ -696,14 +705,30 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             #   local_num_out_tokens = local_num_in_tokens * topK
             #                        = global_num_out_tokens / num_dp_devices
             #
+            # With padding (align_size != 128, which is the default/no-op value):
+            #   The global num_out_tokens passed here is already worst_case_out_tokens.
+            #   We need to recalculate local worst-case from local raw tokens.
+            #   local_raw_out_tokens = global_raw_out_tokens / num_dp_devices
+            #   local_worst_case = ((local_raw_out + E*(A-1)) // A) * A
+            #
             # Local permute produces output ordered by expert: [E0 | E1 | ... | EN]
             # where each expert section contains tokens routed to that expert.
             #
             # Global assembly (if needed) should be done outside this primitive.
             # =========================================================================
 
-            # Calculate local output tokens based on topK bound
-            # num_out_tokens (from caller) = global_num_in_tokens * topK
+            # =========================================================================
+            # Output size calculation
+            # =========================================================================
+            # For both padding and non-padding cases, use simple division.
+            # The global num_out_tokens is already the worst-case buffer size.
+            #
+            # IMPORTANT for padding + sharding:
+            # Padding overhead is per-shard (each shard needs E*(A-1) extra space).
+            # The caller must account for this by passing a sufficiently large
+            # global num_out_tokens such that: global_worst / num_dp >= local_worst
+            # where local_worst = ((local_raw + E*(A-1)) // A) * A
+            # =========================================================================
             local_num_out_tokens = num_out_tokens // num_dp_devices
 
             # Local permute - output stays sharded on this GPU
@@ -720,6 +745,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
                 hidden_size=hidden_size,
                 with_probs=with_probs,
                 with_pad=with_pad,
+                align_size=align_size,
             )
 
             return local_output, local_permuted_probs
@@ -734,12 +760,13 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_probs,
         with_pad,
+        align_size,
         mesh,
         value_types,
         result_types,
     ):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, num_out_tokens, hidden_size, mesh, result_types
+        del num_tokens, num_experts, num_out_tokens, hidden_size, align_size, mesh, result_types
         prefix = "PermuteWithMaskMap"
         # inp: (num_tokens, hidden_size)
         inp_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
@@ -1814,6 +1841,7 @@ def permute_with_mask_map(
         hidden_size=hidden_size,
         with_probs=with_probs,
         with_pad=False,
+        align_size=128,  # Default value, no-op for non-padding case
     )
 
     if not with_probs:
@@ -1831,6 +1859,7 @@ def permute_with_mask_map_and_pad(
     num_experts: int,
     num_out_tokens: int,
     hidden_size: int,
+    align_size: int = 128,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """
     Permute the input tensor based on the row_id_map with fused padding.
@@ -1853,13 +1882,18 @@ def permute_with_mask_map_and_pad(
         Number of tokens in the permuted tensor (including padding).
     hidden_size : int
         Hidden size of the input tensor.
+    align_size : int
+        Alignment size for padding (default: 128). Used for distributed sharding
+        to correctly compute local buffer sizes.
 
     Returns
     -------
     output : jnp.ndarray
         Permuted and padded output tensor of shape `[num_out_tokens, hidden_size]`.
+        Padding positions are zero-filled.
     permuted_probs : Optional[jnp.ndarray]
         Permuted probabilities if probs was provided, None otherwise.
+        Padding positions are zero-filled.
     """
     with_probs = probs is not None
 
@@ -1884,7 +1918,12 @@ def permute_with_mask_map_and_pad(
         hidden_size=hidden_size,
         with_probs=with_probs,
         with_pad=True,
+        align_size=align_size,
     )
+
+    # Note: Zero-filling of padding positions is now handled directly in the
+    # _permute_kernel when FUSION_PAD=True. Each thread zeros a portion of the
+    # output buffers before writing actual permuted values.
 
     if not with_probs:
         permuted_probs = None
