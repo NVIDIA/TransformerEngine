@@ -144,6 +144,7 @@ class FusedAttnHelper:
             self.head_dim_v,
             self.window_size[0],
             self.window_size[1],
+            not self.is_non_deterministic_allowed(),
         )
 
     @staticmethod
