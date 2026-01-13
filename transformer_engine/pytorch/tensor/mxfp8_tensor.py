@@ -785,9 +785,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 )
                 # pylint: disable=unnecessary-dunder-call
                 super(MXFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
-            # Cache the attributes
-            self._dtype = tensor.dtype
-            self._requires_grad = tensor.requires_grad
+                # Cache the attributes
+                self.dtype = tensor.dtype
 
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
