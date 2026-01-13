@@ -917,7 +917,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return self._data.shape
         else:
             transpose_shape = self._transpose.shape
-            return torch.Size(tuple(transpose_shape[1:]) + (transpose_shape[0],))
+            return tuple(transpose_shape[1:]) + (transpose_shape[0],)
 
     @property
     def is_cuda(self):
