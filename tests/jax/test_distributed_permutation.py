@@ -259,9 +259,7 @@ class TestDistributedPermutation:
         routing_map = jnp.zeros((num_tokens, num_experts), dtype=jnp.int32)
         for token_idx in range(num_tokens):
             key, subkey = jax.random.split(key)
-            expert_indices = jax.random.choice(
-                subkey, num_experts, shape=(topk,), replace=False
-            )
+            expert_indices = jax.random.choice(subkey, num_experts, shape=(topk,), replace=False)
             routing_map = routing_map.at[token_idx, expert_indices].set(1)
 
         return routing_map
@@ -522,9 +520,7 @@ class TestDistributedPermutation:
             roundtrip_out = roundtrip(inp_sharded, routing_sharded, merging_sharded)
 
             # Should recover original input
-            assert_allclose(
-                jax.device_get(roundtrip_out), jax.device_get(inp_sharded), dtype=dtype
-            )
+            assert_allclose(jax.device_get(roundtrip_out), jax.device_get(inp_sharded), dtype=dtype)
 
             # ================================================================
             # Backward pass test (gradients)
@@ -599,9 +595,7 @@ class TestDistributedPermutation:
         # Compute global_num_out_tokens such that global / num_dp >= local_worst.
         local_num_tokens = num_tokens // num_dp_devices
         local_raw_out = local_num_tokens * topk
-        local_worst = (
-            (local_raw_out + num_experts * (align_size - 1)) // align_size
-        ) * align_size
+        local_worst = ((local_raw_out + num_experts * (align_size - 1)) // align_size) * align_size
         # Global must be large enough so that global / num_dp >= local_worst
         global_num_out_tokens = local_worst * num_dp_devices
 
@@ -709,9 +703,7 @@ class TestDistributedPermutation:
         # Compute global_num_out_tokens such that global / num_dp >= local_worst.
         local_num_tokens = num_tokens // num_dp_devices
         local_raw_out = local_num_tokens * topk
-        local_worst = (
-            (local_raw_out + num_experts * (align_size - 1)) // align_size
-        ) * align_size
+        local_worst = ((local_raw_out + num_experts * (align_size - 1)) // align_size) * align_size
         global_num_out_tokens = local_worst * num_dp_devices
 
         with mesh:
@@ -733,14 +725,10 @@ class TestDistributedPermutation:
                 )
                 return token_combine(dispatched, rid_map, mprobs, pad_offsets)
 
-            roundtrip_out = roundtrip_with_padding(
-                inp_sharded, routing_sharded, merging_sharded
-            )
+            roundtrip_out = roundtrip_with_padding(inp_sharded, routing_sharded, merging_sharded)
 
             # Should recover original input
-            assert_allclose(
-                jax.device_get(roundtrip_out), jax.device_get(inp_sharded), dtype=dtype
-            )
+            assert_allclose(jax.device_get(roundtrip_out), jax.device_get(inp_sharded), dtype=dtype)
 
             # ================================================================
             # Backward pass test (gradients)

@@ -283,7 +283,7 @@ def _token_dispatch_bwd_rule(
     ],
 ) -> Tuple[jnp.ndarray, None, Optional[jnp.ndarray]]:
     """Backward pass rule for token_dispatch.
-    
+
     Returns gradients for (inp, routing_map, probs).
     routing_map gradient is None since it's a discrete routing decision.
     """

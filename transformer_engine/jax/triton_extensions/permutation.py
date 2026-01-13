@@ -773,7 +773,9 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         # row_id_map: (num_tokens, num_experts * 2 + 1)
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
         # probs: (num_tokens, num_experts) or (0,)
-        probs_spec = (f"{prefix}_tokens", f"{prefix}_experts") if with_probs else (f"{prefix}_empty",)
+        probs_spec = (
+            (f"{prefix}_tokens", f"{prefix}_experts") if with_probs else (f"{prefix}_empty",)
+        )
         # scale: (num_tokens, hidden_size) - same shape as inp, permuted together
         scale_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
         # permuted_scale: (num_out_tokens, hidden_size) - same shape as output
@@ -786,7 +788,14 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         permuted_probs_spec = (f"{prefix}_out_tokens",) if with_probs else (f"{prefix}_empty2",)
 
         return SdyShardingRule(
-            (inp_spec, row_id_map_spec, probs_spec, scale_spec, permuted_scale_spec, pad_offsets_spec),
+            (
+                inp_spec,
+                row_id_map_spec,
+                probs_spec,
+                scale_spec,
+                permuted_scale_spec,
+                pad_offsets_spec,
+            ),
             (output_spec, permuted_probs_spec),
         )
 
@@ -1063,7 +1072,9 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
         # merging_probs: (num_tokens, num_experts) or (0,)
         merging_probs_spec = (
-            (f"{prefix}_tokens", f"{prefix}_experts") if with_merging_probs else (f"{prefix}_empty",)
+            (f"{prefix}_tokens", f"{prefix}_experts")
+            if with_merging_probs
+            else (f"{prefix}_empty",)
         )
         # permuted_probs: (num_out_tokens,) or (0,)
         permuted_probs_spec = (f"{prefix}_out_tokens",) if with_probs else (f"{prefix}_empty2",)
@@ -1094,7 +1105,13 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
 
     name = "te_unpermute_bwd_with_merging_probs_triton"
     multiple_results = True
-    impl_static_args = (5, 6, 7, 8, 9)  # num_tokens, num_experts, num_out_tokens, hidden_size, with_unpad
+    impl_static_args = (
+        5,
+        6,
+        7,
+        8,
+        9,
+    )  # num_tokens, num_experts, num_out_tokens, hidden_size, with_unpad
     inner_primitive = None
     outer_primitive = None
 
@@ -1326,7 +1343,13 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         merging_probs_grad_spec = (f"{prefix}_tokens", f"{prefix}_experts")
 
         return SdyShardingRule(
-            (fwd_output_grad_spec, fwd_input_spec, merging_probs_spec, row_id_map_spec, pad_offsets_spec),
+            (
+                fwd_output_grad_spec,
+                fwd_input_spec,
+                merging_probs_spec,
+                row_id_map_spec,
+                pad_offsets_spec,
+            ),
             (fwd_input_grad_spec, merging_probs_grad_spec),
         )
 
@@ -1653,9 +1676,7 @@ class SortChunksByMapPrimitive(BasePrimitive):
         return [output_sharding, permuted_probs_sharding]
 
     @staticmethod
-    def partition(
-        num_tokens, hidden_size, is_forward, with_probs, mesh, arg_infos, result_infos
-    ):
+    def partition(num_tokens, hidden_size, is_forward, with_probs, mesh, arg_infos, result_infos):
         """Partition the primitive for distributed execution."""
         del result_infos
         inp_spec = get_padded_spec(arg_infos[0])
