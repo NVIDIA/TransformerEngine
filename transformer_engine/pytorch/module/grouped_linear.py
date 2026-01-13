@@ -257,6 +257,10 @@ class _GroupedLinear(torch.autograd.Function):
                 # Keep weakrefs to weights to preserve attributes like main_grad
                 # when we need to modify the weight python objects
                 ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
+                # Save overwrite_main_grad flag now while we have access to weight objects
+                ctx.origin_weights_overwrite_main_grad = getattr(
+                    weights[0], "overwrite_main_grad", False
+                )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -314,9 +318,12 @@ class _GroupedLinear(torch.autograd.Function):
                 origin_weight_refs = ctx.origin_weight_refs
                 ctx.origin_weight_refs = None
                 origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
+                assert all(w is not None for w in origin_weights), (
+                    "weight was removed while fuse_wgrad_accumulation=True"
+                )
                 main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
                 for origin_weight, main_grad in zip(origin_weights, main_grads):
-                    if origin_weight is not None and main_grad is not None:
+                    if main_grad is not None:
                         origin_weight.main_grad = main_grad
 
             # Preprocess grad output
@@ -454,7 +461,7 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=(
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(weights[0], "overwrite_main_grad", False)
+                        if not getattr(ctx, "origin_weights_overwrite_main_grad", False)
                         else False
                     ),
                 )

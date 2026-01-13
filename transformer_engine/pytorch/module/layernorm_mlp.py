@@ -771,6 +771,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.fc2_weight_python_object_ref = (
                     weakref.ref(fc2_weight) if fc2_weight.requires_grad else None
                 )
+                # Save overwrite_main_grad flags now while we have access to weight objects
+                ctx.fc1_weight_overwrites_main_grad = getattr(
+                    fc1_weight, "overwrite_main_grad", False
+                )
+                ctx.fc2_weight_overwrites_main_grad = getattr(
+                    fc2_weight, "overwrite_main_grad", False
+                )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -985,7 +992,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_weight_main_grad = None
             if ctx.fuse_wgrad_accumulation:
                 fc1_weight_python_object_ref = getattr(ctx, "fc1_weight_python_object_ref", None)
-                fc2_weight_python_object_ref = getattr(ctx, "fc2_weight_python_object_ref", None)
+                fc2_weight_python_object_ref = getattr(ctx, "fc2_weight_python_object_ref", None) 
                 ctx.fc1_weight_python_object_ref = None
                 ctx.fc2_weight_python_object_ref = None
                 fc1_weight_python_object = (
@@ -998,10 +1005,16 @@ class _LayerNormMLP(torch.autograd.Function):
                     if fc2_weight_python_object_ref is not None
                     else None
                 )
-                if fc1_weight_python_object is not None and ctx.fc1_weight_requires_grad:
+                if ctx.fc1_weight_requires_grad:
+                    assert fc1_weight_python_object is not None, (
+                        "fc1_weight was removed while fuse_wgrad_accumulation=True"
+                    )
                     fc1_weight_main_grad = ctx.fc1_main_grad_func()
                     fc1_weight_python_object.main_grad = fc1_weight_main_grad
-                if fc2_weight_python_object is not None and ctx.fc2_weight_requires_grad:
+                if ctx.fc2_weight_requires_grad:
+                    assert fc2_weight_python_object is not None, (
+                        "fc2_weight was removed while fuse_wgrad_accumulation=True"
+                    )
                     fc2_weight_main_grad = ctx.fc2_main_grad_func()
                     fc2_weight_python_object.main_grad = fc2_weight_main_grad
 
@@ -1231,7 +1244,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     "quantization_params": ctx.fc2_grad_weight_quantizer,  # wgrad in high precision
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(fc2_weight_python_object, "overwrite_main_grad", False)
+                        if not getattr(ctx, "fc2_weight_overwrites_main_grad", False)
                         else False
                     ),
                     "layout": "NT",
@@ -1478,7 +1491,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     "quantization_params": ctx.fc1_grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(fc1_weight_python_object, "overwrite_main_grad", False)
+                        if not getattr(ctx, "fc1_weight_overwrites_main_grad", False)
                         else False
                     ),
                     "layout": "NT",

@@ -443,6 +443,10 @@ class _Linear(torch.autograd.Function):
                 # Keep weakref to weight to preserve attributes like main_grad
                 # when we need to modify the weight python object
                 ctx.origin_weight_ref = weakref.ref(weight)
+                # Save overwrite_main_grad flag now while we have access to weight object
+                ctx.origin_weight_overwrites_main_grad = getattr(
+                    weight, "overwrite_main_grad", False
+                )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -509,7 +513,9 @@ class _Linear(torch.autograd.Function):
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
             # Only needed when fuse_wgrad_accumulation is enabled.
             origin_weight_python_object = None
-            origin_weight_overwrites_main_grad = False
+            origin_weight_overwrites_main_grad = getattr(
+                ctx, "origin_weight_overwrites_main_grad", False
+            )
             main_grad = None
             if ctx.fuse_wgrad_accumulation and ctx.requires_wgrad:
                 origin_weight_ref = ctx.origin_weight_ref
@@ -517,14 +523,12 @@ class _Linear(torch.autograd.Function):
                 origin_weight_python_object = (
                     origin_weight_ref() if origin_weight_ref is not None else None
                 )
-                origin_weight_overwrites_main_grad = getattr(
-                    origin_weight_python_object, "overwrite_main_grad", False
+                assert origin_weight_python_object is not None, (
+                    "weight was removed while fuse_wgrad_accumulation=True"
                 )
                 # Since main_grad can be modified inplace, it should not be a part of saved_tensors
                 main_grad = ctx.main_grad_func()
-
-                if origin_weight_python_object is not None:
-                    origin_weight_python_object.main_grad = main_grad
+                origin_weight_python_object.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
