@@ -209,14 +209,16 @@ void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor noop_flag, NVTETens
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), scale, stream);
 }
 
-void nvte_multi_tensor_scale_tensor_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
-                                         const size_t num_tensor_lists, const size_t num_tensors_per_list,
-                                         NVTETensor scale, cudaStream_t stream) {
+void nvte_multi_tensor_scale_tensor_cuda(int chunk_size, NVTETensor noop_flag,
+                                         NVTETensor **tensor_lists, const size_t num_tensor_lists,
+                                         const size_t num_tensors_per_list, NVTETensor scale,
+                                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_scale_tensor_cuda);
   using namespace transformer_engine;
 
   Tensor *scale_tensor = convertNVTETensorCheck(scale);
   multi_tensor_scale::multi_tensor_scale_tensor_cuda(
       chunk_size, *convertNVTETensorCheck(noop_flag),
-      convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), reinterpret_cast<float *>(scale_tensor->data.dptr), stream);
+      convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
+      reinterpret_cast<float *>(scale_tensor->data.dptr), stream);
 }
