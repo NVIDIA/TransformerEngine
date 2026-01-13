@@ -19,6 +19,7 @@ import transformer_engine.pytorch.cpu_offload_v1 as v1_code_path
 from .quantized_tensor import (
     restore_from_saved,
     prepare_for_saving,
+    QuantizedTensor,
 )
 
 
@@ -255,6 +256,8 @@ class OffloadableLayerState:
         Start offloading of tensors. Puts copy from GPU to CPU tasks on offload stream.
         Before each copy event, the offload stream waits for the event signalling that the tensor is ready to be offloaded.
         This event is recorded in the start_offload or push_tensor call.
+
+        Note: tensor_list only contains regular tensors (QuantizedTensors are decomposed in push_tensor).
         """
         self._validate_state(func_name="start_offload", allowed_states=["not_offloaded"])
         self.state = "offload_started"
@@ -275,19 +278,18 @@ class OffloadableLayerState:
 
             with torch.cuda.stream(self.offload_stream):
                 if allocate_cpu_buffers:
-                    # empty_like is defined also for QuantizedTensors
                     offloaded_tensor = torch.empty_like(
                         tensor, device=torch.device("cpu"), pin_memory=True
                     )
                     self.cpu_tensor_group.tensor_list.append(offloaded_tensor)
                 else:
-                    assert self.cpu_tensor_group.tensor_list[tensor_id].shape == tensor.shape, (
+                    offloaded_tensor = self.cpu_tensor_group.tensor_list[tensor_id]
+                    assert offloaded_tensor.shape == tensor.shape, (
                         "CPU buffer shape does not match the offloaded tensor shape:"
-                        f" {self.cpu_tensor_group.tensor_list[tensor_id].shape} != {tensor.shape}  "
-                        "                       Make sure that tensor shaped do not change between"
+                        f" {offloaded_tensor.shape} != {tensor.shape}  "
+                        "Make sure that tensor shapes do not change between"
                         " iterations if retain_pinned_cpu_buffers is True."
                     )
-                    offloaded_tensor = self.cpu_tensor_group.tensor_list[tensor_id]
                 offloaded_tensor.copy_(tensor, non_blocking=True)
 
         # aux is a dictionary that contains auxiliary data like information which tensors were deduplicated,
@@ -318,6 +320,9 @@ class OffloadableLayerState:
         """
         Start reloading of tensors.
         It allocates new tensors on GPU and puts copy from CPU tasks on offload stream.
+
+        Note: tensor_list only contains regular tensors (QuantizedTensors are decomposed in push_tensor
+        and reconstructed in pop_tensor).
         """
         self._validate_state(func_name="start_reload", allowed_states=["offload_finished"])
         self.state = "reload_started"
@@ -330,7 +335,6 @@ class OffloadableLayerState:
             # cannot move tensors from pool of one stream to another without
             # calling cudaFree and cudaMalloc again.
 
-            # empty_like is defined also for QuantizedTensors.
             reloaded_tensor = torch.empty_like(tensor, device=torch.device("cuda"))
             self.offload_stream.wait_stream(torch.cuda.current_stream())
 
@@ -347,16 +351,29 @@ class OffloadableLayerState:
             self.bwd_gpu_tensor_group
         )
 
-    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor:
+    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor | tuple[list, list]:
         """
         It is called when a tensor is saved for backward pass.
 
         If tensor is offloaded, returns int representing the index of the tensor in the offloaded tensor group.
         If tensor is not offloaded, returns the tensor itself.
+        For QuantizedTensor, returns (list of push results for each component, tensor_objs) tuple.
         """
         self._validate_state(func_name="push_tensor", allowed_states=["not_offloaded"])
 
         if self._check_if_offload(tensor):
+            # For QuantizedTensor: decompose into component tensors, push each one recursively
+            if isinstance(tensor, QuantizedTensor):
+                # Make a copy because prepare_for_saving modifies the object (sets fields to None)
+                tensor_copy = tensor.detach()
+                # Inline prepare_for_saving logic - QuantizedTensor is a torch.Tensor subclass,
+                # so the generic prepare_for_saving would not call tensor.prepare_for_saving()
+                saved_tensors, tensor_obj = tensor_copy.prepare_for_saving()
+                push_results = [
+                    self.push_tensor(t) if t is not None else None for t in saved_tensors
+                ]
+                return (push_results, [tensor_obj])
+
             self.fwd_gpu_tensor_group.tensor_list.append(tensor)
             # The group is processed and offloaded at the end of the forward pass of current layer.
             # To enable offloading of tensors faster we use self.offload_stream and record
@@ -370,23 +387,39 @@ class OffloadableLayerState:
             return len(self.fwd_gpu_tensor_group.tensor_list) - 1
         return tensor
 
-    def pop_tensor(self, tensor_or_tensor_id: torch.Tensor | int) -> torch.Tensor:
+    def pop_tensor(
+        self, tensor_or_tensor_id: torch.Tensor | int | tuple[list, list]
+    ) -> torch.Tensor:
         """
         It is called when a tensor is used in backward pass.
         Returns the tensor. If tensor was offloaded/reloaded, wait for the reload of a tensor to finish.
+        For QuantizedTensor (tuple input), reconstructs from component tensors.
         """
         self._validate_state(
             func_name="pop_tensor", allowed_states=["not_offloaded", "reload_started"]
         )
 
-        # 1. tensor not offloaded
+        # 1. tensor not offloaded (regular tensor returned as-is from push)
         if isinstance(tensor_or_tensor_id, torch.Tensor):
             return tensor_or_tensor_id
-        # 2. the layer was not offloaded at all
+
+        # 2. QuantizedTensor case: tuple of (push_results, tensor_objs)
+        if isinstance(tensor_or_tensor_id, tuple):
+            push_results, tensor_objs = tensor_or_tensor_id
+            # Recursively pop each component
+            reloaded_tensors = [
+                self.pop_tensor(pr) if pr is not None else None for pr in push_results
+            ]
+            # Inline restore_from_saved - tensor_objs[0] is the QuantizedTensor copy
+            tensor_obj = tensor_objs[0]
+            tensor_obj.restore_from_saved(reloaded_tensors)
+            return tensor_obj
+
+        # 3. Regular tensor index case
         if self.state == "not_offloaded":
             return self.fwd_gpu_tensor_group.tensor_list[tensor_or_tensor_id]
 
-        # 3. the layer was offloaded
+        # 4. the layer was offloaded
         assert self.state == "reload_started"
         # wait for the tensor to be reloaded
         torch.cuda.current_stream().wait_event(
@@ -406,6 +439,10 @@ class OffloadableLayerState:
         """
         Check if tensor needs to be offloaded.
         """
+        # Only offload tensors with at least 256k elements (~1MB for float32)
+        if t.numel() < 256 * 1024:
+            return False
+
         if (
             not isinstance(t, torch.nn.Parameter)
             and not getattr(t, "_TE_do_not_offload", False)
@@ -418,7 +455,6 @@ class OffloadableLayerState:
                     " this tensor will be skipped."
                 )
                 return False
-
             return True
         return False
 
@@ -488,11 +524,13 @@ class OffloadSynchronizer:
         self.previous_bwd_layer_id = layer_num
         self.current_layer_id = layer_num
 
-    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor:
+    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor | tuple[list, list]:
         """Default push tensor method"""
         return self.layer_states[self.num_of_fwds].push_tensor(tensor)
 
-    def pop_tensor(self, tensor_or_tensor_id: torch.Tensor | int) -> torch.Tensor:
+    def pop_tensor(
+        self, tensor_or_tensor_id: torch.Tensor | int | tuple[list, list]
+    ) -> torch.Tensor:
         """Default pop tensor method"""
         return self.layer_states[self.current_layer_id].pop_tensor(tensor_or_tensor_id)
 
@@ -591,6 +629,12 @@ class DefaultOffloadSynchronizer(OffloadSynchronizer):
 
         for layer in self.start_reload_map[layer_num]:
             self.layer_states[layer].start_reload()
+
+    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor | tuple[list, list]:
+        """Push tensor - skip processing if layer won't be offloaded to reduce CPU overhead."""
+        if not self.offload_layer_map.get(self.num_of_fwds, False):
+            return tensor
+        return self.layer_states[self.num_of_fwds].push_tensor(tensor)
 
 
 class ManualOffloadSynchronizer(OffloadSynchronizer):
