@@ -576,9 +576,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 origin_weight_ref = ctx.origin_weight_ref
                 ctx.origin_weight_ref = None
                 origin_weight = origin_weight_ref() if origin_weight_ref is not None else None
-                assert origin_weight is not None, (
-                    "weight was removed while fuse_wgrad_accumulation=True"
-                )
+                assert (
+                    origin_weight is not None
+                ), "weight was removed while fuse_wgrad_accumulation=True"
                 # Since main_grad can be modified inplace, it should not be a part of saved_tensors
                 main_grad = ctx.main_grad_func() if weight is not None else None
                 if main_grad is not None:
