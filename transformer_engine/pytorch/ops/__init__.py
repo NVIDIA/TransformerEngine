@@ -11,5 +11,5 @@ This operation-based API is experimental and subject to change.
 from .basic import *
 from .fuser import register_backward_fusion, register_forward_fusion
 from .linear import Linear
-from .op import FusibleOperation
+from .op import BasicOperation, FusedOperation, FusibleOperation
 from .sequential import Sequential
