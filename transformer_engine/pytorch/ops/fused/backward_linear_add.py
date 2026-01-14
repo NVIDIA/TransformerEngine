@@ -114,7 +114,7 @@ class BackwardLinearAdd(FusedOperation):
     @staticmethod
     def fuse_backward_ops(
         ops: list[FusibleOperation],
-        **unused,
+        **unused,  # pylint: disable=unused-argument
     ) -> list[FusibleOperation]:
         """Apply operation fusion for backward pass.
 

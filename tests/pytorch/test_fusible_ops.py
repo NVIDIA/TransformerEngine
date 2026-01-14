@@ -2960,31 +2960,36 @@ class TestCustomOps:
                 input_: torch.Tensor,
                 **unused,
             ) -> torch.Tensor:
-                # Do compute on CPU
+                weight = self.basic_ops[0].weight
+                dtype = weight.dtype
+                device = weight.device
+
+                # Perform compute on CPU, because why not?
                 x = input_.cpu()
-                w = self.basic_ops[0].weight.cpu()
+                w = weight.cpu()
                 y = torch.nn.functional.linear(x, w)
                 z = torch.nn.functional.silu(y)
+                out = z.to(device=device)
 
                 # Save state for linear backward
                 linear_op_ctx = basic_op_ctxs[0]
-                linear_op_ctx.save_for_backward(x.cuda(), w.cuda())
+                linear_op_ctx.save_for_backward(input_, weight)
                 linear_op_ctx.with_quantized_compute = False
                 linear_op_ctx.input_quantizer = None
                 linear_op_ctx.weight_quantizer = None
                 linear_op_ctx.grad_output_quantizer = None
                 linear_op_ctx.grad_input_quantizer = None
-                linear_op_ctx.dtype = w.dtype
+                linear_op_ctx.dtype = dtype
                 linear_op_ctx.input_requires_grad = True
                 linear_op_ctx.weight_requires_grad = True
 
                 # Save state for SiLU backward
                 silu_op_ctx = basic_op_ctxs[1]
-                silu_op_ctx.save_for_backward(y.cuda())
-                silu_op_ctx.dtype = w.dtype
+                silu_op_ctx.save_for_backward(y.to(device=device))
+                silu_op_ctx.dtype = dtype
                 silu_op_ctx.prev_op_grad_output_quantizer = None
 
-                return z.cuda(), [(), ()]
+                return out, [(), ()]
 
             @staticmethod
             def fuse_ops(
@@ -3070,12 +3075,24 @@ class TestCustomOps:
                 grad_output: torch.Tensor,
                 **unused,
             ) -> torch.Tensor:
-                scale = self.basic_ops[0].scale
+
+                # Load state from linear forward
                 linear_op_ctx = basic_op_ctxs[1]
                 x, w = linear_op_ctx.saved_tensors
-                dy = grad_output
+                dtype = linear_op_ctx.dtype
+                device = w.device
+
+                # Perform compute in FP64 and apply scale before dgrad
+                # GEMM instead of after
+                scale = self.basic_ops[0].scale
+                dy = grad_output.double()
+                x = x.double()
+                w = w.double()
                 dx = torch.nn.functional.linear(dy, scale * w.T)
                 dw = torch.matmul(dy.T, x)
+                dx = dx.to(dtype=dtype)
+                dw = dw.to(dtype=dtype)
+
                 return dx, [(), (dw,)], [(), ()]
 
             @staticmethod

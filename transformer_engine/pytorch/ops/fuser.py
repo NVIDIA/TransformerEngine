@@ -7,7 +7,7 @@
 from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 import itertools
-from typing import Any, Optional
+from typing import Any, Optional, TypeAlias
 
 import torch
 
@@ -45,7 +45,9 @@ def _is_graph_capturing() -> bool:
 
 
 # Type alias for a function that may perform operation fusion
-type OperationFusionFunction = Callable[tuple[list[FusibleOperation], ...], list[FusibleOperation]]
+OperationFusionFunction: TypeAlias = (
+    "Callable[tuple[list[FusibleOperation], ...], list[FusibleOperation]]"
+)
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):

@@ -137,7 +137,7 @@ class ForwardLinearBiasActivation(FusedOperation):
     @staticmethod
     def fuse_forward_ops(
         ops: list[FusibleOperation],
-        **unused,
+        **unused,  # pylint: disable=unused-argument
     ) -> list[FusibleOperation]:
         """Apply operation fusion for forward pass.
 

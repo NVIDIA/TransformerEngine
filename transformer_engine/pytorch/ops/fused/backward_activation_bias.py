@@ -86,7 +86,7 @@ class BackwardActivationBias(FusedOperation):
         ops: list[FusibleOperation],
         *,
         recipe: Optional[Recipe] = None,
-        **unused,
+        **unused,  # pylint: disable=unused-argument
     ) -> list[FusibleOperation]:
         """Apply operation fusion for backward pass.
 
