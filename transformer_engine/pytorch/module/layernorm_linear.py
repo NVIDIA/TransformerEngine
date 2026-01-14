@@ -1519,85 +1519,87 @@ class LayerNormLinear(TransformerEngineBaseModule):
             inp, allow_non_contiguous=False  # removed .contiguous from inside the layer
         )
 
-        # Get concatenated weight and bias tensors
-        weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+        try:
+            # Get concatenated weight and bias tensors
+            weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
-        quantizers = (
-            self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
-            if not debug
-            else self._get_debug_quantizers(fp8_output, fp8_grad, is_grad_enabled)
-        )
-        if debug:
-            if self.no_debug_features_active(quantizers):
-                debug = False
-                quantizers = self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
+            quantizers = (
+                self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
+                if not debug
+                else self._get_debug_quantizers(fp8_output, fp8_grad, is_grad_enabled)
+            )
+            if debug:
+                if self.no_debug_features_active(quantizers):
+                    debug = False
+                    quantizers = self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
 
-        (
-            input_quantizer,
-            weight_quantizer,
-            output_quantizer,
-            grad_input_quantizer,
-            grad_weight_quantizer,
-            grad_output_quantizer,
-        ) = quantizers
+            (
+                input_quantizer,
+                weight_quantizer,
+                output_quantizer,
+                grad_input_quantizer,
+                grad_weight_quantizer,
+                grad_output_quantizer,
+            ) = quantizers
 
-        if is_grad_enabled:
-            fwd_fn = _LayerNormLinear.apply
-            autograd_ctx = []
-        else:
-            fwd_fn = _LayerNormLinear.forward
-            autograd_ctx = [None]
-        non_tensor_args = (
-            self.eps,
-            is_first_microbatch,
-            self.fp8,
-            self.fp8_calibration,
-            self.wgrad_store,
-            self.fuse_wgrad_accumulation,
-            input_quantizer,
-            weight_quantizer,
-            output_quantizer,
-            grad_input_quantizer,
-            grad_weight_quantizer,
-            grad_output_quantizer,
-            is_cpu_offload_enabled(),
-            self.tp_group,
-            self.tp_size,
-            self.sequence_parallel,
-            self.tp_size > 1,
-            self.activation_dtype,
-            self.parallel_mode,
-            self.return_layernorm_output,
-            self.return_layernorm_output_gathered,
-            is_grad_enabled,
-            self.fwd_ln_sm_margin if is_grad_enabled else self.inf_ln_sm_margin,
-            self.bwd_ln_sm_margin,
-            self.zero_centered_gamma,
-            self.normalization,
-            self.ub_overlap_ag_fprop,
-            self.ub_overlap_rs_fprop,
-            self.ub_overlap_ag_dgrad,
-            self.ub_overlap_rs_dgrad,
-            self.ub_bulk_wgrad,
-            self.ub_bulk_dgrad,
-            self.ub_name,
-            self.fsdp_group,
-            self,
-            skip_fp8_weight_update,
-            self.symmetric_ar_type,
-            debug,
-        )
-        out = fwd_fn(
-            *autograd_ctx,
-            inp,
-            self.layer_norm_weight,
-            self.layer_norm_bias,
-            weight_tensor,
-            bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None,
-            non_tensor_args,
-        )
+            if is_grad_enabled:
+                fwd_fn = _LayerNormLinear.apply
+                autograd_ctx = []
+            else:
+                fwd_fn = _LayerNormLinear.forward
+                autograd_ctx = [None]
+            non_tensor_args = (
+                self.eps,
+                is_first_microbatch,
+                self.fp8,
+                self.fp8_calibration,
+                self.wgrad_store,
+                self.fuse_wgrad_accumulation,
+                input_quantizer,
+                weight_quantizer,
+                output_quantizer,
+                grad_input_quantizer,
+                grad_weight_quantizer,
+                grad_output_quantizer,
+                is_cpu_offload_enabled(),
+                self.tp_group,
+                self.tp_size,
+                self.sequence_parallel,
+                self.tp_size > 1,
+                self.activation_dtype,
+                self.parallel_mode,
+                self.return_layernorm_output,
+                self.return_layernorm_output_gathered,
+                is_grad_enabled,
+                self.fwd_ln_sm_margin if is_grad_enabled else self.inf_ln_sm_margin,
+                self.bwd_ln_sm_margin,
+                self.zero_centered_gamma,
+                self.normalization,
+                self.ub_overlap_ag_fprop,
+                self.ub_overlap_rs_fprop,
+                self.ub_overlap_ag_dgrad,
+                self.ub_overlap_rs_dgrad,
+                self.ub_bulk_wgrad,
+                self.ub_bulk_dgrad,
+                self.ub_name,
+                self.fsdp_group,
+                self,
+                skip_fp8_weight_update,
+                self.symmetric_ar_type,
+                debug,
+            )
+            out = fwd_fn(
+                *autograd_ctx,
+                inp,
+                self.layer_norm_weight,
+                self.layer_norm_bias,
+                weight_tensor,
+                bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None,
+                non_tensor_args,
+            )
 
-        self.end_forward()
+        finally:
+            self.end_forward()
 
         if self.return_layernorm_output:
             out, ln_out = out
