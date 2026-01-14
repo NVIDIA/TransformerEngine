@@ -27,10 +27,10 @@ def measure_memory():
     # Initialize layer with BF16 parameters
     layer = DenseGeneral(features=1024, dtype=jnp.bfloat16)
     x = jax.random.normal(key, (1024, 1024), dtype=jnp.bfloat16)
-    params = layer.init(key, x)
+    var_collect = layer.init(key, x)
 
     # Forward pass in high precision
-    output = layer.apply(params, x)
+    output = layer.apply(var_collect, x)
     del x  # Input is saved by model for backward, not by user script
 
     mem_after_forward = get_gpu_memory_mb() - init_memory

@@ -21,15 +21,15 @@ def run_forward_backward(params_dtype, compute_dtype):
     # Initialize parameters and optimizer
     init_key, dropout_key = jax.random.split(jax.random.PRNGKey(0))
     x = jax.random.normal(init_key, (32, 128, 1024), dtype=compute_dtype)
-    params = layer.init({"params": init_key, "dropout": dropout_key}, x)
+    var_collect = layer.init({"params": init_key, "dropout": dropout_key}, x)
 
     # Forward and backward pass
-    def loss_fn(params):
-        output = layer.apply(params, x, rngs={"dropout": dropout_key})
+    def loss_fn(var_collect):
+        output = layer.apply(var_collect, x, rngs={"dropout": dropout_key})
         assert output.dtype == compute_dtype
         return output.sum()
 
-    loss, grads = jax.value_and_grad(loss_fn)(params)
+    loss, grads = jax.value_and_grad(loss_fn)(var_collect)
 
 
 run_forward_backward(jnp.float32, jnp.float32)  # high precision training

@@ -27,13 +27,13 @@ with te.autocast(enabled=True, recipe=recipe):
     layer = DenseGeneral(features=1024)
     key = jax.random.PRNGKey(0)
     x = jax.random.normal(key, (32, 128, 1024), dtype=jnp.bfloat16)
-    params = layer.init(key, x)
+    var_collect = layer.init(key, x)
 
     # Forward and backward pass
-    def loss_fn(params):
-        output = layer.apply(params, x)
+    def loss_fn(var_collect):
+        output = layer.apply(var_collect, x)
         return output.sum()
 
-    loss, grads = jax.value_and_grad(loss_fn)(params)
+    loss, grads = jax.value_and_grad(loss_fn)(var_collect)
 
 # END_DELAYED_SCALING_EXAMPLE

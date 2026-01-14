@@ -33,8 +33,8 @@ def measure_memory():
 
     # Forward pass with FP8 compute
     with te.autocast(enabled=True, recipe=recipe):
-        params = layer.init(key, x)
-        output = layer.apply(params, x)
+        var_collect = layer.init(key, x)
+        output = layer.apply(var_collect, x)
     del x  # Input is saved by model for backward, not by user script
 
     mem_after_forward = get_gpu_memory_mb() - init_memory

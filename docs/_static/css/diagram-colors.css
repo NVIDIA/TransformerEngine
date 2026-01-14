@@ -73,10 +73,12 @@
 }
 
 /* Arrows */
+/* Note: marker-end references #arrowhead marker which must be defined in each SVG's <defs> section */
 .arrow {
   stroke: #616161;
   stroke-width: 2;
   fill: none;
+  marker-end: url(#arrowhead);
 }
 
 /* Additional box and element styles */

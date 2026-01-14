@@ -6,6 +6,10 @@
 FP8 Blockwise Scaling
 ===================================
 
+.. warning::
+
+   ``Float8BlockScaling`` is **not currently supported** in JAX.
+
 FP8 Blockwise Scaling recipe is inspired by the quantization scheme used to train the `DeepSeek-v3 model <https://arxiv.org/abs/2412.19437>`__ –
 the first open-source large-scale LLM trained entirely in FP8 precision.
 Unlike the previous recipes, it assigns a dedicated scaling factor to each block of elements.
@@ -163,10 +167,7 @@ Here's how to use the FP8 Blockwise Scaling recipe in PyTorch and JAX:
 
    .. tab:: JAX
 
-      .. literalinclude:: jax_blockwise_scaling_example.py
-         :language: python
-         :start-after: # START_BLOCKWISE_SCALING_EXAMPLE
-         :end-before: # END_BLOCKWISE_SCALING_EXAMPLE
+      ``Float8BlockScaling`` is **not currently supported** in JAX.
 
 Supported devices
 -----------------

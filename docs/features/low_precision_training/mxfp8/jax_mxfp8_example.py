@@ -3,10 +3,11 @@
 # See LICENSE for license information.
 
 # Check for Blackwell or newer GPU
-from transformer_engine_jax import get_device_compute_capability
+from transformer_engine.jax.quantize import get_device_compute_capability
 
-major_minor = get_device_compute_capability(0)
-assert major_minor >= 100, f"MXFP8 requires SM100 (Blackwell) or later, got SM{major_minor}"
+assert (
+    get_device_compute_capability() >= 100
+), f"MXFP8 requires SM100 (Blackwell) or later, got SM{get_device_compute_capability()}"
 
 # START_MXFP8_EXAMPLE
 
@@ -26,13 +27,13 @@ with te.autocast(enabled=True, recipe=recipe):
     layer = DenseGeneral(features=1024)
     key = jax.random.PRNGKey(0)
     x = jax.random.normal(key, (32, 128, 1024), dtype=jnp.bfloat16)
-    params = layer.init(key, x)
+    var_collect = layer.init(key, x)
 
     # Forward and backward pass
-    def loss_fn(params):
-        output = layer.apply(params, x)
+    def loss_fn(var_collect):
+        output = layer.apply(var_collect, x)
         return output.sum()
 
-    loss, grads = jax.value_and_grad(loss_fn)(params)
+    loss, grads = jax.value_and_grad(loss_fn)(var_collect)
 
 # END_MXFP8_EXAMPLE
