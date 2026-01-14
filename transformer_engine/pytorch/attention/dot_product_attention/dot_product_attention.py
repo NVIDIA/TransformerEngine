@@ -976,6 +976,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                     or bottom right (`True`) corner of the softmax matrix in the encoder.
                     If `None`, it will be set to `False` for `attn_mask_type` =
                     {'causal', 'padding_causal'} and `True` for other mask types.
+                    Note: This parameter will be automatically overridden based on the
+                    `attn_mask_type` - it will be forced to `False` for 'causal' and
+                    'padding_causal' mask types, and forced to `True` for mask types
+                    containing 'bottom_right' (e.g., 'causal_bottom_right',
+                    'padding_causal_bottom_right'), regardless of the explicitly passed value.
         checkpoint_core_attention : bool, default = False
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would

@@ -508,7 +508,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 }
 
 // NVTE fused attention FWD with packed QKV
-// DEPRECATED: This API is deprecated. (Should there be a version by which this is going to be removed? @cyang)
+// DEPRECATED: This API is deprecated.
 // Please use nvte_fused_attn_fwd with separate Q, K, V tensors instead.
 void nvte_fused_attn_fwd_qkvpacked(
     const NVTETensor QKV, const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
