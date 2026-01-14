@@ -254,7 +254,8 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                        const std::vector<size_t> &split_sections,
-                                       std::vector<py::handle> quantizer_list);
+                                       std::vector<py::handle> quantizer_list,
+                                       bool disable_bulk_allocation = false);
 
 /***************************************************************************************************
  * Bias gradient fusions
