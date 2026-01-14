@@ -434,9 +434,11 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
 
     name = "te_permute_with_mask_map_triton"
     multiple_results = True
-    # scale, permuted_scale are dummy inputs (not used when PERMUTE_SCALE=False)
-    # pad_offsets can be shape (0,) when not doing padding, or (num_experts,) when padding
-    # output_buf, permuted_probs_buf are pre-zeroed buffers for the inner primitive only
+    # Outer primitive has 6 tensor inputs: inp, row_id_map, probs, scale, permuted_scale, pad_offsets
+    # Static args for outer primitive: num_tokens, num_experts, num_out_tokens, hidden_size,
+    #                                  with_probs, with_pad, align_size
+    # Note: The inner primitive has 8 tensor inputs (adds output_buf, permuted_probs_buf),
+    #       but impl_static_args is for the outer primitive's impl() which has 6 tensor inputs.
     impl_static_args = (
         6,
         7,
@@ -445,7 +447,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         10,
         11,
         12,
-    )  # num_tokens, num_experts, num_out_tokens, hidden_size, with_probs, with_pad, align_size
+    )
     inner_primitive = None
     outer_primitive = None
 
@@ -503,8 +505,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         # align_size is only used for sharding, but must be passed since abstract() requires it
         assert PermuteWithMaskMapPrimitive.inner_primitive is not None
 
-        # When padding is enabled, create pre-zeroed output buffers for the inner primitive.
-        # This ensures padding positions contain zeros instead of uninitialized memory.
+        # Create pre-zeroed output buffers for the inner primitive.
+        # When with_pad=True, this ensures padding positions contain zeros.
         # These buffers are aliased to the outputs via input_output_aliases in the lowering.
         if with_pad:
             output_buf = jnp.zeros((num_out_tokens, hidden_size), dtype=inp.dtype)
@@ -513,9 +515,12 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             else:
                 permuted_probs_buf = jnp.zeros((0,), dtype=inp.dtype)
         else:
-            # When not padding, use dummy buffers (not used by lowering)
-            output_buf = jnp.zeros((0,), dtype=inp.dtype)
-            permuted_probs_buf = jnp.zeros((0,), dtype=inp.dtype)
+            # When not padding, use empty buffers (kernel ignores them, lowering skips aliasing)
+            output_buf = jnp.empty((num_out_tokens, hidden_size), dtype=inp.dtype)
+            if with_probs:
+                permuted_probs_buf = jnp.empty((num_out_tokens,), dtype=probs.dtype)
+            else:
+                permuted_probs_buf = jnp.empty((0,), dtype=inp.dtype)
 
         return PermuteWithMaskMapPrimitive.inner_primitive.bind(
             inp,
@@ -544,8 +549,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         scale,
         permuted_scale,
         pad_offsets,
-        output_buf,  # Pre-zeroed output buffer (used when with_pad=True)
-        permuted_probs_buf,  # Pre-zeroed permuted_probs buffer (used when with_pad=True)
+        output_buf,  # Pre-zeroed output buffer (for input_output_aliases)
+        permuted_probs_buf,  # Pre-zeroed permuted_probs buffer (for input_output_aliases)
         *,
         num_tokens,
         num_experts,
@@ -583,13 +588,15 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         block_size = _get_min_block_size(_permute_kernel)
         grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
-        # When padding is enabled, use input_output_aliases to alias the pre-zeroed
-        # buffers to the outputs. This ensures padding positions contain zeros.
+        # Use input_output_aliases to alias pre-zeroed buffers to outputs.
+        # This ensures padding positions contain zeros since the kernel only writes valid positions.
         # Input indices: 0=inp, 1=row_id_map, 2=probs, 3=scale, 4=permuted_scale,
         #                5=pad_offsets, 6=output_buf, 7=permuted_probs_buf
         # Output indices: 0=output, 1=permuted_probs
         if with_pad:
-            input_output_aliases = {6: 0, 7: 1}  # output_buf->output, permuted_probs_buf->permuted_probs
+            input_output_aliases = {6: 0}
+            if with_probs:
+                input_output_aliases[7] = 1
         else:
             input_output_aliases = None
 
@@ -837,6 +844,11 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
 
     name = "te_unpermute_with_mask_map_triton"
     multiple_results = True
+    # Outer primitive has 5 tensor inputs: inp, row_id_map, merging_probs, permuted_probs, pad_offsets
+    # Static args for outer primitive: num_tokens, num_experts, hidden_size,
+    #                                  with_merging_probs, with_probs, with_unpad
+    # Note: The inner primitive has 7 tensor inputs (adds output_buf, unpermuted_probs_buf),
+    #       but impl_static_args is for the outer primitive's impl() which has 5 tensor inputs.
     impl_static_args = (
         5,
         6,
@@ -844,7 +856,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         8,
         9,
         10,
-    )  # num_tokens, num_experts, hidden_size, with_merging_probs, with_probs, with_unpad
+    )
     inner_primitive = None
     outer_primitive = None
 
@@ -855,6 +867,8 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         merging_probs_aval,
         permuted_probs_aval,
         pad_offsets_aval,
+        output_buf_aval=None,  # Dummy for kernel signature consistency (inner primitive only)
+        unpermuted_probs_buf_aval=None,  # Dummy for kernel signature consistency (inner primitive only)
         *,
         num_tokens,
         num_experts,
@@ -865,6 +879,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
     ):
         """Shape/dtype inference for unpermute."""
         del row_id_map_aval, merging_probs_aval, with_merging_probs, pad_offsets_aval, with_unpad
+        del output_buf_aval, unpermuted_probs_buf_aval  # Unused, for signature consistency
 
         output_shape = (num_tokens, hidden_size)
         output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)
@@ -895,12 +910,23 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
     ):
         """Forward to inner primitive."""
         assert UnpermuteWithMaskMapPrimitive.inner_primitive is not None
+
+        # Create dummy buffers for kernel signature consistency with _permute_kernel.
+        # These are not used for pre-zeroing since unpermute writes to all output positions.
+        output_buf = jnp.empty((num_tokens, hidden_size), dtype=inp.dtype)
+        if with_probs:
+            unpermuted_probs_buf = jnp.empty((num_tokens, num_experts), dtype=permuted_probs.dtype)
+        else:
+            unpermuted_probs_buf = jnp.empty((0,), dtype=inp.dtype)
+
         return UnpermuteWithMaskMapPrimitive.inner_primitive.bind(
             inp,
             row_id_map,
             merging_probs,
             permuted_probs,
             pad_offsets,
+            output_buf,
+            unpermuted_probs_buf,
             num_tokens=num_tokens,
             num_experts=num_experts,
             hidden_size=hidden_size,
@@ -917,6 +943,8 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         merging_probs,
         permuted_probs,
         pad_offsets,
+        output_buf,  # Dummy for kernel signature consistency
+        unpermuted_probs_buf,  # Dummy for kernel signature consistency
         *,
         num_tokens,
         num_experts,
@@ -957,6 +985,8 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
             merging_probs,
             permuted_probs,
             pad_offsets,
+            output_buf,
+            unpermuted_probs_buf,
             grid=grid,
             constexprs={
                 "stride_row_id_map_token": row_id_stride_token,
@@ -1957,9 +1987,10 @@ def permute_with_mask_map_and_pad(
         align_size=align_size,
     )
 
-    # Note: Zero-filling of padding positions is now handled directly in the
-    # _permute_kernel when FUSION_PAD=True. Each thread zeros a portion of the
-    # output buffers before writing actual permuted values.
+    # Note: Zero-filling of padding positions is handled by pre-zeroing the output
+    # buffers in impl() using jnp.zeros(), then aliasing them to the kernel's outputs
+    # via input_output_aliases. The kernel only writes to valid positions, leaving
+    # padding positions at zero.
 
     if not with_probs:
         permuted_probs = None

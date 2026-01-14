@@ -249,7 +249,8 @@ def triton_call_lowering(
     kernel_constexprs = constexprs if constexprs is not None else {}
 
     # Handle autotuned kernels - compile all configs
-    if isinstance(kernel_fn, autotuner.Autotuner):
+    is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
+    if is_autotuned:
         # Compile all configs for runtime selection
         kernel_calls = []
         actual_kernel_fn = kernel_fn.fn
@@ -291,23 +292,14 @@ def triton_call_lowering(
             kernel_calls.append((config_call, str(config)))
 
         # Create autotuned kernel call
-        # Convert input_output_aliases to format with sizes
-        if input_output_aliases is None:
-            input_output_aliases = {}
-
-        input_output_aliases_with_sizes = tuple(
-            (
-                input_idx,
-                output_idx,
-                ctx.avals_in[input_idx].size * ctx.avals_in[input_idx].dtype.itemsize,
-            )
-            for input_idx, output_idx in input_output_aliases.items()
-        )
-
+        # Note: We pass an empty tuple for input_output_aliases_with_sizes here
+        # because aliasing is handled at the FFI lowering level via operand_output_aliases.
+        # Passing aliases to both TritonAutotunedKernelCall and FFI lowering can cause
+        # CUDA_ERROR_INVALID_VALUE errors during cuMemcpyHtoDAsync_v2.
         kernel_call = gpu_triton.TritonAutotunedKernelCall(
             f"{actual_kernel_fn.__name__}_autotuned",
             kernel_calls,
-            input_output_aliases_with_sizes,
+            (),  # Empty tuple - aliasing handled by FFI lowering
         )
 
     else:
@@ -338,15 +330,21 @@ def triton_call_lowering(
     serialized_metadata = b""
     call_proto = kernel_call.to_proto(actual_kernel_fn.__name__, serialized_metadata)
 
-    if input_output_aliases is None:
-        input_output_aliases = {}
+    # Handle input_output_aliases:
+    # All aliasing is handled at the FFI lowering level via operand_output_aliases.
+    # We don't use TritonAutotunedKernelCall's input_output_aliases_with_sizes because
+    # passing aliases to both levels causes CUDA_ERROR_INVALID_VALUE during cuMemcpyHtoDAsync_v2.
+    if input_output_aliases:
+        ffi_operand_output_aliases = input_output_aliases
+    else:
+        ffi_operand_output_aliases = None
 
     # Use JAX FFI lowering with compressed protobuf
     rule = jax.ffi.ffi_lowering(
         "triton_kernel_call",  # Custom call target registered in gpu_triton.py
         api_version=2,
         backend_config=zlib.compress(call_proto),
-        operand_output_aliases=input_output_aliases,
+        operand_output_aliases=ffi_operand_output_aliases,
     )
 
     return rule(ctx, *array_args)
