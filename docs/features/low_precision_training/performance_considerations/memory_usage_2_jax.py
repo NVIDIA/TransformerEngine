@@ -41,9 +41,8 @@ print("Tensors in memory:")
 total_bytes = 0
 for arr in jax.live_arrays():
     total_bytes += arr.nbytes
-    if arr.nbytes > 200000: # do not count small tensors
+    if arr.nbytes > 200000:  # do not count small tensors
         print(f"  Shape: {arr.shape}, Dtype: {arr.dtype}, Size: {arr.nbytes / 1024:.1f} KB")
-print(f"  Total from all live arrays: {total_bytes / (1024**2):.2f} MB")\
-
+print(f"  Total from all live arrays: {total_bytes / (1024**2):.2f} MB")
 
 print("# END_MEMORY_USAGE_2")

@@ -20,6 +20,7 @@ layer = DenseGeneral(features=1024, dtype=jnp.bfloat16)
 x = jax.random.normal(key, (1024, 1024), dtype=jnp.bfloat16)
 var_collect = layer.init(key, x)
 
+
 @jax.jit
 def loss_fn(var_collect, x):
     output = layer.apply(var_collect, x)
