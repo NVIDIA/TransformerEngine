@@ -1610,7 +1610,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 " insight. ",
                 level=logging.WARNING,
             )
-            self.name = f"Layer_{TEDebugState.get_layer_count()}"
+            self.fast_setattr("name", f"Layer_{TEDebugState.get_layer_count()}")
 
     def _check_weight_tensor_recipe_correspondence(self) -> None:
         """
