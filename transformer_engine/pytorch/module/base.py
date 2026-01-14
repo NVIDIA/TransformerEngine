@@ -1583,8 +1583,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Sometimes features inform that they will not be enabled for particular layer
         # for multiple next iterations.
-        self.fast_setattr("next_iter_when_debug_should_be_run",
-                          next_iter_when_debug_should_be_run(quantizers))
+        self.fast_setattr(
+            "next_iter_when_debug_should_be_run", next_iter_when_debug_should_be_run(quantizers)
+        )
 
         if not run_current:
             return True
