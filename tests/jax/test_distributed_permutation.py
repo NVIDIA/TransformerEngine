@@ -50,9 +50,11 @@ from test_permutation import (
 
 # Dispatch/combine test cases: (num_tokens, num_experts, hidden_size, topk)
 # topk = number of experts each token is routed to
+# Includes small, medium-large, and largest stress test cases.
 ALL_DISPATCH_COMBINE_CASES = [
     (128, 4, 64, 2),
-    (256, 8, 128, 3),
+    (4096, 32, 1280, 2),
+    (4096, 256, 4096, 6),
 ]
 DISPATCH_COMBINE_CASES = {
     "L0": ALL_DISPATCH_COMBINE_CASES[0:1],
@@ -62,7 +64,8 @@ DISPATCH_COMBINE_CASES = {
 # Dispatch/combine with padding test cases: (num_tokens, num_experts, hidden_size, topk, align_size)
 ALL_DISPATCH_COMBINE_PADDING_CASES = [
     (128, 4, 64, 2, 8),
-    (256, 8, 128, 3, 16),
+    (4096, 32, 1280, 2, 128),
+    (4096, 256, 4096, 6, 16),
 ]
 DISPATCH_COMBINE_PADDING_CASES = {
     "L0": ALL_DISPATCH_COMBINE_PADDING_CASES[0:1],
@@ -88,6 +91,25 @@ class TestDistributedPermutation:
     We verify correctness by comparing each shard's output against the reference
     implementation run on that shard's local data.
     """
+
+    @staticmethod
+    def compute_padded_output_size(
+        num_tokens: int,
+        num_experts: int,
+        topk: int,
+        align_size: int,
+        num_dp_devices: int,
+    ) -> int:
+        """Compute global_num_out_tokens for distributed padding tests.
+
+        Each device processes local_num_tokens tokens. We compute the worst-case
+        padded output size per device, then multiply by num_dp_devices to get
+        a global size that ensures global / num_dp >= local_worst.
+        """
+        local_num_tokens = num_tokens // num_dp_devices
+        local_raw_out = local_num_tokens * topk
+        local_worst = ((local_raw_out + num_experts * (align_size - 1)) // align_size) * align_size
+        return local_worst * num_dp_devices
 
     @staticmethod
     def generate_routing_map(
@@ -428,11 +450,9 @@ class TestDistributedPermutation:
         # For padding + sharding, we need to account for per-shard padding overhead.
         # Each shard needs E*(A-1) extra space for worst-case padding.
         # Compute global_num_out_tokens such that global / num_dp >= local_worst.
-        local_num_tokens = num_tokens // num_dp_devices
-        local_raw_out = local_num_tokens * topk
-        local_worst = ((local_raw_out + num_experts * (align_size - 1)) // align_size) * align_size
-        # Global must be large enough so that global / num_dp >= local_worst
-        global_num_out_tokens = local_worst * num_dp_devices
+        global_num_out_tokens = self.compute_padded_output_size(
+            num_tokens, num_experts, topk, align_size, num_dp_devices
+        )
 
         with mesh:
             inp_sharding = NamedSharding(mesh, sharded_pspec)
@@ -533,10 +553,9 @@ class TestDistributedPermutation:
         # For padding + sharding, we need to account for per-shard padding overhead.
         # Each shard needs E*(A-1) extra space for worst-case padding.
         # Compute global_num_out_tokens such that global / num_dp >= local_worst.
-        local_num_tokens = num_tokens // num_dp_devices
-        local_raw_out = local_num_tokens * topk
-        local_worst = ((local_raw_out + num_experts * (align_size - 1)) // align_size) * align_size
-        global_num_out_tokens = local_worst * num_dp_devices
+        global_num_out_tokens = self.compute_padded_output_size(
+            num_tokens, num_experts, topk, align_size, num_dp_devices
+        )
 
         with mesh:
             inp_sharding = NamedSharding(mesh, sharded_pspec)

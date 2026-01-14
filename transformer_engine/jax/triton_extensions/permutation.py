@@ -144,7 +144,7 @@ class RowIdMapPass1Primitive(BasePrimitive):
     @staticmethod
     def partition(num_tokens, num_experts, block_size, mesh, arg_infos, result_infos):
         """Row id map 1st pass partition."""
-        del result_infos
+        del num_tokens, result_infos
         routing_map_spec = get_padded_spec(arg_infos[0])
 
         # Input sharding
@@ -178,7 +178,7 @@ class RowIdMapPass1Primitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(num_tokens, num_experts, block_size, mesh, value_types, result_types):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, block_size, mesh, result_types
+        del num_tokens, num_experts, block_size, mesh, value_types, result_types
         prefix = "RowIdMapPass1"
         # routing_map shape: (num_tokens, num_experts)
         input_spec = (f"{prefix}_tokens", f"{prefix}_experts")
@@ -280,7 +280,7 @@ class RowIdMapPass2Primitive(BasePrimitive):
     @staticmethod
     def partition(num_tokens, num_experts, block_size, mesh, arg_infos, result_infos):
         """Partition the primitive for distributed execution."""
-        del result_infos
+        del num_tokens, result_infos
         row_id_map_spec = get_padded_spec(arg_infos[0])
 
         # Input shardings
@@ -314,7 +314,7 @@ class RowIdMapPass2Primitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(num_tokens, num_experts, block_size, mesh, value_types, result_types):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, block_size, mesh, result_types
+        del num_tokens, num_experts, block_size, mesh, value_types, result_types
         prefix = "RowIdMapPass2"
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_cols")
         workspace_spec = (f"{prefix}_ws_experts", f"{prefix}_ws_blocks")
@@ -390,7 +390,7 @@ class RowIdMapPass3Primitive(BasePrimitive):
     @staticmethod
     def partition(num_tokens, num_experts, mesh, arg_infos, result_infos):
         """Partition the primitive for distributed execution."""
-        del result_infos
+        del num_tokens, result_infos
         row_id_map_spec = get_padded_spec(arg_infos[0])
 
         # Input sharding
@@ -416,7 +416,7 @@ class RowIdMapPass3Primitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(num_tokens, num_experts, mesh, value_types, result_types):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, mesh, result_types
+        del num_tokens, num_experts, mesh, value_types, result_types
         prefix = "RowIdMapPass3"
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_cols")
         return SdyShardingRule((row_id_map_spec,), (row_id_map_spec,))
@@ -501,7 +501,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         align_size, # align_size is only used for sharding, but must be passed since abstract() requires it
     ):
         """Forward to inner primitive."""
-        
+
         assert PermuteWithMaskMapPrimitive.inner_primitive is not None
 
         # Create pre-zeroed output buffers for the inner primitive.
@@ -700,7 +700,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         independently. The row_id_map contains local destination indices,
         so no inter-GPU communication is needed.
         """
-        del result_infos
+        del num_tokens, result_infos
         inp_spec = get_padded_spec(arg_infos[0])
 
         # Input shardings - preserve original shardings
@@ -810,7 +810,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         result_types,
     ):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, num_out_tokens, hidden_size, align_size, mesh, result_types
+        del num_tokens, num_experts, num_out_tokens, hidden_size, align_size, mesh, value_types, result_types
         prefix = "PermuteWithMaskMap"
         # inp: (num_tokens, hidden_size)
         inp_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
@@ -1072,7 +1072,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         result_infos,
     ):
         """Partition the primitive for distributed execution."""
-        del result_infos
+        del num_tokens, result_infos
         row_id_map_spec = get_padded_spec(arg_infos[1])
 
         # Input shardings - preserve original shardings
@@ -1130,7 +1130,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         result_types,
     ):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, hidden_size, mesh, result_types
+        del num_tokens, num_experts, hidden_size, mesh, value_types, result_types
         prefix = "UnpermuteWithMaskMap"
         # inp: (num_out_tokens, hidden_size)
         inp_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
@@ -1347,7 +1347,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         result_infos,
     ):
         """Partition the primitive for distributed execution."""
-        del result_infos
+        del num_tokens, num_out_tokens, result_infos
         fwd_output_grad_spec = get_padded_spec(arg_infos[0])
         merging_probs_spec = get_padded_spec(arg_infos[2])
 
@@ -1397,7 +1397,7 @@ class UnpermuteBwdWithMergingProbsPrimitive(BasePrimitive):
         result_types,
     ):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, num_out_tokens, hidden_size, mesh, result_types
+        del num_tokens, num_experts, num_out_tokens, hidden_size, mesh, value_types, result_types
         prefix = "UnpermuteBwdWithMergingProbs"
         fwd_output_grad_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
         fwd_input_spec = (f"{prefix}_out_tokens", f"{prefix}_hidden")
@@ -1623,7 +1623,7 @@ class MakeChunkSortMapPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(num_tokens, num_splits, mesh, value_types, result_types):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_splits, mesh, result_types
+        del num_tokens, num_splits, mesh, value_types, result_types
         prefix = "MakeChunkSortMap"
         split_sizes_spec = (f"{prefix}_splits",)
         sorted_indices_spec = (f"{prefix}_splits",)
@@ -1744,7 +1744,7 @@ class SortChunksByMapPrimitive(BasePrimitive):
     @staticmethod
     def partition(num_tokens, hidden_size, is_forward, with_probs, mesh, arg_infos, result_infos):
         """Partition the primitive for distributed execution."""
-        del result_infos
+        del num_tokens, result_infos
         inp_spec = get_padded_spec(arg_infos[0])
 
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
@@ -1787,7 +1787,7 @@ class SortChunksByMapPrimitive(BasePrimitive):
         num_tokens, hidden_size, is_forward, with_probs, mesh, value_types, result_types
     ):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, hidden_size, is_forward, mesh, result_types
+        del num_tokens, hidden_size, is_forward, mesh, value_types, result_types
         prefix = "SortChunksByMap"
         inp_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
         row_id_map_spec = (f"{prefix}_tokens",)
@@ -2064,7 +2064,7 @@ def unpermute_with_mask_map(
         merging_probs = jnp.zeros((0,), dtype=inp.dtype)
     if not with_probs:
         permuted_probs = jnp.zeros((0,), dtype=inp.dtype)
-    # Create dummy pad_offsets (not used when FUSION_UNPAD=False, but required by kernel signature)
+    # Create dummy pad_offsets (not used when with_unpad=False, but required by kernel signature)
     dummy_pad_offsets = jnp.zeros((0,), dtype=jnp.int32)
 
     output, unpermuted_probs = UnpermuteWithMaskMapPrimitive.outer_primitive.bind(
