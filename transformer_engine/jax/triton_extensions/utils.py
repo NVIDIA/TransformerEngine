@@ -338,17 +338,15 @@ def triton_call_lowering(
     serialized_metadata = b""
     call_proto = kernel_call.to_proto(actual_kernel_fn.__name__, serialized_metadata)
 
-    if input_output_aliases:
-        ffi_operand_output_aliases = input_output_aliases
-    else:
-        ffi_operand_output_aliases = None
+    if input_output_aliases is None:
+        input_output_aliases = {}
 
     # Use JAX FFI lowering with compressed protobuf
     rule = jax.ffi.ffi_lowering(
         "triton_kernel_call",  # Custom call target registered in gpu_triton.py
         api_version=2,
         backend_config=zlib.compress(call_proto),
-        operand_output_aliases=ffi_operand_output_aliases,
+        operand_output_aliases=input_output_aliases,
     )
 
     return rule(ctx, *array_args)
