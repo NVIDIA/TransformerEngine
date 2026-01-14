@@ -42,7 +42,7 @@ class BackwardAddRMSNorm(FusedOperation):
 
         # Get basic operations
         rmsnorm_op = self.basic_ops[1]
-        rmsnorm_op_ctx = basic_op_ctxs[0]
+        rmsnorm_op_ctx = basic_op_ctxs[1]
 
         # Saved tensors from forward pass
         x, rstdevs = rmsnorm_op_ctx.saved_tensors
@@ -53,7 +53,7 @@ class BackwardAddRMSNorm(FusedOperation):
 
         # Check input tensors
         dtype = rmsnorm_op_ctx.dtype
-        extra_grad = basic_op_grad_extra_outputs[1][0]
+        extra_grad = basic_op_grad_extra_outputs[0][0]
         dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
         w = maybe_dequantize(rmsnorm_op.weight, dtype).view((inner_dim,))
         add = maybe_dequantize(extra_grad.contiguous(), dtype).view(x.size())
@@ -77,57 +77,50 @@ class BackwardAddRMSNorm(FusedOperation):
         grad_input = dx.view(grad_output.size())
         grad_weight = dw.view(weight_dims)
 
-        return grad_input, [(grad_weight,), ()], [(), ()]
+        return grad_input, [(), (grad_weight,)], [(), ()]
 
+    @staticmethod
+    def fuse_backward_ops(
+        ops: list[FusibleOperation],
+        **unused,
+    ) -> list[FusibleOperation]:
+        """Apply operation fusion for backward pass.
 
-def fuse_backward_add_rmsnorm(
-    ops: list[tuple[FusibleOperation, list[int]]],
-) -> list[tuple[FusibleOperation, list[int]]]:
-    """Fused backward RMNorm + add
+        Parameters
+        ----------
+        ops : list of FusibleOperation
+            Backward pass operations.
 
-    Parameters
-    ----------
-    ops : list of tuples
-        Backward pass operations and the indices of the corresponding
-        basic operations.
+        Returns
+        -------
+        ops : list of FusibleOperation
+            Updated backward pass operations
 
-    Returns
-    -------
-    ops : list of tuples
-        Updated backward pass operations
+        """
 
-    """
+        # Scan through ops, fusing if possible
+        out = []
+        window = []
+        while ops:
 
-    # Scan through ops, fusing if possible
-    out = []
-    window = []
-    while len(ops) >= 2:
+            # Shift window
+            while len(window) >= 2:
+                out.append(window[0])
+                window = window[1:]
+            while ops and len(window) < 2:
+                window.append(ops[0])
+                ops = ops[1:]
+
+            # Construct fused op if window matches pattern
+            if (
+                len(window) == 2
+                and isinstance(window[0], MakeExtraOutput)
+                and isinstance(window[1], RMSNorm)
+                and not window[0]._in_place
+            ):
+                op = BackwardAddRMSNorm(add=window[0], rmsnorm=window[1])
+                window = [op]
+
+        # Return list of ops
         out.extend(window)
-
-        # Check if first op is linear
-        window, ops = ops[:1], ops[1:]
-        op, _ = window[0]
-        if not isinstance(op, RMSNorm):
-            continue
-
-        # Check if second op is "make extra output"
-        op, _ = ops[0]
-        if not isinstance(op, MakeExtraOutput):
-            continue
-        if op._in_place:
-            continue
-        window.extend(ops[:1])
-        ops = ops[1:]
-
-        # Replace window with fused op
-        op = BackwardAddRMSNorm(
-            rmsnorm=window[0][0],
-            add=window[1][0],
-        )
-        basic_op_idxs = [basic_op_idxs[0] for _, basic_op_idxs in window]
-        window = [(op, basic_op_idxs)]
-
-    # Return list of ops
-    out.extend(window)
-    out.extend(ops)
-    return out
+        return out

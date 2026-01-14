@@ -2329,13 +2329,13 @@ class TestFusedOps:
         backward_ops = model._module_groups[0]._backward_ops
         if with_quantization:
             assert len(backward_ops) == 2
-            assert isinstance(backward_ops[0][0], BackwardActivationBias)
-            assert isinstance(backward_ops[1][0], te_ops.Quantize)
+            assert isinstance(backward_ops[0][0], te_ops.Quantize)
+            assert isinstance(backward_ops[1][0], BackwardActivationBias)
         else:
             assert len(backward_ops) == 3
-            assert isinstance(backward_ops[0][0], act_type)
+            assert isinstance(backward_ops[0][0], te_ops.Quantize)
             assert isinstance(backward_ops[1][0], te_ops.Bias)
-            assert isinstance(backward_ops[2][0], te_ops.Quantize)
+            assert isinstance(backward_ops[2][0], act_type)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
