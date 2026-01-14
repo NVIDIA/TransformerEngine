@@ -809,7 +809,16 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         result_types,
     ):
         """Shardy sharding rule for this primitive."""
-        del num_tokens, num_experts, num_out_tokens, hidden_size, align_size, mesh, value_types, result_types
+        del (
+            num_tokens,
+            num_experts,
+            num_out_tokens,
+            hidden_size,
+            align_size,
+            mesh,
+            value_types,
+            result_types,
+        )
         prefix = "PermuteWithMaskMap"
         # inp: (num_tokens, hidden_size)
         inp_spec = (f"{prefix}_tokens", f"{prefix}_hidden")
