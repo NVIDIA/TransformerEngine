@@ -2888,7 +2888,10 @@ class TestCustomOps:
                 ctx: OperationContext,
                 grad_output: torch.Tensor,
             ) -> torch.Tensor:
-                scale, input_, = ctx.saved_tensors
+                (
+                    scale,
+                    input_,
+                ) = ctx.saved_tensors
                 grad_scale = torch.inner(input_.reshape(-1), grad_output.reshape(-1))
                 grad_scale = grad_scale.reshape(())
                 grad_input = scale * grad_output

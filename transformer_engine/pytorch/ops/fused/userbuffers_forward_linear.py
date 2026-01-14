@@ -389,10 +389,7 @@ class UserbuffersForwardLinear(FusedOperation):
         """
 
         # Return immediately if environment is not distributed
-        if (
-            not torch.distributed.is_initialized()
-            or torch.distributed.get_world_size() == 1
-        ):
+        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
             return ops
 
         # Scan through ops, fusing if possible
@@ -419,10 +416,7 @@ class UserbuffersForwardLinear(FusedOperation):
 
             # Check if next op is reduce-scatter
             reduce_scatter = None
-            if (
-                linear.tensor_parallel_mode is None
-                and ops and isinstance(ops[0], ReduceScatter)
-            ):
+            if linear.tensor_parallel_mode is None and ops and isinstance(ops[0], ReduceScatter):
                 reduce_scatter, ops = ops[0], ops[1:]
                 window.append(reduce_scatter)
 
