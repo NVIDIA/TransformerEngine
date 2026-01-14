@@ -97,7 +97,6 @@ class RowIdMapPass1Primitive(BasePrimitive):
     @staticmethod
     def lowering(ctx, routing_map, *, num_tokens, num_experts, block_size):
         """MLIR lowering using triton_call_lowering."""
-        # Compute strides
         routing_stride_token = num_experts
         routing_stride_expert = 1
         row_id_stride_token = num_experts * 2 + 1
@@ -105,11 +104,10 @@ class RowIdMapPass1Primitive(BasePrimitive):
 
         grid = (num_experts, triton.cdiv(num_tokens, block_size))
 
-        # All scalar arguments must be passed as constexprs
         return triton_call_lowering(
             ctx,
             _row_id_map_pass_1_kernel,
-            routing_map,  # Only tensor arguments here
+            routing_map,
             grid=grid,
             constexprs={
                 "num_tokens": num_tokens,
@@ -437,8 +435,9 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
     # Outer primitive has 6 tensor inputs: inp, row_id_map, probs, scale, permuted_scale, pad_offsets
     # Static args for outer primitive: num_tokens, num_experts, num_out_tokens, hidden_size,
     #                                  with_probs, with_pad, align_size
-    # Note: The inner primitive has 8 tensor inputs (adds output_buf, permuted_probs_buf),
-    #       but impl_static_args is for the outer primitive's impl() which has 6 tensor inputs.
+    # Inner primitive adds output_buf, permuted_probs_buf)
+
+    # impl_static_args is for the outer primitive's impl() which has 6 tensor inputs.
     impl_static_args = (
         6,
         7,
@@ -499,10 +498,10 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_probs,
         with_pad,
-        align_size,
+        align_size, # align_size is only used for sharding, but must be passed since abstract() requires it
     ):
         """Forward to inner primitive."""
-        # align_size is only used for sharding, but must be passed since abstract() requires it
+        
         assert PermuteWithMaskMapPrimitive.inner_primitive is not None
 
         # Create pre-zeroed output buffers for the inner primitive.
@@ -748,6 +747,8 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             #   local_num_out_tokens = local_num_in_tokens * topK
             #                        = global_num_out_tokens / num_dp_devices
             #
+            #   E = num_experts
+            #   A = align_size for padding to group gemm size in cuBLAS
             # With padding (align_size != 128, which is the default/no-op value):
             #   The global num_out_tokens passed here is already worst_case_out_tokens.
             #   We need to recalculate local worst-case from local raw tokens.
@@ -758,7 +759,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             # where each expert section contains tokens routed to that expert.
             #
             # Global assembly (if needed) should be done outside this primitive.
-            # =========================================================================
+
 
             # =========================================================================
             # Output size calculation
@@ -771,7 +772,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             # The caller must account for this by passing a sufficiently large
             # global num_out_tokens such that: global_worst / num_dp >= local_worst
             # where local_worst = ((local_raw + E*(A-1)) // A) * A
-            # =========================================================================
+
             local_num_out_tokens = num_out_tokens // num_dp_devices
 
             # Local permute - output stays sharded on this GPU
@@ -847,8 +848,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
     # Outer primitive has 5 tensor inputs: inp, row_id_map, merging_probs, permuted_probs, pad_offsets
     # Static args for outer primitive: num_tokens, num_experts, hidden_size,
     #                                  with_merging_probs, with_probs, with_unpad
-    # Note: The inner primitive has 7 tensor inputs (adds output_buf, unpermuted_probs_buf),
-    #       but impl_static_args is for the outer primitive's impl() which has 5 tensor inputs.
+    # Inner primitive has adds output_buf, unpermuted_probs_buf
     impl_static_args = (
         5,
         6,
@@ -867,8 +867,8 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         merging_probs_aval,
         permuted_probs_aval,
         pad_offsets_aval,
-        output_buf_aval=None,  # Dummy for kernel signature consistency (inner primitive only)
-        unpermuted_probs_buf_aval=None,  # Dummy for kernel signature consistency (inner primitive only)
+        output_buf_aval=None,  # Dummy (inner primitive only)
+        unpermuted_probs_buf_aval=None,  # Dummy (inner primitive only)
         *,
         num_tokens,
         num_experts,
@@ -879,7 +879,7 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
     ):
         """Shape/dtype inference for unpermute."""
         del row_id_map_aval, merging_probs_aval, with_merging_probs, pad_offsets_aval, with_unpad
-        del output_buf_aval, unpermuted_probs_buf_aval  # Unused, for signature consistency
+        del output_buf_aval, unpermuted_probs_buf_aval
 
         output_shape = (num_tokens, hidden_size)
         output_aval = jax.core.ShapedArray(output_shape, inp_aval.dtype)

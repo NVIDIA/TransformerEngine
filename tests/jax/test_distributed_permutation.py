@@ -40,14 +40,16 @@ from transformer_engine.jax.permutation import (
     token_combine,
 )
 
-
-# =============================================================================
-# Test parameter definitions
-# =============================================================================
+# Reference implementations from test_permutation.py
+from test_permutation import (
+    reference_make_row_id_map,
+    _reference_permute_impl,
+    _reference_unpermute_impl,
+    reference_token_combine,
+)
 
 # Dispatch/combine test cases: (num_tokens, num_experts, hidden_size, topk)
 # topk = number of experts each token is routed to
-# Note: num_tokens should be divisible by max expected DP size (e.g., 4)
 ALL_DISPATCH_COMBINE_CASES = [
     (128, 4, 64, 2),
     (256, 8, 128, 3),
@@ -75,157 +77,6 @@ DTYPES = {
 }
 
 
-# =============================================================================
-# Reference implementations (from test_permutation.py)
-# =============================================================================
-
-
-def reference_make_row_id_map(routing_map: jnp.ndarray) -> jnp.ndarray:
-    """
-    Vectorized reference implementation of make_row_id_map using JAX primitives.
-    """
-    num_tokens, num_experts = routing_map.shape
-
-    cumsum_per_expert = jnp.cumsum(routing_map, axis=0)
-    tokens_per_expert = jnp.sum(routing_map, axis=0)
-    expert_offsets = jnp.concatenate([jnp.array([0]), jnp.cumsum(tokens_per_expert)[:-1]])
-
-    dest_rows_all = (expert_offsets[None, :] + cumsum_per_expert - 1) * routing_map + (-1) * (
-        1 - routing_map
-    )
-    n_routed_per_token = jnp.sum(routing_map, axis=1)
-
-    sort_keys = jnp.where(routing_map == 1, -dest_rows_all, jnp.iinfo(jnp.int32).max)
-    sorted_expert_indices = jnp.argsort(sort_keys, axis=1)
-
-    token_idx = jnp.broadcast_to(jnp.arange(num_tokens)[:, None], (num_tokens, num_experts))
-    sorted_dest_rows = dest_rows_all[token_idx, sorted_expert_indices]
-
-    row_id_map = jnp.concatenate(
-        [
-            sorted_dest_rows.astype(jnp.int32),
-            sorted_expert_indices.astype(jnp.int32),
-            n_routed_per_token.astype(jnp.int32)[:, None],
-        ],
-        axis=1,
-    )
-
-    return row_id_map
-
-
-def _reference_permute_impl(
-    inp: jnp.ndarray,
-    row_id_map: jnp.ndarray,
-    probs: jnp.ndarray,
-    num_out_tokens: int,
-) -> tuple:
-    """
-    Vectorized internal helper for reference permutation implementation.
-    """
-    num_tokens, hidden_size = inp.shape
-    num_experts = (row_id_map.shape[1] - 1) // 2
-
-    dest_rows = row_id_map[:, :num_experts]
-    expert_indices = row_id_map[:, num_experts : 2 * num_experts]
-    n_routed = row_id_map[:, 2 * num_experts]
-
-    slot_indices = jnp.arange(num_experts)[None, :]
-    valid_mask = slot_indices < n_routed[:, None]
-
-    flat_dest_rows = dest_rows.flatten()
-    flat_valid_mask = valid_mask.flatten()
-    flat_token_indices = jnp.repeat(jnp.arange(num_tokens), num_experts)
-    flat_expert_indices = expert_indices.flatten()
-
-    flat_dest_rows_clamped = jnp.where(flat_valid_mask, flat_dest_rows, num_out_tokens)
-
-    output = jnp.zeros((num_out_tokens, hidden_size), dtype=inp.dtype)
-    gathered_inp = inp[flat_token_indices]
-
-    output = output.at[flat_dest_rows_clamped].set(
-        gathered_inp,
-        mode="drop",
-    )
-
-    permuted_probs = None
-    if probs is not None:
-        permuted_probs = jnp.zeros((num_out_tokens,), dtype=probs.dtype)
-
-        if probs.ndim == 1:
-            flat_probs = probs[flat_token_indices]
-        else:
-            flat_expert_indices_clamped = jnp.where(flat_valid_mask, flat_expert_indices, 0).astype(
-                jnp.int32
-            )
-            flat_probs = probs[flat_token_indices.astype(jnp.int32), flat_expert_indices_clamped]
-
-        permuted_probs = permuted_probs.at[flat_dest_rows_clamped.astype(jnp.int32)].set(
-            flat_probs,
-            mode="drop",
-        )
-
-    return output, permuted_probs
-
-
-def _reference_unpermute_impl(
-    inp: jnp.ndarray,
-    row_id_map: jnp.ndarray,
-    merging_probs: jnp.ndarray,
-    permuted_probs: jnp.ndarray,
-) -> tuple:
-    """
-    Vectorized internal helper for reference unpermutation implementation.
-    """
-    num_tokens = row_id_map.shape[0]
-    num_experts = (row_id_map.shape[1] - 1) // 2
-
-    src_rows = row_id_map[:, :num_experts]
-    expert_indices = row_id_map[:, num_experts : 2 * num_experts]
-    n_routed = row_id_map[:, 2 * num_experts]
-
-    slot_indices = jnp.arange(num_experts)[None, :]
-    valid_mask = slot_indices < n_routed[:, None]
-
-    src_rows_clamped = jnp.where(valid_mask, src_rows, 0)
-    gathered_inp = inp[src_rows_clamped]
-
-    if merging_probs is not None:
-        token_idx = jnp.broadcast_to(jnp.arange(num_tokens)[:, None], (num_tokens, num_experts))
-        weights = merging_probs[token_idx, expert_indices]
-        gathered_inp = gathered_inp * weights[:, :, None]
-
-    gathered_inp = jnp.where(valid_mask[:, :, None], gathered_inp, 0.0)
-    output = jnp.sum(gathered_inp, axis=1)
-
-    unpermuted_probs = None
-    if permuted_probs is not None:
-        gathered_probs = permuted_probs[src_rows_clamped]
-        unpermuted_probs = jnp.zeros((num_tokens, num_experts), dtype=permuted_probs.dtype)
-        token_idx = jnp.broadcast_to(jnp.arange(num_tokens)[:, None], (num_tokens, num_experts))
-        unpermuted_probs = unpermuted_probs.at[token_idx, expert_indices].set(
-            jnp.where(valid_mask, gathered_probs, 0.0)
-        )
-
-    return output, unpermuted_probs
-
-
-def reference_token_combine(
-    inp: jnp.ndarray,
-    row_id_map: jnp.ndarray,
-    merging_probs: jnp.ndarray,
-) -> jnp.ndarray:
-    """
-    Reference implementation of token_combine using JAX primitives.
-    """
-    output, _ = _reference_unpermute_impl(inp, row_id_map, merging_probs, None)
-    return output
-
-
-# =============================================================================
-# Test class
-# =============================================================================
-
-
 class TestDistributedPermutation:
     """Test distributed/sharded execution of MoE permutation primitives.
 
@@ -242,17 +93,9 @@ class TestDistributedPermutation:
     def generate_routing_map(
         num_tokens: int,
         num_experts: int,
-        topk: int = 2,
+        topk: int = 2,  #Number of experts each token is routed to (max 1s per row).
         key: jax.Array = None,
     ):
-        """Generate random routing map for testing.
-
-        Args:
-            num_tokens: Number of tokens.
-            num_experts: Number of experts.
-            topk: Number of experts each token is routed to (max 1s per row).
-            key: Random key.
-        """
         if key is None:
             key = jax.random.PRNGKey(0)
 
@@ -266,9 +109,6 @@ class TestDistributedPermutation:
 
         return routing_map
 
-    # =========================================================================
-    # Test: Local token_dispatch with sharded inputs (forward + backward)
-    # =========================================================================
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
@@ -442,9 +282,7 @@ class TestDistributedPermutation:
             assert_allclose(jax.device_get(target_inp_grad), ref_inp_grad, dtype=dtype)
             assert_allclose(jax.device_get(target_probs_grad), ref_probs_grad, dtype=dtype)
 
-    # =========================================================================
-    # Test: Local roundtrip (dispatch + combine) with sharded inputs
-    # =========================================================================
+
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
@@ -544,9 +382,6 @@ class TestDistributedPermutation:
                 jax.device_get(computed_grad), jax.device_get(expected_grad), dtype=dtype
             )
 
-    # =========================================================================
-    # Test: Local token_dispatch with padding (forward + backward)
-    # =========================================================================
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
@@ -651,9 +486,6 @@ class TestDistributedPermutation:
             assert not np.any(np.isnan(jax.device_get(inp_grad))), "Input gradient contains NaN"
             assert not np.any(np.isnan(jax.device_get(probs_grad))), "Probs gradient contains NaN"
 
-    # =========================================================================
-    # Test: Local roundtrip with padding (forward + backward)
-    # =========================================================================
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
