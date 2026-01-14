@@ -204,12 +204,12 @@ def _permute_kernel(
     # Pre-allocated output buffers for JAX input_output_aliases.
     # These are aliased to output_ptr/permuted_probs_ptr in JAX, so they point to the same memory.
     # In PyTorch, pass the same tensors as output_ptr/permuted_probs_ptr.
-    _output_buf_ptr,  # pylint: disable=unused-argument
-    _permuted_probs_buf_ptr,  # pylint: disable=unused-argument
+    output_buf_ptr,  # pylint: disable=unused-argument
+    permuted_probs_buf_ptr,  # pylint: disable=unused-argument
     # sizes
     scale_hidden_dim,
-    _num_tokens,  # pylint: disable=unused-argument
-    _num_out_tokens,  # pylint: disable=unused-argument
+    num_tokens,  # pylint: disable=unused-argument
+    num_out_tokens,  # pylint: disable=unused-argument
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -320,8 +320,8 @@ def _unpermute_kernel(
     pad_offsets_ptr,
     # Dummy parameters for JAX input_output_aliases compatibility (matches _permute_kernel signature pattern)
     # These are unused in the unpermute kernel but maintain consistency with the permute kernel.
-    _output_buf_ptr,  # pylint: disable=unused-argument
-    _unpermuted_probs_buf_ptr,  # pylint: disable=unused-argument
+    output_buf_ptr,  # pylint: disable=unused-argument
+    unpermuted_probs_buf_ptr,  # pylint: disable=unused-argument
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
