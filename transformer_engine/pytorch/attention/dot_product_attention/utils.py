@@ -680,7 +680,7 @@ def get_attention_backend(
                     "Disabling FlashAttention for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
-            use_flash_attention = False
+                use_flash_attention = False
             if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
                 # Turn on FlashAttention 3 for thd when there is padding between
                 # sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD].
