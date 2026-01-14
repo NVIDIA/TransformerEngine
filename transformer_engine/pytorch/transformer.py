@@ -768,9 +768,6 @@ class TransformerLayer(torch.nn.Module):
                 enc_dec_attn_mask[i].dtype == torch.bool for i in range(len(enc_dec_attn_mask))
             ), "Encoder-decoder attention mask must be boolean tensor(s)"
 
-        if TEDebugState.debug_enabled:
-            TransformerEngineBaseModule._validate_name(self)
-
         # For AMP
         if torch.is_autocast_enabled():
             hidden_states = cast_if_needed(hidden_states, torch_get_autocast_gpu_dtype())

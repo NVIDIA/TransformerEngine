@@ -739,8 +739,6 @@ class MultiheadAttention(torch.nn.Module):
             core_attention_bias_type in AttnBiasTypes
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
 
-        if TEDebugState.debug_enabled:
-            TransformerEngineBaseModule._validate_name(self)
 
         # =================================================
         # Pre-allocate memory for key-value cache for inference

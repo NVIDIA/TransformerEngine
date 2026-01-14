@@ -633,6 +633,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
+        self._validate_name()
 
     def fast_setattr(self, name: str, value: Any) -> None:
         """
@@ -1546,7 +1547,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         debug = TEDebugState.debug_enabled
         if not debug:
             return False
-        self._validate_name()
 
         # If layer is run first time in new iteration,
         # we need to check if the debug should be enabled for this layer -
@@ -1597,22 +1597,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def _validate_name(self):
         """
         Validate name passed to the module.
-        This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
-        If no name is assigned, it creates a default name with layer count as the variable.
+        It creates a default name with layer count as the variable
+        which may be changed by the user of the module.
         """
         if self.name is not None:
             return
         assert TEDebugState.debug_enabled
         import nvdlfw_inspect.api as debug_api
 
-        if self.name is None:
-            debug_api.log_message(
-                "Names are not provided to debug modules. ",
-                "Creating and using generic names. Pass names to debug modules for better"
-                " insight. ",
-                level=logging.WARNING,
-            )
-            self.fast_setattr("name", f"Layer_{TEDebugState.get_layer_count()}")
+        self.name = f"Layer_{TEDebugState.get_layer_count()}"
 
     def _check_weight_tensor_recipe_correspondence(self) -> None:
         """
