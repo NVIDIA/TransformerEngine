@@ -165,7 +165,9 @@ class FP8EmulationFunc(torch.autograd.Function):
     def forward(ctx, tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout):
         # pylint: disable=missing-function-docstring
         if is_in_onnx_export_mode():
-            return FP8EmulationFunc.onnx_forward(tensor1, tensor2, tensor3, quantizer_name, qkv_layout)
+            return FP8EmulationFunc.onnx_forward(
+                tensor1, tensor2, tensor3, quantizer_name, qkv_layout
+            )
 
         if quantizer_name == "QKV_quantizer":
             query_layer, key_layer, value_layer = [
@@ -243,20 +245,18 @@ class FP8EmulationFunc(torch.autograd.Function):
             numels = [tensor1.numel(), tensor2.numel(), tensor3.numel()]
 
             # Flatten and concatenate
-            combined = torch.cat([
-                tensor1.reshape(-1),
-                tensor2.reshape(-1),
-                tensor3.reshape(-1)
-            ], dim=0).to(torch.float32)
+            combined = torch.cat(
+                [tensor1.reshape(-1), tensor2.reshape(-1), tensor3.reshape(-1)], dim=0
+            ).to(torch.float32)
 
             # Quantize + dequantize combined tensor (shared scale)
             data, scale_inv = torch.ops.tex.fp8_cs_quantize(combined)
             out = torch.ops.tex.fp8_dequantize(data, scale_inv)
 
             # Split back
-            out1 = out[:numels[0]].reshape(shapes[0]).to(orig_dtype)
-            out2 = out[numels[0]:numels[0] + numels[1]].reshape(shapes[1]).to(orig_dtype)
-            out3 = out[numels[0] + numels[1]:].reshape(shapes[2]).to(orig_dtype)
+            out1 = out[: numels[0]].reshape(shapes[0]).to(orig_dtype)
+            out2 = out[numels[0] : numels[0] + numels[1]].reshape(shapes[1]).to(orig_dtype)
+            out3 = out[numels[0] + numels[1] :].reshape(shapes[2]).to(orig_dtype)
 
             return out1, out2, out3
         elif quantizer_name in ["S_quantizer", "O_quantizer"]:
