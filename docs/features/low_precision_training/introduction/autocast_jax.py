@@ -2,22 +2,10 @@
 #
 # See LICENSE for license information.
 
-import jax
+from transformer_engine.jax.quantize import get_device_compute_capability
 
 # Requires Ada (SM89) or newer for FP8 support
-cc = jax.devices()[0].device_kind
-assert (
-    "RTX 40" in cc
-    or "RTX 5" in cc
-    or "Ada" in cc
-    or "L40" in cc
-    or "H100" in cc
-    or "H200" in cc
-    or "GH" in cc
-    or "B100" in cc
-    or "B200" in cc
-    or "GB" in cc
-), "This example requires SM89 (Ada) or newer"
+assert get_device_compute_capability() >= 89, "This example requires SM89 (Ada) or newer"
 
 # START_AUTOCAST_BASIC
 
@@ -40,14 +28,14 @@ with te.autocast(enabled=True, recipe=recipe):
 
     init_key, dropout_key = jax.random.split(jax.random.PRNGKey(0))
     x = jax.random.normal(init_key, (32, 128, 1024), dtype=jnp.bfloat16)
-    params = layer.init({"params": init_key, "dropout": dropout_key}, x)
+    var_collect = layer.init({"params": init_key, "dropout": dropout_key}, x)
 
     # Forward and backward pass (both inside autocast for JAX)
-    def loss_fn(params):
-        output = layer.apply(params, x, rngs={"dropout": dropout_key})
+    def loss_fn(var_collect):
+        output = layer.apply(var_collect, x, rngs={"dropout": dropout_key})
         return output.sum()
 
-    loss, grads = jax.value_and_grad(loss_fn)(params)
+    loss, grads = jax.value_and_grad(loss_fn)(var_collect)
 
 # END_AUTOCAST_BASIC
 
@@ -59,13 +47,13 @@ decoder_recipe = DelayedScaling(fp8_format=Format.HYBRID)
 
 with te.autocast(enabled=True, recipe=encoder_recipe):
     encoder = TransformerLayer(hidden_size=1024, mlp_hidden_size=4096, num_attention_heads=16)
-    encoder_params = encoder.init({"params": init_key, "dropout": dropout_key}, x)
-    hidden = encoder.apply(encoder_params, x, rngs={"dropout": dropout_key})
+    encoder_var_collect = encoder.init({"params": init_key, "dropout": dropout_key}, x)
+    hidden = encoder.apply(encoder_var_collect, x, rngs={"dropout": dropout_key})
 
 with te.autocast(enabled=True, recipe=decoder_recipe):
     decoder = TransformerLayer(hidden_size=1024, mlp_hidden_size=4096, num_attention_heads=16)
-    decoder_params = decoder.init({"params": init_key, "dropout": dropout_key}, hidden)
-    output = decoder.apply(decoder_params, hidden, rngs={"dropout": dropout_key})
+    decoder_var_collect = decoder.init({"params": init_key, "dropout": dropout_key}, hidden)
+    output = decoder.apply(decoder_var_collect, hidden, rngs={"dropout": dropout_key})
 
 # END_AUTOCAST_SEQUENTIAL
 
@@ -78,18 +66,18 @@ inner_recipe = DelayedScaling(fp8_format=Format.HYBRID)
 with te.autocast(enabled=True, recipe=outer_recipe):
     # layer1 uses outer_recipe
     layer1 = TransformerLayer(hidden_size=1024, mlp_hidden_size=4096, num_attention_heads=16)
-    params1 = layer1.init({"params": init_key, "dropout": dropout_key}, x)
-    hidden = layer1.apply(params1, x, rngs={"dropout": dropout_key})
+    var_collect1 = layer1.init({"params": init_key, "dropout": dropout_key}, x)
+    hidden = layer1.apply(var_collect1, x, rngs={"dropout": dropout_key})
 
     with te.autocast(enabled=True, recipe=inner_recipe):
         # layer2 uses inner_recipe (overrides outer)
         layer2 = TransformerLayer(hidden_size=1024, mlp_hidden_size=4096, num_attention_heads=16)
-        params2 = layer2.init({"params": init_key, "dropout": dropout_key}, hidden)
-        hidden = layer2.apply(params2, hidden, rngs={"dropout": dropout_key})
+        var_collect2 = layer2.init({"params": init_key, "dropout": dropout_key}, hidden)
+        hidden = layer2.apply(var_collect2, hidden, rngs={"dropout": dropout_key})
 
     # layer3 uses outer_recipe again
     layer3 = TransformerLayer(hidden_size=1024, mlp_hidden_size=4096, num_attention_heads=16)
-    params3 = layer3.init({"params": init_key, "dropout": dropout_key}, hidden)
-    output = layer3.apply(params3, hidden, rngs={"dropout": dropout_key})
+    var_collect3 = layer3.init({"params": init_key, "dropout": dropout_key}, hidden)
+    output = layer3.apply(var_collect3, hidden, rngs={"dropout": dropout_key})
 
 # END_AUTOCAST_NESTED

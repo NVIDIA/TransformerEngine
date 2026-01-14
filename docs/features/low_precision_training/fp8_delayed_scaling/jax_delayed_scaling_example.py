@@ -2,22 +2,10 @@
 #
 # See LICENSE for license information.
 
-import jax
+from transformer_engine.jax.quantize import get_device_compute_capability
 
 # Requires Ada (SM89) or newer for FP8 support
-cc = jax.devices()[0].device_kind
-assert (
-    "RTX 40" in cc
-    or "RTX 5" in cc
-    or "Ada" in cc
-    or "L40" in cc
-    or "H100" in cc
-    or "H200" in cc
-    or "GH" in cc
-    or "B100" in cc
-    or "B200" in cc
-    or "GB" in cc
-), "This example requires SM89 (Ada) or newer"
+assert get_device_compute_capability() >= 89, "This example requires SM89 (Ada) or newer"
 
 # START_DELAYED_SCALING_EXAMPLE
 

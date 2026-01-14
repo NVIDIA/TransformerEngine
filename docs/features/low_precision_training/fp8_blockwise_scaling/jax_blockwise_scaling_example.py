@@ -3,12 +3,11 @@
 # See LICENSE for license information.
 
 # Check for Hopper or newer GPU
-from transformer_engine_jax import get_device_compute_capability
+from transformer_engine.jax.quantize import get_device_compute_capability
 
-major_minor = get_device_compute_capability(0)
 assert (
-    major_minor >= 90
-), f"FP8 Blockwise Scaling requires SM90 (Hopper) or later, got SM{major_minor}"
+    get_device_compute_capability() >= 90
+), f"FP8 Blockwise Scaling requires SM90 (Hopper) or later, got SM{get_device_compute_capability()}"
 
 # START_BLOCKWISE_SCALING_EXAMPLE
 
