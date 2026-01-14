@@ -164,6 +164,9 @@ class FP8EmulationFunc(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout):
         # pylint: disable=missing-function-docstring
+        if is_in_onnx_export_mode():
+            return FP8EmulationFunc.onnx_forward(tensor1, tensor2, tensor3, quantizer_name, qkv_layout)
+
         if quantizer_name == "QKV_quantizer":
             query_layer, key_layer, value_layer = [
                 x.contiguous() for x in [tensor1, tensor2, tensor3]
@@ -201,6 +204,67 @@ class FP8EmulationFunc(torch.autograd.Function):
         else:
             tensors = grad1, grad2, grad3
         return tensors[0], tensors[1], tensors[2], None, None, None
+
+    @staticmethod
+    def onnx_forward(tensor1, tensor2, tensor3, quantizer_name, qkv_layout=None):
+        """
+        ONNX-compatible forward for FP8 emulation using operations with defined ONNX translations.
+
+        This method performs quantize + dequantize to emulate FP8 effects using ONNX-compatible ops.
+        For ONNX export, we use current scaling (dynamic) quantization.
+
+        Parameters
+        ----------
+        tensor1, tensor2, tensor3 : torch.Tensor
+            Input tensors (e.g., Q, K, V for QKV_quantizer, or single tensor for S/O quantizers)
+        quantizer_name : str
+            Name of quantizer: "QKV_quantizer", "S_quantizer", "O_quantizer", etc.
+        qkv_layout : str, optional
+            QKV layout string (not used in ONNX path)
+
+        Returns
+        -------
+        Tuple of emulated tensors
+        """
+        # pylint: disable=unused-argument
+
+        def _fp8_emulate(tensor):
+            """Quantize + dequantize using existing ONNX-compatible ops."""
+            orig_dtype = tensor.dtype
+            tensor_fp32 = tensor.to(torch.float32)
+            data, scale_inv = torch.ops.tex.fp8_cs_quantize(tensor_fp32)
+            out = torch.ops.tex.fp8_dequantize(data, scale_inv)
+            return out.to(orig_dtype)
+
+        if quantizer_name == "QKV_quantizer":
+            # Combine Q, K, V -> quantize together -> split back
+            orig_dtype = tensor1.dtype
+            shapes = [tensor1.shape, tensor2.shape, tensor3.shape]
+            numels = [tensor1.numel(), tensor2.numel(), tensor3.numel()]
+
+            # Flatten and concatenate
+            combined = torch.cat([
+                tensor1.reshape(-1),
+                tensor2.reshape(-1),
+                tensor3.reshape(-1)
+            ], dim=0).to(torch.float32)
+
+            # Quantize + dequantize combined tensor (shared scale)
+            data, scale_inv = torch.ops.tex.fp8_cs_quantize(combined)
+            out = torch.ops.tex.fp8_dequantize(data, scale_inv)
+
+            # Split back
+            out1 = out[:numels[0]].reshape(shapes[0]).to(orig_dtype)
+            out2 = out[numels[0]:numels[0] + numels[1]].reshape(shapes[1]).to(orig_dtype)
+            out3 = out[numels[0] + numels[1]:].reshape(shapes[2]).to(orig_dtype)
+
+            return out1, out2, out3
+        elif quantizer_name in ["S_quantizer", "O_quantizer"]:
+            # Emulate FP8 on single tensor
+            return _fp8_emulate(tensor1), tensor2, tensor3
+        else:
+            # Pass-through
+            return tensor1, tensor2, tensor3
 
 
 class UnfusedDotProductAttention(torch.nn.Module):
