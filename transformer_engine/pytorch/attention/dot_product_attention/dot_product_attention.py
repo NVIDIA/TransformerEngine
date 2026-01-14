@@ -1147,10 +1147,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if attn_mask_type == "padding_causal":
                     attn_mask_type = attn_mask_type + "_bottom_right"
 
-                self.attention_type = "cross"
-                self.flash_attention.attention_type = self.attention_type
-                self.fused_attention.attention_type = self.attention_type
-                self.unfused_attention.attention_type = self.attention_type
+                if self.attention_type != "cross":
+                    self.fast_setattr("attention_type", "cross")
+                    self.flash_attention.attention_type = self.attention_type
+                    self.fused_attention.attention_type = self.attention_type
+                    self.unfused_attention.attention_type = self.attention_type
 
                 query_layer, key_layer, value_layer = [
                     x.contiguous() if not x.is_contiguous() else x
