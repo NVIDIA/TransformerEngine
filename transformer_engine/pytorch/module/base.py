@@ -1560,14 +1560,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 debug = False
             else:
                 debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
-            self.debug_last_iteration = TEDebugState.get_iteration()
-            self.debug_enabled_in_this_iteration = debug
+            self.fast_setattr("debug_last_iteration", TEDebugState.get_iteration())
+            self.fast_setattr("debug_enabled_in_this_iteration", debug)
         else:
             # If this is the same iteration as previous invocation of the module,
             # we use the debug value from the first invocation in the iteration.
             debug = self.debug_enabled_in_this_iteration
 
-        self.debug_last_iteration = TEDebugState.get_iteration()
+        self.fast_setattr("debug_last_iteration", TEDebugState.get_iteration())
 
         if self.wgrad_store is not None:
             if debug and self.wgrad_store.delay_wgrad_compute():
@@ -1583,7 +1583,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Sometimes features inform that they will not be enabled for particular layer
         # for multiple next iterations.
-        self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
+        self.fast_setattr("next_iter_when_debug_should_be_run",
+                          next_iter_when_debug_should_be_run(quantizers))
 
         if not run_current:
             return True
