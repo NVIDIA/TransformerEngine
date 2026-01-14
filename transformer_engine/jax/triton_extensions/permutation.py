@@ -498,7 +498,7 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         hidden_size,
         with_probs,
         with_pad,
-        align_size, # align_size is only used for sharding, but must be passed since abstract() requires it
+        align_size,  # align_size is only used for sharding, but must be passed since abstract() requires it
     ):
         """Forward to inner primitive."""
 
@@ -759,7 +759,6 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             # where each expert section contains tokens routed to that expert.
             #
             # Global assembly (if needed) should be done outside this primitive.
-
 
             # =========================================================================
             # Output size calculation
