@@ -96,7 +96,7 @@ usages during training. This has implications for memory layout and transpose op
 The physical memory layout requirements for rowwise and columnwise usages differ between architectures 
 and recipes. For FP8 tensors:
 
-- *Hopper*: cannot efficiently access elements in columnwise fashion, so columnwise tensors need to be physically transposed in memory.
+- *Hopper*: cannot efficiently access elements in columnwise fashion, so columnwise tensors need to be physically transposed in memory. Note that higher precision formats (BF16/FP16) do not have this limitation.
 - *Blackwell*: supports columnwise access natively, so no transpose is needed.
 
 We will see that for most of the recipes and devices, rowwise usage and columnwise usage need different tensors.
@@ -343,7 +343,7 @@ and columnwise tensors require separate memory layouts.
             :end-before: # END_MEMORY_USAGE_1
       
       Layer size is ``1024 * 1024 * 2 (2 bytes per parameter) = 2MB``.
-      Memory after forward pass is ``2 MB (weight) + 2 MB (input saved for backward) + 2 MB (output) = 6 MB``.
+      Memory after forward pass is ``2 MB (weight) + 2 MB (input saved for backward) = 4 MB``.
       
       **2. FP8 training with master weights in BF16**
 
@@ -373,15 +373,7 @@ and columnwise tensors require separate memory layouts.
             :start-after: # START_MEMORY_USAGE_2
             :end-before: # END_MEMORY_USAGE_2
       
-      In JAX, unlike PyTorch, FP8 weights are not cached between forward passes.
-      Weights are stored in BF16 and quantized to FP8 on-the-fly during each forward pass.
-      This means the memory usage is similar to the baseline.
-      
-      .. note::
-         
-         JAX does not currently support storing model weights directly in FP8 format
-         like PyTorch's ``quantized_model_init``. Weights are always stored in high precision
-         (BF16/FP32) and quantized to FP8 during computation.
+      Memory after forward pass is ``2 MB (weight in BF16) + 1 MB (input in FP8) + 1 MB (weight in FP8) = 4 MB``.
 
 Fused layers
 ------------

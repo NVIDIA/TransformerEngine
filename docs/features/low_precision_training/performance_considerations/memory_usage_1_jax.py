@@ -11,37 +11,34 @@ import jax.numpy as jnp
 from transformer_engine.jax.flax import DenseGeneral
 
 
-def get_gpu_memory_mb():
-    """Get current GPU memory usage in MB."""
-    jax.effects_barrier()
-    stats = jax.local_devices()[0].memory_stats()
-    return stats["bytes_in_use"] / (1024**2) if stats else 0.0
+key = jax.random.PRNGKey(0)
+jax.clear_caches()
 
 
-def measure_memory():
-    key = jax.random.PRNGKey(0)
-    jax.clear_caches()
+# Initialize layer with BF16 parameters
+layer = DenseGeneral(features=1024, dtype=jnp.bfloat16)
+x = jax.random.normal(key, (1024, 1024), dtype=jnp.bfloat16)
+var_collect = layer.init(key, x)
 
-    init_memory = get_gpu_memory_mb()
-
-    # Initialize layer with BF16 parameters
-    layer = DenseGeneral(features=1024, dtype=jnp.bfloat16)
-    x = jax.random.normal(key, (1024, 1024), dtype=jnp.bfloat16)
-    var_collect = layer.init(key, x)
-
-    # Forward pass in high precision
+@jax.jit
+def loss_fn(var_collect, x):
     output = layer.apply(var_collect, x)
-    del x  # Input is saved by model for backward, not by user script
-
-    mem_after_forward = get_gpu_memory_mb() - init_memory
-    return mem_after_forward
+    return output.sum()
 
 
-# Warmup run
-measure_memory()
+# Trace the backward pass - this allocates saved tensors
+_, backward_fn = jax.vjp(loss_fn, var_collect, x)
 
-# Actual measurement
-mem_after_forward = measure_memory()
-print(f"Memory usage after forward pass: {mem_after_forward:.2f} MB")
+
+del x
+
+print("Tensors in memory:")
+total_bytes = 0
+for arr in jax.live_arrays():
+    total_bytes += arr.nbytes
+    if arr.nbytes > 200000:  # do not count small tensors
+        print(f"  Shape: {arr.shape}, Dtype: {arr.dtype}, Size: {arr.nbytes / 1024:.1f} KB")
+print(f"  Total from all live arrays: {total_bytes / (1024**2):.2f} MB")
+
 
 print("# END_MEMORY_USAGE_1")

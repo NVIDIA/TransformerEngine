@@ -228,6 +228,12 @@ Let's now see how we can train in lower precisions in supported frameworks.
          :start-after: # START_AUTOCAST_NESTED
          :end-before: # END_AUTOCAST_NESTED
 
+      .. note::
+         Python context managers like ``autocast`` may interact unexpectedly with JAX's JIT compilation.
+         For finer-grained control, consider passing the recipe directly to TE modules instead.
+         See the `TE JAX Integration notebook <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/te_jax_integration.ipynb>`_
+         for details.
+
 **Mixed precision with 8- or 4-bit precisions**
 
 From now on, we will refer to FP8/MXFP8/NVFP4 etc. as *low precision*
