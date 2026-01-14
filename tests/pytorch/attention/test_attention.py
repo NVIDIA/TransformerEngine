@@ -1176,8 +1176,12 @@ def _run_dot_product_attention(
         max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
-        cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend in ["FusedAttention", "FlashAttention"] else None,
-        cu_seqlens_kv_padded=cu_seqlens_kv_after_pad if backend in ["FusedAttention", "FlashAttention"] else None,
+        cu_seqlens_q_padded=(
+            cu_seqlens_q_after_pad if backend in ["FusedAttention", "FlashAttention"] else None
+        ),
+        cu_seqlens_kv_padded=(
+            cu_seqlens_kv_after_pad if backend in ["FusedAttention", "FlashAttention"] else None
+        ),
         attn_mask_type=config.attn_mask_type,
         checkpoint_core_attention=ckpt_attn,
         core_attention_bias_type=config.attn_bias_type,

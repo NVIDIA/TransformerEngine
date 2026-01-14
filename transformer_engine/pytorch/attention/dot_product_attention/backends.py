@@ -931,7 +931,9 @@ class FlashAttention(torch.nn.Module):
                             cu_seqlens_q_padded if cu_seqlens_q_padded is not None else cu_seqlens_q
                         )
                         fa_optional_forward_args_thd.append(
-                            cu_seqlens_kv_padded if cu_seqlens_kv_padded is not None else cu_seqlens_kv
+                            cu_seqlens_kv_padded
+                            if cu_seqlens_kv_padded is not None
+                            else cu_seqlens_kv
                         )
                         fa_optional_forward_args_thd.append(max_seqlen_q)
                         fa_optional_forward_args_thd.append(max_seqlen_kv)
@@ -973,8 +975,12 @@ class FlashAttention(torch.nn.Module):
                         # in addition to `cu_seqlens_q_padded` and `cu_seqlens_kv_padded` to avoid affecting the
                         # padding positions.
                         if pad_between_seqs:
-                            fa_3_optional_forward_kwargs["seqused_q"] = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                            fa_3_optional_forward_kwargs["seqused_k"] = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                            fa_3_optional_forward_kwargs["seqused_q"] = (
+                                cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                            )
+                            fa_3_optional_forward_kwargs["seqused_k"] = (
+                                cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                            )
                     else:
                         fa_3_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
                         fa_3_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
