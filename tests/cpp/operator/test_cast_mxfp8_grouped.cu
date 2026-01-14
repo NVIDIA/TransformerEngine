@@ -37,10 +37,10 @@ enum ActivationKind {
 };
 
 enum ShapeRepresentation {
-    SAME_MK = 0,
-    VARYING_M = 1,
-    VARYING_K = 2,
-    VARYING_MK = 3
+  SAME_BOTH_DIMS    = 0,
+  VARYING_FIRST_DIM = 1,
+  VARYING_LAST_DIM  = 2,
+  VARYING_BOTH_DIMS = 3
 };
 
 template <typename InputType, typename OutputType>
@@ -172,6 +172,57 @@ void compute_ref(const ProcessingMethod processing_method,
     // }
 }
 
+template <typename T>
+void compare_scaled_elts(const std::string &name,
+                         const T* ref_data,
+                         const T* test_data,
+                         const size_t rows,
+                         const size_t cols,
+                         const bool rowwise,
+                         const size_t tolerable_mismatches_limit = 0,
+                         const double atol = 1e-5,
+                         const double rtol = 1e-8) {
+    size_t mismatches_num = 0;
+    int first_mismatch_idx = -1;
+
+    for (size_t i = 0; i < rows * cols; ++i) {
+        double t = static_cast<double>(test_data[i]);
+        double r = static_cast<double>(ref_data[i]);
+        bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
+        /* For Float32 the floating point comparison is enough to error out */
+        bool assertion = false;
+        if (mismatch && !assertion) {
+            /* Check if it is just a failure of round to nearest choosing different
+                side of the real value */
+            const double mean = (t + r) / 2;
+            const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
+            const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
+            const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
+            const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
+            assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
+        }
+        std::string direction = rowwise ? "rowwise" : "columnwise";
+        if (assertion) {
+            mismatches_num++;
+            if (first_mismatch_idx == -1) {
+                first_mismatch_idx = i;
+            }
+        }
+        if (mismatches_num > tolerable_mismatches_limit) {
+            const double first_mismatch_t = static_cast<double>(test_data[first_mismatch_idx]);
+            const double first_mismatch_r = static_cast<double>(ref_data[first_mismatch_idx]);
+
+            GTEST_FAIL() << mismatches_num << " mismatche(s) which is more than tolerable mismatch limit of "
+                        << tolerable_mismatches_limit << "." << std::endl
+                        << "Error in tensor " << name << " in "
+                        << direction << " direction." << std::endl
+                        << "First mismatch at place " << first_mismatch_idx
+                        << " (" << std::to_string(first_mismatch_idx) << "): "
+                        << first_mismatch_t << " vs " << first_mismatch_r;
+        }
+    }
+}
+
 /**
  * Scaling along single dimension (either rows or columns)
  * Produces one set of output data and the corresponding data of the fused operation (dbias):
@@ -179,12 +230,14 @@ void compute_ref(const ProcessingMethod processing_method,
  *       OR
  * 2) Scaled columns + column-wise scaling factors
  */
-
 template <typename InputType, typename OutputType>
 void performTest_x1(const ProcessingMethod processing_method,
                     float (*OP)(const float),
+                    const ShapeRepresentation shape_rep,
                     const size_t num_tensors,
                     const std::vector<size_t>& logical_shape_vec,
+                    const std::vector<size_t>& first_dims_h,
+                    const std::vector<size_t>& last_dims_h,
                     const bool rowwise,
                     const bool colwise) {
     using namespace test;
@@ -195,11 +248,11 @@ void performTest_x1(const ProcessingMethod processing_method,
     const size_t rows = logical_shape_vec[0];
     const size_t cols = logical_shape_vec[1];
 
-    const size_t M = rows / num_tensors;
-    const size_t K = cols;
-
     std::vector<size_t> scales_rowwise_shape = {rows, cols / 32};
     std::vector<size_t> scales_colwise_shape = {rows / 32, cols};
+
+    const size_t scales_stride_rowwise = scales_rowwise_shape[1];
+    const size_t scales_stride_colwise = scales_colwise_shape[1];
 
     const size_t elts_num = rows * cols;
     const size_t sfs_num = (rows * cols) / 32;
@@ -219,11 +272,13 @@ void performTest_x1(const ProcessingMethod processing_method,
     std::vector<fp8e8m0> out_scales_rowwise_ref(rowwise ? sfs_num : 0);
     std::vector<fp8e8m0> out_scales_colwise_ref(colwise ? sfs_num : 0);
 
-    size_t tensor_elts[2] = {128 * 128, 128 * 128};
-    std::vector<size_t> offsets_h(num_tensors);
-    offsets_h[0] = 0;
-    for (size_t t = 1; t < num_tensors; ++t) {
-        offsets_h[t] = offsets_h[t-1] + tensor_elts[t-1];
+    std::vector<size_t> offsets_h(num_tensors + 1);
+    for (size_t t = 0; t < num_tensors + 1; ++t) {
+        if (t == 0) {
+            offsets_h[t] = 0;
+        } else {
+            offsets_h[t] = offsets_h[t-1] + (first_dims_h[t-1] * last_dims_h[t-1]);
+        }
     }
 
     for (size_t i = 0; i < elts_num; ++i) {
@@ -256,32 +311,66 @@ void performTest_x1(const ProcessingMethod processing_method,
     const size_t out_data_size = elts_num * sizeof(OutputType);
     const size_t out_scales_size = sfs_num * sizeof(fp8e8m0);
 
+    const size_t first_dims_size = num_tensors * sizeof(size_t);
+    const size_t last_dims_size = num_tensors * sizeof(size_t);
+    const size_t offsets_size = (num_tensors + 1) * sizeof(size_t);
+
     InputType* in_data_d;
     OutputType* out_data_rowwise_d;
     OutputType* out_data_colwise_d;
     fp8e8m0* out_scales_rowwise_d;
     fp8e8m0* out_scales_colwise_d;
+    size_t* first_dims_d;
+    size_t* last_dims_d;
     size_t* offsets_d;
 
     cudaMalloc((void**)&in_data_d, in_data_size);
+    cudaMalloc((void**)&first_dims_d, first_dims_size);
+    cudaMalloc((void**)&last_dims_d, last_dims_size);
+    cudaMalloc((void**)&offsets_d, offsets_size);
+    
     cudaMemcpy(in_data_d, in_data.data(), in_data_size, cudaMemcpyHostToDevice);
-
-    cudaMalloc((void**)&offsets_d, in_data_size);
-    cudaMemcpy(offsets_d, offsets_h.data(), num_tensors * sizeof(size_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(first_dims_d, first_dims_h.data(), first_dims_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(last_dims_d, last_dims_h.data(), last_dims_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(offsets_d, offsets_h.data(), offsets_size, cudaMemcpyHostToDevice);
 
     NVTEShape logical_shape_ = nvte_make_shape(logical_shape_vec.data(), logical_shape_vec.size());
+
+    NVTEShape first_dims_shape_;
+    NVTEShape last_dims_shape_;
     NVTEShape offsets_shape_;
-    offsets_shape_.data[0] = num_tensors;
+
+    first_dims_shape_.ndim = 1;
+    last_dims_shape_.ndim = 1;
     offsets_shape_.ndim = 1;
+
+    first_dims_shape_.data[0] = num_tensors;
+    last_dims_shape_.data[0] = num_tensors;
+    offsets_shape_.data[0] = num_tensors + 1;
 
     NVTEGroupedTensor in_group_tensor = nvte_create_grouped_tensor(NVTE_DELAYED_TENSOR_SCALING, num_tensors, logical_shape_);
     NVTEGroupedTensor out_group_tensor = nvte_create_grouped_tensor(NVTE_MXFP8_1D_SCALING, num_tensors, logical_shape_);
 
     NVTEBasicTensor in_data_tensor = {in_data_d, static_cast<NVTEDType>(itype), logical_shape_};
     nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &in_data_tensor);
-    
-    NVTEBasicTensor offsets_tensor = {offsets_d, kNVTEInt64, offsets_shape_};
-    nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets, &offsets_tensor);
+
+    if ((shape_rep == VARYING_FIRST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
+        NVTEBasicTensor first_dims_tensor = {first_dims_d, kNVTEInt64, first_dims_shape_};
+        nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims, &first_dims_tensor);
+        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims, &first_dims_tensor);
+    }
+
+    if ((shape_rep == VARYING_LAST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
+        NVTEBasicTensor last_dims_tensor = {last_dims_d, kNVTEInt64, last_dims_shape_};
+        nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims, &last_dims_tensor);
+        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims, &last_dims_tensor);
+    }
+
+    if (shape_rep != SAME_BOTH_DIMS) {
+        NVTEBasicTensor offsets_tensor = {offsets_d, kNVTEInt64, offsets_shape_};
+        nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets, &offsets_tensor);
+        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets, &offsets_tensor);
+    }
 
     if (rowwise) {
         cudaMalloc((void**)&out_data_rowwise_d, out_data_size);
@@ -307,13 +396,15 @@ void performTest_x1(const ProcessingMethod processing_method,
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseScaleInv, &out_scales_colwise_tensor);
     }
 
-    /* DO STUFF */
     // Reference (CPU)
     for (size_t t = 0; t < num_tensors; ++t) {
+        const size_t M = first_dims_h[t];
+        const size_t K = last_dims_h[t];
+
         const size_t scales_stride_rowwise = K / 32;
         const size_t scales_stride_colwise = K;
-        const size_t data_offset = t * (M * K);
-        const size_t sfs_offset = t * (M * K / 32);
+        const size_t data_offset = offsets_h[t];
+        const size_t sfs_offset = data_offset / 32;
 
         const InputType* const in_ptr = in_data.data() + data_offset;
         OutputType* const out_data_rowwise_ptr = out_data_rowwise_ref.data() + data_offset;
@@ -336,18 +427,50 @@ void performTest_x1(const ProcessingMethod processing_method,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
+    auto [atol, rtol] = getTolerances(otype);
+    const size_t scale_diff_abs_tolerance = 0;
+    const double abs_tolerable_mismatches_limit = 0.0;
+    const double rel_tolerable_mismatches_limit = 0.0;
+
     if (rowwise) {
         cudaMemcpy(out_data_rowwise_h.data(), out_data_rowwise_d, out_data_size, cudaMemcpyDeviceToHost);
         cudaMemcpy(out_scales_rowwise_h.data(), out_scales_rowwise_d, out_scales_size, cudaMemcpyDeviceToHost);
+
+        size_t mismatches_scales = 0;
+        compare_scaling_factors("rowwise_scales", out_scales_rowwise_h.data(), out_scales_rowwise_ref.data(),
+                                scales_rowwise_shape[0], scales_rowwise_shape[1], scales_stride_rowwise,
+                                mismatches_scales,
+                                scale_diff_abs_tolerance,
+                                abs_tolerable_mismatches_limit,
+                                rel_tolerable_mismatches_limit);
+
+        const size_t mismatches_elts = 32 * mismatches_scales;
+
+        compare_scaled_elts<OutputType>("rowwise_output", out_data_rowwise_ref.data(),
+                                        out_data_rowwise_h.data(), rows, cols, true, mismatches_elts);
     }
 
     if (colwise) {
         cudaMemcpy(out_data_colwise_h.data(), out_data_colwise_d, out_data_size, cudaMemcpyDeviceToHost);
         cudaMemcpy(out_scales_colwise_h.data(), out_scales_colwise_d, out_scales_size, cudaMemcpyDeviceToHost);
+
+        size_t mismatches_scales = 0;
+        compare_scaling_factors("colwise_scales", out_scales_colwise_h.data(), out_scales_colwise_ref.data(),
+                                scales_colwise_shape[0], scales_colwise_shape[1], scales_stride_colwise,
+                                mismatches_scales,
+                                scale_diff_abs_tolerance,
+                                abs_tolerable_mismatches_limit,
+                                rel_tolerable_mismatches_limit);
+
+        const size_t mismatches_elts = 32 * mismatches_scales;
+
+        compare_scaled_elts<OutputType>("colwise_output", out_data_colwise_ref.data(),
+                                        out_data_colwise_h.data(), rows, cols, false, mismatches_elts);
     }
 
-
     cudaFree(in_data_d);
+    cudaFree(first_dims_d);
+    cudaFree(last_dims_d);
     cudaFree(offsets_d);
     if (rowwise) {
         cudaFree(out_data_rowwise_d);
@@ -357,332 +480,7 @@ void performTest_x1(const ProcessingMethod processing_method,
         cudaFree(out_data_colwise_d);
         cudaFree(out_scales_colwise_d);
     }
-
-    // const size_t block_size_rows = rowwise ? 1 : 32;
-    // const size_t block_size_cols = colwise ? 1 : 32;
-
-    // const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, block_size_rows,
-    //                                                               block_size_cols);
-
-    // const size_t unpadded_blocks_Y = scale_dims[0];
-    // const size_t unpadded_blocks_X = scale_dims[1];
-    // const size_t blocks_Y = scale_dims[2];
-    // const size_t blocks_X = scale_dims[3];
-    // const size_t scales_stride = blocks_X;
-
-    // Tensor input("input", shape, itype);
-    // Tensor grad("grad", shape, itype);
-    // Tensor output_c("output_c", shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
-    // Tensor output_dbias("output_dbias", std::vector<size_t>{ cols }, itype);
-
-    // std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(rows * cols);
-    // std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
-    // std::unique_ptr<fp8e8m0[]> ref_output_scales = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
-
-    // fillCase<EncodingType>(&input, InputsFillCase::uniform);
-    // fillUniform(&grad);
-
-    // Tensor workspace;
-    // switch (processing_method) {
-    //     case ProcessingMethod::CAST_ONLY: {
-    //         nvte_quantize(input.data(), output_c.data(), 0);
-    //         break;
-    //     }
-    //     case ProcessingMethod::CAST_DBIAS: {
-    //         nvte_quantize_dbias(grad.data(),
-    //                             output_c.data(),
-    //                             output_dbias.data(),
-    //                             workspace.data(),
-    //                             0);
-    //         workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-
-    //         nvte_quantize_dbias(grad.data(),
-    //                             output_c.data(),
-    //                             output_dbias.data(),
-    //                             workspace.data(),
-    //                             0);
-    //         break;
-    //     }
-    //     case ProcessingMethod::CAST_DBIAS_DACT: {
-    //         auto nvte_quantize_dbias_dact = &nvte_quantize_dbias_dgelu;
-    //         if (OP == &dsilu)       { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsilu; }
-    //         else if (OP == &drelu)  { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
-    //         else if (OP == &dqgelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
-    //         else if (OP == &dsrelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
-
-    //         nvte_quantize_dbias_dact(grad.data(),
-    //                                  input.data(),
-    //                                  output_c.data(),
-    //                                  output_dbias.data(),
-    //                                  workspace.data(),
-    //                                  0);
-    //         workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-
-    //         nvte_quantize_dbias_dact(grad.data(),
-    //                                  input.data(),
-    //                                  output_c.data(),
-    //                                  output_dbias.data(),
-    //                                  workspace.data(),
-    //                                  0);
-    //         break;
-    //     }
-    //     case ProcessingMethod::CAST_DACT: {
-    //         auto nvte_dact = &nvte_dgelu;
-    //         if (OP == &dsilu)       { nvte_dact = &nvte_dsilu; }
-    //         else if (OP == &drelu)  { nvte_dact = &nvte_drelu; }
-    //         else if (OP == &dqgelu) { nvte_dact = &nvte_dqgelu; }
-    //         else if (OP == &dsrelu) { nvte_dact = &nvte_dsrelu; }
-
-    //         nvte_dact(grad.data(), input.data(), output_c.data(), 0);
-    //         break;
-    //     }
-    //     case ProcessingMethod::CAST_ACT: {
-    //         auto nvte_act = &nvte_gelu;
-    //         if (OP == &silu)       { nvte_act = &nvte_silu; }
-    //         else if (OP == &relu)  { nvte_act = &nvte_relu; }
-    //         else if (OP == &qgelu) { nvte_act = &nvte_qgelu; }
-    //         else if (OP == &srelu) { nvte_act = &nvte_srelu; }
-
-    //         nvte_act(input.data(), output_c.data(), 0);
-    //         break;
-    //     }
-    // }
-
-    // cudaDeviceSynchronize();
-    // auto err = cudaGetLastError();
-    // ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
-
-    // compute_ref<InputType, OutputType>(processing_method,
-    //                                    OP,
-    //                                    rowwise,
-    //                                    colwise,
-    //                                    input.rowwise_cpu_dptr<InputType>(),
-    //                                    grad.rowwise_cpu_dptr<InputType>(),
-    //                                    ref_output_c.get(),
-    //                                    ref_output_c.get(),
-    //                                    ref_output_scales.get(),
-    //                                    ref_output_scales.get(),
-    //                                    ref_output_dbias.get(),
-    //                                    rows,
-    //                                    cols,
-    //                                    scales_stride,
-    //                                    scales_stride);
-
-    // const uint8_t * const gpu_scales_ptr = rowwise
-    //                                        ? output_c.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
-    //                                        : output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
-
-    // const size_t scale_diff_abs_tolerance = 0;
-    // const double abs_tolerable_mismatches_limit = 0.0;
-    // const double rel_tolerable_mismatches_limit = 0.0;
-
-    // size_t mismatches_scales = 0;
-
-    // compare_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
-    //                         unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-    //                         mismatches_scales,
-    //                         scale_diff_abs_tolerance,
-    //                         abs_tolerable_mismatches_limit,
-    //                         rel_tolerable_mismatches_limit);
-
-    // const size_t mismatches_elts = 32 * mismatches_scales;
-    // auto [atol, rtol] = getTolerances(otype);
-    // compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol, true, mismatches_elts);
-
-    // if (processing_method == ProcessingMethod::CAST_DBIAS
-    //     || processing_method == ProcessingMethod::CAST_DBIAS_DACT)
-    // {
-    //     auto [atol_dbias, rtol_dbias] = getTolerances(itype);
-    //     if (itype == DType::kFloat32) {
-    //         atol_dbias = 1e-4;
-    //         rtol_dbias *= sqrt(static_cast<double>(rows)) ;
-    //     } else {
-    //         rtol_dbias *= 4;
-    //     }
-    //     compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
-    // }
 }
-
-/**
- * Scaling along both dimensions (rows and columns)
- * Produces two sets of scaled output data and the corresponding data of the fused operation (dbias):
- * 1) Scaled rows + row-wise scaling factors
- *      AND
- * 2) Scaled columns + column-wise scaling factors
- */
-/*
-template <typename InputType, typename OutputType>
-void performTest_x2(const ProcessingMethod processing_method,
-                    float (*OP)(const float),
-                    const std::pair<size_t, size_t>& shape,
-                    const std::vector<size_t>& M_i,
-                    const std::vector<size_t>& Offset_i) {
-    using namespace test;
-    using EncodingType = fp32;
-    DType itype = TypeInfo<InputType>::dtype;
-    DType otype = TypeInfo<OutputType>::dtype;
-
-    const size_t rows = shape.first;
-    const size_t cols = shape.second;
-
-    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32);
-    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1);
-
-    const size_t unpadded_blocks_Y_rowwise = scale_dims_rowwise[0];
-    const size_t unpadded_blocks_X_rowwise = scale_dims_rowwise[1];
-    const size_t blocks_Y_rowwise = scale_dims_rowwise[2];
-    const size_t blocks_X_rowwise = scale_dims_rowwise[3];
-    const size_t scales_stride_rowwise = blocks_X_rowwise;
-
-    const size_t unpadded_blocks_Y_colwise = scale_dims_colwise[0];
-    const size_t unpadded_blocks_X_colwise = scale_dims_colwise[1];
-    const size_t blocks_Y_colwise = scale_dims_colwise[2];
-    const size_t blocks_X_colwise = scale_dims_colwise[3];
-    const size_t scales_stride_colwise = blocks_X_colwise;
-
-    Tensor input("input", shape, itype);
-    Tensor grad("grad", shape, itype);
-    Tensor output("output", shape, otype, true, true, NVTE_MXFP8_1D_SCALING);
-    Tensor output_dbias("output_dbias", std::vector<size_t>{ cols }, itype);
-
-    std::unique_ptr<OutputType[]> ref_output_c_rowwise = std::make_unique<OutputType[]>(rows * cols);
-    std::unique_ptr<OutputType[]> ref_output_c_colwise = std::make_unique<OutputType[]>(rows * cols);
-    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
-    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
-    std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
-
-    fillCase<EncodingType>(&input, InputsFillCase::uniform);
-    fillUniform(&grad);
-
-    Tensor workspace;
-    switch (processing_method) {
-        case ProcessingMethod::CAST_ONLY: {
-            nvte_quantize(input.data(), output.data(), 0);
-            break;
-        }
-        case ProcessingMethod::CAST_DBIAS: {
-            nvte_quantize_dbias(grad.data(),
-                                output.data(),
-                                output_dbias.data(),
-                                workspace.data(),
-                                0);
-            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-
-            nvte_quantize_dbias(grad.data(),
-                                output.data(),
-                                output_dbias.data(),
-                                workspace.data(),
-                                0);
-            break;
-        }
-        case ProcessingMethod::CAST_DBIAS_DACT: {
-            auto nvte_quantize_dbias_dact = &nvte_quantize_dbias_dgelu;
-            if (OP == &dsilu)       { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsilu; }
-            else if (OP == &drelu)  { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
-            else if (OP == &dqgelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
-            else if (OP == &dsrelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
-
-            nvte_quantize_dbias_dact(grad.data(),
-                                     input.data(),
-                                     output.data(),
-                                     output_dbias.data(),
-                                     workspace.data(),
-                                     0);
-            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-
-            nvte_quantize_dbias_dact(grad.data(),
-                                     input.data(),
-                                     output.data(),
-                                     output_dbias.data(),
-                                     workspace.data(),
-                                     0);
-            break;
-        }
-        case ProcessingMethod::CAST_DACT: {
-            auto nvte_dact = &nvte_dgelu;
-            if (OP == &dsilu)       { nvte_dact = &nvte_dsilu; }
-            else if (OP == &drelu)  { nvte_dact = &nvte_drelu; }
-            else if (OP == &dqgelu) { nvte_dact = &nvte_dqgelu; }
-            else if (OP == &dsrelu) { nvte_dact = &nvte_dsrelu; }
-
-            nvte_dact(grad.data(), input.data(), output.data(), 0);
-            break;
-        }
-        case ProcessingMethod::CAST_ACT: {
-            auto nvte_act = &nvte_gelu;
-            if (OP == &silu)       { nvte_act = &nvte_silu; }
-            else if (OP == &relu)  { nvte_act = &nvte_relu; }
-            else if (OP == &qgelu) { nvte_act = &nvte_qgelu; }
-            else if (OP == &srelu) { nvte_act = &nvte_srelu; }
-
-            nvte_act(input.data(), output.data(), 0);
-            break;
-        }
-    }
-
-    cudaDeviceSynchronize();
-    auto err = cudaGetLastError();
-    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
-
-    compute_ref<InputType, OutputType>(processing_method,
-                                       OP,
-                                       true,
-                                       true,
-                                       input.rowwise_cpu_dptr<InputType>(),
-                                       grad.rowwise_cpu_dptr<InputType>(),
-                                       ref_output_c_rowwise.get(),
-                                       ref_output_c_colwise.get(),
-                                       ref_scales_rowwise.get(),
-                                       ref_scales_colwise.get(),
-                                       ref_output_dbias.get(),
-                                       rows,
-                                       cols,
-                                       scales_stride_rowwise,
-                                       scales_stride_colwise);
-
-    const size_t scale_diff_abs_tolerance = 0;
-    const double abs_tolerable_mismatches_limit = 0.0;
-    const double rel_tolerable_mismatches_limit = 0.0;
-
-    size_t mismatches_scales_rowwise = 0;
-    compare_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                            ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                            unpadded_blocks_X_rowwise, scales_stride_rowwise,
-                            mismatches_scales_rowwise,
-                            scale_diff_abs_tolerance,
-                            abs_tolerable_mismatches_limit,
-                            rel_tolerable_mismatches_limit);
-
-    size_t mismatches_scales_colwise = 0;
-    compare_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                            ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                            unpadded_blocks_X_colwise, scales_stride_colwise,
-                            mismatches_scales_colwise,
-                            scale_diff_abs_tolerance,
-                            abs_tolerable_mismatches_limit,
-                            rel_tolerable_mismatches_limit);
-
-    const size_t mismatches_elts_rowwise = 32 * mismatches_scales_rowwise;
-    const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;
-
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol, true, mismatches_elts_rowwise);
-    compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol, true, mismatches_elts_colwise);
-
-    if (processing_method == ProcessingMethod::CAST_DBIAS
-        || processing_method == ProcessingMethod::CAST_DBIAS_DACT)
-    {
-        auto [atol_dbias, rtol_dbias] = getTolerances(itype);
-        if (itype == DType::kFloat32) {
-            atol_dbias = 1e-4;
-            rtol_dbias *= sqrt(static_cast<double>(rows)) ;
-        } else {
-            rtol_dbias *= 4;
-        }
-        compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
-    }
-}
-*/
 
 std::vector<ProcessingMethod> processing_methods = {
     ProcessingMethod::CAST_ONLY,
@@ -716,10 +514,10 @@ std::vector<ScalingDirection> scaling_directions = {
 
 // {num_tensors, logical_shape_M, logical_shape_K, [M_i], [K_i], [Offset_i]}
 std::vector<std::vector<size_t>> input_config = {
-    {1, 128, 128},
-    {2, 256, 128},
-    // {3, 128 * 3, 256},
-    // {5, 256 * 5, 256},
+    {0, 1, 128, 128},
+    {0, 2, 256, 128},
+    {1, 2, 512, 128, 128, 512-128},
+    {3, 2, 1, 128 * 128 + 256 * 256, 128, 256, 128, 256},
 };
 
 }  // namespace
@@ -747,9 +545,40 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     const ScalingDirection scaling_direction = std::get<2>(GetParam());
     const std::vector<size_t> input_config = std::get<3>(GetParam());
 
-    const size_t num_tensors = input_config[0];
-    const std::vector<size_t> logical_shape = {input_config[1], input_config[2]};
-  
+    const ShapeRepresentation shape_rep = static_cast<ShapeRepresentation>(input_config[0]);
+    const size_t num_tensors = input_config[1];
+    const std::vector<size_t> logical_shape = {input_config[2], input_config[3]};
+    std::vector<size_t> first_dims(num_tensors);
+    std::vector<size_t> last_dims(num_tensors);
+    for (size_t t = 0; t < num_tensors; ++t) {
+        switch (shape_rep) {
+            case SAME_BOTH_DIMS: {
+                first_dims[t] = logical_shape[0] / num_tensors;
+                last_dims[t] = logical_shape[1];
+                break;
+            }
+            case VARYING_FIRST_DIM: {
+                first_dims[t] = input_config[t + 4];
+                last_dims[t] = logical_shape[1];
+                break;
+            }
+            case VARYING_LAST_DIM: {
+                first_dims[t] = logical_shape[0];
+                last_dims[t] = input_config[t + (4 + num_tensors)];
+                break;
+            }
+            case VARYING_BOTH_DIMS: {
+                first_dims[t] = input_config[t + 4];
+                last_dims[t] = input_config[t + (4 + num_tensors)];
+                break;
+            }
+        }
+        // Skips tests if tensor dims are not multiples of 128
+        if ((first_dims[t] % 128 != 0) || (last_dims[t] % 128 != 0)) {
+            GTEST_SKIP();
+        }
+    }
+
     // Skips non Act tests if the Activation type is not an identity
     if ((processing_method == ProcessingMethod::CAST_ONLY || processing_method == ProcessingMethod::CAST_DBIAS)
         && activation != ActivationKind::Identity) {
@@ -771,7 +600,8 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     }
 
     auto OP = &identity;
-    performTest_x1<bf16, fp8e4m3>(processing_method, OP, num_tensors, logical_shape, rowwise, colwise);
+    performTest_x1<bf16, fp8e4m3>(processing_method, OP, shape_rep, num_tensors, logical_shape,
+                                  first_dims, last_dims, rowwise, colwise);
 
     // if (processing_method == ProcessingMethod::CAST_ACT) {
     //     // Forward activations
@@ -867,11 +697,19 @@ INSTANTIATE_TEST_SUITE_P(
         }
 
         const std::vector<size_t> input = std::get<3>(info.param);
-        name += "_N_" + std::to_string(input[0]);
+        name += "_Shape_";
+        switch(static_cast<ShapeRepresentation>(input[0])) {
+            case ShapeRepresentation::SAME_BOTH_DIMS:       name += "SAME_BOTH_DIMS"; break;
+            case ShapeRepresentation::VARYING_FIRST_DIM:    name += "VARYING_FIRST_DIM"; break;
+            case ShapeRepresentation::VARYING_LAST_DIM:     name += "VARYING_LAST_DIM"; break;
+            case ShapeRepresentation::VARYING_BOTH_DIMS:    name += "VARYING_BOTH_DIMS"; break;
+        };
+
+        name += "_N_" + std::to_string(input[1]);
 
         name += "_Shape_" +
-                std::to_string(input[1]) +
-                "X" + std::to_string(input[2]);
+                std::to_string(input[2]) +
+                "X" + std::to_string(input[3]);
 
         // name += "_DimsM_";
         // const auto& M_i_ = std::get<5>(info.param);
