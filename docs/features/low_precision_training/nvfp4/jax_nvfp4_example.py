@@ -26,13 +26,16 @@ recipe = NVFP4BlockScaling()
 with te.autocast(enabled=True, recipe=recipe):
     # Initialize layer and data
     layer = DenseGeneral(features=1024)
-    key = jax.random.PRNGKey(0)
+    key, sr_key = jax.random.split(jax.random.PRNGKey(0))
     x = jax.random.normal(key, (32, 128, 1024), dtype=jnp.bfloat16)
-    var_collect = layer.init(key, x)
+
+    # NVFP4 requires sr_rng for stochastic rounding
+    rngs = {"sr_rng": sr_key}
+    var_collect = layer.init({"params": key, "sr_rng": sr_key}, x)
 
     # Forward and backward pass
     def loss_fn(var_collect):
-        output = layer.apply(var_collect, x)
+        output = layer.apply(var_collect, x, rngs=rngs)
         return output.sum()
 
     loss, grads = jax.value_and_grad(loss_fn)(var_collect)
