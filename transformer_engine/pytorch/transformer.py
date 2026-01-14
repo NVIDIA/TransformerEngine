@@ -398,6 +398,7 @@ class TransformerLayer(torch.nn.Module):
         self.softmax_type = softmax_type
 
         self.name = name
+        TransformerEngineBaseModule._validate_name(self)
 
         attention_args = (
             hidden_size,

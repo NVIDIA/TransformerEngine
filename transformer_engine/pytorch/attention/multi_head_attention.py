@@ -335,6 +335,7 @@ class MultiheadAttention(torch.nn.Module):
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
         self.name = name
+        TransformerEngineBaseModule._validate_name(self)
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
