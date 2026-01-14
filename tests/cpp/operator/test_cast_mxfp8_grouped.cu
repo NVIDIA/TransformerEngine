@@ -238,6 +238,7 @@ void performTest_x1(const ProcessingMethod processing_method,
                     const std::vector<size_t>& logical_shape_vec,
                     const std::vector<size_t>& first_dims_h,
                     const std::vector<size_t>& last_dims_h,
+                    const std::vector<size_t>& offsets_h,
                     const bool rowwise,
                     const bool colwise) {
     using namespace test;
@@ -248,14 +249,10 @@ void performTest_x1(const ProcessingMethod processing_method,
     const size_t rows = logical_shape_vec[0];
     const size_t cols = logical_shape_vec[1];
 
-    std::vector<size_t> scales_rowwise_shape = {rows, cols / 32};
-    std::vector<size_t> scales_colwise_shape = {rows / 32, cols};
-
-    const size_t scales_stride_rowwise = scales_rowwise_shape[1];
-    const size_t scales_stride_colwise = scales_colwise_shape[1];
-
     const size_t elts_num = rows * cols;
     const size_t sfs_num = (rows * cols) / 32;
+
+    std::vector<size_t> scales_shape = {sfs_num};
 
     std::mt19937 gen;
     std::uniform_real_distribution<> dis(-2.0, 1.0);
@@ -272,39 +269,24 @@ void performTest_x1(const ProcessingMethod processing_method,
     std::vector<fp8e8m0> out_scales_rowwise_ref(rowwise ? sfs_num : 0);
     std::vector<fp8e8m0> out_scales_colwise_ref(colwise ? sfs_num : 0);
 
-    std::vector<size_t> offsets_h(num_tensors + 1);
-    for (size_t t = 0; t < num_tensors + 1; ++t) {
-        if (t == 0) {
-            offsets_h[t] = 0;
-        } else {
-            offsets_h[t] = offsets_h[t-1] + (first_dims_h[t-1] * last_dims_h[t-1]);
-        }
-    }
-
     for (size_t i = 0; i < elts_num; ++i) {
         const float val = dis(gen);
         in_data[i] = static_cast<InputType>(val);
     }
 
+    const OutputType zero_elt = static_cast<OutputType>(0.0f);
+    const fp8e8m0 zero_SF = static_cast<fp8e8m0>(0.0f);
     if (rowwise) {
-        for (size_t i = 0; i < elts_num; ++i) {
-            out_data_rowwise_h[i] = static_cast<OutputType>(0.0f);
-            out_data_rowwise_ref[i] = static_cast<OutputType>(0.0f);
-        }
-        for (size_t i = 0; i < sfs_num; ++i) {
-            out_scales_rowwise_h[i] = static_cast<fp8e8m0>(0.0f);
-            out_scales_rowwise_ref[i] = static_cast<fp8e8m0>(0.0f);
-        }
+        std::fill(out_data_rowwise_h.begin(), out_data_rowwise_h.end(), zero_elt);
+        std::fill(out_data_rowwise_ref.begin(), out_data_rowwise_ref.end(), zero_elt);
+        std::fill(out_scales_rowwise_h.begin(), out_scales_rowwise_h.end(), zero_SF);
+        std::fill(out_scales_rowwise_ref.begin(), out_scales_rowwise_ref.end(), zero_SF);
     }
     if (colwise) {
-        for (size_t i = 0; i < elts_num; ++i) {
-            out_data_colwise_h[i] = static_cast<OutputType>(0.0f);
-            out_data_colwise_ref[i] = static_cast<OutputType>(0.0f);
-        }
-        for (size_t i = 0; i < sfs_num; ++i) {
-            out_scales_colwise_h[i] = static_cast<fp8e8m0>(0.0f);
-            out_scales_colwise_ref[i] = static_cast<fp8e8m0>(0.0f);
-        }
+        std::fill(out_data_colwise_h.begin(), out_data_colwise_h.end(), zero_elt);
+        std::fill(out_data_colwise_ref.begin(), out_data_colwise_ref.end(), zero_elt);
+        std::fill(out_scales_colwise_h.begin(), out_scales_colwise_h.end(), zero_SF);
+        std::fill(out_scales_colwise_ref.begin(), out_scales_colwise_ref.end(), zero_SF);
     }
 
     const size_t in_data_size = elts_num * sizeof(InputType);
@@ -378,7 +360,7 @@ void performTest_x1(const ProcessingMethod processing_method,
         cudaMemset(out_data_rowwise_d, 0, out_data_size);
         cudaMemset(out_scales_rowwise_d, 0, out_scales_size);
         NVTEBasicTensor out_data_rowwise_tensor = {out_data_rowwise_d, static_cast<NVTEDType>(otype), logical_shape_};
-        NVTEShape scales_rowwise_shape_ = nvte_make_shape(scales_rowwise_shape.data(), scales_rowwise_shape.size());
+        NVTEShape scales_rowwise_shape_ = nvte_make_shape(scales_shape.data(), scales_shape.size());
         NVTEBasicTensor out_scales_rowwise_tensor = {out_scales_rowwise_d, NVTEDType::kNVTEFloat8E8M0, scales_rowwise_shape_};
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &out_data_rowwise_tensor);
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseScaleInv, &out_scales_rowwise_tensor);
@@ -390,7 +372,7 @@ void performTest_x1(const ProcessingMethod processing_method,
         cudaMemset(out_data_colwise_d, 0, out_data_size);
         cudaMemset(out_scales_colwise_d, 0, out_scales_size);
         NVTEBasicTensor out_data_colwise_tensor = {out_data_colwise_d, static_cast<NVTEDType>(otype), logical_shape_};
-        NVTEShape scales_colwise_shape_ = nvte_make_shape(scales_colwise_shape.data(), scales_colwise_shape.size());
+        NVTEShape scales_colwise_shape_ = nvte_make_shape(scales_shape.data(), scales_shape.size());
         NVTEBasicTensor out_scales_colwise_tensor = {out_scales_colwise_d, NVTEDType::kNVTEFloat8E8M0, scales_colwise_shape_};
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseData, &out_data_colwise_tensor);
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseScaleInv, &out_scales_colwise_tensor);
@@ -438,11 +420,8 @@ void performTest_x1(const ProcessingMethod processing_method,
 
         size_t mismatches_scales = 0;
         compare_scaling_factors("rowwise_scales", out_scales_rowwise_h.data(), out_scales_rowwise_ref.data(),
-                                scales_rowwise_shape[0], scales_rowwise_shape[1], scales_stride_rowwise,
-                                mismatches_scales,
-                                scale_diff_abs_tolerance,
-                                abs_tolerable_mismatches_limit,
-                                rel_tolerable_mismatches_limit);
+                                1, sfs_num, sfs_num, mismatches_scales, scale_diff_abs_tolerance,
+                                abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 
         const size_t mismatches_elts = 32 * mismatches_scales;
 
@@ -456,11 +435,8 @@ void performTest_x1(const ProcessingMethod processing_method,
 
         size_t mismatches_scales = 0;
         compare_scaling_factors("colwise_scales", out_scales_colwise_h.data(), out_scales_colwise_ref.data(),
-                                scales_colwise_shape[0], scales_colwise_shape[1], scales_stride_colwise,
-                                mismatches_scales,
-                                scale_diff_abs_tolerance,
-                                abs_tolerable_mismatches_limit,
-                                rel_tolerable_mismatches_limit);
+                                1, sfs_num, sfs_num, mismatches_scales, scale_diff_abs_tolerance,
+                                abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 
         const size_t mismatches_elts = 32 * mismatches_scales;
 
@@ -516,8 +492,9 @@ std::vector<ScalingDirection> scaling_directions = {
 std::vector<std::vector<size_t>> input_config = {
     {SAME_BOTH_DIMS,        1,      128,128},
     {SAME_BOTH_DIMS,        2,      256,128},
-    {VARYING_FIRST_DIM,     2,      512,128,                    128,512-128},
+    {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
     {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
+    {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
 };
 
 }  // namespace
@@ -550,11 +527,12 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     const std::vector<size_t> logical_shape = {input_config[2], input_config[3]};
     std::vector<size_t> first_dims(num_tensors);
     std::vector<size_t> last_dims(num_tensors);
+    std::vector<size_t> offsets(num_tensors + 1, 0);
     for (size_t t = 0; t < num_tensors; ++t) {
         switch (shape_rep) {
             case SAME_BOTH_DIMS: {
                 first_dims[t] = logical_shape[0] / num_tensors;
-                last_dims[t] = logical_shape[1];
+                last_dims[t] = logical_shape[1]; 
                 break;
             }
             case VARYING_FIRST_DIM: {
@@ -564,7 +542,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
             }
             case VARYING_LAST_DIM: {
                 first_dims[t] = logical_shape[0];
-                last_dims[t] = input_config[t + (4 + num_tensors)];
+                last_dims[t] = input_config[t + 4];
                 break;
             }
             case VARYING_BOTH_DIMS: {
@@ -573,6 +551,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
                 break;
             }
         }
+        offsets[t+1] = offsets[t] + first_dims[t] * last_dims[t];
         // Skips tests if tensor dims are not multiples of 128
         if ((first_dims[t] % 128 != 0) || (last_dims[t] % 128 != 0)) {
             GTEST_SKIP();
@@ -601,7 +580,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
 
     auto OP = &identity;
     performTest_x1<bf16, fp8e4m3>(processing_method, OP, shape_rep, num_tensors, logical_shape,
-                                  first_dims, last_dims, rowwise, colwise);
+                                  first_dims, last_dims, offsets, rowwise, colwise);
 
     // if (processing_method == ProcessingMethod::CAST_ACT) {
     //     // Forward activations
@@ -711,24 +690,6 @@ INSTANTIATE_TEST_SUITE_P(
                 std::to_string(input[2]) +
                 "X" + std::to_string(input[3]);
 
-        // name += "_DimsM_";
-        // const auto& M_i_ = std::get<5>(info.param);
-        // for (size_t i = 0; i < M_i_.size(); ++i) {
-        //     const size_t m = M_i_[i];
-        //     name += std::to_string(m);
-        //     if (i < M_i_.size() - 1) {
-        //         name += "X";
-        //     }
-        // }
-        // name += "_Offsets_";
-        // const auto& Offset_i_ = std::get<6>(info.param);
-        // for (size_t i = 0; i < Offset_i_.size(); ++i) {
-        //     const size_t offset = Offset_i_[i];
-        //     name += std::to_string(offset);
-        //     if (i < Offset_i_.size() - 1) {
-        //         name += "X";
-        //     }
-        // }
         name += "_" + test::typeName(std::get<4>(info.param)) +
                 "_" + test::typeName(std::get<5>(info.param));
         return name;

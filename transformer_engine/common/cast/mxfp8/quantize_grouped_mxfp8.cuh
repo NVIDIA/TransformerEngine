@@ -52,6 +52,8 @@ constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
 constexpr size_t THREADS_PER_CHUNK = 128;
 
+constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
+
 constexpr size_t THREADS_X = CHUNK_DIM_X / SCALE_DIM_X;
 constexpr size_t THREADS_Y = THREADS_PER_CHUNK / THREADS_X;
 
@@ -83,24 +85,24 @@ get_current_tensor_id(const ShapeRepresentation shape_rep,
     const size_t rows_per_tensor = first_logical_dim / num_tensors; 
     return current_row / rows_per_tensor;
   } else {
-    // upper_bound(offsets, current_offset) - 1 in range i in [0..num_tensors)
-    size_t low = 0;
-    size_t hi = num_tensors; // half-open [low, hi)
+    // upper_bound(offsets, current_offset) - 1 in range i in [0..num_tensors]
+    size_t low = 1;
+    size_t hi = num_tensors; // [low, hi]
   
-    while (low < hi) {
+    while (low <= hi) {
       const size_t mid = low + (hi - low) / 2;
       const size_t mid_offset = static_cast<size_t>(offsets_ptr[mid]);
   
       if (mid_offset <= current_offset) {
         low = mid + 1;
       } else {
-        hi = mid;
+        hi = mid - 1;
       }
     }
   
     // low = first index where offsets[low] > current_offset (or low == num_tensors)
     // id = low - 1, but need to evaluate if current_offset < offsets[0]
-    return (low == 0) ? 0 : (low - 1);
+    return low - 1;
   }
 }
 
@@ -110,7 +112,7 @@ get_tensor_rows_num(const size_t tensor_id,
                     const size_t first_logical_dim,
                     const int64_t* const __restrict__ first_dims_ptr,
                     const size_t num_tensors) {
-  size_t rows_num = first_logical_dim;
+  size_t rows_num = 0;
   switch (shape_rep) {
     case ShapeRepresentation::SAME_BOTH_DIMS:     // rows_num = first_logical_dim / num_tensors; break;
     case ShapeRepresentation::VARYING_LAST_DIM:   rows_num = first_logical_dim; break;
@@ -125,7 +127,7 @@ get_tensor_cols_num(const size_t tensor_id,
                     const ShapeRepresentation shape_rep,
                     const size_t last_logical_dim,
                     const int64_t* const __restrict__ last_dims_ptr) {
-  size_t cols_num = last_logical_dim;
+  size_t cols_num = 0;
   switch (shape_rep) {
     case ShapeRepresentation::SAME_BOTH_DIMS:
     case ShapeRepresentation::VARYING_FIRST_DIM:  cols_num = last_logical_dim; break;
@@ -135,14 +137,15 @@ get_tensor_cols_num(const size_t tensor_id,
   return cols_num;
 }
 
-// Copies the base tensor map to shmem, modifies the copy, stores the modified tensor map at index 
+// Copies the base tensor map to shmem, modifies the copy, stores the modified tensor map at index
+template <typename T>
 __device__ __forceinline__ void
 modify_base_tensor_map(const CUtensorMap base_tensor_map,
                        CUtensorMap* global_tensor_map,
                        const uintptr_t global_data_ptr, 
                        const size_t global_dim_Y,
                        const size_t global_dim_X) {
-  const size_t global_stride = global_dim_X;
+  const size_t global_stride_bytes = global_dim_X * sizeof(T);
 
   __shared__ CUtensorMap shared_tensor_map;
   shared_tensor_map = base_tensor_map;  // Copy the base tensor map into shmem
@@ -160,7 +163,7 @@ modify_base_tensor_map(const CUtensorMap base_tensor_map,
        "l"(global_data_ptr),
        "r"(static_cast<uint32_t>(global_dim_Y)),
        "r"(static_cast<uint32_t>(global_dim_X)),
-       "l"(static_cast<uint64_t>(global_stride))
+       "l"(static_cast<uint64_t>(global_stride_bytes))
     : "memory"
   );
   *global_tensor_map = shared_tensor_map;
@@ -197,22 +200,22 @@ init_tma_descriptors(const __grid_constant__ CUtensorMap base_tensor_map_input,
   if (leading_thread && (tensor_id < num_tensors)) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
-      modify_base_tensor_map(base_tensor_map_input, &g_tensor_maps_input[tensor_id],
+      modify_base_tensor_map<IType>(base_tensor_map_input, &g_tensor_maps_input[tensor_id],
                              global_data_ptr, rows, cols);
     }
     if (compute_activations) {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(act_input_data_ptr + offset_elts);
-      modify_base_tensor_map(base_tensor_map_act_input, &g_tensor_maps_act_input[tensor_id],
+      modify_base_tensor_map<IType>(base_tensor_map_act_input, &g_tensor_maps_act_input[tensor_id],
                              global_data_ptr, rows, cols);
     }
     if (rowwise) {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(output_rowwise_data_ptr + offset_elts);
-      modify_base_tensor_map(base_tensor_map_output_rowwise, &g_tensor_maps_output_rowwise[tensor_id],
+      modify_base_tensor_map<OType>(base_tensor_map_output_rowwise, &g_tensor_maps_output_rowwise[tensor_id],
                              global_data_ptr, rows, cols);
     }
     if (colwise) {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(output_colwise_data_ptr + offset_elts);
-      modify_base_tensor_map(base_tensor_map_output_colwise, &g_tensor_maps_output_colwise[tensor_id],
+      modify_base_tensor_map<OType>(base_tensor_map_output_colwise, &g_tensor_maps_output_colwise[tensor_id],
                              global_data_ptr, rows, cols);
     }
   }
@@ -258,7 +261,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING && COLWISE_SCALING;
 
-  const size_t block_global_offset = blockIdx.x * CHUNK_DIM_Y * CHUNK_DIM_X;
+  const size_t block_global_offset = blockIdx.x * ELTS_PER_CHUNK;
 
   const size_t tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset,
                                                  first_logical_dim, last_logical_dim,
@@ -270,10 +273,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const size_t scale_stride_colwise = cols;
 
   const bool is_const_last_dim = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
+  const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
-  const size_t offset_within_tensor = is_const_last_dim
-                                      ? block_global_offset   // grouped tensor can be treated as continuous tensor for MXFP8
-                                      : (block_global_offset - offsets_ptr[tensor_id]);
+  // grouped tensor can be treated as continuous tensor for MXFP8
+  const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
+  const size_t offset_within_tensor = block_global_offset - tensor_base;
 
   const CUtensorMap& tensor_map_input = is_const_last_dim
                                         ? tensor_map_input_static
@@ -297,28 +301,31 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (COLWISE_SCALING)      { fence_acquire_tensormap(&tensor_map_output_colwise);  }
   }
 
-  const size_t block_offset_Y = offset_within_tensor / cols;
-  const size_t block_offset_X = offset_within_tensor % cols;
-  const size_t blockIdxY = block_offset_Y / CHUNK_DIM_Y;
-  const size_t blockIdxX = block_offset_X / CHUNK_DIM_X;
+  const size_t blocks_X_num_in_current_tensor = cols / CHUNK_DIM_X;
+  const size_t block_id_in_current_tensor = is_single_tensor
+                                            ? blockIdx.x
+                                            : (blockIdx.x - tensor_base / ELTS_PER_CHUNK);
 
+  const size_t block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
+  const size_t block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
+
+  const size_t block_offset_Y = block_id_Y * CHUNK_DIM_Y;
+  const size_t block_offset_X = block_id_X * CHUNK_DIM_X;
+ 
   if (leading_thread) {
+    printf("Current tensor ID: %2lu   offset_within_tensor: %4lu   CHUNK_DIM_Y: %4lu   CHUNK_DIM_X: %4lu\n",
+           tensor_id, offset_within_tensor, CHUNK_DIM_Y, CHUNK_DIM_X);
     printf("Current tensor ID: %2lu   Rows: %4lu   Cols: %4lu   BLOCK IdxY: %2lu   IdxX %2lu   Offset Y: %4lu   Offset X: %4lu\n",
-           tensor_id, rows, cols, blockIdxY, blockIdxX, block_offset_Y, block_offset_X);
+           tensor_id, rows, cols, block_id_Y, block_id_X, block_offset_Y, block_offset_X);
   }
 
-  // Early exit if the border of the chunk goes over the 
-  if (block_offset_Y >= rows) {
-    return;
-  }
+  e8m0_t *const scales_rowwise = scales_rowwise_ptr + (is_single_tensor ? 0 : tensor_base / SCALE_DIM_X);
+  e8m0_t *const scales_colwise = scales_colwise_ptr + (is_single_tensor ? 0 : tensor_base / SCALE_DIM_Y);
 
-  e8m0_t *const scales_rowwise = scales_rowwise_ptr + (is_const_last_dim ? 0 : offsets_ptr[tensor_id] / SCALE_DIM_X);
-  e8m0_t *const scales_colwise = scales_colwise_ptr + (is_const_last_dim ? 0 : offsets_ptr[tensor_id] / SCALE_DIM_Y);
-
-  const size_t scales_block_offset_Y_rowwise = blockIdxY * CHUNK_DIM_Y;
-  const size_t scales_block_offset_X_rowwise = blockIdxX * CHUNK_DIM_X / SCALE_DIM_X;
-  const size_t scales_block_offset_Y_colwise = blockIdxY * CHUNK_DIM_Y / SCALE_DIM_Y;
-  const size_t scales_block_offset_X_colwise = blockIdxX * CHUNK_DIM_X;
+  const size_t scales_block_offset_Y_rowwise = block_id_Y * CHUNK_DIM_Y;
+  const size_t scales_block_offset_X_rowwise = block_id_X * CHUNK_DIM_X / SCALE_DIM_X;
+  const size_t scales_block_offset_Y_colwise = block_id_Y * CHUNK_DIM_Y / SCALE_DIM_Y;
+  const size_t scales_block_offset_X_colwise = block_id_X * CHUNK_DIM_X;
 
   const size_t tid_Y_rowwise = threadIdx.x / THREADS_X;
   const size_t tid_X_rowwise = threadIdx.x % THREADS_X;
@@ -334,8 +341,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const size_t scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
   const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
   const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
-
-  const bool rowwise_scale_is_within_bounds = scales_offset_X_rowwise < cols;
 
   // helps resolving bank conflicts in shmem
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
@@ -607,9 +612,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
       const int stage_scales_offset_X = scales_offset_X_rowwise;
       const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
-      if (rowwise_scale_is_within_bounds) {
-        scales_rowwise[scale_idx] = biased_exponent;
-      }
+      scales_rowwise[scale_idx] = biased_exponent;
 
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
@@ -711,8 +714,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
       }
       const int dbias_stride = cols;
-      const int dbias_offset_Y = blockIdxY;
-      const int dbias_offset_X = blockIdxX * CHUNK_DIM_X + threadIdx.x;
+      const int dbias_offset_Y = block_id_Y;
+      const int dbias_offset_X = block_id_X * CHUNK_DIM_X + threadIdx.x;
       const int dbias_idx = dbias_offset_Y * dbias_stride + dbias_offset_X;
       const bool col_out_of_bounds_dbias = (dbias_offset_X >= cols);
       if (!col_out_of_bounds_dbias) {
