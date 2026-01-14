@@ -964,8 +964,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         tp_group : ProcessGroup, default = None
                   tensor parallel process group.
         """
-        self.tp_group = tp_group
-        self.tp_group_initialized = True
+        self.fast_setattr("tp_group", tp_group)
+        self.fast_setattr("tp_group_initialized", True)
 
     def _get_fp8_params(self) -> Union[List[torch.Tensor], None]:
         """returns the FP8 weights."""
