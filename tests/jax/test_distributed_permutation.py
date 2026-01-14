@@ -93,7 +93,7 @@ class TestDistributedPermutation:
     def generate_routing_map(
         num_tokens: int,
         num_experts: int,
-        topk: int = 2,  #Number of experts each token is routed to (max 1s per row).
+        topk: int = 2,  # Number of experts each token is routed to (max 1s per row).
         key: jax.Array = None,
     ):
         if key is None:
@@ -106,7 +106,6 @@ class TestDistributedPermutation:
             routing_map = routing_map.at[token_idx, expert_indices].set(1)
 
         return routing_map
-
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
@@ -280,8 +279,6 @@ class TestDistributedPermutation:
             assert_allclose(jax.device_get(target_inp_grad), ref_inp_grad, dtype=dtype)
             assert_allclose(jax.device_get(target_probs_grad), ref_probs_grad, dtype=dtype)
 
-
-
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
         "num_tokens,num_experts,hidden_size,topk",
@@ -377,7 +374,6 @@ class TestDistributedPermutation:
             assert_allclose(
                 jax.device_get(computed_grad), jax.device_get(expected_grad), dtype=dtype
             )
-
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
@@ -479,7 +475,6 @@ class TestDistributedPermutation:
             # Gradients should not contain NaN
             assert not np.any(np.isnan(jax.device_get(inp_grad))), "Input gradient contains NaN"
             assert not np.any(np.isnan(jax.device_get(probs_grad))), "Probs gradient contains NaN"
-
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
