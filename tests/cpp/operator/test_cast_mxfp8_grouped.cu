@@ -512,12 +512,12 @@ std::vector<ScalingDirection> scaling_directions = {
     // ScalingDirection::BOTH,
 };
 
-// {num_tensors, logical_shape_M, logical_shape_K, [M_i], [K_i], [Offset_i]}
+// {shape_representation, num_tensors, [logical_shape_M, logical_shape_K], [M_i], [K_i]}
 std::vector<std::vector<size_t>> input_config = {
-    {0, 1, 128, 128},
-    {0, 2, 256, 128},
-    {1, 2, 512, 128, 128, 512-128},
-    {3, 2, 1, 128 * 128 + 256 * 256, 128, 256, 128, 256},
+    {SAME_BOTH_DIMS,        1,      128,128},
+    {SAME_BOTH_DIMS,        2,      256,128},
+    {VARYING_FIRST_DIM,     2,      512,128,                    128,512-128},
+    {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
 };
 
 }  // namespace
