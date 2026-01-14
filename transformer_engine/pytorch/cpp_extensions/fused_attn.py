@@ -454,7 +454,7 @@ def fused_attn_bwd(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
-    bottom_right_diagonal: bool, default = True
+    bottom_right_diagonal: bool, default = None
                 whether to align sliding window and ALiBi diagonal to the top left (False) or
                 bottom right (True) corner of the softmax matrix.
     deterministic : bool, default = False
