@@ -605,10 +605,10 @@ def fill_userbuffers_buffer_for_all_gather(
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
-    def __init__(self) -> None:
+    def __init__(self, name: Optional[str] = None) -> None:
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
-        self.name = None
+        self.name = name
         self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False
         self.fp8 = False
@@ -1602,8 +1602,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         if self.name is not None:
             return
-        assert TEDebugState.debug_enabled
-        import nvdlfw_inspect.api as debug_api
 
         self.name = f"Layer_{TEDebugState.get_layer_count()}"
 

@@ -447,7 +447,7 @@ class TransformerLayer(torch.nn.Module):
             qk_norm_type=qk_norm_type,
             qk_norm_eps=qk_norm_eps,
             qk_norm_before_rope=qk_norm_before_rope,
-            name=name + ".self_attention" if name is not None else None,
+            name=self.name + ".self_attention" if self.name is not None else None,
         )
 
         if layer_type == "decoder":
@@ -464,7 +464,7 @@ class TransformerLayer(torch.nn.Module):
                 qk_norm_type=qk_norm_type,
                 qk_norm_eps=qk_norm_eps,
                 qk_norm_before_rope=qk_norm_before_rope,
-                name=name + ".inter_attention" if name is not None else None,
+                name=self.name + ".inter_attention" if self.name is not None else None,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -500,7 +500,7 @@ class TransformerLayer(torch.nn.Module):
             activation_params=activation_params,
             normalization=normalization,
             device=device,
-            name=name + ".layernorm_mlp" if name is not None else None,
+            name=self.name + ".layernorm_mlp" if self.name is not None else None,
         )
 
         self.hidden_dropout = hidden_dropout

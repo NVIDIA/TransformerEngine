@@ -1789,7 +1789,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         zero_centered_gamma: bool = False,
         device: Union[torch.device, str] = "cuda",
         ub_overlap_ag: bool = False,
-        name: str = None,
+        name: Optional[str] = None,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,
         ub_bulk_dgrad: bool = False,
@@ -1798,7 +1798,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         checkpoint: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
@@ -1829,7 +1829,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 for use_fp8 in [False, True]
             )
         )
-        self.name = name
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 

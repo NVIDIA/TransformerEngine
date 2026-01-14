@@ -614,7 +614,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         save_original_input: bool = False,
         name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.num_gemms = num_gemms
@@ -633,7 +633,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         ), "GroupedLinear doesn't support Userbuffer overlap."
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
-        self.name = name
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute)
 

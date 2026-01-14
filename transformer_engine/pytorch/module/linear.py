@@ -1098,7 +1098,7 @@ class Linear(TransformerEngineBaseModule):
         save_original_input: bool = False,
         name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -1111,7 +1111,6 @@ class Linear(TransformerEngineBaseModule):
         self.rng_tracker_name = rng_tracker_name
         self.symmetric_ar_type = symmetric_ar_type
         self.save_original_input = save_original_input
-        self.name = name
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 

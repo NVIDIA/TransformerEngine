@@ -1161,9 +1161,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
-        name: str = None,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -1182,7 +1182,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.symmetric_ar_type = symmetric_ar_type
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
-        self.name = name
 
         if tp_group is None:
             self.tp_size = tp_size
