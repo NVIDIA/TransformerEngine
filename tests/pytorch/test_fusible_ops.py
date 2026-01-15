@@ -2075,12 +2075,12 @@ class TestBasicOps:
     @pytest.mark.parametrize(
         "input_shape,extra_input_shape",
         (
-            ((3,4,5), (3,4,5)),
-            ((6,7), ()),
-            ((), (8,9)),
-            ((10,11,12), (11,1)),
-            ((1,15), (13,14,15)),
-        )
+            ((3, 4, 5), (3, 4, 5)),
+            ((6, 7), ()),
+            ((), (8, 9)),
+            ((10, 11, 12), (11, 1)),
+            ((1, 15), (13, 14, 15)),
+        ),
     )
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("extra_input_requires_grad", (False, True))

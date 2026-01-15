@@ -37,8 +37,7 @@ def _reduce_broadcast_dims(
     reduce_dims = []
     if len(shape) < len(target_shape):
         raise ValueError(
-            "Invalid target shape "
-            f"(shape={shape} cannot be broadcast to shape={target_shape})."
+            f"Invalid target shape (shape={shape} cannot be broadcast to shape={target_shape})."
         )
     if len(shape) > len(target_shape):
         reduce_dims.extend(range(len(shape) - len(target_shape)))
@@ -47,8 +46,7 @@ def _reduce_broadcast_dims(
             pass
         elif target_shape[idx] != 1:
             raise ValueError(
-                "Invalid target shape "
-                f"(shape={shape} cannot be broadcast to shape={target_shape})."
+                f"Invalid target shape (shape={shape} cannot be broadcast to shape={target_shape})."
             )
         else:
             reduce_dims.append(idx)

@@ -239,8 +239,7 @@ class GroupedLinear(BasicOperation):
             weight = getattr(self, f"weight{group_idx}")
             if weight.dtype != dtype:
                 raise RuntimeError(
-                    f"Weight {group_idx} has invalid dtype "
-                    f"(expected {dtype}, got {weight.dtype})."
+                    f"Weight {group_idx} has invalid dtype (expected {dtype}, got {weight.dtype})."
                 )
             if not devices_match(weight.device, device):
                 raise RuntimeError(
@@ -264,13 +263,10 @@ class GroupedLinear(BasicOperation):
             bias = getattr(self, f"bias{group_idx}")
             if self.has_bias:
                 if bias is None:
-                    raise RuntimeError(
-                        f"Expected biases, but bias {group_idx} is uninitialized"
-                    )
+                    raise RuntimeError(f"Expected biases, but bias {group_idx} is uninitialized")
                 if bias.dtype != dtype:
                     raise RuntimeError(
-                        f"Bias {group_idx} has invalid dtype "
-                        f"(expected {dtype}, got {bias.dtype})."
+                        f"Bias {group_idx} has invalid dtype (expected {dtype}, got {bias.dtype})."
                     )
                 if not devices_match(bias.device, device):
                     raise RuntimeError(
@@ -284,9 +280,7 @@ class GroupedLinear(BasicOperation):
                     )
             else:
                 if bias is not None:
-                    raise RuntimeError(
-                        f"Expected no biases, but bias {group_idx} is initialized"
-                    )
+                    raise RuntimeError(f"Expected no biases, but bias {group_idx} is initialized")
 
     def pre_fuser_forward(self, *, requires_grad: bool) -> None:
         super().pre_fuser_forward(requires_grad=requires_grad)
@@ -345,8 +339,12 @@ class GroupedLinear(BasicOperation):
                     input_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
                     weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
                     weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_weight.amax_epsilon
-                    grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-                    grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_bwd_grad.amax_epsilon
+                    grad_output_quantizer.force_pow_2_scales = (
+                        recipe.fp8_quant_bwd_grad.power_2_scale
+                    )
+                    grad_output_quantizer.amax_epsilon_scales = (
+                        recipe.fp8_quant_bwd_grad.amax_epsilon
+                    )
 
     def op_forward(self, *args, **kwargs):
         raise RuntimeError(
@@ -403,18 +401,13 @@ class GroupedLinear(BasicOperation):
         split_sizes = basic_op_extra_inputs[0][0]
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
         if len(split_sizes_int) != group_size:
-            raise ValueError(
-                f"Expected {group_size} splits, but got {len(split_sizes_int)}."
-            )
+            raise ValueError(f"Expected {group_size} splits, but got {len(split_sizes_int)}.")
 
         # Extract params
         weights = [getattr(self, f"weight{idx}") for idx in range(group_size)]
         bs = None
         if has_bias:
-            bs = [
-                maybe_dequantize(getattr(self, f"bias{idx}"), dtype)
-                for idx in range(group_size)
-            ]
+            bs = [maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(group_size)]
 
         # Convert weight dtype if needed
         ws = []
@@ -526,9 +519,7 @@ class GroupedLinear(BasicOperation):
         else:
             dys = torch.split(dy, split_sizes_int)
             if has_bias:
-                grad_biases = [
-                    dy.reshape(-1, dy.size(-1)).sum(dim=0) for dy in dys
-                ]
+                grad_biases = [dy.reshape(-1, dy.size(-1)).sum(dim=0) for dy in dys]
 
         # Initialize grad weight grads
         accumulate_into_main_grad = self._accumulate_into_main_grad
@@ -542,7 +533,9 @@ class GroupedLinear(BasicOperation):
                     weight_param = getattr(self, f"weight{group_idx}")
                     if hasattr(weight_param, "__fsdp_param__"):
                         weight_param.main_grad = weight_param.get_main_grad()
-                    accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
+                    accumulate_into_main_grad = not getattr(
+                        weight_param, "overwrite_main_grad", False
+                    )
                     grad_weights[group_idx] = weight_param.main_grad
             else:
                 weight_shape = ws[0].size()
