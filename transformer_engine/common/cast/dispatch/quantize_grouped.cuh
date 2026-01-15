@@ -59,7 +59,8 @@ void quantize_grouped_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTenso
       Tensor *workspace_tensor = convertNVTETensor(workspace);
 
       mxfp8::quantize_grouped</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
-          input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor, stream);
+          input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
+          workspace_tensor, stream);
       break;
     }
     default:

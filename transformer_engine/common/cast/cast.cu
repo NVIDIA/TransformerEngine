@@ -27,7 +27,8 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
   // dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
 }
 
-void nvte_quantize_grouped(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream) {
+void nvte_quantize_grouped(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                           cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize_grouped);
   using namespace transformer_engine;
 

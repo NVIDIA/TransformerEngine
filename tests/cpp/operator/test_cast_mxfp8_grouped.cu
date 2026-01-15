@@ -263,7 +263,7 @@ void performTest(const ProcessingMethod processing_method,
     std::vector<OutputType> out_data_colwise_h(colwise ? elts_num : 0);
     std::vector<fp8e8m0> out_scales_rowwise_h(rowwise ? sfs_num : 0);
     std::vector<fp8e8m0> out_scales_colwise_h(colwise ? sfs_num : 0);
-    
+
     std::vector<OutputType> out_data_rowwise_ref(rowwise ? elts_num : 0);
     std::vector<OutputType> out_data_colwise_ref(colwise ? elts_num : 0);
     std::vector<fp8e8m0> out_scales_rowwise_ref(rowwise ? sfs_num : 0);
@@ -310,7 +310,7 @@ void performTest(const ProcessingMethod processing_method,
     cudaMalloc((void**)&first_dims_d, first_dims_size);
     cudaMalloc((void**)&last_dims_d, last_dims_size);
     cudaMalloc((void**)&offsets_d, offsets_size);
-    
+
     cudaMemcpy(in_data_d, in_data.data(), in_data_size, cudaMemcpyHostToDevice);
     cudaMemcpy(first_dims_d, first_dims_h.data(), first_dims_size, cudaMemcpyHostToDevice);
     cudaMemcpy(last_dims_d, last_dims_h.data(), last_dims_size, cudaMemcpyHostToDevice);
@@ -393,7 +393,7 @@ void performTest(const ProcessingMethod processing_method,
         OutputType* const out_data_colwise_ptr = out_data_colwise_ref.data() + data_offset;
         fp8e8m0* const out_scales_rowwise_ptr = out_scales_rowwise_ref.data() + sfs_offset;
         fp8e8m0* const out_scales_colwise_ptr = out_scales_colwise_ref.data() + sfs_offset;
-    
+
         compute_ref<InputType, OutputType>(
             processing_method, OP, rowwise, colwise, in_ptr, /*grad=*/ nullptr,
             out_data_rowwise_ptr, out_data_colwise_ptr,
@@ -518,7 +518,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
 
     using namespace transformer_engine;
     using namespace test;
-   
+
     const ProcessingMethod processing_method = std::get<0>(GetParam());
     const ActivationKind activation = std::get<1>(GetParam());
     const ScalingDirection scaling_direction = std::get<2>(GetParam());
@@ -536,7 +536,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
         switch (shape_rep) {
             case SAME_BOTH_DIMS: {
                 first_dims[t] = logical_shape[0] / num_tensors;
-                last_dims[t] = logical_shape[1]; 
+                last_dims[t] = logical_shape[1];
                 break;
             }
             case VARYING_FIRST_DIM: {
