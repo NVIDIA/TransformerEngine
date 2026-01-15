@@ -21,8 +21,8 @@
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
-#include "swizzle.cuh"
 #include "specialized/quantize_mxfp8.cuh"
+#include "swizzle.cuh"
 
 namespace transformer_engine {
 namespace dispatch {

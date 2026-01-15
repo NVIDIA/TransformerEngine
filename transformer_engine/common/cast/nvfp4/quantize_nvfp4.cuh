@@ -160,7 +160,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   OType *out_colwise_data_sh = reinterpret_cast<OType *>(dshmem + in_mem + out_mem_rowwise_data);
   fp8e4m3 *out_rowwise_scales_sh =
       reinterpret_cast<fp8e4m3 *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
-  (void)out_rowwise_scales_sh;  // Suppress unused variable warning
+  (void)out_rowwise_scales_sh;   // Suppress unused variable warning
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
   constexpr int shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
