@@ -2404,7 +2404,9 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
         pytest.skip("Not enough backends to run this test with.")
 
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
-    unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(dtype, config, "UnfusedDotProductAttention")
+    unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(
+        dtype, config, "UnfusedDotProductAttention"
+    )
 
     atol = 5e-1
     rtol = 5e-1
