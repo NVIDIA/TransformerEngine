@@ -415,14 +415,22 @@ class FusedAttnRunner:
             )
 
         if get_device_compute_capability(0) >= 100 and self.is_training:
-            if FusedAttnHelper.is_non_deterministic_allowed() and ((self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS) or get_cudnn_version() < 90700):
+            if FusedAttnHelper.is_non_deterministic_allowed() and (
+                (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
+                or get_cudnn_version() < 90700
+            ):
                 pytest.skip(
-                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with dropout"
-                    )
-            if not FusedAttnHelper.is_non_deterministic_allowed() and (self.dropout_prob != 0.0 or self.attn_bias_type != AttnBiasType.NO_BIAS or get_cudnn_version() < 91800):
+                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
+                    " dropout"
+                )
+            if not FusedAttnHelper.is_non_deterministic_allowed() and (
+                self.dropout_prob != 0.0
+                or self.attn_bias_type != AttnBiasType.NO_BIAS
+                or get_cudnn_version() < 91800
+            ):
                 pytest.skip(
                     "For sm100+, deterministic bprop (cuDNN 9.18+) does not support bias or dropout"
-                    )
+                )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
