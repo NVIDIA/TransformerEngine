@@ -1520,3 +1520,23 @@ def make_einsum_cls(quantization_recipe):
       return jnp.einsum(s, x, kernel, _dot_general=dot_general, **kwargs)
   
     return wrap_function_in_te_state_module(te_einsum, quantization_recipe, "einsum")()
+
+def make_ragged_dot_cls(quantization_recipe):
+    import jax
+    def te_grouped_dot_general(generate_quantizer_set, x, kernel, group_sizes, **kwargs):
+        num_groups = group_sizes.shape[0]
+        quantizer_set = generate_quantizer_set(n_groups=num_groups)
+
+        target_out_shape = jax.lax.ragged_dot(x, kernel, group_sizes=group_sizes).shape
+
+        out = grouped_dense(
+          x,
+          kernel,
+          group_sizes=group_sizes,
+          contracting_dims=((1,), (1,)),
+          quantizer_set=quantizer_set
+        )
+
+        return out.reshape(target_out_shape)
+  
+    return wrap_function_in_te_state_module(te_grouped_dot_general, quantization_recipe, "ragged_dot")()

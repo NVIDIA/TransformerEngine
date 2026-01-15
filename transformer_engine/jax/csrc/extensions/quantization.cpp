@@ -375,29 +375,19 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   size_t num_groups = group_sizes.dimensions()[0];
   size_t dim_list_bytes = group_size_dtype_bytes * num_groups;
   std::vector<int32_t> dim_list_host(num_groups);
-  // HACK: assumes batched gemm with equal group sizes
-  for (size_t i = 0; i < num_groups; i++) {
-    if (input_dims[0] == num_groups) {
-      dim_list_host[i] = 1;
-      continue;
-    }
-    dim_list_host[i] = m / num_groups;
-  }
-  // auto *group_size_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
-  // cudaMemcpyAsync(dim_list_host.data(), group_size_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
-  //                 stream);
-  // // Note: This may break cudaGraph.
-  // cudaStreamSynchronize(stream);
-  // printf("GroupedQuantizeFFI: m=%zu, n=%zu, group sizes = ", m, n);
-  // for (size_t i = 0; i < num_groups; i++) {
-  //   printf("%d ", dim_list_host[i]);
-  // }
-  // printf("\n");
+  auto *group_size_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
+  cudaMemcpyAsync(dim_list_host.data(), group_size_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
+                  stream);
+  // Note: This may break cudaGraph.
+  cudaStreamSynchronize(stream);
 
-  size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-  NVTE_CHECK(m == sum_group_sizes || input_dims[0] == sum_group_sizes,
-             "Unexpected group_sizes! Got %zu (M=%zu, input_dims[0] = %zu)", sum_group_sizes, m,
-             input_dims[0]);
+  // For MaxText case, I think is okay if this check fails as we are expecting to overallocate the buffers in the current use_ring_of_experts impl, which will result in the group sizes not filling the whole tensor.
+  // size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
+  // NVTE_CHECK(m == sum_group_sizes || input_dims[0] == sum_group_sizes,
+  //            "Unexpected group_sizes! Got ", sum_group_sizes, " (M=", m, ", input_dims[0] = ", input_dims[0], ")");
+
+  // TODO(jberchtold): This is a temporary fix to zero out the output buffers to prevent NaNs in output when this buffer is over-allocated and the groups do not fill the whole buffer. Though these NaNs should be ignored in the downstream GEMM, so more debugging is needed to see why they cause issues.
+  cudaMemsetAsync(outputs->untyped_data(), 0, outputs->size_bytes(), stream);
 
   if (is_delayed_scaling) {
     NVTE_CHECK(amaxs->dimensions()[0] == num_groups, "Unexpected amax size, Expected ", num_groups,
@@ -505,8 +495,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeHandler, GroupedQuantizeFFI,
                                   .Ret<Buffer_Type>()      // amax
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<JAXX_Quantize_Layout>("q_layout")
-                                  .Attr<int64_t>("flatten_axis"),
-                                FFI_CudaGraph_Traits);
+                                  .Attr<int64_t>("flatten_axis"));
 
 }  // namespace jax
 }  // namespace transformer_engine

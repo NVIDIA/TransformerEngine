@@ -1216,19 +1216,14 @@ def grouped_quantize(
             scale = scale.at[i].set(quantizer_i.scale[0])
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
-        # TODO fixme, measure perf with always scale/amax of 1 to just isolate quant and gemm
-        # HACK: assumes equal group sizes
-        assert group_axis == 0, f"Currently only group_axis = 0 is supported for current-tensor-scaling, but received {group_axis=}"
-        grouped_amax = jnp.max(jnp.abs(x.reshape((n_groups, x.shape[0]//n_groups, *x.shape[1:]))), axis=tuple(range(1, x.ndim+1)))
-        # import pdb; pdb.set_trace()
-        # if amax is not None:
-        #     row_amax = amax
-        # else:
-        #     row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
-        # segment_ids = jnp.repeat(
-        #     jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[group_axis]
-        # )
-        # grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
+        if amax is not None:
+            row_amax = amax
+        else:
+            row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
+        segment_ids = jnp.repeat(
+            jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[group_axis]
+        )
+        grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
             tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype, margin=0.0)
             scale = scale.at[i].set(tmp_scale[0])
