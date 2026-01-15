@@ -16,11 +16,16 @@ from datasets import load_dataset
 from flax import linen as nn
 from flax.training import train_state
 
-from common import is_bf16_supported, get_quantization_recipe_from_name_string
+from common import (
+    is_bf16_supported,
+    get_quantization_recipe_from_name_string,
+    unpack_cached_datasets_if_available,
+)
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMode
 
+unpack_cached_datasets_if_available()
 
 PARAMS_KEY = "params"
 DROPOUT_KEY = "dropout"

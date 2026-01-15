@@ -12,11 +12,9 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from ..quantized_tensor import QuantizedTensorStorage
+from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
-
-from ..quantized_tensor import Quantizer
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
@@ -227,3 +225,12 @@ class Float8TensorStorage(QuantizedTensorStorage):
         if not needs_data_transpose:
             self._transpose = None
             self._transpose_invalid = True
+
+    def get_usages(self) -> Dict[str, bool]:
+        """Get the usage of the tensor"""
+        usages = {"rowwise": self._data is not None}
+        if is_non_tn_fp8_gemm_supported():
+            usages["columnwise"] = self._data is not None
+        else:
+            usages["columnwise"] = self._transpose is not None and not self._transpose_invalid
+        return usages

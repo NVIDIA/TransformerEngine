@@ -24,11 +24,14 @@ class _Fp8Padding(torch.autograd.Function):
     def forward(
         ctx,
         inp: torch.Tensor,
-        m_splits: List[int],
-        padded_m_splits: List[int],
-        is_grad_enabled: bool,
+        non_tensor_args: Tuple,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
+
+        # Reduce number of arguments to autograd function in order
+        # to reduce CPU overhead due to pytorch arg checking.
+        (m_splits, padded_m_splits, is_grad_enabled) = non_tensor_args
+
         # Make sure input dimensions are compatible
         in_features = inp.shape[-1]
 
@@ -65,7 +68,7 @@ class _Fp8Padding(torch.autograd.Function):
                 grad_output.view(-1, in_features), grad_input, ctx.padded_m_splits, ctx.m_splits
             )
 
-        return (grad_input, None, None, None)
+        return grad_input, None
 
 
 class Fp8Padding(torch.nn.Module):
@@ -78,7 +81,7 @@ class Fp8Padding(torch.nn.Module):
                 number of GEMMs to be performed simultaneously.
     align_size : int, optional
                  the alignment size for the input tensor. If not provided, the alignment size will
-                 be determined by the FP8 recipe (32 for MXFP8 and 16 for others) in the first
+                 be determined by the FP8/FP4 recipe (32 for MXFP8/NVFP4 and 16 for others) in the first
                  forward pass.
     """
 
@@ -111,7 +114,14 @@ class Fp8Padding(torch.nn.Module):
 
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
         if self.align_size is None:
-            self.align_size = 32 if FP8GlobalStateManager.get_fp8_recipe().mxfp8() else 16
+            self.align_size = (
+                32
+                if (
+                    FP8GlobalStateManager.get_fp8_recipe().mxfp8()
+                    or FP8GlobalStateManager.get_fp8_recipe().nvfp4()
+                )
+                else 16
+            )
 
         # FP8 padding calculate
         padded_m_splits = [
@@ -121,19 +131,20 @@ class Fp8Padding(torch.nn.Module):
         if m_splits == padded_m_splits:
             return inp, m_splits
 
-        if torch.is_grad_enabled():
+        is_grad_enabled = torch.is_grad_enabled()
+
+        if is_grad_enabled:
             fn = _Fp8Padding.apply
-            args = []
+            autograd_ctx = []
         else:
             fn = _Fp8Padding.forward
-            args = [None]
+            autograd_ctx = [None]
 
-        args += (
-            inp,
+        non_tensor_args = (
             m_splits,
             padded_m_splits,
-            torch.is_grad_enabled(),
+            is_grad_enabled,
         )
-        out = fn(*args)
+        out = fn(*autograd_ctx, inp, non_tensor_args)
 
         return out, padded_m_splits

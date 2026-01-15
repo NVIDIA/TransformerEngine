@@ -28,7 +28,7 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_userbuffers_backward_linear,
     fuse_userbuffers_forward_linear,
 )
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
@@ -310,7 +310,7 @@ class OperationFuser:
 
     Parameters
     ----------
-    ops: list of FusibleOperation
+    ops : list of FusibleOperation
         Pipeline of operations
 
     """

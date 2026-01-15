@@ -46,7 +46,7 @@ from .scaling_modes import ScalingMode
 from .device_utils import get_device_compute_capability
 
 __all__ = [
-    "get_quantize_config",
+    "get_global_quantize_recipe",
     "get_quantize_config_with_recipe",
     "autocast",
     "fp8_autocast",
@@ -475,7 +475,12 @@ class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
             (self.AMAX_HISTORY_LEN,),
             jnp.float32,
         ).value
-        return QuantizeMeta(scale=scale, amax_history=amax_history)
+        return QuantizeMeta(
+            margin=self.MARGIN,
+            amax_compute_algo=self.AMAX_COMPUTE_ALGO,
+            scale=scale,
+            amax_history=amax_history,
+        )
 
 
 class CurrentScalingQuantizeConfig(BaseQuantizeConfig):
@@ -631,10 +636,8 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
         )
         sr_jax_rng = jax.jit(jax.random.fold_in)(sr_jax_rng, quantizer_hash)
 
-        # Generate 4 random uint32 values from the JAX PRNG key
-        shape = (4,)
-        if get_num_devices_in_mesh() > 1:
-            shape = (get_num_devices_in_mesh(), 4)
+        # Generate 4 random uint32 values per device from the JAX PRNG key
+        shape = (get_num_devices_in_mesh(), 4)
         sr_jax_rng_state = jax.random.randint(
             sr_jax_rng, shape, 0, jnp.iinfo(jnp.int32).max, dtype=jnp.int32
         ).view(jnp.uint32)
@@ -671,14 +674,6 @@ class NVFP4ScalingQuantizeConfig(BaseQuantizeConfig):
         )
 
 
-_QUANTIZE_CONFIG = NoOpQuantizeConfig()
-
-
-def get_quantize_config():
-    """Global instance of BaseQuantizeConfig set by autocast context."""
-    return _QUANTIZE_CONFIG
-
-
 def get_quantize_config_class(
     fp8_recipe: Recipe,
 ) -> Type[BaseQuantizeConfig]:
@@ -689,6 +684,8 @@ def get_quantize_config_class(
     Returns:
         The quantization config class corresponding to the given recipe.
     """
+    if fp8_recipe is None:
+        return NoOpQuantizeConfig
     if isinstance(fp8_recipe, DelayedScaling):
         return DelayedScalingQuantizeConfig
     if isinstance(fp8_recipe, MXFP8BlockScaling):
@@ -703,8 +700,21 @@ def get_quantize_config_class(
 def get_quantize_config_with_recipe(fp8_recipe: Recipe):
     """Get the quantization configuration object based on the FP8 recipe."""
     config = get_quantize_config_class(fp8_recipe)()
-    config.initialize_from_recipe(fp8_recipe)
+    if fp8_recipe is not None:
+        config.initialize_from_recipe(fp8_recipe)
     return config
+
+
+_GLOBAL_RECIPE: Optional[Recipe] = None
+
+
+def get_global_quantize_recipe() -> Optional[Recipe]:
+    """Get the global quantization recipe if set.
+
+    Returns:
+        The global quantization recipe or None if not set.
+    """
+    return _GLOBAL_RECIPE
 
 
 @contextmanager
@@ -753,22 +763,21 @@ def autocast(
     if recipe is None:
         recipe = DelayedScaling()
 
-    global _QUANTIZE_CONFIG
+    global _GLOBAL_RECIPE
 
-    old_quantize_config = _QUANTIZE_CONFIG
+    old_global_recipe = _GLOBAL_RECIPE
 
-    _QUANTIZE_CONFIG = NoOpQuantizeConfig()
+    _GLOBAL_RECIPE = None
 
     try:
         with global_shard_guard(mesh_resource):
             if enabled:
-                _QUANTIZE_CONFIG = get_quantize_config_class(recipe)()
-                is_supported, reason = _QUANTIZE_CONFIG.is_supported()
+                _GLOBAL_RECIPE = recipe
+                is_supported, reason = get_quantize_config_class(_GLOBAL_RECIPE)().is_supported()
                 assert is_supported, reason
-                _QUANTIZE_CONFIG.initialize_from_recipe(recipe)
             yield
     finally:
-        _QUANTIZE_CONFIG = old_quantize_config
+        _GLOBAL_RECIPE = old_global_recipe
 
 
 @contextmanager

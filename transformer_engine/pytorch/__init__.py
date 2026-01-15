@@ -7,21 +7,13 @@
 # pylint: disable=wrong-import-position
 
 import functools
-from packaging.version import Version as PkgVersion
 
 import torch
 
 from transformer_engine.common import load_framework_extension
-
-
-@functools.lru_cache(maxsize=None)
-def torch_version() -> tuple[int, ...]:
-    """Get PyTorch version"""
-    return PkgVersion(str(torch.__version__)).release
-
+from transformer_engine.pytorch.torch_version import torch_version
 
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
-
 
 load_framework_extension("torch")
 from transformer_engine.pytorch.module import LayerNormLinear
@@ -66,24 +58,24 @@ from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
-from transformer_engine.pytorch.tensor import Quantizer
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
+from transformer_engine.pytorch.quantized_tensor import Quantizer
+from transformer_engine.pytorch.quantized_tensor import prepare_for_saving
+from transformer_engine.pytorch.quantized_tensor import restore_from_saved
 from transformer_engine.pytorch.tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor import NVFP4Quantizer
-from transformer_engine.pytorch.tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.tensor import Float8TensorStorage
 from transformer_engine.pytorch.tensor import MXFP8TensorStorage
 from transformer_engine.pytorch.tensor import Float8BlockwiseQTensorStorage
 from transformer_engine.pytorch.tensor import NVFP4TensorStorage
-from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor import Float8Tensor
 from transformer_engine.pytorch.tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor import NVFP4Tensor
-from transformer_engine.pytorch.tensor import prepare_for_saving
-from transformer_engine.pytorch.tensor import restore_from_saved
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False

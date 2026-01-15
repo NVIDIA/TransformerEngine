@@ -13,11 +13,9 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine_torch import Float8BlockScaleTensorFormat
 
-from ..quantized_tensor import QuantizedTensorStorage
+from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType_To_Torch
-
-from ..quantized_tensor import Quantizer
 
 from ...utils import _empty_tensor
 
@@ -422,3 +420,10 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             return
 
         return
+
+    def get_usages(self) -> Dict[str, bool]:
+        """Get the usage of the tensor"""
+        return {
+            "rowwise": self._rowwise_data is not None,
+            "columnwise": self._columnwise_data is not None,
+        }

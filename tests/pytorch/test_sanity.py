@@ -36,7 +36,6 @@ from transformer_engine.pytorch import (
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
-from transformer_engine.pytorch.module.base import get_workspace
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from utils import ModelConfig
 
@@ -122,6 +121,7 @@ all_activations = [
     "sreglu",
     "silu",
     "swiglu",
+    "clamped_swiglu",
 ]
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -547,7 +547,7 @@ def test_sanity_layernorm_mlp(
     sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
-
+    activation_params = None if activation != "clamped_swiglu" else {"limit": 7.0, "alpha": 1.702}
     block = LayerNormMLP(
         config.hidden_size,
         4 * config.hidden_size,
@@ -555,6 +555,7 @@ def test_sanity_layernorm_mlp(
         output_layer_init_method=output_layer_init_method,
         zero_centered_gamma=zero_centered_gamma,
         activation=activation,
+        activation_params=activation_params,
         normalization=normalization,
         params_dtype=dtype,
         device="cuda",
@@ -910,7 +911,7 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
     inp = torch.reshape(scratchpad[offset:-offset], (N, N))
     weight = torch.reshape(scratchpad[offset * 2 :], (N, N))
 
-    _ = general_gemm(A=weight, B=inp, workspace=get_workspace())
+    _ = general_gemm(A=weight, B=inp)
     torch.cuda.synchronize()
 
 
@@ -934,7 +935,6 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     general_gemm(
         weight_fp8,
         inp_fp8,
-        get_workspace(),
         outp_type,
         bias=None,
         use_split_accumulator=False,
