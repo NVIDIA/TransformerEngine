@@ -231,18 +231,18 @@ void compare_scaled_elts(const std::string &name,
  * 2) Scaled columns + column-wise scaling factors
  */
 template <typename InputType, typename OutputType>
-void performTest_x1(const ProcessingMethod processing_method,
-                    float (*OP)(const float),
-                    const ShapeRepresentation shape_rep,
-                    const size_t num_tensors,
-                    const std::vector<size_t>& logical_shape_vec,
-                    const std::vector<size_t>& first_dims_h,
-                    const std::vector<size_t>& last_dims_h,
-                    const std::vector<size_t>& offsets_h,
-                    const bool rowwise,
-                    const bool colwise) {
+void performTest(const ProcessingMethod processing_method,
+                 float (*OP)(const float),
+                 const ShapeRepresentation shape_rep,
+                 const size_t num_tensors,
+                 const std::vector<size_t>& logical_shape_vec,
+                 const std::vector<size_t>& first_dims_h,
+                 const std::vector<size_t>& last_dims_h,
+                 const std::vector<size_t>& offsets_h,
+                 const bool rowwise,
+                 const bool colwise) {
     using namespace test;
-    using EncodingType = fp32;
+
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
 
@@ -484,8 +484,8 @@ enum ScalingDirection {
 
 std::vector<ScalingDirection> scaling_directions = {
     ScalingDirection::ROWWISE,
-    // ScalingDirection::COLWISE,
-    // ScalingDirection::BOTH,
+    ScalingDirection::COLWISE,
+    ScalingDirection::BOTH,
 };
 
 // {shape_representation, num_tensors, [logical_shape_M, logical_shape_K], [M_i], [K_i]}
@@ -493,6 +493,8 @@ std::vector<std::vector<size_t>> input_config = {
     {SAME_BOTH_DIMS,        1,      128,128},
     {SAME_BOTH_DIMS,        2,      256,128},
     {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
+    {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
+    {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
     {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
     {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
 };
@@ -521,6 +523,8 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     const ActivationKind activation = std::get<1>(GetParam());
     const ScalingDirection scaling_direction = std::get<2>(GetParam());
     const std::vector<size_t> input_config = std::get<3>(GetParam());
+    const DType input_type = std::get<4>(GetParam());
+    const DType output_type = std::get<5>(GetParam());
 
     const ShapeRepresentation shape_rep = static_cast<ShapeRepresentation>(input_config[0]);
     const size_t num_tensors = input_config[1];
@@ -579,52 +583,14 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     }
 
     auto OP = &identity;
-    performTest_x1<bf16, fp8e4m3>(processing_method, OP, shape_rep, num_tensors, logical_shape,
-                                  first_dims, last_dims, offsets, rowwise, colwise);
 
-    // if (processing_method == ProcessingMethod::CAST_ACT) {
-    //     // Forward activations
-    //     auto OP = &identity;
-    //     switch (activation) {
-    //         case ActivationKind::GeLU: OP = &gelu; break;
-    //         case ActivationKind::SiLU: OP = &silu; break;
-    //         case ActivationKind::ReLU: OP = &relu; break;
-    //         case ActivationKind::QGeLU: OP = &qgelu; break;
-    //         case ActivationKind::SReLU: OP = &srelu; break;
-    //     }
-
-    //     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-    //         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
-    //             if (scaling_direction == ScalingDirection::BOTH) {
-    //                 performTest_x2<InputType, OutputType>(
-    //                     processing_method, OP, tensor_logical_shape, M_i, Offset_i);
-    //             } else {
-    //                 performTest_x1<InputType, OutputType>(
-    //                     processing_method, OP, tensor_logical_shape, M_i, Offset_i, rowwise, colwise);
-    //             }
-    //         );
-    //     );
-    // } else {
-    //     auto OP = &identity;
-    //     switch (activation) {
-    //         case ActivationKind::GeLU: OP = &dgelu; break;
-    //         case ActivationKind::SiLU: OP = &dsilu; break;
-    //         case ActivationKind::ReLU: OP = &drelu; break;
-    //         case ActivationKind::QGeLU: OP = &dqgelu; break;
-    //         case ActivationKind::SReLU: OP = &dsrelu; break;
-    //     }
-    //     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-    //         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
-    //             if (scaling_direction == ScalingDirection::BOTH) {
-    //                 performTest_x2<InputType, OutputType>(
-    //                     processing_method, OP, tensor_logical_shape, M_i, Offset_i);
-    //             } else {
-    //                 performTest_x1<InputType, OutputType>(
-    //                     processing_method, OP, tensor_logical_shape, M_i, Offset_i, rowwise, colwise);
-    //             }
-    //         );
-    //     );
-    // }
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
+            performTest<InputType, OutputType>(processing_method, OP, shape_rep, num_tensors,
+                                               logical_shape, first_dims, last_dims, offsets,
+                                               rowwise, colwise);
+        );
+    );
 }
 
 std::string to_string(const ProcessingMethod method) {
@@ -658,10 +624,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(activation_kinds),
         ::testing::ValuesIn(scaling_directions),
         ::testing::ValuesIn(input_config),
-        ::testing::Values(DType::kBFloat16),
-        ::testing::Values(DType::kFloat8E4M3)),
-        // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
     [](const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
         const ProcessingMethod method = std::get<0>(info.param);
         std::string name = to_string(method);

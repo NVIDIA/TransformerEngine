@@ -49,14 +49,14 @@ void quantize_grouped_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTenso
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
       const NVTEGroupedTensor activation = nullptr;
-      NVTEGroupedTensor dbias = nullptr;
-      NVTEGroupedTensor workspace = nullptr;
+      NVTETensor dbias = nullptr;
+      NVTETensor workspace = nullptr;
 
       const GroupedTensor *input_tensor = convertNVTEGroupedTensorCheck(input);
       GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
       const GroupedTensor *activations_tensor = convertNVTEGroupedTensor(activation);
-      GroupedTensor *dbias_tensor = convertNVTEGroupedTensor(dbias);
-      GroupedTensor *workspace_tensor = convertNVTEGroupedTensor(workspace);
+      Tensor *dbias_tensor = convertNVTETensor(dbias);
+      Tensor *workspace_tensor = convertNVTETensor(workspace);
 
       mxfp8::quantize_grouped</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor, stream);
