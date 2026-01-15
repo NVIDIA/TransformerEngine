@@ -76,8 +76,8 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
   constexpr bool IS_ACT = false;
 
   for (int i = 0; i < num_tensors; i++) {
-    dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(
-        inputs[i], outputs[i], quant_configs, stream);
+    dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(inputs[i], outputs[i], quant_configs,
+                                                          stream);
   }
 }
 

@@ -156,7 +156,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     if (is_fp8_dtype(ret.Atype)) {
       // Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
       // NVTE_CHECK(ret.lda % 16 == 0,
-                //  "Leading dimension requirement on A for FP8 GEMM. Caller must pad.");
+      //  "Leading dimension requirement on A for FP8 GEMM. Caller must pad.");
     }
   } else if (nvfp4) {
     // NVFP4 GEMM. Either the pure NVFP4 recipe or the FWD pass of the Hybrid NVFP4/MXFP8 recipe.

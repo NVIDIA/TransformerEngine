@@ -368,10 +368,12 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             batch_dims,
             output_bdims=(
                 batch_dims[0],  # out
-                batch_dims[0],  # colwise_out (probably need to transpose according if scaling mode does it)
+                batch_dims[
+                    0
+                ],  # colwise_out (probably need to transpose according if scaling mode does it)
                 0,  # scale_inv
                 0,  # colwise_scale_inv
-                0, # updated_amax
+                0,  # updated_amax
                 0,  # dbias
             ),
             static_kwargs={

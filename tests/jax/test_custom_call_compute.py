@@ -1975,18 +1975,22 @@ class TestGroupedDense:
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
 
-@pytest_parametrize_wrapper('eqn,a_shape,b_shape', [
-    # ('ij,jk->ik', (64, 32), (32, 128)),
-    # ('bij,bjk->bik', (8, 64, 32), (8, 32, 128)),
-    # ('abc,cde->abde', (4, 8, 16), (16, 32, 64)),
-    ('BSM,BSEC->EBCM', (2, 4096, 4096), (2, 4096, 8, 1024)),                            
-    ('EBCM,EMH->EBCH', (8, 2, 1024, 4096), (8, 4096, 14336)) ,                           
-    ('EBCM,EMH->EBCH', (8, 2, 1024, 4096), (8, 4096, 14336)),
-    ('EBCH,EHM->EBCM', (8, 2, 1024, 14336), (8, 14336, 4096)),
-    ('EBCM,BSEC->BSM', (8, 2, 1024, 4096), (2, 4096, 8, 1024)),
-])
-@pytest_parametrize_wrapper('dtype', [jnp.bfloat16])
-@pytest_parametrize_wrapper('quantization_recipe', supported_recipes)
+
+@pytest_parametrize_wrapper(
+    "eqn,a_shape,b_shape",
+    [
+        # ('ij,jk->ik', (64, 32), (32, 128)),
+        # ('bij,bjk->bik', (8, 64, 32), (8, 32, 128)),
+        # ('abc,cde->abde', (4, 8, 16), (16, 32, 64)),
+        ("BSM,BSEC->EBCM", (2, 4096, 4096), (2, 4096, 8, 1024)),
+        ("EBCM,EMH->EBCH", (8, 2, 1024, 4096), (8, 4096, 14336)),
+        ("EBCM,EMH->EBCH", (8, 2, 1024, 4096), (8, 4096, 14336)),
+        ("EBCH,EHM->EBCM", (8, 2, 1024, 14336), (8, 14336, 4096)),
+        ("EBCM,BSEC->BSM", (8, 2, 1024, 4096), (2, 4096, 8, 1024)),
+    ],
+)
+@pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
+@pytest_parametrize_wrapper("quantization_recipe", supported_recipes)
 class TestEinsum:
 
     def _te_einsum(self, eqn, a, b, quantization_recipe):
@@ -2011,7 +2015,9 @@ class TestEinsum:
         a = jax.random.uniform(subkeys[0], a_shape, dtype=dtype)
         b = jax.random.uniform(subkeys[1], b_shape, dtype=dtype)
 
-        te_out = jax.jit(functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe))(a, b)
+        te_out = jax.jit(
+            functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe)
+        )(a, b)
         ref_out = jax.jit(functools.partial(self._ref_einsum, eqn))(a, b)
 
         assert_allclose(te_out, ref_out, dtype=dtype)
@@ -2032,14 +2038,25 @@ class TestEinsum:
             @functools.wraps(f)
             def wrapped(*args):
                 return jnp.mean(f(*args))
+
             return wrapped
 
-        te_fwd, te_grads = jax.jit(jax.value_and_grad(wrap_in_mean(functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe))))(a, b)
-        ref_fwd, ref_grads = jax.jit(jax.value_and_grad(wrap_in_mean(functools.partial(self._ref_einsum, eqn))))(a, b)
+        te_fwd, te_grads = jax.jit(
+            jax.value_and_grad(
+                wrap_in_mean(
+                    functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe)
+                )
+            )
+        )(a, b)
+        ref_fwd, ref_grads = jax.jit(
+            jax.value_and_grad(wrap_in_mean(functools.partial(self._ref_einsum, eqn)))
+        )(a, b)
 
         assert_allclose(te_fwd, ref_fwd, dtype=dtype)
 
-        assert len(te_grads) == len(ref_grads), f"Number of gradients differ: {len(te_grads)=} vs {len(ref_grads)=}"
+        assert len(te_grads) == len(
+            ref_grads
+        ), f"Number of gradients differ: {len(te_grads)=} vs {len(ref_grads)=}"
 
         for te_grad, ref_grad in zip(te_grads, ref_grads):
             assert_allclose(te_grad, ref_grad, dtype=dtype)
