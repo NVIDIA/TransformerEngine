@@ -2967,7 +2967,7 @@ class TestCustomOps:
                 # Perform compute on CPU, because why not?
                 x = input_.cpu()
                 w = weight.cpu()
-                y = torch.nn.functional.linear(x, w)
+                y = torch.matmul(x, w.T)
                 z = torch.nn.functional.silu(y)
                 out = z.to(device=device)
 
@@ -3043,8 +3043,12 @@ class TestCustomOps:
         assert len(forward_ops) == 1
         assert isinstance(forward_ops[0][0], CustomForwardLinearSiLU)
 
-        # Check results
+        # Expected numerical error
         tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+
+        # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
         dw_test = model[0].weight.grad.to(dtype=torch.float64, device="cpu")
@@ -3088,7 +3092,7 @@ class TestCustomOps:
                 dy = grad_output.double()
                 x = x.double()
                 w = w.double()
-                dx = torch.nn.functional.linear(dy, scale * w.T)
+                dx = torch.matmul(dy, scale * w)
                 dw = torch.matmul(dy.T, x)
                 dx = dx.to(dtype=dtype)
                 dw = dw.to(dtype=dtype)
@@ -3147,8 +3151,12 @@ class TestCustomOps:
         assert len(backward_ops) == 1
         assert isinstance(backward_ops[0][0], CustomBackwardLinearScale)
 
-        # Check results
+        # Expected numerical error
         tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+
+        # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
         dw_test = model[1].weight.grad.to(dtype=torch.float64, device="cpu")
