@@ -14,7 +14,6 @@ from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 from contextlib import contextmanager
 from types import MethodType
 
-from typing_extensions import Self
 import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
@@ -649,17 +648,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         super().__setattr__(name, value)
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        if "_initialized" in self.__dict__ and self._initialized:
-            warnings.warn(
-                """The default implementation of torch.nn.Module introduces significant CPU overhead
-                when setting attributes and is therefore not recommended. Please use the explicit
-                calls (fast_setattr for setting regular values and module_setattr for setting
-                parameters, children modules and buffers).""",
-                RuntimeWarning,
-            )
-        super().__setattr__(name, value)
-
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """
         Delayed scaling only.
@@ -1107,10 +1095,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             inp, num_gemms, allow_non_contiguous, allow_different_data_and_param_types
         )
         self.end_forward()
-
-    def train(self, mode: bool = True) -> Self:
-        with warnings.catch_warnings(action="ignore", category=RuntimeWarning):
-            return super().train(mode)
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled

@@ -935,8 +935,7 @@ def _make_graphed_callables(
 
             forward = make_graphed_forward(func, func.training, graphed, func.forward, te_modules)
             if _order is None:
-                with warnings.catch_warnings(action="ignore", category=RuntimeWarning):
-                    func.forward = forward
+                func.forward = forward
                 ret.append(func)
             else:
                 ret.append(forward)
@@ -944,9 +943,8 @@ def _make_graphed_callables(
             ret.append(graphed)
 
         backward_dw_func, reset_func = make_graphed_attribute_functions(i)
-        with warnings.catch_warnings(action="ignore", category=RuntimeWarning):
-            setattr(ret[-1], "backward_dw", backward_dw_func)
-            setattr(ret[-1], "reset", reset_func)
+        setattr(ret[-1], "backward_dw", backward_dw_func)
+        setattr(ret[-1], "reset", reset_func)
 
     if just_one_callable:
         return ret[0]
