@@ -131,22 +131,13 @@ class ForwardLinearScaleAdd(FusedOperation):
 
         # Scan through ops, fusing if possible
         out = []
-        window = []
-        while ops:
-
-            # Shift window
-            while len(window) >= 3:
-                out.append(window[0])
-                window = window[1:]
-            while ops and len(window) < 3:
-                window.append(ops[0])
-                ops = ops[1:]
+        window, ops = ops[:3], ops[3:]
+        while len(window) == 3:
 
             # Check if window matches pattern
             matches_pattern = True
             if not (
-                len(window) == 3
-                and isinstance(window[0], BasicLinear)
+                isinstance(window[0], BasicLinear)
                 and isinstance(window[1], ConstantScale)
                 and isinstance(window[2], AddExtraInput)
             ):
@@ -159,14 +150,25 @@ class ForwardLinearScaleAdd(FusedOperation):
                 # Fused op accumulates output in-place
                 matches_pattern = False
 
-            # Construct fused op if window matches pattern
             if matches_pattern:
+                # Construct fused op if window matches pattern
                 op = ForwardLinearScaleAdd(
                     linear=window[0],
                     scale=window[1],
                     add=window[2],
                 )
                 window = [op]
+            else:
+                # Shift window if window doesn't match pattern
+                out.extend(window[:-2])
+                window = window[-2:]
+
+            # Adjust window to expected size
+            out.extend(window[:-3])
+            window = window[-3:]
+            while ops and len(window) < 3:
+                window.append(ops[0])
+                ops = ops[1:]
 
         # Return list of ops
         out.extend(window)

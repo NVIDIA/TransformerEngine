@@ -110,26 +110,30 @@ class BackwardActivationBias(FusedOperation):
 
         # Scan through ops, fusing if possible
         out = []
-        window = []
-        while ops:
-
-            # Shift window
-            while len(window) >= 3:
-                out.append(window[0])
-                window = window[1:]
-            while ops and len(window) < 3:
-                window.append(ops[0])
-                ops = ops[1:]
-
-            # Construct fused op if window matches pattern
+        window, ops = ops[:3], ops[3:]
+        while len(window) == 3:
             if (
-                len(window) == 3
-                and isinstance(window[2], _fusible_activations)
+                isinstance(window[2], _fusible_activations)
                 and isinstance(window[1], Bias)
                 and window[0].get_grad_output_quantizer() is not None
             ):
+                # Construct fused op if window matches pattern
                 op = BackwardActivationBias(bias=window[1], activation=window[2])
                 window = [window[0], op]
+                while ops and len(window) < 3:
+                    window.append(ops[0])
+                    ops = ops[1:]
+            else:
+                # Shift window if window doesn't match pattern
+                out.extend(window[:-2])
+                window = window[-2:]
+
+            # Adjust window to expected size
+            out.extend(window[:-3])
+            window = window[-3:]
+            while ops and len(window) < 3:
+                window.append(ops[0])
+                ops = ops[1:]
 
         # Return list of ops
         out.extend(window)

@@ -100,26 +100,27 @@ class BackwardAddRMSNorm(FusedOperation):
 
         # Scan through ops, fusing if possible
         out = []
-        window = []
-        while ops:
-
-            # Shift window
-            while len(window) >= 2:
-                out.append(window[0])
-                window = window[1:]
-            while ops and len(window) < 2:
-                window.append(ops[0])
-                ops = ops[1:]
-
-            # Construct fused op if window matches pattern
+        window, ops = ops[:2], ops[2:]
+        while len(window) == 2:
             if (
-                len(window) == 2
-                and isinstance(window[0], MakeExtraOutput)
+                isinstance(window[0], MakeExtraOutput)
                 and isinstance(window[1], RMSNorm)
                 and not window[0]._in_place
             ):
+                # Construct fused op if window matches pattern
                 op = BackwardAddRMSNorm(add=window[0], rmsnorm=window[1])
                 window = [op]
+            else:
+                # Shift window if window doesn't match pattern
+                out.extend(window[:-1])
+                window = window[-1:]
+
+            # Adjust window to expected size
+            out.extend(window[:-2])
+            window = window[-2:]
+            while ops and len(window) < 2:
+                window.append(ops[0])
+                ops = ops[1:]
 
         # Return list of ops
         out.extend(window)

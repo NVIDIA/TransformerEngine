@@ -132,22 +132,13 @@ class BackwardLinearAdd(FusedOperation):
 
         # Scan through ops, fusing if possible
         out = []
-        window = []
-        while ops:
-
-            # Shift window
-            while len(window) >= 2:
-                out.append(window[0])
-                window = window[1:]
-            while ops and len(window) < 2:
-                window.append(ops[0])
-                ops = ops[1:]
+        window, ops = ops[:2], ops[2:]
+        while len(window) == 2:
 
             # Check if window matches pattern
             matches_pattern = True
             if not (
-                len(window) == 2
-                and isinstance(window[0], MakeExtraOutput)
+                isinstance(window[0], MakeExtraOutput)
                 and isinstance(window[1], BasicLinear)
             ):
                 matches_pattern = False
@@ -159,10 +150,21 @@ class BackwardLinearAdd(FusedOperation):
                 # after the dgrad GEMM
                 matches_pattern = False
 
-            # Construct fused op if window matches pattern
             if matches_pattern:
+                # Construct fused op if window matches pattern
                 op = BackwardLinearAdd(backward_add=window[0], linear=window[1])
                 window = [op]
+            else:
+                # Shift window if window doesn't match pattern
+                out.extend(window[:-1])
+                window = window[-1:]
+
+            # Adjust window to expected size
+            out.extend(window[:-2])
+            window = window[-2:]
+            while ops and len(window) < 2:
+                window.append(ops[0])
+                ops = ops[1:]
 
         # Return list of ops
         out.extend(window)
