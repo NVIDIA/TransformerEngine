@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import torch
 
+from ...tensor import Quantizer
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
 
@@ -39,7 +40,7 @@ def _reduce_broadcast_dims(
             "Invalid target shape "
             f"(shape={shape} cannot be broadcast to shape={target_shape})."
         )
-    elif len(shape) > len(target_shape):
+    if len(shape) > len(target_shape):
         reduce_dims.extend(range(len(shape) - len(target_shape)))
     for idx in range(-len(target_shape), 0):
         if shape[idx] == target_shape[idx]:

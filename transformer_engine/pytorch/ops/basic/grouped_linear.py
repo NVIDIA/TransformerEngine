@@ -5,7 +5,7 @@
 """Fusible operation for bias."""
 
 from __future__ import annotations
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 import contextlib
 import math
 from typing import Any, Optional
@@ -14,13 +14,14 @@ import torch
 
 import transformer_engine_torch as tex
 from ...cpp_extensions import general_grouped_gemm
+from ...distributed import CudaRNGStatesTracker
 from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
     get_dummy_wgrad,
 )
-from ...quantization import FP8GlobalStateManager
+from ...quantization import FP8GlobalStateManager, Recipe
 from ...tensor import Quantizer
 from ...utils import (
     canonicalize_device,
@@ -33,6 +34,40 @@ from ..op import BasicOperation, OperationContext
 
 
 class GroupedLinear(BasicOperation):
+    """Apply multiple linear transformations: :math:``y_i = x_i W_i^T + b_i``
+
+    This is equivalent to splitting the input tensor along its first
+    dimension, applying a separate ``torch.nn.Linear`` to each split,
+    and concatenating along the first dimension.
+
+    Paramters
+    ---------
+    group_size : int
+        Number of linear transformations.
+    in_features : int
+        Inner dimension of input tensor.
+    out_features : int
+        Inner dimension of output tensor.
+    bias : bool, default = ``True``
+        Apply additive bias.
+    device : torch.device, default = default CUDA device
+        Tensor device.
+    dtype : torch.dtype, default = default dtype
+        Tensor datatype.
+    rng_state_tracker_function : callable
+        Function that returns ``CudaRNGStatesTracker``, which is used
+        for model-parallel weight initialization.
+    accumulate_into_main_grad : bool, default = ``False``
+        Whether to directly accumulate weight gradients into the
+        weight's ``main_grad`` attribute instead of relying on PyTorch
+        autograd. The weight's ``main_grad`` must be set externally
+        and there is no guarantee that `grad` will be set or be
+        meaningful. This is primarily intented to integrate with
+        Megatron-LM. This argument along with weight tensor having
+        attribute ``overwrite_main_grad`` set to True will overwrite
+        ``main_grad`` instead of accumulating.
+
+    """
 
     # Operation expects input split sizes
     num_extra_inputs: int = 1
@@ -120,6 +155,7 @@ class GroupedLinear(BasicOperation):
 
     @property
     def has_bias(self) -> bool:
+        """Whether an additive bias is being applied"""
         return self.bias0 is not None
 
     def reset_parameters(self) -> None:
@@ -216,7 +252,7 @@ class GroupedLinear(BasicOperation):
                     f"Weight {group_idx} has requires_grad={weight.requires_grad}, "
                     f"but expected requires_grad={weight_requires_grad}."
                 )
-            if type(weight.data) != weight_tensor_type:
+            if type(weight.data) != weight_tensor_type:  # pylint: disable=unidiomatic-typecheck
                 raise RuntimeError(
                     f"Weight {group_idx} has invalid tensor type "
                     f"(expected {weight_tensor_type.__name__}, "
@@ -364,7 +400,6 @@ class GroupedLinear(BasicOperation):
             dtype = self.weight0.dtype
 
         # Extract split sizes from extra input
-        # TODO Support splits on GPU
         split_sizes = basic_op_extra_inputs[0][0]
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
         if len(split_sizes_int) != group_size:
@@ -472,7 +507,6 @@ class GroupedLinear(BasicOperation):
         ws, saved_tensors = saved_tensors[:group_size], saved_tensors[group_size:]
 
         # Split grad output tensor and convert dtypes if needed
-        # TODO Support splits on GPU
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
         dy = maybe_dequantize(grad_output, ctx.dtype)
         dys = None
