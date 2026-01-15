@@ -120,9 +120,6 @@ class BackwardActivationBias(FusedOperation):
                 # Construct fused op if window matches pattern
                 op = BackwardActivationBias(bias=window[1], activation=window[2])
                 window = [window[0], op]
-                while ops and len(window) < 3:
-                    window.append(ops[0])
-                    ops = ops[1:]
             else:
                 # Shift window if window doesn't match pattern
                 out.extend(window[:-2])
