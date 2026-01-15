@@ -148,7 +148,7 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
-      sizeof(bool)              // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t)           // kNVTEWithGEMMSwizzledScales
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -413,14 +413,14 @@ struct QuantizationConfig {
   bool use_fast_math = false;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),                          // force_pow_2_scales
+      sizeof(uint8_t),                       // force_pow_2_scales
       sizeof(float),                         // amax_epsilon
       sizeof(NVTETensor),                    // noop_tensor
       sizeof(Float8BlockScaleTensorFormat),  // (deprecated)
       sizeof(NVTETensor),                    // rng_seed and offset
-      sizeof(bool),                          // nvfp4_2d_quantization
-      sizeof(bool),                          // stochastic_rounding
-      sizeof(bool)                           // use_fast_math
+      sizeof(uint8_t),                       // nvfp4_2d_quantization
+      sizeof(uint8_t),                       // stochastic_rounding
+      sizeof(uint8_t)                        // use_fast_math
   };
 };
 

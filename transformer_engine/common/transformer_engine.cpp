@@ -866,7 +866,7 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
       break;
     }
     case kNVTEWithGEMMSwizzledScales:
-      std::memcpy(&t.with_gemm_swizzled_scales, buf, attr_size);
+      t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<uint8_t *>(buf));
       break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
@@ -946,7 +946,7 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
       break;
     }
     case kNVTEWithGEMMSwizzledScales:
-      std::memcpy(buf, &t->with_gemm_swizzled_scales, attr_size);
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8>(t->with_gemm_swizzled_scales);
       break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
@@ -1022,12 +1022,18 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
              static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
              " bytes)");
 
+  // bool size is implementation-dependent, so we explicitly specify
+  // uint8_t in the user-facing API.
+  auto bool_to_uint8 = [] (bool in, void *out) {
+    *reinterpret_cast<uint8_t *>(out) = static_cast<uint8_t>(in);
+  };
+
   // Write to buffer
   NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
   const auto &config_ = *reinterpret_cast<const QuantizationConfig *>(config);
   switch (attr) {
     case kNVTEQuantizationConfigForcePow2Scales:
-      std::memcpy(buf, &config_.force_pow_2_scales, attr_size);
+      bool_to_uint8(config_.force_pow_2_scales, buf);
       break;
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(buf, &config_.amax_epsilon, attr_size);
@@ -1045,13 +1051,13 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
       std::memcpy(buf, &config_.rng_state, attr_size);
       break;
     case kNVTEQuantizationConfigNVFP42DQuantization:
-      std::memcpy(buf, &config_.nvfp4_2d_quantization, attr_size);
+      bool_to_uint8(config_.nvfp4_2d_quantization, buf);
       break;
     case kNVTEQuantizationConfigStochasticRounding:
-      std::memcpy(buf, &config_.stochastic_rounding, attr_size);
+      bool_to_uint8(config_.stochastic_rounding, buf);
       break;
     case kNVTEQuantizationConfigUseFastMath:
-      std::memcpy(buf, &config_.use_fast_math, attr_size);
+      bool_to_uint8(config_.use_fast_math, buf);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -1074,12 +1080,18 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
              " bytes)");
   NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
 
+  // bool size is implementation-dependent, so we explicitly specify
+  // uint8_t in the user-facing API.
+  auto uint8_to_bool = [] (void *in, bool &out) {
+    out = static_cast<bool>(*reinterpret_cast<uint8_t *>(in));
+  };
+
   // Read from buffer
   NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
   auto &config_ = *reinterpret_cast<QuantizationConfig *>(config);
   switch (attr) {
     case kNVTEQuantizationConfigForcePow2Scales:
-      std::memcpy(&config_.force_pow_2_scales, buf, attr_size);
+      config_.force_pow_2_scales = uint8_to_bool(buf);
       break;
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(&config_.amax_epsilon, buf, attr_size);
@@ -1094,13 +1106,13 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       std::memcpy(&config_.rng_state, buf, attr_size);
       break;
     case kNVTEQuantizationConfigNVFP42DQuantization:
-      std::memcpy(&config_.nvfp4_2d_quantization, buf, attr_size);
+      config_.nvfp4_2d_quantization = uint8_to_bool(buf);
       break;
     case kNVTEQuantizationConfigStochasticRounding:
-      std::memcpy(&config_.stochastic_rounding, buf, attr_size);
+      config_.stochastic_rounding = uint8_to_bool(buf);
       break;
     case kNVTEQuantizationConfigUseFastMath:
-      std::memcpy(&config_.use_fast_math, buf, attr_size);
+      config_.use_fast_math = uint8_to_bool(buf);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

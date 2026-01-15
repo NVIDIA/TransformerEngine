@@ -13,6 +13,7 @@
 
 #include <cuda_runtime_api.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -266,8 +267,7 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
 
 /*! \brief Set a parameter of the tensor.
  *
- *  This only supports tensor parameters of type NVTEBasicTensor. Use
- *  nvte_set_tensor_param_v2 for other parameter types.
+ *  \warning Deprecated in favor of nvte_set_tensor_param_v2.
  *
  *  \param[in/out] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
@@ -278,8 +278,7 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
 
 /*! \brief Get a value of the parameter of the tensor.
  *
- *  This only supports tensor parameters of type NVTEBasicTensor. Use
- *  nvte_get_tensor_param_v2 for other parameter types.
+ *  \warning Deprecated in favor of nvte_set_tensor_param_v2.
  *
  *  \param[in] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
@@ -735,8 +734,8 @@ class TensorWrapper {
   }
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
-    nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &with_gemm_swizzled_scales,
-                             sizeof(with_gemm_swizzled_scales));
+    const auto val = static_cast<uint8_t>(with_gemm_swizzled_scales);
+    nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val));
   }
 
   // Parameter getters
@@ -770,10 +769,10 @@ class TensorWrapper {
   }
 
   bool get_with_gemm_swizzled_scales() const {
-    bool with_gemm_swizzled_scales = false;
-    nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &with_gemm_swizzled_scales,
-                             sizeof(with_gemm_swizzled_scales), nullptr);
-    return with_gemm_swizzled_scales;
+    uint8_t val = 0;
+    nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val,
+                             sizeof(val), nullptr);
+    return static_cast<bool>(val);
   }
 
   /*! \brief Get an underlying NVTETensor.
@@ -995,8 +994,9 @@ class QuantizationConfigWrapper {
 
   /*! \brief Set whether to force power of 2 scales */
   void set_force_pow_2_scales(bool force_pow_2_scales) {
+    const auto val = static_cast<uint8_t>(force_pow_2_scales);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales,
-                                           &force_pow_2_scales, sizeof(bool));
+                                           &val, sizeof(val));
   }
 
   /*! \brief Set small value to add to amax */
@@ -1022,20 +1022,23 @@ class QuantizationConfigWrapper {
 
   /*! \brief Set whether to use 2D block scaling for NVFP4 */
   void set_nvfp4_2d_quantization(bool nvfp4_2d_quantization) {
+    const auto val = static_cast<uint8_t>(nvfp4_2d_quantization);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP42DQuantization,
-                                           &nvfp4_2d_quantization, sizeof(bool));
+                                           &val, sizeof(val));
   }
 
   /*! \brief Set whether to use stochastic rounding */
   void set_stochastic_rounding(bool stochastic_rounding) {
+    const auto val = static_cast<uint8_t>(stochastic_rounding);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
-                                           &stochastic_rounding, sizeof(bool));
+                                           &val, sizeof(val));
   }
 
   /*! \brief Set whether to enable fast math operations */
   void set_use_fast_math(bool use_fast_math) {
+    const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath,
-                                           &use_fast_math, sizeof(bool));
+                                           &val, sizeof(val));
   }
 
  private:

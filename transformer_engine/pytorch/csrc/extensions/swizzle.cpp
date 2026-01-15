@@ -61,11 +61,6 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  // TE tensors with only scales
-  TensorWrapper input_nvte(scaling_mode);
-  TensorWrapper output_nvte(scaling_mode);
-  output_nvte.set_with_gemm_swizzled_scales(true);
-
   // Swizzle row-wise scales if needed
   std::optional<at::Tensor> rowwise_scales_pyt;
   if (rowwise_usage) {
@@ -83,12 +78,13 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
     // Initialize TE tensors with scales
     const auto data_nvte = tensor.get_rowwise_data();
     const auto data_dtype = static_cast<DType>(data_nvte.dtype);
-    reset_tensor_data(input_nvte, false, true);
+    TensorWrapper input_nvte(scaling_mode);
     input_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
     input_nvte.set_rowwise_scale_inv(input_scales_dptr, scales_dtype, input_scales_shape);
-    reset_tensor_data(output_nvte, false, true);
+    TensorWrapper output_nvte(scaling_mode);
     output_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
     output_nvte.set_rowwise_scale_inv(output_scales_dptr, scales_dtype, output_scales_shape);
+    output_nvte.set_with_gemm_swizzled_scales(true);
 
     // Launch kernel
     NVTE_SCOPED_GIL_RELEASE(
@@ -115,12 +111,13 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
     // Initialize TE tensors with scales
     const auto data_nvte = tensor.get_columnwise_data();
     const auto data_dtype = static_cast<DType>(data_nvte.dtype);
-    reset_tensor_data(input_nvte, true, false);
+    TensorWrapper input_nvte(scaling_mode);
     input_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
     input_nvte.set_columnwise_scale_inv(input_scales_dptr, scales_dtype, input_scales_shape);
-    reset_tensor_data(output_nvte, true, false);
+    TensorWrapper output_nvte(scaling_mode);
     output_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
     output_nvte.set_columnwise_scale_inv(output_scales_dptr, scales_dtype, output_scales_shape);
+    output_nvte.set_with_gemm_swizzled_scales(true);
 
     // Launch kernel
     NVTE_SCOPED_GIL_RELEASE(

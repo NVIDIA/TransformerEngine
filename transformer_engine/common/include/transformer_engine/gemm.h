@@ -59,7 +59,7 @@ NVTEMatmulConfig nvte_create_matmul_config();
  *
  *  \param[in]  config        Matrix multiplication configuration.
  *  \param[in]  attr          Option type.
- *  \param[out] buf           Memory address to write option value.
+ *  \param[out] buf           Memory address to write option value to.
  *                            Ignored if NULL.
  *  \param[in]  size_in_bytes Size of buf.
  *  \param[out] size_written  Number of bytes that have been written to
@@ -73,7 +73,7 @@ void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
  *
  *  \param[in/out] config        Matrix multiplication configuration.
  *  \param[in]     attr          Option type.
- *  \param[in]     buf           Memory address to read option value.
+ *  \param[in]     buf           Memory address to read option value from.
  *  \param[in]     size_in_bytes Size of buf.
  */
 void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
@@ -294,14 +294,16 @@ class MatmulConfigWrapper {
 
   /*! \brief Set whether to compute GELU in GEMM epilogue. */
   void set_with_gelu_epilogue(bool with_gelu_epilogue) {
+    const auto val = static_cast<uint8_t>(with_gelu_epilogue);
     nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithGELUEpilogue,
-                                     &with_gelu_epilogue, sizeof(bool));
+                                     &val, sizeof(val));
   }
 
   /*! \brief Set whether to compute GELU backward in GEMM epilogue. */
   void set_with_dgelu_epilogue(bool with_dgelu_epilogue) {
+    const auto val = static_cast<uint8_t>(with_dgelu_epilogue);
     nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithDGELUEpilogue,
-                                     &with_dgelu_epilogue, sizeof(bool));
+                                     &val, sizeof(val));
   }
 
   /*! \brief Set auxilliary tensor for GEMM epilogue. */
@@ -312,13 +314,15 @@ class MatmulConfigWrapper {
 
   /*! \brief Set whether to use split accumulator for FP8 GEMM. */
   void set_use_split_accumulator(bool use_split_accumulator) {
+    const auto val = static_cast<uint8_t>(use_split_accumulator);
     nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigUseSplitAccumulator,
-                                     &use_split_accumulator, sizeof(bool));
+                                     &val, sizeof(val));
   }
 
   /*! \brief Set number of streaming multiprocessors to use in GEMM kernel. */
   void set_sm_count(int sm_count) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigSMCount, &sm_count, sizeof(int));
+    const auto val = static_cast<int32_t>(sm_count);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigSMCount, &val, sizeof(val));
   }
 
  private:

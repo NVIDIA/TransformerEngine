@@ -177,7 +177,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
   NVTE_CHECK(scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_MXFP8_1D_SCALING,
              "Unsupported tensor format (", to_string(scaling_mode), ").");
   if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    bool has_swizzled_scales = false;
+    uint8_t has_swizzled_scales = false;
     nvte_get_tensor_param_v2(source.data(), NVTETensorParam::kNVTEWithGEMMSwizzledScales,
                              &has_swizzled_scales, sizeof(has_swizzled_scales), nullptr);
     NVTE_CHECK(has_swizzled_scales,

@@ -30,18 +30,16 @@ void quantize_transpose_square_blockwise(const SimpleTensor &input, SimpleTensor
                                          const bool return_transpose, const bool pow_2_scale,
                                          const SimpleTensor &noop_tensor, cudaStream_t stream);
 
-/// TODO Compact format is removed. Replace this enum with bool.
 // enum class for rowwise usage
 enum class FP8BlockwiseRowwiseOption {
   // No rowwise data, skip rowwise quantization
   NONE,
   // Rowwise data, scales in GEMM format
   ROWWISE_GEMM_READY,
-  // Rowwise data, scales in compact format, needs extra processing (padding, transposing) before GEMM
+  // Deprecated
   ROWWISE_COMPACT
 };
 
-/// TODO Compact format is removed. Replace this enum with bool.
 // enum class for columnwise usage
 // For Hopper sm90 with only TN fp8 gemm, there is need to do columnwise transpose when doing 1D block scaling
 enum class FP8BlockwiseColumnwiseOption {
@@ -52,8 +50,7 @@ enum class FP8BlockwiseColumnwiseOption {
   // On Hopper sm90, GEMM_READY means that columnwise quantization also fuses transpose op
   // On higher sm versions with TN,NT,NN fp8 gemm, GEMM_READY doesn't fuse transpose
   COLUMNWISE_GEMM_READY,
-  // Columnwise data in original shape
-  // Scales in compact format, needs extra processing (padding, transposing) before GEMM
+  // Deprecated
   COLUMNWISE_COMPACT
 };
 
