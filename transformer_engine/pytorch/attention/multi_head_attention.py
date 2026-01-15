@@ -8,7 +8,6 @@ import collections
 from typing import Callable, List, Optional, Tuple, Union
 import torch
 
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
