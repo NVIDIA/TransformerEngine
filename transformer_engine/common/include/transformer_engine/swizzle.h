@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file cast.h
+/*! \file swizzle.h
  *  \brief Functions to convert scaling factors into format expected by GEMM.
  */
 
