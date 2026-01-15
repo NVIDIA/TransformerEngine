@@ -137,10 +137,7 @@ class BackwardLinearScale(FusedOperation):
 
             # Check if window matches pattern
             matches_pattern = True
-            if not (
-                isinstance(window[0], BasicLinear)
-                and isinstance(window[1], ConstantScale)
-            ):
+            if not (isinstance(window[0], BasicLinear) and isinstance(window[1], ConstantScale)):
                 matches_pattern = False
             elif window[0].tensor_parallel_mode == "column":
                 # Column tensor-parallelism requires communication

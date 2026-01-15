@@ -137,10 +137,7 @@ class BackwardLinearAdd(FusedOperation):
 
             # Check if window matches pattern
             matches_pattern = True
-            if not (
-                isinstance(window[0], MakeExtraOutput)
-                and isinstance(window[1], BasicLinear)
-            ):
+            if not (isinstance(window[0], MakeExtraOutput) and isinstance(window[1], BasicLinear)):
                 matches_pattern = False
             elif not window[0]._in_place:
                 # Fused op accumulates grad input in-place

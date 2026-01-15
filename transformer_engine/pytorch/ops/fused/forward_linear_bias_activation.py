@@ -160,10 +160,7 @@ class ForwardLinearBiasActivation(FusedOperation):
 
             # Check if window matches pattern
             matches_pattern = True
-            if not (
-                isinstance(window[0], BasicLinear)
-                and isinstance(window[1], Bias)
-            ):
+            if not (isinstance(window[0], BasicLinear) and isinstance(window[1], Bias)):
                 matches_pattern = False
             elif window[0].tensor_parallel_mode == "row":
                 # Row tensor-parallelism requires communication after
