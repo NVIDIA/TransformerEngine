@@ -604,21 +604,17 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   }
   NVTEGroupedTensor out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
 
-  // NVTE_CHECK(!rhs_is_trans && !lhs_is_trans, "TE grouped GEMM only supports non-transposed inputs but received rhs_is_trans=", rhs_is_trans, " lhs_is_trans=", lhs_is_trans);
-
   nvte_grouped_gemm(
-    rhs_is_trans, lhs_is_trans,
-    alpha_tensor.data(),
-    rhs_tensor, lhs_tensor,
-    beta_tensor.data(),
+    rhs_tensor, rhs_is_trans,
+    lhs_tensor, lhs_is_trans,
     nullptr,
     out_tensor,
+    alpha_tensor.data(),
+    beta_tensor.data(),
     workspace_setup.data(),
     workspace_cublas.data(),
-    stream,
-    nullptr,
-    nullptr,
-    nullptr);
+    nullptr,  // config (use defaults)
+    stream);
 
   return ffi_with_cuda_error_check();
 }
