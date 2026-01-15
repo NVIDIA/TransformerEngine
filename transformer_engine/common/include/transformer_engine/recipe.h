@@ -23,7 +23,7 @@ extern "C" {
  * the last, the last entry shifts to the second to last) and the
  * first entry is set to zero. The scaling factor is estimated so the
  * FP8 tensor's maximum absolute value is
- * @f$ 2^{-\text{margin}} \text{max}_\text{fp8\_dtype} @f$.
+ * @f$ 2^{-margin} \max_{fp8\_dtype} @f$.
  *
  *  \param[in] amax_history             History of maximum absolute values.
  *                                      Shape: [history_length, num_scales]
@@ -54,7 +54,7 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update(
  * the last, the last entry shifts to the second to last) and the
  * first entry is set to zero. The scaling factor is estimated so the
  * FP8 tensor's maximum absolute value is
- * @f$ 2^{-\text{margin}} \text{max}_\text{fp8\_dtype} @f$.
+ * @f$ 2^{-margin} \max_{fp8\_dtype} @f$.
  *
  *  \param[in] amax_reduction_buffer    The contiguous buffer used for amax reduction.
  *                                      Shape: [num_scales * num_tensors]

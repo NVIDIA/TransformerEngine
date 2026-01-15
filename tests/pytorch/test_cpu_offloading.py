@@ -54,9 +54,13 @@ gc.disable()
 
 
 class Utils:
+    # Tensor used for simulating long-running GPU work in long_job()
     tensor1 = torch.randn((1024, 1024), device="cuda", dtype=torch.bfloat16)
-    _B = 64
-    _S = 256
+    # Test tensor dimensions: _B x _S x _D = 128 x 512 x 256 = 16,777,216 elements
+    # This exceeds the 256K element threshold for offloading (cpu_offload.py line 443).
+    # For quantized tensors, scale_inv tensors (~524K elements for block scaling) also exceed threshold.
+    _B = 128
+    _S = 512
     _H = 4
     _D = 256
 
@@ -395,6 +399,9 @@ class TestsDefaultOffloadSynchronizer:
         offload_synchronizer.push_tensor(x1)
         offload_synchronizer.push_tensor(x1)
         offload_synchronizer.push_tensor(x1)
+        # Verify x1 is not corrupted after pushing (important for QuantizedTensor)
+        if recipe is not None:
+            x1.dequantize()  # Should not raise - tensor should still be valid
         offload_synchronizer.fwd_step()
         # Only one copy of tensor on cpu is allocated.
         assert Utils.get_cpu_memory_mb() == pytest.approx(init_cpu_memory + 1 * x_size, 0.1)
