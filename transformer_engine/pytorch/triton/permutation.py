@@ -72,13 +72,13 @@ def make_row_id_map(
     #  [0, 0, 0, r, r, r, r]]
     _row_id_map_pass_1_kernel[grid](
         routing_map,
-        row_id_map,
-        workspace_tensor,
         num_tokens,
         routing_map.stride(0),
         routing_map.stride(1),
         row_id_map.stride(0),
         row_id_map.stride(1),
+        row_id_map,
+        workspace_tensor,
         block_size,
     )
 
@@ -110,9 +110,9 @@ def make_row_id_map(
     grid = (num_tokens,)
     _row_id_map_pass_3_kernel[grid](
         row_id_map,
-        num_experts,
         row_id_map.stride(0),
         row_id_map.stride(1),
+        num_experts,
         triton.next_power_of_2(num_experts),
     )
     return row_id_map
@@ -169,14 +169,10 @@ def permute_with_mask_map(
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _permute_kernel[grid](
         inp,
-        output,
         row_id_map,
         probs,
         scale,
-        permuted_probs,
         permuted_scale,
-        num_experts,
-        hidden_size,
         scale_hidden_dim,
         row_id_map.stride(0),
         row_id_map.stride(1),
@@ -191,6 +187,10 @@ def permute_with_mask_map(
         permuted_probs.stride(0) if permuted_probs is not None else None,
         permuted_scale.stride(0) if permuted_scale is not None else None,
         permuted_scale.stride(1) if permuted_scale is not None else None,
+        output,
+        permuted_probs,
+        num_experts,
+        hidden_size,
         PERMUTE_PROBS=probs is not None,
         PERMUTE_SCALE=scale is not None,
     )
@@ -238,13 +238,9 @@ def unpermute_with_mask_map(
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _unpermute_kernel[grid](
         inp,
-        output,
         row_id_map,
         merging_probs,
         permuted_probs,
-        unpermuted_probs,
-        num_experts,
-        hidden_size,
         row_id_map.stride(0),
         row_id_map.stride(1),
         inp.stride(0),
@@ -256,6 +252,10 @@ def unpermute_with_mask_map(
         permuted_probs.stride(0) if permuted_probs is not None else None,
         unpermuted_probs.stride(0) if unpermuted_probs is not None else None,
         unpermuted_probs.stride(1) if unpermuted_probs is not None else None,
+        output,
+        unpermuted_probs,
+        num_experts,
+        hidden_size,
         PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
         WITH_MERGING_PROBS=merging_probs is not None,
         PERMUTE_PROBS=permuted_probs is not None,
@@ -304,13 +304,9 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     grid = (num_tokens,)
     _unpermute_bwd_with_merging_probs_kernel[grid](
         fwd_output_grad,
-        act_grad,
         fwd_input,
         merging_probs,
-        merging_probs_grad,
         row_id_map,
-        num_experts,
-        hidden_size,
         row_id_map.stride(0),
         row_id_map.stride(1),
         fwd_output_grad.stride(0),
@@ -323,6 +319,10 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         merging_probs.stride(1),
         merging_probs_grad.stride(0),
         merging_probs_grad.stride(1),
+        act_grad,
+        merging_probs_grad,
+        num_experts,
+        hidden_size,
         PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
     )
     return act_grad, merging_probs_grad
@@ -395,17 +395,17 @@ def sort_chunks_by_map(
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _sort_chunks_by_map_kernel[grid](
         inp,
-        output,
         row_id_map,
         probs,
-        permuted_probs,
-        hidden_size,
         inp.stride(0),
         inp.stride(1),
         output.stride(0),
         output.stride(1),
         probs.stride(0) if probs is not None else None,
         permuted_probs.stride(0) if permuted_probs is not None else None,
+        output,
+        permuted_probs,
+        hidden_size,
         PERMUTE_PROBS=probs is not None,
         FORWARD=is_forward,
     )

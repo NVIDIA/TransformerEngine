@@ -20,7 +20,7 @@ def install_requirements() -> List[str]:
 
 def test_requirements() -> List[str]:
     """Test dependencies for TE/JAX extensions."""
-    return ["numpy"]
+    return ["numpy", "triton"]
 
 
 def xla_path() -> str:

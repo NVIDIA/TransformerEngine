@@ -2,9 +2,14 @@
 #
 # See LICENSE for license information.
 
+from typing import List, Tuple
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
+
+import transformer_engine_torch as tex
+
 from transformer_engine.pytorch import NVFP4Quantizer
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -151,6 +156,74 @@ def quantize_fp4(
     return qx, sx, qx_t, sx_t
 
 
+def group_quantize_fp4(
+    x: torch.Tensor,
+    use_stochastic_rounding: bool,
+    use_2D: bool,
+    use_RHT: bool,
+    split_sections: list[int],
+    use_tex_split_quantize: bool = True,
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+    """
+    Group quantize function with toggle between tex.split_quantize and manual split/call methods.
+
+    Args:
+        x (torch.Tensor): Input tensor.
+        use_stochastic_rounding (bool): Use stochastic rounding.
+        use_2D (bool): Use 2D quantization.
+        use_RHT (bool): Use RHT.
+        split_sections (list[int]): Split sizes for inputs.
+        use_tex_split_quantize (bool): Toggle method. If True, use tex.split_quantize, else use manual split and per-quantizer invocation.
+
+    Returns:
+        tuple: Lists of quantized tensors and scale tensors for all sections.
+    """
+    num_tensors = len(split_sections)
+    nvfp4_quantizers = [
+        NVFP4Quantizer(
+            rowwise=True,
+            columnwise=True,
+            with_amax_reduction=False,
+            amax_reduction_group=None,
+            with_rht=use_RHT,
+            with_post_rht_amax=True,
+            stochastic_rounding=use_stochastic_rounding,
+            with_2d_quantization=use_2D,
+        )
+        for _ in range(num_tensors)
+    ]
+
+    if use_tex_split_quantize:
+        outputs = tex.split_quantize(x, split_sections, nvfp4_quantizers)
+        qx_list = [output._rowwise_data.view(dtype=torch.uint8) for output in outputs]
+        sx_list = [output._rowwise_scale_inv for output in outputs]
+        qx_t_list = [output._columnwise_data.view(dtype=torch.uint8) for output in outputs]
+        sx_t_list = [output._columnwise_scale_inv for output in outputs]
+    else:
+        x_chunks = torch.split(x, split_sections)
+        qx_list = []
+        sx_list = []
+        qx_t_list = []
+        sx_t_list = []
+        for i in range(num_tensors):
+            x_chunk = x_chunks[i]
+            x_nvfp4_sut = nvfp4_quantizers[i](x_chunk)
+            assert x_nvfp4_sut._rowwise_data is not None
+            qx = x_nvfp4_sut._rowwise_data.view(dtype=torch.uint8)
+            assert x_nvfp4_sut._rowwise_scale_inv is not None
+            sx = x_nvfp4_sut._rowwise_scale_inv
+            assert x_nvfp4_sut._columnwise_data is not None
+            qx_t = x_nvfp4_sut._columnwise_data.view(dtype=torch.uint8)
+            assert x_nvfp4_sut._columnwise_scale_inv is not None
+            sx_t = x_nvfp4_sut._columnwise_scale_inv
+            qx_list.append(qx)
+            sx_list.append(sx)
+            qx_t_list.append(qx_t)
+            sx_t_list.append(sx_t)
+
+    return qx_list, sx_list, qx_t_list, sx_t_list
+
+
 def check_quantization_nvfp4_versus_reference(
     x_dtype: torch.dtype, M: int, N: int, use_2D: bool, use_RHT: bool
 ) -> None:
@@ -209,6 +282,92 @@ def check_quantization_nvfp4_versus_reference(
     assert me_t_sr < me_t_rn, "Stochastic rounding failed - error larger than the round to nearest."
 
 
+def check_group_quantization_nvfp4_versus_reference(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+    use_2D: bool,
+    use_RHT: bool,
+    num_splits: int,
+    use_tex_split_quantize: bool = True,
+) -> None:
+    device = "cuda"
+    torch.manual_seed(seed)
+    n_iters = 50
+
+    split_sections = [M // num_splits] * num_splits
+    x_total = torch.randn((M, N), dtype=x_dtype, device=device) * 2 - 1
+    x_splits = torch.split(x_total, split_sections)
+
+    q_rn_list, s_rn_list, q_t_rn_list, s_t_rn_list = group_quantize_fp4(
+        x_total,
+        use_stochastic_rounding=False,
+        use_2D=use_2D,
+        use_RHT=use_RHT,
+        split_sections=split_sections,
+        use_tex_split_quantize=use_tex_split_quantize,
+    )
+    sr_n_iter_results = []
+    for i in range(n_iters):
+        q_sr_list, s_sr_list, q_t_sr_list, s_t_sr_list = group_quantize_fp4(
+            x_total,
+            use_stochastic_rounding=True,
+            use_2D=use_2D,
+            use_RHT=use_RHT,
+            split_sections=split_sections,
+            use_tex_split_quantize=use_tex_split_quantize,
+        )
+        sr_n_iter_results.append((q_sr_list, s_sr_list, q_t_sr_list, s_t_sr_list))
+
+    for i, x in enumerate(x_splits):
+        y = x.t().contiguous()
+        if use_RHT:
+            y = RHT(y)
+        amax = torch.max(torch.abs(x)).float()
+
+        # fetch q_rn, s_rn, q_t_rn, s_t_rn
+        q_rn = q_rn_list[i]
+        s_rn = s_rn_list[i]
+        q_t_rn = q_t_rn_list[i]
+        s_t_rn = s_t_rn_list[i]
+
+        dq_rn = dequantize_fp4(q_rn, s_rn, amax)
+        dq_t_rn = dequantize_fp4(q_t_rn, s_t_rn, amax)
+        error_rn = (dq_rn - x).float()
+        me_rn = torch.sqrt((error_rn * error_rn).mean())
+        error_t_rn = (dq_t_rn - y).float()
+        me_t_rn = torch.sqrt((error_t_rn * error_t_rn).mean())
+        sr_result = torch.zeros_like(x).float()
+        sr_t_result = torch.zeros_like(x).float().t().contiguous()
+        for iter_idx in range(n_iters):
+            result_sr = sr_n_iter_results[iter_idx]
+            q_sr = result_sr[0][i]
+            s_sr = result_sr[1][i]
+            q_t_sr = result_sr[2][i]
+            s_t_sr = result_sr[3][i]
+
+            dq_sr = dequantize_fp4(q_sr, s_sr, amax)
+            dq_t_sr = dequantize_fp4(q_t_sr, s_t_sr, amax)
+            sr_result += dq_sr.float()
+            sr_t_result += dq_t_sr.float()
+
+        # Get the mean result of the stochastic rounding
+        # It should be more accurate than the RN result
+        sr_result /= n_iters
+        error_sr = (sr_result - x).float()
+        me_sr = torch.sqrt((error_sr * error_sr).mean())
+        sr_t_result /= n_iters
+        error_t_sr = (sr_t_result - y).float()
+        me_t_sr = torch.sqrt((error_t_sr * error_t_sr).mean())
+
+        print(f"RMSE SR: {me_sr:.3e} | RMSE RN: {me_rn:.3e}")
+        print(f"RMSE SR_t: {me_t_sr:.3e} | RMSE RN_t: {me_t_rn:.3e}")
+        assert me_sr < me_rn, "Stochastic rounding failed - error larger than the round to nearest."
+        assert (
+            me_t_sr < me_t_rn
+        ), "Stochastic rounding failed - error larger than the round to nearest."
+
+
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, N",
@@ -235,4 +394,40 @@ def test_quantization_block_tiling_versus_reference(
         use_RHT=use_RHT,
         M=M,
         N=N,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        (8192, 8192),
+        (4096, 7168),
+        (16384, 2048),
+    ],
+)
+@pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
+@pytest.mark.parametrize("use_2D", [False], ids=str)
+@pytest.mark.parametrize("use_RHT", [True], ids=str)
+@pytest.mark.parametrize("num_splits", [4, 8], ids=str)
+@pytest.mark.parametrize("use_tex_split_quantize", [True, False], ids=str)
+def test_group_stochastic_rounding_quantization_versus_reference(
+    x_dtype: torch.dtype,
+    use_2D: bool,
+    use_RHT: bool,
+    num_splits: int,
+    use_tex_split_quantize: bool,
+    M: int,
+    N: int,
+) -> None:
+    if x_dtype == torch.float32 and use_RHT:
+        pytest.skip("RHT is only supported with bfloat16")
+    check_group_quantization_nvfp4_versus_reference(
+        x_dtype=x_dtype,
+        use_2D=use_2D,
+        use_RHT=use_RHT,
+        M=M,
+        N=N,
+        num_splits=num_splits,
+        use_tex_split_quantize=use_tex_split_quantize,
     )
