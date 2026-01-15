@@ -308,6 +308,30 @@ Troubleshooting
          cd transformer_engine
          pip install -v -v -v --no-build-isolation .
 
+5. **Problems when using UV or virtual environments:**
+
+   * **Symptoms:** Cannot import ``transformer_engine``
+   * **Solution:** Ensure your UV environment is active and that you have used ``uv pip install --no-build-isolation <te_pypi_package_or_wheel_or_source_dir>`` instead of a regular pip install to your system environment.
+
+   * **Symptoms:** Errors at runtime with ``CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED``
+   * **Solution:** This can occur when TE is built against the container's system installation of cuDNN, but pip packages inside the virtual environment pull in pip packages for ``nvidia-cudnn-cu12/cu13``. To resolve this, when building TE from source please specify the following environment variables to point to the cuDNN in your virtual environment.
+   
+  ```bash
+    export CUDNN_PATH=$(pwd)/.venv/lib/python3.12/site-packages/nvidia/cudnn
+    export CUDNN_HOME=$CUDNN_PATH
+    export LD_LIBRARY_PATH=$CUDNN_PATH/lib:$LD_LIBRARY_PATH
+  ```
+
+   * **Symptoms:** Regular TE installs work correctly, but UV wheel builds fail at runtime.
+   * **Solution:** Ensure that ``uv build --wheel --no-build-isolation -v`` is used during the wheel build as well as the pip installation of the wheel. Use ``-v`` to ensure build isolation is active and that TE is not pulling in a mismatching version of PyTorch or JAX that differs from the UV environment's version.
+
+**JAX-specific Common Issues and Solutions:**
+
+1. **FFI Issues:**
+
+   * **Symptoms:** ``No registered implementation for custom call to <some_te_ffi> for platform CUDA``
+   * **Solution:** Ensure ``--no-build-isolation`` is used during installation. If pre-building wheels, ensure that the wheel is both built and installed with ``--no-build-isolation``. See "Problems when using UV" above if using UV.
+
 .. troubleshooting-end-marker-do-not-remove
 
 Breaking Changes
