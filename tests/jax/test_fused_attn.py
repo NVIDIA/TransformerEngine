@@ -416,16 +416,14 @@ class FusedAttnRunner:
         if (
             get_device_compute_capability(0) >= 100
             and self.is_training
-            and not FusedAttnHelper.is_non_deterministic_allowed()
             and (
                 self.dropout_prob != 0.0
                 or self.attn_bias_type != AttnBiasType.NO_BIAS
-                or get_cudnn_version() < 91800
+                or (not FusedAttnHelper.is_non_deterministic_allowed() and get_cudnn_version() < 91800)
             )
         ):
             pytest.skip(
-                "For sm100+, bprop determinism is only supported by cuDNN 9.18+ and for no_bias and"
-                " dropout = 0.0"
+                "For sm100+, bprop is only supported for no_bias and dropout = 0.0, and bprop determinism is only supported by cuDNN 9.18.0+"
             )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
