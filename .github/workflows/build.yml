@@ -144,7 +144,7 @@ jobs:
       - name: 'Dependencies'
         run: |
           docker exec builder bash -c '\
-            pip install pybind11[global] einops onnxscript && \
+            pip install cmake==3.21.0 pybind11[global] einops onnxscript && \
             pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130
           '
       - name: 'Build'
