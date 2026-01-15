@@ -323,7 +323,7 @@ Troubleshooting
   ```
 
    * **Symptoms:** Regular TE installs work correctly, but UV wheel builds fail at runtime.
-   * **Solution:** Ensure that ``uv build --wheel --no-build-isolation -v`` is used during the wheel build as well as the pip installation of the wheel. Use ``-v`` to ensure build isolation is active and that TE is not pulling in a mismatching version of PyTorch or JAX that differs from the UV environment's version.
+   * **Solution:** Ensure that ``uv build --wheel --no-build-isolation -v`` is used during the wheel build as well as the pip installation of the wheel. Use ``-v`` for verbose output to verify that TE is not pulling in a mismatching version of PyTorch or JAX that differs from the UV environment's version.
 
 **JAX-specific Common Issues and Solutions:**
 
