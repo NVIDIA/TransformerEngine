@@ -3567,18 +3567,20 @@ def fused_attn_bwd(
     compute_capabilities = get_all_device_compute_capability()
     if any(x >= 100 for x in compute_capabilities) and is_training:
         assert (
-            attn_bias_type == AttnBiasType.NO_BIAS
-            and dropout_probability == 0.0
-            and (
+            (
                 FusedAttnHelper.is_non_deterministic_allowed()
-                or (
-                    not FusedAttnHelper.is_non_deterministic_allowed()
-                    and get_cudnn_version() >= (9, 18, 0)
-                )
+                and get_cudnn_version() >= (9, 7, 0)
+                and (attn_bias_type == AttnBiasType.NO_BIAS or dropout_probability == 0.0)
+            )
+            or (
+                not FusedAttnHelper.is_non_deterministic_allowed()
+                and get_cudnn_version() >= (9, 18, 0)
+                and attn_bias_type == AttnBiasType.NO_BIAS
+                and dropout_probability == 0.0
             )
         ), (
-            "For sm100+, bprop is only supported for no_bias and dropout = 0.0, and bprop"
-            " determinism is only supported by cuDNN 9.18+"
+            "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with dropout,"
+            " and deterministic bprop (cuDNN 9.18+) does not support bias or dropout"
         )
 
     fused_config = _FusedAttnConfig(
