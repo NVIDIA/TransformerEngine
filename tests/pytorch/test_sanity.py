@@ -194,6 +194,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
             continue
         elif "weight" in name and p.requires_grad:
             p.main_grad = torch.zeros_like(p)
+            p.grad_added_to_main_grad = False  # Should be set to True after backward
 
     use_fp8 = fp8_recipe is not None
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
@@ -203,13 +204,19 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
     torch.cuda.synchronize()
 
     failed_grads = []
+    failed_grad_added_flags = []
     for name, p in block.named_parameters():
         if "layer_norm_weight" in name:
             continue
         elif "weight" in name and p.requires_grad:
             if not torch.count_nonzero(p.main_grad) > 0:
                 failed_grads.append(name)
+            if not getattr(p, "grad_added_to_main_grad", False):
+                failed_grad_added_flags.append(name)
     assert len(failed_grads) == 0, f"Gradient not accumulated for {failed_grads}."
+    assert (
+        len(failed_grad_added_flags) == 0
+    ), f"grad_added_to_main_grad not set to True for {failed_grad_added_flags}."
 
 
 def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
