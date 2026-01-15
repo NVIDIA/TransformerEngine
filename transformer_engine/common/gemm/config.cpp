@@ -87,8 +87,8 @@ void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
 
   // bool size is implementation-dependent, so we explicitly specify
   // uint8_t in the user-facing API.
-  auto uint8_to_bool = [](void *in, bool &out) {
-    out = static_cast<bool>(*reinterpret_cast<uint8_t *>(in));
+  auto uint8_to_bool = [](const void *in, bool &out) {
+    out = static_cast<bool>(*reinterpret_cast<const uint8_t *>(in));
   };
 
   // Read from buffer
@@ -114,7 +114,7 @@ void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
       uint8_to_bool(buf, config_.use_split_accumulator);
       break;
     case kNVTEMatmulConfigSMCount:
-      config_.sm_count = static_cast<int>(*reinterpret_cast<int32_t *>(buf));
+      config_.sm_count = static_cast<int>(*reinterpret_cast<const int32_t *>(buf));
       break;
     default:
       NVTE_ERROR("Unsupported NVTEMatmulConfigAttribute (got ", static_cast<int>(attr), ")");

@@ -142,17 +142,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t buff_size_aligned_out_mxfp8 =
       DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
-  // constexpr size_t buff_size_nvfp4_scales =
-  //     CHUNK_DIM_Y * (CHUNK_DIM_X / SCALE_DIM_X) * sizeof(fp8e4m3);
-  // constexpr size_t buff_size_mxfp8_scales =
-  //     (CHUNK_DIM_Y / SCALE_DIM_Y) * CHUNK_DIM_X * sizeof(fp8e8m0);
-
   constexpr size_t in_mem = buff_size_aligned_in;
 
   constexpr size_t out_mem_rowwise_data = (ROWWISE_SCALING ? buff_size_aligned_out_nvfp4 : 0);
   constexpr size_t out_mem_colwise_data = (COLWISE_SCALING ? buff_size_aligned_out_mxfp8 : 0);
-  // constexpr size_t out_mem_rowwise_scales = (ROWWISE_SCALING ? buff_size_nvfp4_scales : 0);
-  // constexpr size_t out_mem_colwise_scales = (COLWISE_SCALING ? buff_size_mxfp8_scales : 0);
 
   extern __shared__ char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
@@ -168,8 +161,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   fp8e4m3 *out_rowwise_scales_sh =
       reinterpret_cast<fp8e4m3 *>(dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
   (void)out_rowwise_scales_sh;  // Suppress unused variable warning
-  // e8m0_t *out_colwise_scales_sh = reinterpret_cast<e8m0_t *>(
-  //     dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_rowwise_scales);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
   constexpr int shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;

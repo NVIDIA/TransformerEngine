@@ -866,7 +866,7 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
       break;
     }
     case kNVTEWithGEMMSwizzledScales:
-      t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<uint8_t *>(buf));
+      t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
@@ -946,7 +946,7 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
       break;
     }
     case kNVTEWithGEMMSwizzledScales:
-      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8>(t->with_gemm_swizzled_scales);
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
       break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
@@ -1082,8 +1082,8 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
 
   // bool size is implementation-dependent, so we explicitly specify
   // uint8_t in the user-facing API.
-  auto uint8_to_bool = [](void *in, bool &out) {
-    out = static_cast<bool>(*reinterpret_cast<uint8_t *>(in));
+  auto uint8_to_bool = [](const void *in, bool &out) {
+    out = static_cast<bool>(*reinterpret_cast<const uint8_t *>(in));
   };
 
   // Read from buffer
@@ -1091,7 +1091,7 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
   auto &config_ = *reinterpret_cast<QuantizationConfig *>(config);
   switch (attr) {
     case kNVTEQuantizationConfigForcePow2Scales:
-      config_.force_pow_2_scales = uint8_to_bool(buf);
+      uint8_to_bool(buf, config_.force_pow_2_scales);
       break;
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(&config_.amax_epsilon, buf, attr_size);
@@ -1106,13 +1106,13 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       std::memcpy(&config_.rng_state, buf, attr_size);
       break;
     case kNVTEQuantizationConfigNVFP42DQuantization:
-      config_.nvfp4_2d_quantization = uint8_to_bool(buf);
+      uint8_to_bool(buf, config_.nvfp4_2d_quantization);
       break;
     case kNVTEQuantizationConfigStochasticRounding:
-      config_.stochastic_rounding = uint8_to_bool(buf);
+      uint8_to_bool(buf, config_.stochastic_rounding);
       break;
     case kNVTEQuantizationConfigUseFastMath:
-      config_.use_fast_math = uint8_to_bool(buf);
+      uint8_to_bool(buf, config_.use_fast_math);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

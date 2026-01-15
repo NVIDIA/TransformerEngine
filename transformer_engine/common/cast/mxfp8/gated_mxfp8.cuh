@@ -20,6 +20,7 @@
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
+#include "swizzle.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -49,20 +50,6 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
-// Convert compact scale indices into GEMM swizzled scale index
-__device__ __forceinline__ size_t gemm_swizzled_scale_idx(size_t i, size_t j, size_t num_tiles_X) {
-  constexpr size_t TILE_DIM_X = 4;  // Tile dim in scale buffer
-  constexpr size_t TILE_DIM_Y = 128;
-  constexpr size_t TILE_SIZE = TILE_DIM_X * TILE_DIM_Y;
-  const size_t tile_idx_X = j / TILE_DIM_X;
-  const size_t tile_idx_Y = i / TILE_DIM_Y;
-  const size_t idx_in_tile_X = j % TILE_DIM_X;
-  const size_t idx_in_tile_Y = i % TILE_DIM_Y;
-  size_t idx = (tile_idx_Y * num_tiles_X + tile_idx_X) * TILE_SIZE;
-  idx += (idx_in_tile_Y % 32) * 16 + (idx_in_tile_Y / 32) * 4 + idx_in_tile_X;
-  return idx;
-}
-
 template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
           bool ROWWISE_SCALING, bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES,
@@ -82,6 +69,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
+
+  using transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
 
   constexpr size_t STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
   static_assert(STAGES >= 1);
