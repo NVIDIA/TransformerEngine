@@ -770,8 +770,7 @@ class TensorWrapper {
 
   bool get_with_gemm_swizzled_scales() const {
     uint8_t val = 0;
-    nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val,
-                             sizeof(val), nullptr);
+    nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
   }
 
@@ -995,8 +994,8 @@ class QuantizationConfigWrapper {
   /*! \brief Set whether to force power of 2 scales */
   void set_force_pow_2_scales(bool force_pow_2_scales) {
     const auto val = static_cast<uint8_t>(force_pow_2_scales);
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales,
-                                           &val, sizeof(val));
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales, &val,
+                                           sizeof(val));
   }
 
   /*! \brief Set small value to add to amax */
@@ -1030,15 +1029,15 @@ class QuantizationConfigWrapper {
   /*! \brief Set whether to use stochastic rounding */
   void set_stochastic_rounding(bool stochastic_rounding) {
     const auto val = static_cast<uint8_t>(stochastic_rounding);
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
-                                           &val, sizeof(val));
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding, &val,
+                                           sizeof(val));
   }
 
   /*! \brief Set whether to enable fast math operations */
   void set_use_fast_math(bool use_fast_math) {
     const auto val = static_cast<uint8_t>(use_fast_math);
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath,
-                                           &val, sizeof(val));
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
+                                           sizeof(val));
   }
 
  private:

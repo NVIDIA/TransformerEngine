@@ -38,7 +38,7 @@ void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
 
   // bool size is implementation-dependent, so we explicitly specify
   // uint8_t in the user-facing API.
-  auto bool_to_uint8 = [] (bool in, void *out) {
+  auto bool_to_uint8 = [](bool in, void *out) {
     *reinterpret_cast<uint8_t *>(out) = static_cast<uint8_t>(in);
   };
 
@@ -87,7 +87,7 @@ void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
 
   // bool size is implementation-dependent, so we explicitly specify
   // uint8_t in the user-facing API.
-  auto uint8_to_bool = [] (void *in, bool &out) {
+  auto uint8_to_bool = [](void *in, bool &out) {
     out = static_cast<bool>(*reinterpret_cast<uint8_t *>(in));
   };
 

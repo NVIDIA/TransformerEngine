@@ -295,15 +295,14 @@ class MatmulConfigWrapper {
   /*! \brief Set whether to compute GELU in GEMM epilogue. */
   void set_with_gelu_epilogue(bool with_gelu_epilogue) {
     const auto val = static_cast<uint8_t>(with_gelu_epilogue);
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithGELUEpilogue,
-                                     &val, sizeof(val));
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithGELUEpilogue, &val, sizeof(val));
   }
 
   /*! \brief Set whether to compute GELU backward in GEMM epilogue. */
   void set_with_dgelu_epilogue(bool with_dgelu_epilogue) {
     const auto val = static_cast<uint8_t>(with_dgelu_epilogue);
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithDGELUEpilogue,
-                                     &val, sizeof(val));
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithDGELUEpilogue, &val,
+                                     sizeof(val));
   }
 
   /*! \brief Set auxilliary tensor for GEMM epilogue. */
@@ -315,8 +314,8 @@ class MatmulConfigWrapper {
   /*! \brief Set whether to use split accumulator for FP8 GEMM. */
   void set_use_split_accumulator(bool use_split_accumulator) {
     const auto val = static_cast<uint8_t>(use_split_accumulator);
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigUseSplitAccumulator,
-                                     &val, sizeof(val));
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigUseSplitAccumulator, &val,
+                                     sizeof(val));
   }
 
   /*! \brief Set number of streaming multiprocessors to use in GEMM kernel. */
