@@ -409,7 +409,6 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in]     softmax_type              Attention softmax type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
- *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
@@ -673,7 +672,7 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
  *  \param[in]     len                      batch_size x sequence_length.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
+uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlens, NVTETensor workspace, size_t len,
                                        cudaStream_t stream);
 
 /*!  \brief Set the seed and offset for RNG state.
@@ -830,8 +829,7 @@ void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETens
  *  \param[in]     tensor           Input tensor.
  *  \param[in]     cu_seqlens       Cumulative sequence lengths, [batch_size + 1].
  *  \param[out]    new_tensor       Output tensor.
- *  \param[in]     b                Batch size.
- *  \param[in]     max_seq_len      Maximum sequence length.
+ *  \param[in]     t                Packed sequence length.
  *  \param[in]     stream           CUDA stream used for this operation.
  */
 void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,

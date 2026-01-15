@@ -872,10 +872,16 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   auto rht_matrix_nvte = makeTransformerEngineTensor(quantizer.rht_matrix);
 
   if (all_aligned_token_dim) {
+    // allocate a tile scheduler workspace
+    auto tile_scheduler_workspace_torch =
+        at::empty({1}, at::device(at::kCUDA).dtype(torch::kInt32));
+    auto nvte_tile_scheduler_workspace =
+        makeTransformerEngineTensor(tile_scheduler_workspace_torch);
     // call the fully-fused grouped kernel for rowwise quantization & colwise RHT quantization transpose
     nvte_group_hadamard_transform_cast_fusion(
         input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
-        rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0], stream);
+        rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0],
+        nvte_tile_scheduler_workspace.data(), stream);
   } else {
     // Separate quantization for rowwise usage and columnwise usage
     // Rowwise quantization fusion with grouped version
@@ -1089,7 +1095,8 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                        const std::vector<size_t> &split_sections,
-                                       std::vector<py::handle> quantizer_list) {
+                                       std::vector<py::handle> quantizer_list,
+                                       bool disable_bulk_allocation) {
   init_extension();
 
   // Check number of tensors
@@ -1141,22 +1148,24 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   enum class QuantizationMethod { UNFUSED, FUSED_NVFP4 };
   AllocationMethod allocation_method = AllocationMethod::UNFUSED;
   QuantizationMethod quantization_method = QuantizationMethod::UNFUSED;
-  if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
-                  [](const py::handle &quantizer) -> bool {
-                    return detail::IsFloat8BlockwiseQuantizers(quantizer.ptr());
-                  })) {
-    allocation_method = AllocationMethod::BULK_FP8_BLOCKWISE;
-  } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
-                         [](const py::handle &quantizer) -> bool {
-                           return detail::IsMXFP8Quantizers(quantizer.ptr());
-                         })) {
-    allocation_method = AllocationMethod::BULK_MXFP8;
-  } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
-                         [](const py::handle &quantizer) -> bool {
-                           return detail::IsNVFP4Quantizers(quantizer.ptr());
-                         })) {
-    allocation_method = AllocationMethod::BULK_NVFP4;
-    quantization_method = QuantizationMethod::FUSED_NVFP4;
+  if (!disable_bulk_allocation) {
+    if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
+                    [](const py::handle &quantizer) -> bool {
+                      return detail::IsFloat8BlockwiseQuantizers(quantizer.ptr());
+                    })) {
+      allocation_method = AllocationMethod::BULK_FP8_BLOCKWISE;
+    } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
+                           [](const py::handle &quantizer) -> bool {
+                             return detail::IsMXFP8Quantizers(quantizer.ptr());
+                           })) {
+      allocation_method = AllocationMethod::BULK_MXFP8;
+    } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
+                           [](const py::handle &quantizer) -> bool {
+                             return detail::IsNVFP4Quantizers(quantizer.ptr());
+                           })) {
+      allocation_method = AllocationMethod::BULK_NVFP4;
+      quantization_method = QuantizationMethod::FUSED_NVFP4;
+    }
   }
 
   // Allocate output tensors
