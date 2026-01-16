@@ -72,23 +72,28 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     "--num-processes=$NUM_GPUS"
   )
 
-  BACKENDS=("cublasmp" "userbuffers")
+  BACKENDS=("userbuffers" "cublasmp" )
   for backend in "${BACKENDS[@]}"; do
     for i in $(seq 0 $(($NUM_GPUS - 1))); do
       # Define output file for logs
       LOG_FILE="${TEST_FILE}_gpu_${i}_${backend}.log"
 
+      PYTEST_ARGS_FINAL=("${PYTEST_ARGS[@]}")
+      if [ ${backend} == "cublasmp" ]; then
+        PYTEST_ARGS_FINAL+=("--use-cublasmp")
+      fi
+
       if [ $i -eq 0 ]; then
         # For process 0: show live output AND save to log file using tee
         echo "=== Live output from process 0 with ${backend} ==="
-        pytest --junitxml=$XML_LOG_DIR/collective_gemm_${TEST_FILE}.xml \
-          "${PYTEST_ARGS[@]}" \
+        pytest --junitxml=$XML_LOG_DIR/collective_gemm_${TEST_FILE}_${backend}.xml \
+          "${PYTEST_ARGS_FINAL[@]}" \
           --process-id=$i 2>&1 | tee "$LOG_FILE" &
         PID=$!
         PIDS+=($PID)
       else
         # For other processes: redirect to log files only
-        pytest "${PYTEST_ARGS[@]}" \
+        pytest "${PYTEST_ARGS_FINAL[@]}" \
           --process-id=$i > "$LOG_FILE" 2>&1 &
         PID=$!
         PIDS+=($PID)

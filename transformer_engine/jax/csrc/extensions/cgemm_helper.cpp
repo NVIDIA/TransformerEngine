@@ -12,6 +12,8 @@
 namespace transformer_engine {
 namespace jax {
 
+static bool collective_gemm_with_cublasmp = false;
+
 ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &id_type) {
   ncclUniqueId unique_id;
 
@@ -62,7 +64,7 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
 }
 
 void CommunicatorHandler::init(int num_total_devices, int num_devices_per_process, int process_id,
-                               int tp_size, bool use_cublasmp) {
+                               int tp_size) {
   // Validate inputs
   NVTE_CHECK(num_devices_per_process == 1,
              "num_devices_per_process must be == 1, got num_devices_per_process=",
@@ -139,7 +141,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   // Bootstrap UB/cuBlasMp via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
   auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(
-      buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER, use_cublasmp);
+      buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER,
+      collective_gemm_with_cublasmp);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -150,6 +153,11 @@ void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_proc
   config.init(num_max_streams, gemm_priority, comm_priority, num_comm_sm, use_ce, aggregate_ag);
   auto &handler = CommunicatorHandler::get(false);
   handler.init(num_total_devices, num_devices_per_process, process_id, tp_size, use_cublasmp);
+  collective_gemm_with_cublasmp = use_cublasmp;
+}
+
+bool IsCollectiveGemmWithCublasmp() {
+  return collective_gemm_with_cublasmp;
 }
 
 int GetCgemmNumMaxStreams() {
@@ -159,8 +167,7 @@ int GetCgemmNumMaxStreams() {
 
 CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape,
                                                           DType dtype,
-                                                          JAXX_Collective_Op collective_op,
-                                                          bool use_cublasmp) {
+                                                          JAXX_Collective_Op collective_op) {
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
 
@@ -193,7 +200,7 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   }
 
   std::unique_ptr<CommOverlapCore> executor;
-  if (use_cublasmp) {
+  if (collective_gemm_with_cublasmp) {
     executor = std::make_unique<CommOverlapP2PBase>(
         reinterpret_cast<int64_t>(comm_handler.get_comm_for_current_device()),
         comm_handler.get_tp_domain_id(), comm_handler.tp_size, cgemm_config.num_comm_sm,

@@ -23,6 +23,7 @@ from transformer_engine_jax import (
     JAXX_Collective_Op,
     get_device_compute_capability,
     initialize_cgemm_communicator,
+    is_collective_gemm_with_cublasmp,
     get_cgemm_num_max_streams,
 )
 
@@ -70,7 +71,6 @@ __all__ = [
 
 
 num_cublas_streams = get_num_compute_streams()
-collective_gemm_with_cublasmp = False
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -283,8 +283,6 @@ def collective_gemm_bootstrap(
         f" num_devices_per_process={num_devices_per_process}"
     )
     assert 0 <= process_id < num_total_devices, f"Invalid process_id={process_id}"
-    global collective_gemm_with_cublasmp
-    collective_gemm_with_cublasmp = use_cublasmp
     initialize_cgemm_communicator(
         num_total_devices,
         num_devices_per_process,
@@ -543,7 +541,7 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode.is_nvfp4_scaling:
             workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         if not collective_op.is_none:
-            if collective_gemm_with_cublasmp:
+            if is_collective_gemm_with_cublasmp():
                 # cuBlasMp manages its own cuBlasLt workspaces per stream
                 workspace_size = 0
             else:
@@ -626,7 +624,6 @@ class GemmPrimitive(BasePrimitive):
             "grad": grad,
             "use_split_accumulator": use_split_accumulator,
             "collective_op": int(collective_op.value),
-            "use_cublasmp": collective_gemm_with_cublasmp,
         }
 
         operand_output_aliases = {}

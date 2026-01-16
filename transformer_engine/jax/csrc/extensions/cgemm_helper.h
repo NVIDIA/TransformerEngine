@@ -127,8 +127,7 @@ class CommunicatorHandler {
 
   int get_tp_num_domains() const { return tp_num_domains; }
 
-  static void init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size,
-                   bool use_cublasmp = false);
+  static void init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size);
 
  private:
   ncclUniqueId coordinate_nccl_unique_id(const std::string &id_type);
@@ -165,8 +164,7 @@ class CollectiveGemmPlanRegistry {
     return instance;
   }
 
-  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype,
-                                JAXX_Collective_Op collective_op, bool use_cublasmp = false);
+  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype, JAXX_Collective_Op collective_op);
 
  private:
   CollectiveGemmPlanRegistry() {}
@@ -181,6 +179,7 @@ void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_proc
                                  int tp_size, int num_max_streams, int gemm_priority,
                                  int comm_priority, int num_comm_sm, bool use_ce, bool aggregate_ag,
                                  bool use_cublasmp = false);
+bool IsCollectiveGemmWithCublasmp();
 
 int GetCgemmNumMaxStreams();
 

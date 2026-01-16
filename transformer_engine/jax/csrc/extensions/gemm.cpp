@@ -94,7 +94,7 @@ Error_Type CollectiveGemmInitFFI(
     Result_Type output, Result_Type bias_grad, Result_Type pre_gelu_out, Result_Type workspace,
     JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary, int64_t rhs_axis_boundary,
     bool lhs_transposed, bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
-    bool use_split_accumulator, JAXX_Collective_Op collective_op, bool use_cublasmp) {
+    bool use_split_accumulator, JAXX_Collective_Op collective_op) {
   nvte_cublas_handle_init();
 
   // Init UB buffer
@@ -120,8 +120,7 @@ Error_Type CollectiveGemmInitFFI(
       buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
     }
-    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype,
-                                                                    collective_op, use_cublasmp);
+    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype, collective_op);
   }
   return ffi_with_cuda_error_check();
 }
@@ -149,8 +148,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
-                                  .Attr<JAXX_Collective_Op>("collective_op")
-                                  .Attr<bool>("use_cublasmp"));
+                                  .Attr<JAXX_Collective_Op>("collective_op"));
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
@@ -158,8 +156,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    Result_Type pre_gelu_out, Result_Type workspace, JAXX_Scaling_Mode scaling_mode,
                    int64_t lhs_axis_boundary, int64_t rhs_axis_boundary, bool lhs_transposed,
                    bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
-                   bool use_split_accumulator, JAXX_Collective_Op collective_op,
-                   bool use_cublasmp) {
+                   bool use_split_accumulator, JAXX_Collective_Op collective_op) {
   // cuBLAS workspace + 256 alignment enforcement (+ swizzle scales)
   uint8_t *lhs_swizzle_scale_ptr = nullptr, *rhs_swizzle_scale_ptr = nullptr;
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
@@ -337,8 +334,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
-                                  .Attr<JAXX_Collective_Op>("collective_op")
-                                  .Attr<bool>("use_cublasmp"),
+                                  .Attr<JAXX_Collective_Op>("collective_op"),
                               FFI_CudaGraph_Traits);
 
 size_t GroupedGemmGetGroupSizes(cudaStream_t stream, size_t num_gemms, int32_t *dev_group_sizes,
