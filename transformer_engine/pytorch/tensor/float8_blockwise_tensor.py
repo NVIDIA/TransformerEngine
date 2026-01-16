@@ -607,7 +607,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
         if self._rowwise_data is not None:
             return self._rowwise_data.shape
-        elif self._columnwise_data is not None:
+        if self._columnwise_data is not None:
             return self._columnwise_data.shape
         raise RuntimeError("Float8BlockwiseQTensor has no data!")
 
@@ -616,7 +616,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         """Return whether the tensor is on a CUDA device."""
         if self._rowwise_data is not None:
             return self._rowwise_data.is_cuda
-        elif self._columnwise_data is not None:
+        if self._columnwise_data is not None:
             return self._columnwise_data.is_cuda
         raise RuntimeError("Float8BlockwiseQTensor has no data!")
 

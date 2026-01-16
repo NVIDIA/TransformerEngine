@@ -915,7 +915,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
         if self._data is not None:
             return self._data.shape
-        elif self._transpose is not None:
+        if self._transpose is not None:
             transpose_shape = self._transpose.shape
             return tuple(transpose_shape[1:]) + (transpose_shape[0],)
         raise RuntimeError("Both data and transpose are None")
@@ -925,7 +925,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         """Return whether the tensor is on a CUDA device."""
         if self._data is not None:
             return self._data.is_cuda
-        elif self._transpose is not None:
+        if self._transpose is not None:
             return self._transpose.is_cuda
         raise RuntimeError("Both data and transpose are None")
 

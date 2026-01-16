@@ -355,8 +355,8 @@ class QuantizedTensor(torch.Tensor):
             requires_grad=requires_grad,
             device=torch.cuda.current_device() if device is None else device,
         )
-        instance._requires_grad = requires_grad
-        instance._dtype = dtype
+        # instance._requires_grad = requires_grad
+        # instance._dtype = dtype
         return instance
 
     @property
@@ -369,7 +369,7 @@ class QuantizedTensor(torch.Tensor):
         """
         # Lazy initialization for tensors created via alternate paths
         if not hasattr(self, '_dtype'):
-            self._dtype = super(QuantizedTensor, self).__getattribute__('dtype')
+            self._dtype = torch._C.TensorBase.dtype.__get__(self, type(self))
         return self._dtype
 
     @dtype.setter
@@ -389,7 +389,7 @@ class QuantizedTensor(torch.Tensor):
         """
         # Fallback to parent if not cached yet
         if not hasattr(self, "_requires_grad"):
-            self._requires_grad = super(QuantizedTensor, self).__getattribute__('requires_grad')
+            self._requires_grad = torch._C.TensorBase.requires_grad.__get__(self, type(self))
         return self._requires_grad
 
     @requires_grad.setter
