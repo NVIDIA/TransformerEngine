@@ -100,9 +100,8 @@ class Quantizer {
   virtual void set_quantization_params(TensorWrapper* tensor) const = 0;
 
   /*! @brief Construct a tensor with uninitialized data */
-  virtual std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+  virtual std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
                                                              DType dtype) const = 0;
-
   /*! @brief Convert a PyTorch tensor into a Transformer Engine C++ tensor
    *
    * The PyTorch tensor's attributes are modified to match the
@@ -134,11 +133,11 @@ class NoneQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override {}
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
                                                      DType dtype) const override;
 
   /*! @brief Construct a tensor with pre-initialized data */
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype,
                                                      at::Tensor data) const;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
@@ -160,11 +159,10 @@ class Float8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
                                                      DType dtype) const override;
-
   /*! @brief Construct a tensor with pre-initialized data */
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape, DType dtype,
                                                      std::optional<at::Tensor> data,
                                                      std::optional<at::Tensor> transpose,
                                                      std::optional<at::Tensor> scale_inv) const;
@@ -192,16 +190,15 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
                                                      DType dtype) const override;
-
   /*! @brief Construct an unquantized tensor that shares the quantizer's amax pointer.
    *
    * The amax is zeroed out. Most TE kernels that output amax expect
    * amax to be initialized to zero.
   */
   std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
-      const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data = std::nullopt);
+      const NVTEShape& shape, DType dtype, std::optional<at::Tensor> data = std::nullopt);
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
@@ -217,7 +214,6 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   void quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
                           const std::optional<TensorWrapper>& noop_flag = std::nullopt);
 
- private:
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
@@ -251,7 +247,7 @@ class Float8BlockQuantizer : public Quantizer {
   // Create a python Float8BlockQuantized tensor and C++ wrapper
   // for the tensor. Should set quantized data, scales for rowwise
   // and optionally columnwise usage.
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
                                                      DType dtype) const override;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
@@ -260,6 +256,11 @@ class Float8BlockQuantizer : public Quantizer {
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+  NVTEShape get_scale_shape(const NVTEShape& shape, bool columnwise) const;
+
+ private:
+  template <typename ShapeT>
+  ShapeT get_scale_shape_impl(size_t numel, size_t last_dim, bool columnwise) const;
 };
 
 class MXFP8Quantizer : public Quantizer {
@@ -272,7 +273,7 @@ class MXFP8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
                                                      DType dtype) const override;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
@@ -281,6 +282,11 @@ class MXFP8Quantizer : public Quantizer {
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+  NVTEShape get_scale_shape(const NVTEShape& shape, bool columnwise) const;
+
+ private:
+  template <typename ShapeT>
+  ShapeT get_scale_shape_impl(size_t numel, size_t last_dim, bool columnwise) const;
 };
 
 class NVFP4Quantizer : public Quantizer {
@@ -306,9 +312,8 @@ class NVFP4Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+  std::pair<TensorWrapper, py::object> create_tensor(const NVTEShape& shape,
                                                      DType dtype) const override;
-
   /*! @brief Construct an unquantized tensor that shares NVFP4 tensor's amax pointer
    *
    * The amax is zeroed out. Most TE kernels that output amax expect
@@ -331,15 +336,37 @@ class NVFP4Quantizer : public Quantizer {
   void quantize_with_amax(TensorWrapper& input, TensorWrapper& out);
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+  NVTEShape get_scale_shape(const NVTEShape& shape, bool columnwise) const;
 
  private:
+  template <typename ShapeT>
+  ShapeT get_scale_shape_impl(size_t numel, size_t last_dim, bool columnwise) const;
+
+ public:
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
-std::vector<size_t> getTensorShape(const at::Tensor& t);
+NVTEShape getTensorShape(const at::Tensor& t);
+
+template <typename T>
+inline NVTEShape make_nvte_1d_shape(T dim0) {
+  NVTEShape shape;
+  shape.ndim = 1;
+  shape.data[0] = static_cast<size_t>(dim0);
+  return shape;
+}
+
+template <typename T, typename U>
+inline NVTEShape make_nvte_2d_shape(T dim0, U dim1) {
+  NVTEShape shape;
+  shape.ndim = 2;
+  shape.data[0] = static_cast<size_t>(dim0);
+  shape.data[1] = static_cast<size_t>(dim1);
+  return shape;
+}
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
@@ -423,21 +450,16 @@ inline transformer_engine::DType GetTransformerEngineDType(int DType_value) {
   return static_cast<transformer_engine::DType>(DType_value);
 }
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
-                                                              const std::vector<size_t>& shape,
-                                                              const transformer_engine::DType type);
-
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, std::vector<size_t> scale_inv_shape = {1},
+    void* data_ptr, const NVTEShape& shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, const NVTEShape& scale_inv_shape,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, void* columnwise_data_ptr, const std::vector<size_t>& shape,
-    const std::vector<size_t>& columnwise_shape, const transformer_engine::DType type,
-    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
-    const std::vector<size_t>& scale_inv_shape = {1},
-    const std::vector<size_t>& columnwise_scale_inv_shape = {1},
+    void* data_ptr, void* columnwise_data_ptr, const NVTEShape& shape,
+    const NVTEShape& columnwise_shape, const transformer_engine::DType type, void* amax_ptr,
+    void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
+    const NVTEShape& scale_inv_shape, const NVTEShape& columnwise_scale_inv_shape,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
@@ -459,7 +481,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 template <typename T>
 T product(const std::vector<T>& shape);
 
-size_t product(const NVTEShape& shape, size_t begin, size_t end);
+size_t product(const NVTEShape& shape, size_t begin = 0, size_t end = -1);
 
 std::vector<size_t> nvte_shape_to_vector(const NVTEShape& nvte_shape);
 
@@ -479,9 +501,7 @@ std::vector<size_t> convertShape(const NVTEShape& shape);
 
 size_t roundup(const size_t value, const size_t multiple);
 
-NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
-
-std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose);
+NVTEShape convert_shape_back_from_fp4(const NVTEShape& shape, bool transpose);
 
 // unpack the PhiloxCudaState into CUDA tensor
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr);

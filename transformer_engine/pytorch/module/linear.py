@@ -1344,7 +1344,7 @@ class Linear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
 
-    @no_torch_dynamo()
+    @no_torch_dynamo(recursive=False)
     def forward(
         self,
         inp: torch.Tensor,
