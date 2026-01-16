@@ -141,8 +141,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   // Bootstrap UB/cuBlasMp via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
   auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(
-      buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER,
-      collective_gemm_with_cublasmp);
+      buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER, collective_gemm_with_cublasmp);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -156,9 +155,7 @@ void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_proc
   collective_gemm_with_cublasmp = use_cublasmp;
 }
 
-bool IsCollectiveGemmWithCublasmp() {
-  return collective_gemm_with_cublasmp;
-}
+bool IsCollectiveGemmWithCublasmp() { return collective_gemm_with_cublasmp; }
 
 int GetCgemmNumMaxStreams() {
   auto &config = CgemmConfig::get();
@@ -204,7 +201,7 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
     executor = std::make_unique<CommOverlapP2PBase>(
         reinterpret_cast<int64_t>(comm_handler.get_comm_for_current_device()),
         comm_handler.get_tp_domain_id(), comm_handler.tp_size, cgemm_config.num_comm_sm,
-        cgemm_config.aggregate_ag);
+        false /*atomic_gemm*/);
   } else {
     executor = std::make_unique<CommOverlapP2PBase>(
         buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,

@@ -88,13 +88,15 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
-Error_Type CollectiveGemmInitFFI(
-    Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs, Buffer_Type rhs_scale_inv,
-    Buffer_Type bias, Buffer_Type gelu_input, Buffer_Type alpha, Buffer_Type beta,
-    Result_Type output, Result_Type bias_grad, Result_Type pre_gelu_out, Result_Type workspace,
-    JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary, int64_t rhs_axis_boundary,
-    bool lhs_transposed, bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
-    bool use_split_accumulator, JAXX_Collective_Op collective_op) {
+Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
+                                 Buffer_Type rhs_scale_inv, Buffer_Type bias,
+                                 Buffer_Type gelu_input, Buffer_Type alpha, Buffer_Type beta,
+                                 Result_Type output, Result_Type bias_grad,
+                                 Result_Type pre_gelu_out, Result_Type workspace,
+                                 JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
+                                 int64_t rhs_axis_boundary, bool lhs_transposed,
+                                 bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
+                                 bool use_split_accumulator, JAXX_Collective_Op collective_op) {
   nvte_cublas_handle_init();
 
   // Init UB buffer
@@ -120,7 +122,8 @@ Error_Type CollectiveGemmInitFFI(
       buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
     }
-    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype, collective_op);
+    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype,
+                                                                    collective_op);
   }
   return ffi_with_cuda_error_check();
 }
