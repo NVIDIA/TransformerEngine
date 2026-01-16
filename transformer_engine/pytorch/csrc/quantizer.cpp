@@ -149,8 +149,9 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   }
   py::object scale_inv_py = py::cast(*scale_inv);
   at::Device device =
-      with_data ? data->device() : (with_transpose ? transpose->device() :
-        at::Device(torch::kCUDA, c10::cuda::current_device()));
+      with_data ? data->device()
+                : (with_transpose ? transpose->device()
+                                  : at::Device(torch::kCUDA, c10::cuda::current_device()));
   // Construct Python FP8 tensor
   py::object out_py;
   if (internal) {
@@ -384,9 +385,10 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     scale_inv_tensor = at::empty(scale_inv_shape, opts);
   }
-  at::Device device = with_data ? data_tensor.device()
-                                : (with_transpose ? transpose_tensor.device() : 
-                                  at::Device(torch::kCUDA, c10::cuda::current_device()));
+  at::Device device =
+      with_data ? data_tensor.device()
+                : (with_transpose ? transpose_tensor.device()
+                                  : at::Device(torch::kCUDA, c10::cuda::current_device()));
   // Construct Python FP8 tensor
   py::object out_py;
   py::object scale_inv_py = py::cast(scale_inv_tensor);
@@ -700,7 +702,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     PyDict_SetItemString(kwargs, "rowwise_data", py::cast(data_rowwise).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "columnwise_data", py::cast(data_colwise).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "rowwise_scale_inv", py::cast(scale_inv_rowwise).inc_ref().ptr());
-    PyDict_SetItemString(kwargs, "columnwise_scale_inv", py::cast(scale_inv_colwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "columnwise_scale_inv",
+                         py::cast(scale_inv_colwise).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.inc_ref().ptr());
     PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).inc_ref().ptr());
@@ -725,9 +728,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     PyDict_SetItemString(kwargs, "rowwise_data", py::cast(data_rowwise).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "columnwise_data", py::cast(data_colwise).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "rowwise_scale_inv", py::cast(scale_inv_rowwise).inc_ref().ptr());
-    PyDict_SetItemString(kwargs, "columnwise_scale_inv", py::cast(scale_inv_colwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "columnwise_scale_inv",
+                         py::cast(scale_inv_colwise).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
-    PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr()); 
+    PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
     PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "data_format", py::cast(data_format).inc_ref().ptr());
     PyObject* args = PyTuple_New(0);
@@ -1370,7 +1374,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* args = PyTuple_New(0);
-    
+
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorStoragePythonClass), args, kwargs);
     if (result == nullptr) {
