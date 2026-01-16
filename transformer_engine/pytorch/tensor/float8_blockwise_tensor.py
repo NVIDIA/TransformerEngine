@@ -620,6 +620,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             return self._columnwise_data.is_cuda
         raise RuntimeError("Float8BlockwiseQTensor has no data!")
 
+
 class _ViewFunc(torch.autograd.Function):
     """View function
 

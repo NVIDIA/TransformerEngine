@@ -368,8 +368,8 @@ class QuantizedTensor(torch.Tensor):
         change after creation, we cache it in a member variable and return
         """
         # Lazy initialization for tensors created via alternate paths
-        if not hasattr(self, '_dtype'):
-            self._dtype = super(QuantizedTensor, self).__getattribute__('dtype')
+        if not hasattr(self, "_dtype"):
+            self._dtype = super(QuantizedTensor, self).__getattribute__("dtype")
         return self._dtype
 
     @dtype.setter
@@ -389,7 +389,7 @@ class QuantizedTensor(torch.Tensor):
         """
         # Fallback to parent if not cached yet
         if not hasattr(self, "_requires_grad"):
-            self._requires_grad = super(QuantizedTensor, self).__getattribute__('requires_grad')
+            self._requires_grad = super(QuantizedTensor, self).__getattribute__("requires_grad")
         return self._requires_grad
 
     @requires_grad.setter
