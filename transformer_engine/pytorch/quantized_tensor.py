@@ -368,7 +368,7 @@ class QuantizedTensor(torch.Tensor):
         change after creation, we cache it in a member variable and return
         """
         # Lazy initialization for tensors created via alternate paths
-        if not hasattr(self, '_dtype'):
+        if not hasattr(self, "_dtype"):
             self._dtype = torch._C.TensorBase.dtype.__get__(self, type(self))
         return self._dtype
 
