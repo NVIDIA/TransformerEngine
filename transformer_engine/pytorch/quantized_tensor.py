@@ -355,8 +355,57 @@ class QuantizedTensor(torch.Tensor):
             requires_grad=requires_grad,
             device=torch.cuda.current_device() if device is None else device,
         )
-
+        # instance._requires_grad = requires_grad
+        # instance._dtype = dtype
         return instance
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """
+        Return the high precision data type of the tensor
+        Attribute access of custom tensors goes through an
+        expensive Pyobject lookup. Since dtype for a tensor is never
+        change after creation, we cache it in a member variable and return
+        """
+        # Lazy initialization for tensors created via alternate paths
+        if not hasattr(self, "_dtype"):
+            self._dtype = torch._C.TensorBase.dtype.__get__(self, type(self))
+        return self._dtype
+
+    @dtype.setter
+    def dtype(self, value: torch.dtype) -> None:
+        """Set dtype property"""
+        # Update the cached value
+        self._dtype = value
+        warnings.warn("Dtype of QuantizedTensor has been changed. Ensure this is intended.")
+
+    @property
+    def requires_grad(self) -> bool:
+        """
+        Return whether or not the tensor requires gradient.
+        Attribute access of custom tensors goes through an
+        expensive Pyobject lookup. Since requires_grad is set during
+        initialization and may be updated, we cache it in a member variable.
+        """
+        # Fallback to parent if not cached yet
+        if not hasattr(self, "_requires_grad"):
+            self._requires_grad = torch._C.TensorBase.requires_grad.__get__(self, type(self))
+        return self._requires_grad
+
+    @requires_grad.setter
+    def requires_grad(self, value: bool) -> None:
+        """Set requires_grad property so that autograd engine is aware of the change"""
+        # Update the cached value and call parent class method to ensure autograd engine is aware
+        self.requires_grad_(value)
+
+    def requires_grad_(self, requires_grad: bool = True) -> QuantizedTensor:
+        """Cache requires_grad property and call parent class method"""
+        # pylint: disable=missing-function-docstring
+        # Update the cached value
+        self._requires_grad = requires_grad
+        # Call parent class method to ensure autograd engine is aware
+        super().requires_grad_(requires_grad)
+        return self
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Convert quantized data to standard PyTorch tensor"""

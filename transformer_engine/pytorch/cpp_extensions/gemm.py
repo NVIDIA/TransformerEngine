@@ -76,8 +76,6 @@ def get_tensor_device(tensor: torch.Tensor) -> int:
     The order of attributes checked is important to also
     minimize overhead.
     """
-    if hasattr(tensor, "device"):
-        return tensor.device.index
     if hasattr(tensor, "_rowwise_data") and tensor._rowwise_data is not None:
         return tensor._rowwise_data.device.index
     if hasattr(tensor, "_columnwise_data") and tensor._columnwise_data is not None:
@@ -86,6 +84,8 @@ def get_tensor_device(tensor: torch.Tensor) -> int:
         return tensor._data.device.index
     if hasattr(tensor, "_transpose") and tensor._transpose is not None:
         return tensor._transpose.device.index
+    if hasattr(tensor, "device"):
+        return tensor.device.index
     return torch.cuda.current_device()
 
 
