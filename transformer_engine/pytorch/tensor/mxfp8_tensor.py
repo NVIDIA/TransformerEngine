@@ -824,6 +824,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             return self._columnwise_data.is_cuda
         raise RuntimeError("MXFP8Tensor has no data!")
 
+
 class _ViewFunc(torch.autograd.Function):
     """View function
 

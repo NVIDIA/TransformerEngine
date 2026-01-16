@@ -389,7 +389,11 @@ class QuantizedTensor(torch.Tensor):
         """
         # Fallback to parent if not cached yet
         if not hasattr(self, "_requires_grad"):
+<<<<<<< HEAD
             self._requires_grad = torch._C.TensorBase.requires_grad.__get__(self, type(self))
+=======
+            self._requires_grad = super(QuantizedTensor, self).__getattribute__("requires_grad")
+>>>>>>> da7fbf53566d334cb3468e270cf0b197ff5c1c5b
         return self._requires_grad
 
     @requires_grad.setter
