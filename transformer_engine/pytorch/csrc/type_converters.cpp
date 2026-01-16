@@ -156,6 +156,104 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
   return ret;
 }
 
+NVTEScalingMode ScalingModeFromQuantizer(py::handle quantizer) {
+  auto *quantizer_ptr = quantizer.ptr();
+  if (IsMXFP8Quantizers(quantizer_ptr)) {
+    return NVTE_MXFP8_1D_SCALING;
+  }
+  if (IsNVFP4Quantizers(quantizer_ptr)) {
+    return NVTE_NVFP4_1D_SCALING;
+  }
+  if (IsFloat8BlockwiseQuantizers(quantizer_ptr)) {
+    const int block_scaling_dim = quantizer.attr("block_scaling_dim").cast<int>();
+    return (block_scaling_dim == 2) ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
+  }
+  return NVTE_DELAYED_TENSOR_SCALING;
+}
+
+GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
+  // Returns a GroupedTensorWrapper from a PyTorch GroupedTensor.
+  const auto num_tensors = tensor.attr("num_tensors").cast<size_t>();
+  const auto logical_shape = tensor.attr("logical_shape").cast<std::vector<size_t>>();
+
+  NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+  if (!tensor.attr("quantizers").is_none()) {
+    const auto quantizers = tensor.attr("quantizers").cast<py::list>();
+    if (!quantizers.empty() && !quantizers[0].is_none()) {
+      scaling_mode = ScalingModeFromQuantizer(quantizers[0]);
+    }
+  }
+
+  auto ret = GroupedTensorWrapper(num_tensors, logical_shape, scaling_mode);
+
+  // Rowwise data
+  if (!tensor.attr("data").is_none()) {
+    const auto &data = tensor.attr("data").cast<at::Tensor>();
+    ret.set_rowwise_data(data.data_ptr(), GetTransformerEngineDType(data.scalar_type()),
+                         getTensorShape(data));
+  }
+
+  // Columnwise data
+  if (!tensor.attr("columnwise_data").is_none()) {
+    const auto &data = tensor.attr("columnwise_data").cast<at::Tensor>();
+    ret.set_columnwise_data(data.data_ptr(), GetTransformerEngineDType(data.scalar_type()),
+                            getTensorShape(data));
+  }
+
+  // Scale
+  if (!tensor.attr("scale").is_none()) {
+    const auto &scale = tensor.attr("scale").cast<at::Tensor>();
+    ret.set_scale(scale.data_ptr(), GetTransformerEngineDType(scale.scalar_type()),
+                  getTensorShape(scale));
+  }
+
+  // Amax
+  if (!tensor.attr("amax").is_none()) {
+    const auto &amax = tensor.attr("amax").cast<at::Tensor>();
+    ret.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+                 getTensorShape(amax));
+  }
+  if (!tensor.attr("columnwise_amax").is_none()) {
+    const auto &amax = tensor.attr("columnwise_amax").cast<at::Tensor>();
+    ret.set_columnwise_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+                            getTensorShape(amax));
+  }
+
+  // Scale inverse
+  if (!tensor.attr("scale_inv").is_none()) {
+    const auto &scale_inv = tensor.attr("scale_inv").cast<at::Tensor>();
+    ret.set_rowwise_scale_inv(scale_inv.data_ptr(),
+                              GetTransformerEngineDType(scale_inv.scalar_type()),
+                              getTensorShape(scale_inv));
+  }
+  if (!tensor.attr("columnwise_scale_inv").is_none()) {
+    const auto &scale_inv = tensor.attr("columnwise_scale_inv").cast<at::Tensor>();
+    ret.set_columnwise_scale_inv(scale_inv.data_ptr(),
+                                 GetTransformerEngineDType(scale_inv.scalar_type()),
+                                 getTensorShape(scale_inv));
+  }
+
+  // Shape metadata
+  if (!tensor.attr("first_dims").is_none()) {
+    const auto &first_dims = tensor.attr("first_dims").cast<at::Tensor>();
+    ret.set_first_dims(first_dims.data_ptr(), GetTransformerEngineDType(first_dims.scalar_type()),
+                       getTensorShape(first_dims));
+  }
+  if (!tensor.attr("last_dims").is_none()) {
+    const auto &last_dims = tensor.attr("last_dims").cast<at::Tensor>();
+    ret.set_last_dims(last_dims.data_ptr(), GetTransformerEngineDType(last_dims.scalar_type()),
+                      getTensorShape(last_dims));
+  }
+  if (!tensor.attr("tensor_offsets").is_none()) {
+    const auto &tensor_offsets = tensor.attr("tensor_offsets").cast<at::Tensor>();
+    ret.set_tensor_offsets(tensor_offsets.data_ptr(),
+                           GetTransformerEngineDType(tensor_offsets.scalar_type()),
+                           getTensorShape(tensor_offsets));
+  }
+
+  return ret;
+}
+
 }  // namespace detail
 
 }  // namespace transformer_engine::pytorch
