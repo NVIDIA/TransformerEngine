@@ -149,7 +149,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   }
   py::object scale_inv_py = py::cast(*scale_inv);
   at::Device device =
-      with_data ? data->device() : (with_transpose ? transpose->device() : torch::kCUDA);
+      with_data ? data->device() : (with_transpose ? transpose->device() :
+        at::Device(torch::kCUDA, c10::cuda::current_device()));
   // Construct Python FP8 tensor
   py::object out_py;
   if (internal) {
@@ -158,13 +159,15 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     PyObject* args = PyTuple_New(0);
     PyDict_SetItemString(kwargs, "data", data_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_scale_inv", scale_inv_py.ptr());
-    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
+    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "data_transpose", transpose_py.ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass), args, kwargs);
-
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(kwargs);
     Py_DECREF(args);
     NVTE_CHECK(result != nullptr, "Failed to create Float8TensorStorage instance");
@@ -175,17 +178,19 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
     PyObject* args = PyTuple_New(0);
-    PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).ptr());
-    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
+    PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "data", data_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_scale_inv", scale_inv_py.ptr());
-    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
+    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "data_transpose", transpose_py.ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "device", py::cast(device).ptr());
+    PyDict_SetItemString(kwargs, "device", py::cast(device).inc_ref().ptr());
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass), args, kwargs);
-
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(kwargs);
     Py_DECREF(args);
 
@@ -380,7 +385,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     scale_inv_tensor = at::empty(scale_inv_shape, opts);
   }
   at::Device device = with_data ? data_tensor.device()
-                                : (with_transpose ? transpose_tensor.device() : torch::kCUDA);
+                                : (with_transpose ? transpose_tensor.device() : 
+                                  at::Device(torch::kCUDA, c10::cuda::current_device()));
   // Construct Python FP8 tensor
   py::object out_py;
   py::object scale_inv_py = py::cast(scale_inv_tensor);
@@ -391,35 +397,38 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     PyObject* kwargs = PyDict_New();
     PyDict_SetItemString(kwargs, "data", data_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_scale_inv", scale_inv_py.ptr());
-    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
+    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "data_transpose", transpose_py.ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* args = PyTuple_New(0);
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass), args, kwargs);
-
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(args);
     Py_DECREF(kwargs);
-
     NVTE_CHECK(result != nullptr, "Failed to create Float8TensorStorage instance");
     out_py = py::reinterpret_steal<py::object>(result);
   } else {
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
-    PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).ptr());
-    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
+    PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "data", data_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_scale_inv", scale_inv_py.ptr());
-    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
+    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "data_transpose", transpose_py.ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "device", py::cast(device).ptr());
+    PyDict_SetItemString(kwargs, "device", py::cast(device).inc_ref().ptr());
     PyObject* args = PyTuple_New(0);
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass), args, kwargs);
-
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(args);
     Py_DECREF(kwargs);
 
@@ -688,19 +697,21 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   if (internal) {
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
-    PyDict_SetItemString(kwargs, "rowwise_data", py::cast(data_rowwise).ptr());
-    PyDict_SetItemString(kwargs, "columnwise_data", py::cast(data_colwise).ptr());
-    PyDict_SetItemString(kwargs, "rowwise_scale_inv", py::cast(scale_inv_rowwise).ptr());
-    PyDict_SetItemString(kwargs, "columnwise_scale_inv", py::cast(scale_inv_colwise).ptr());
-    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
-    PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).ptr());
-    PyDict_SetItemString(kwargs, "data_format", py::cast(data_format).ptr());
+    PyDict_SetItemString(kwargs, "rowwise_data", py::cast(data_rowwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "columnwise_data", py::cast(data_colwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "rowwise_scale_inv", py::cast(scale_inv_rowwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "columnwise_scale_inv", py::cast(scale_inv_colwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "quantizer", this->quantizer.inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "data_format", py::cast(data_format).inc_ref().ptr());
 
     PyObject* args = PyTuple_New(0);
     PyObject* result = PyObject_Call(
         reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass), args, kwargs);
-
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(args);
     Py_DECREF(kwargs);
 
@@ -709,22 +720,24 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   } else {
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
-    PyDict_SetItemString(kwargs, "shape", py::cast(torch_shape).ptr());
-    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
-    PyDict_SetItemString(kwargs, "rowwise_data", py::cast(data_rowwise).ptr());
-    PyDict_SetItemString(kwargs, "columnwise_data", py::cast(data_colwise).ptr());
-    PyDict_SetItemString(kwargs, "rowwise_scale_inv", py::cast(scale_inv_rowwise).ptr());
-    PyDict_SetItemString(kwargs, "columnwise_scale_inv", py::cast(scale_inv_colwise).ptr());
-    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
-    PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).ptr());
-    PyDict_SetItemString(kwargs, "data_format", py::cast(data_format).ptr());
+    PyDict_SetItemString(kwargs, "shape", py::cast(torch_shape).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "rowwise_data", py::cast(data_rowwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "columnwise_data", py::cast(data_colwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "rowwise_scale_inv", py::cast(scale_inv_rowwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "columnwise_scale_inv", py::cast(scale_inv_colwise).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr()); 
+    PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "data_format", py::cast(data_format).inc_ref().ptr());
     PyObject* args = PyTuple_New(0);
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass), args, kwargs);
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(args);
     Py_DECREF(kwargs);
-
     NVTE_CHECK(result != nullptr, "Failed to create Float8BlockwiseQTensor instance");
     ret = py::reinterpret_steal<py::object>(result);
   }
@@ -1039,12 +1052,14 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "columnwise_data", columnwise_data_py.ptr());
     PyDict_SetItemString(kwargs, "rowwise_scale_inv", rowwise_scale_inv_py.ptr());
     PyDict_SetItemString(kwargs, "columnwise_scale_inv", columnwise_scale_inv_py.ptr());
-    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
+    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass), args, kwargs);
-
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(args);
     Py_DECREF(kwargs);
 
@@ -1053,19 +1068,21 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   } else {
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
-    PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).ptr());
-    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
+    PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "rowwise_data", rowwise_data_py.ptr());
     PyDict_SetItemString(kwargs, "columnwise_data", columnwise_data_py.ptr());
     PyDict_SetItemString(kwargs, "rowwise_scale_inv", rowwise_scale_inv_py.ptr());
     PyDict_SetItemString(kwargs, "columnwise_scale_inv", columnwise_scale_inv_py.ptr());
-    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
+    PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* args = PyTuple_New(0);
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass), args, kwargs);
-
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(args);
     Py_DECREF(kwargs);
 
@@ -1349,12 +1366,16 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "columnwise_scale_inv", columnwise_scale_inv_py.ptr());
     PyDict_SetItemString(kwargs, "amax_rowwise", amax_rowwise_py.ptr());
     PyDict_SetItemString(kwargs, "amax_columnwise", amax_columnwise_py.ptr());
-    PyDict_SetItemString(kwargs, "fp4_dtype", py::cast(this->dtype).ptr());
+    PyDict_SetItemString(kwargs, "fp4_dtype", py::cast(this->dtype).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* args = PyTuple_New(0);
+    
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorStoragePythonClass), args, kwargs);
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(args);
     Py_DECREF(kwargs);
 
@@ -1363,21 +1384,23 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
   } else {
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
-    PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).ptr());
-    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
+    PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).inc_ref().ptr());
+    PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "rowwise_data", rowwise_data_py.ptr());
     PyDict_SetItemString(kwargs, "columnwise_data", columnwise_data_py.ptr());
     PyDict_SetItemString(kwargs, "rowwise_scale_inv", rowwise_scale_inv_py.ptr());
     PyDict_SetItemString(kwargs, "columnwise_scale_inv", columnwise_scale_inv_py.ptr());
     PyDict_SetItemString(kwargs, "amax_rowwise", amax_rowwise_py.ptr());
     PyDict_SetItemString(kwargs, "amax_columnwise", amax_columnwise_py.ptr());
-    PyDict_SetItemString(kwargs, "fp4_dtype", py::cast(this->dtype).ptr());
+    PyDict_SetItemString(kwargs, "fp4_dtype", py::cast(this->dtype).inc_ref().ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
 
     PyObject* args = PyTuple_New(0);
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass), args, kwargs);
-
+    if (result == nullptr) {
+      PyErr_Print();
+    }
     Py_DECREF(args);
     Py_DECREF(kwargs);
 
