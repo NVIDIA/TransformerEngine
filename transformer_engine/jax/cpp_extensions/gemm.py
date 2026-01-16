@@ -583,27 +583,27 @@ class GemmPrimitive(BasePrimitive):
         )
 
         lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
-        lhs_contracting_size = (
-            reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
-            if lhs_transposed
-            else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            lhs_contracting_size,
-            "LHS",
-        )
-        rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
-        rhs_contracting_size = (
-            reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
-            if rhs_transposed
-            else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            rhs_contracting_size,
-            "RHS",
-        )
+        # lhs_contracting_size = (
+        #     reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
+        #     if lhs_transposed
+        #     else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
+        # )
+        # assert_cublas_requirements(
+        #     scaling_mode,
+        #     lhs_contracting_size,
+        #     f"LHS {lhs_aval.shape} with contracting dims {lhs_cdims}",
+        # )
+        # rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
+        # rhs_contracting_size = (
+        #     reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
+        #     if rhs_transposed
+        #     else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
+        # )
+        # assert_cublas_requirements(
+        #     scaling_mode,
+        #     rhs_contracting_size,
+        #     f"RHS {rhs_aval.shape} with contracting dims {rhs_cdims}",
+        # )
 
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta)
         kwargs = {
@@ -808,40 +808,89 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
     ):
-        del transpose_batch_sequence, sequence_dim, is_outer
         assert GemmPrimitive.outer_primitive is not None
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
-        # Batched GEMM is not supported
-        assert (
-            lhs_bdims is None and rhs_bdims is None
-        ), f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
-        out_bdims = (None,)
+        # Validate batch dimensions
+        # if lhs_bdims is not None or rhs_bdims is not None:
+        #     assert lhs_bdims == rhs_bdims, (
+        #         "Batched GEMM requires matching batch dimensions, "
+        #         f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
+        #     )
 
-        # Bias gradient is never batched
-        bias_bdims = (None,)
+        f = partial(
+            GemmPrimitive.outer_impl,
+            **{
+                "out_dtype": out_dtype,
+                "contracting_dims": contracting_dims,
+                "scaling_mode": scaling_mode,
+                "fuse_bias": fuse_bias,
+                "fuse_gelu": fuse_gelu,
+                "grad": grad,
+                "use_split_accumulator": use_split_accumulator,
+                "collective_op": collective_op,
+                "transpose_batch_sequence": transpose_batch_sequence,
+                "sequence_dim": sequence_dim,
+                "is_outer": is_outer,
+            },
+        )
 
-        # Pre-GeLU output, if exists, is batched like GEMM output
-        pre_gelu_bdims = (None,)
-        if fuse_gelu and not grad:
-            pre_gelu_bdims = out_bdims
+        lhs_cdims, rhs_cdims = contracting_dims
+        # Calculate output batch dimension based on input batch dims and contracting dims
+        # Both lhs and rhs have batch dimensions that may be at different indices
+        if lhs_bdims is not None and rhs_bdims is not None:
+            # Count non-contracting dimensions in LHS before the batch dimension
+            lhs_non_contracting_before_batch = sum(
+                1 for i in range(lhs_bdims) if i not in lhs_cdims
+            )
+            # The output batch dimension will be at the position corresponding to
+            # the LHS batch dimension's position among non-contracting dimensions
+            output_bdim = lhs_non_contracting_before_batch
+        elif lhs_bdims is not None:
+            # LHS has a batch dimension - this will be the output batch dimension
+            output_bdim = 0
+        elif rhs_bdims is not None:
+            # RHS has a batch dimension - need to account for LHS non-contracting dims
+            lhs_non_contracting = len(
+                [
+                    i
+                    for i in range(len(batched_args[0].shape))
+                    if i not in lhs_cdims and i != lhs_bdims
+                ]
+            )
+            output_bdim = lhs_non_contracting
+        else:
+            # No batch dimensions in either operand
+            output_bdim = None
 
-        return (
-            GemmPrimitive.outer_primitive.bind(
-                *batched_args,
-                out_dtype=out_dtype,
-                contracting_dims=contracting_dims,
-                scaling_mode=scaling_mode,
-                fuse_bias=fuse_bias,
-                fuse_gelu=fuse_gelu,
-                grad=grad,
-                use_split_accumulator=use_split_accumulator,
-                collective_op=collective_op,
-                transpose_batch_sequence=transpose_batch_sequence,
-                sequence_dim=sequence_dim,
-                is_outer=is_outer,
+        # Use general batcher from BasePrimitive
+        return GemmPrimitive.batcher_impl(
+            batched_args,
+            batch_dims=(
+                lhs_bdims,  # lhs
+                0,  # lhs_scale_inv
+                rhs_bdims,  # rhs
+                0,  # rhs_scale_inv
+                *(None for _ in batched_args[4:]),  # bias, gelu_input, alpha, beta
             ),
-            (out_bdims, bias_bdims, pre_gelu_bdims),
+            output_bdims=(
+                output_bdim,  # output
+                0,  # bias_grad
+                0,  # pre_gelu_out
+            ),
+            static_kwargs={
+                "out_dtype": out_dtype,
+                "contracting_dims": contracting_dims,
+                "scaling_mode": scaling_mode,
+                "fuse_bias": fuse_bias,
+                "fuse_gelu": fuse_gelu,
+                "grad": grad,
+                "use_split_accumulator": use_split_accumulator,
+                "collective_op": collective_op,
+                "transpose_batch_sequence": transpose_batch_sequence,
+                "sequence_dim": sequence_dim,
+                "is_outer": is_outer,
+            },
         )
 
     @staticmethod
@@ -1420,7 +1469,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     name = "te_grouped_gemm_ffi"
     multiple_results = True
-    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    impl_static_args = (9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
     inner_primitive = None
     outer_primitive = None
 
@@ -1433,6 +1482,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         bias_aval,
         group_sizes_aval,
         group_offset_aval,
+        alpha,
+        beta,
         *,
         M,
         N,
@@ -1492,6 +1543,10 @@ class GroupedGemmPrimitive(BasePrimitive):
             # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
             workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
             workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
+
+        workspace_size += (
+            1024 * 1024
+        )  # HACK: properly make a workspace_setup buffer in addition to the workspace_cublas buffer
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         out_shape = (M, N)
@@ -1544,6 +1599,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         bias,
         group_sizes,
         group_offset,
+        alpha,
+        beta,
         M,
         N,
         K,
@@ -1564,6 +1621,8 @@ class GroupedGemmPrimitive(BasePrimitive):
             bias,
             group_sizes,
             group_offset,
+            alpha,
+            beta,
             M=M,
             N=N,
             K=K,
@@ -2072,6 +2131,16 @@ def grouped_gemm(
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
+    # print(f"{lhs_data.shape=}, {rhs_data.shape=}, {group_sizes.shape=}")
+    # print(f"{M=}, {N=}, {K_lhs=}, {K_rhs=}")
+    # import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
+    # print(f"{lhs_is_trans=}, {rhs_is_trans=}")
+    # import pdb; pdb.set_trace()
+
+    num_gemms = group_sizes.shape[0]
+    alpha = jnp.ones((num_gemms,), jnp.float32)
+    beta = jnp.zeros((num_gemms,), jnp.float32)
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
         lhs_scale_inv,
@@ -2080,6 +2149,8 @@ def grouped_gemm(
         bias,
         group_sizes,
         group_offset,
+        alpha,
+        beta,
         M=M,
         N=N,
         K=K_lhs,

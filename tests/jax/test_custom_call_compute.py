@@ -1290,6 +1290,59 @@ class TestFusedQuantize:
         )
 
 
+class TestQuantizeWithVmap:
+    """Test vmap support for quantization primitives."""
+
+    @pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16])
+    @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.ROWWISE])
+    def test_vmap_quantize(self, in_dtype, scaling_mode, q_layout):
+        """Test that vmap works with tex.quantize using the general batcher."""
+        # Determine q_dtype based on scaling mode
+        if scaling_mode.is_nvfp4_scaling:
+            q_dtype = jnp.float4_e2m1fn
+        else:
+            q_dtype = jnp.float8_e4m3fn
+
+        # Create batched input (E, M, K) - E experts
+        E, M, K = 4, 64, 128
+        key = jax.random.PRNGKey(0)
+        batched_input = jax.random.uniform(key, (E, M, K), in_dtype)
+
+        # Create per-expert quantizers
+        quantizers = [
+            QuantizerFactory.create(
+                q_dtype=q_dtype,
+                scaling_mode=scaling_mode,
+                q_layout=q_layout,
+            )
+            for _ in range(E)
+        ]
+
+        # Stack quantizers for vmap
+        stacked_quantizers = jax.tree_util.tree_map(lambda *args: jnp.stack(args), *quantizers)
+
+        # Vmap over expert dimension
+        def quantize_single(x, quantizer):
+            return tex.quantize(x, quantizer=quantizer, flatten_axis=-1)
+
+        vmapped_quantize = jax.vmap(quantize_single, in_axes=(0, 0))
+        result = vmapped_quantize(batched_input, stacked_quantizers)
+
+        # Verify shapes
+        assert result.data.shape == (E, M, K)
+        assert result.scale_inv.shape[0] == E  # Per-expert scales
+
+        # Compare with calling quantize for each expert individually
+        individual_results = []
+        for i in range(E):
+            res_i = tex.quantize(batched_input[i], quantizer=quantizers[i], flatten_axis=-1)
+            individual_results.append(res_i.data)
+
+        expected = jnp.stack(individual_results, axis=0)
+        assert_allclose(result.data, expected, dtype=quantizers[0].q_dtype)
+
+
 valid_fp8_gemm_operand_types = [
     (jnp.float8_e4m3fn, jnp.float8_e4m3fn),
     (jnp.float8_e5m2, jnp.float8_e4m3fn),
@@ -1921,3 +1974,89 @@ class TestGroupedDense:
         assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
+
+
+@pytest_parametrize_wrapper(
+    "eqn,a_shape,b_shape",
+    [
+        # ('ij,jk->ik', (64, 32), (32, 128)),
+        # ('bij,bjk->bik', (8, 64, 32), (8, 32, 128)),
+        # ('abc,cde->abde', (4, 8, 16), (16, 32, 64)),
+        ("BSM,BSEC->EBCM", (2, 4096, 4096), (2, 4096, 8, 1024)),
+        ("EBCM,EMH->EBCH", (8, 2, 1024, 4096), (8, 4096, 14336)),
+        ("EBCM,EMH->EBCH", (8, 2, 1024, 4096), (8, 4096, 14336)),
+        ("EBCH,EHM->EBCM", (8, 2, 1024, 14336), (8, 14336, 4096)),
+        ("EBCM,BSEC->BSM", (8, 2, 1024, 4096), (2, 4096, 8, 1024)),
+    ],
+)
+@pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
+@pytest_parametrize_wrapper("quantization_recipe", supported_recipes)
+class TestEinsum:
+
+    def _te_einsum(self, eqn, a, b, quantization_recipe):
+        from transformer_engine.jax.flax import make_einsum_cls
+
+        te_einsum = make_einsum_cls(quantization_recipe=quantization_recipe)
+        var_collect = te_einsum.init(jax.random.PRNGKey(0), eqn, a, b)
+        return te_einsum.apply(var_collect, eqn, a, b)
+
+    def _ref_einsum(self, eqn, a, b):
+        return jnp.einsum(eqn, a, b)
+
+    def test_einsum_fwd(self, eqn, a_shape, b_shape, dtype, quantization_recipe):
+        from transformer_engine.common.recipe import Float8CurrentScaling
+        import functools
+
+        if not isinstance(quantization_recipe, Float8CurrentScaling):
+            pytest.skip("Einsum currently only supports Float8CurrentScaling recipe.")
+            return
+        key = jax.random.PRNGKey(0)
+        subkeys = jax.random.split(key, 2)
+        a = jax.random.uniform(subkeys[0], a_shape, dtype=dtype)
+        b = jax.random.uniform(subkeys[1], b_shape, dtype=dtype)
+
+        te_out = jax.jit(
+            functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe)
+        )(a, b)
+        ref_out = jax.jit(functools.partial(self._ref_einsum, eqn))(a, b)
+
+        assert_allclose(te_out, ref_out, dtype=dtype)
+
+    def test_einsum_fwd_and_bwd(self, eqn, a_shape, b_shape, dtype, quantization_recipe):
+        from transformer_engine.common.recipe import Float8CurrentScaling
+        import functools
+
+        if not isinstance(quantization_recipe, Float8CurrentScaling):
+            pytest.skip("Einsum currently only supports Float8CurrentScaling recipe.")
+            return
+        key = jax.random.PRNGKey(0)
+        subkeys = jax.random.split(key, 2)
+        a = jax.random.uniform(subkeys[0], a_shape, dtype=dtype)
+        b = jax.random.uniform(subkeys[1], b_shape, dtype=dtype)
+
+        def wrap_in_mean(f):
+            @functools.wraps(f)
+            def wrapped(*args):
+                return jnp.mean(f(*args))
+
+            return wrapped
+
+        te_fwd, te_grads = jax.jit(
+            jax.value_and_grad(
+                wrap_in_mean(
+                    functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe)
+                )
+            )
+        )(a, b)
+        ref_fwd, ref_grads = jax.jit(
+            jax.value_and_grad(wrap_in_mean(functools.partial(self._ref_einsum, eqn)))
+        )(a, b)
+
+        assert_allclose(te_fwd, ref_fwd, dtype=dtype)
+
+        assert len(te_grads) == len(
+            ref_grads
+        ), f"Number of gradients differ: {len(te_grads)=} vs {len(ref_grads)=}"
+
+        for te_grad, ref_grad in zip(te_grads, ref_grads):
+            assert_allclose(te_grad, ref_grad, dtype=dtype)

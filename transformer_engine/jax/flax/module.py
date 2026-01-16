@@ -17,7 +17,7 @@ from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
 
-from ..dense import dense
+from ..dense import dense, grouped_dense
 
 from ..layernorm import canonicalize_norm_type
 from ..layernorm import layernorm
@@ -377,6 +377,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         variable_collection: str = None,
         quantization_checkpoint_name: Optional[str] = None,
         fp8_recipe=None,
+        n_groups: int = None,
     ):
         """
         Generate a set of FP8 meta for a GEMM.
@@ -409,6 +410,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             fp8_recipe=fp8_recipe,
             quantize_meta_set=quantize_meta_set,
             checkpoint_name=quantization_checkpoint_name,
+            n_groups=n_groups,
         )
         return quantizer_set
 
@@ -1379,12 +1381,13 @@ def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str]
     class TEWrapper(te.flax.module.TransformerEngineBase):
         """Wrapper Flax module for TransformerEngine quantization support."""
 
-        def generate_quantizer_set(self, postfix: str = ""):
+        def generate_quantizer_set(self, postfix: str = "", n_groups: int = None):
             OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
             return super().generate_quantizer_set(
                 postfix=postfix,
                 variable_collection=OVERWRITE_WITH_GRADIENT,
                 fp8_recipe=quantization_recipe,
+                n_groups=n_groups,
             )
 
         @nn.compact
@@ -1438,3 +1441,119 @@ def make_dot_general_cls(quantization_recipe):
         )
 
     return wrap_function_in_te_state_module(te_dot_general, quantization_recipe, "dot_general")
+
+
+def make_einsum_cls(quantization_recipe):
+    import functools
+    import math
+    import jax
+
+    def te_einsum(generate_quantizer_set, s, x, kernel, **kwargs):
+        #   with open("/tmp/te_einsum_log.txt", "a") as f:
+        #     f.write(f"{(s, x.shape, kernel.shape)}\n")
+        def dot_general(x, kernel, dims, *args, **kwargs):
+            # print(f"TE dot_general called with dims: {dims}, args: {args}, kwargs: {kwargs}")
+            contracting_dims, batch_dims = dims
+            ((x_bdim,), (k_bdim,)) = batch_dims
+            batch_dims = (x_bdim, k_bdim)
+
+            if x_bdim != 0 or k_bdim != 0:
+                print(f"{x_bdim=}, {k_bdim=}")
+                return jax.lax.dot_general(x, kernel, dims, *args, **kwargs)
+
+            target_out_shape = jax.lax.dot_general(x, kernel, dims).shape
+
+            if x.dtype not in [jnp.float16, jnp.bfloat16, jnp.float32, jnp.float64]:
+                # HACK: because x input is bool for dispatch mask
+                x = x.astype(kernel.dtype)
+
+            # Adjust for unbatched
+            contracting_dims = tuple(
+                tuple(dim - (1 if dim > bdim else 0) for dim in cdims)
+                for bdim, cdims in zip(batch_dims, contracting_dims)
+            )
+
+            group_sizes = None
+            print(f"{x.shape=}, {kernel.shape=}, {dims=}")
+
+            def reorder_lhs_for_grouped_gemm(tensor, cdims):
+                # (B*M, K)
+                assert len(cdims) == 1, f"Only support single contracting dim for now, got {cdims}"
+                cdim = cdims[0] + 1  # account for batch dim at front
+                out = jnp.transpose(
+                    tensor, tuple(range(cdim)) + tuple(range(cdim + 1, tensor.ndim)) + (cdim,)
+                )
+                return out.reshape((-1, out.shape[-1]))
+
+            def reorder_rhs_for_grouped_gemm(tensor, bdims, cdims):
+                # (B, K, N)
+                assert (
+                    len(bdims) == 1 and len(cdims) == 1
+                ), f"Only support single batch and contracting dim for now, got {bdims}, {cdims}"
+                bdim = bdims[0]
+                assert bdim == 0, f"Only support batch dim 0 for now, got {bdim}"
+                cdim = cdims[0] + 1  # account for batch dim at front
+                out = jnp.transpose(
+                    tensor,
+                    (bdim, cdim) + tuple(i for i in range(tensor.ndim) if i != bdim and i != cdim),
+                )
+                return out.reshape((*out.shape[:2], -1))
+
+            x = reorder_lhs_for_grouped_gemm(x, contracting_dims[0])
+            kernel = reorder_rhs_for_grouped_gemm(kernel, (batch_dims[1],), contracting_dims[1])
+
+            num_groups = kernel.shape[0]
+            group_size = math.prod(x.shape[:-1]) // num_groups
+            print(f"{num_groups=}, {group_size=}, {x.shape=}, {kernel.shape=}")
+
+            group_sizes = jnp.array([group_size] * num_groups, dtype=jnp.int32)
+
+            quantizer_set = generate_quantizer_set(n_groups=num_groups)
+
+            print(
+                f"{group_sizes=}, {contracting_dims=}, {x.shape=}, {kernel.shape=},"
+                f" {contracting_dims=}"
+            )
+
+            contracting_dims = (
+                # (B*M, K)
+                (1,),
+                # (B, K, N)
+                (1,),
+            )
+            out = grouped_dense(
+                x,
+                kernel,
+                group_sizes=group_sizes,
+                contracting_dims=contracting_dims,
+                quantizer_set=quantizer_set,
+            )
+            return out.reshape(target_out_shape)
+
+        return jnp.einsum(s, x, kernel, _dot_general=dot_general, **kwargs)
+
+    return wrap_function_in_te_state_module(te_einsum, quantization_recipe, "einsum")()
+
+
+def make_ragged_dot_cls(quantization_recipe):
+    import jax
+
+    def te_grouped_dot_general(generate_quantizer_set, x, kernel, group_sizes, **kwargs):
+        num_groups = group_sizes.shape[0]
+        quantizer_set = generate_quantizer_set(n_groups=num_groups)
+
+        target_out_shape = jax.lax.ragged_dot(x, kernel, group_sizes=group_sizes).shape
+
+        out = grouped_dense(
+            x,
+            kernel,
+            group_sizes=group_sizes,
+            contracting_dims=((1,), (1,)),
+            quantizer_set=quantizer_set,
+        )
+
+        return out.reshape(target_out_shape)
+
+    return wrap_function_in_te_state_module(
+        te_grouped_dot_general, quantization_recipe, "ragged_dot"
+    )()

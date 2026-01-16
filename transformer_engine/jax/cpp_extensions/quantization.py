@@ -20,7 +20,6 @@ from .amax import AmaxScope, calculate_amax, calculate_post_rht_amax
 from .base import BasePrimitive, register_primitive
 from .misc import (
     get_padded_spec,
-    check_valid_batch_dims,
     te_dtype_to_jax_dtype,
     jax_dtype_to_te_dtype,
     multidim_transpose,
@@ -361,34 +360,33 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         stochastic_rounding,
         use_rht,
     ):
-        """
-        to describe batch rules for vmap
-        """
-        del is_outer
-        check_valid_batch_dims(batch_dims)
+        """Batch rule for quantization primitive using general batcher."""
         assert BaseDBiasQuantizePrimitive.outer_primitive is not None
-        x, scale, amax, sr_rng_state, post_rht_amax, rht_matrix = batched_args
-        x_bdim, scale_bdim, amax_bdim, _, _, _ = batch_dims
 
-        out_bdims = x_bdim, x_bdim, scale_bdim, scale_bdim, amax_bdim, x_bdim
-        return (
-            BaseDBiasQuantizePrimitive.outer_primitive.bind(
-                x,
-                scale,
-                amax,
-                sr_rng_state,
-                post_rht_amax,
-                rht_matrix,
-                out_dtype=out_dtype,
-                scaling_mode=scaling_mode,
-                q_layout=q_layout,
-                flatten_axis=flatten_axis,
-                scale_dtype=scale_dtype,
-                is_dbias=is_dbias,
-                stochastic_rounding=stochastic_rounding,
-                use_rht=use_rht,
+        return BaseDBiasQuantizePrimitive.batcher_impl(
+            batched_args,
+            batch_dims,
+            output_bdims=(
+                batch_dims[0],  # out
+                batch_dims[
+                    0
+                ],  # colwise_out (probably need to transpose according if scaling mode does it)
+                0,  # scale_inv
+                0,  # colwise_scale_inv
+                0,  # updated_amax
+                0,  # dbias
             ),
-            out_bdims,
+            static_kwargs={
+                "out_dtype": out_dtype,
+                "scaling_mode": scaling_mode,
+                "q_layout": q_layout,
+                "flatten_axis": flatten_axis,
+                "scale_dtype": scale_dtype,
+                "is_dbias": is_dbias,
+                "is_outer": is_outer,
+                "stochastic_rounding": stochastic_rounding,
+                "use_rht": use_rht,
+            },
         )
 
     @staticmethod
@@ -1213,7 +1211,7 @@ def grouped_quantize(
     assert n_groups == len(
         quantizer.quantizers
     ), f"n_groups={n_groups} != n_quantizers = {len(quantizer.quantizers)}"
-    scale = jnp.empty((n_groups,), jnp.float32)
+    scale = jnp.ones((n_groups,), jnp.float32)
 
     if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         for i, quantizer_i in enumerate(quantizer.quantizers):
