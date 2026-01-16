@@ -54,12 +54,16 @@ std::vector<InputType> create_transpose(const InputType* const input, const size
 }
 
 // Compute the global encode scale factor for a given global amax
-float compute_global_encode_scaling_factor_FP4(const float global_amax) {
+float compute_global_encode_scaling_factor_FP4(const float global_amax, const bool use_fast_nvfp4_scaling) {
   constexpr float fp8_max = 448.0f;     // 448.0f;
   constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
-  // If scale is infinity, return max value of float32
-  global_encode_scale = fminf(global_encode_scale, Numeric_Traits<float>::maxNorm);
+  // If scale is infinity, return the max normalized value 
+  const float max_norm_clamp = use_fast_nvfp4_scaling
+                               ? Numeric_Traits<bf16>::maxNorm
+                               : Numeric_Traits<float>::maxNorm;
+
+  global_encode_scale = fminf(global_encode_scale, max_norm_clamp);
   // If global amax is 0 or infinity, return 1
   if (global_amax == 0.0f || global_encode_scale == 0.0f) {
     return 1.0f;
@@ -76,10 +80,11 @@ void quantize_nvfp4_1d(float (*OP)(const float),
                        const size_t rows,
                        const size_t cols,
                        const size_t scales_stride,
-                       const float global_amax) {
+                       const float global_amax,
+                       const bool use_fast_nvfp4_scaling) {
 
     // Compute a global encoding/decoding scaling factor for all S_dec_b
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_nvfp4_scaling);
 
     constexpr size_t block_size_X = 16;
     const size_t blocks_X = divide_round_up(cols, block_size_X);
@@ -122,8 +127,12 @@ void quantize_nvfp4_1d(float (*OP)(const float),
 
             const size_t scale_idx = i * scales_stride + block_X;
             scales[scale_idx] = S_dec_b_fp8;
-            // Numerical truncation to match GPU implementation, which uses mixed precision FMA instruction
-            const float scale_reciprocal = static_cast<float>(static_cast<bf16>(S_enc_b_fp8));
+
+            float scale_reciprocal = S_enc_b_fp8;
+            if (use_fast_nvfp4_scaling) {
+                // Numerical truncation to match GPU implementation, if mixed precision FMA instruction is used
+                scale_reciprocal = static_cast<float>(static_cast<bf16>(scale_reciprocal));
+            }
 
             for (size_t j = j_min; j < j_max; j += 2) {
                 const int idx_pair = (i * cols + j) / 2;
@@ -138,7 +147,7 @@ void quantize_nvfp4_1d(float (*OP)(const float),
                 fp4e2m1x2 casted_to_e2m1_pair(scaled_elt_pair);
                 output[idx_pair] = casted_to_e2m1_pair;
 
-                // const double2 truncated_pair = cvt_fp4x2_to_double2(casted_to_e2m1_pair);
+                const double2 truncated_pair = cvt_fp4x2_to_double2(casted_to_e2m1_pair);
             }
         }
     }
@@ -151,9 +160,10 @@ void compute_2d_mathematical_scales(float (*OP)(const float),
                                    const size_t rows,
                                    const size_t cols,
                                    const float global_amax,
-                                   std::vector<std::vector<fp8e4m3>>& math_scales) {
+                                   std::vector<std::vector<fp8e4m3>>& math_scales,
+                                   const bool use_fast_nvfp4_scaling) {
 
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_nvfp4_scaling);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
     const size_t blocks_Y = divide_round_up(rows, block_size_Y);
@@ -197,13 +207,14 @@ void quantize_nvfp4_2d(float (*OP)(const float),
                        const size_t rows,
                        const size_t cols,
                        const size_t scales_stride,
-                       const float global_amax) {
+                       const float global_amax,
+                       const bool use_fast_nvfp4_scaling) {
 
     // Step 1: Compute mathematical 8x8 scaling factors
     std::vector<std::vector<fp8e4m3>> math_scales;
-    compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales);
+    compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales, use_fast_nvfp4_scaling);
 
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_nvfp4_scaling);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
     const size_t blocks_Y = divide_round_up(rows, block_size_Y);
@@ -284,11 +295,12 @@ void quantize_nvfp4(float (*OP)(const float),
                     const size_t cols,
                     const size_t scales_stride,
                     const float global_amax,
+                    const bool use_fast_nvfp4_scaling,
                     const bool use_2d_quantization = false) {
     if (use_2d_quantization) {
-        quantize_nvfp4_2d(OP, input, output, scales, rows, cols, scales_stride, global_amax);
+        quantize_nvfp4_2d(OP, input, output, scales, rows, cols, scales_stride, global_amax, use_fast_nvfp4_scaling);
     } else {
-        quantize_nvfp4_1d(OP, input, output, scales, rows, cols, scales_stride, global_amax);
+        quantize_nvfp4_1d(OP, input, output, scales, rows, cols, scales_stride, global_amax, use_fast_nvfp4_scaling);
     }
 }
 
@@ -304,6 +316,7 @@ void compute_ref(float (*OP)(const float),
                  const size_t cols,
                  const size_t scales_stride,
                  const size_t scales_stride_t,
+                 const bool use_fast_nvfp4_scaling,
                  const bool use_2d_quantization = false)
 {
     std::vector<InputType> input_t = create_transpose(input, rows, cols);
@@ -311,7 +324,7 @@ void compute_ref(float (*OP)(const float),
     if (use_2d_quantization) {
         // Step 1: Compute mathematical 8×8 scaling factors
         std::vector<std::vector<fp8e4m3>> math_scales;
-        compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales);
+        compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales, use_fast_nvfp4_scaling);
 
         constexpr size_t block_size_Y = 16;
         constexpr size_t block_size_X = 16;
@@ -338,12 +351,16 @@ void compute_ref(float (*OP)(const float),
 
         // Step 4: Process quantized outputs using the same algorithm as quantize_nvfp4_2d
         // (This part processes the actual FP4 data using the mathematical scaling factors)
-        quantize_nvfp4_2d(OP, input, output, nullptr, rows, cols, scales_stride, global_amax); // scales already filled
-        quantize_nvfp4_2d(OP, input_t.data(), output_t, nullptr, cols, rows, scales_stride_t, global_amax); // scales_t already filled
+        quantize_nvfp4_2d(OP, input, output, nullptr, rows, cols, scales_stride, global_amax,
+                          use_fast_nvfp4_scaling); // scales already filled
+        quantize_nvfp4_2d(OP, input_t.data(), output_t, nullptr, cols, rows, scales_stride_t, global_amax,
+                          use_fast_nvfp4_scaling); // scales_t already filled
 
     } else {
-        quantize_nvfp4(OP, input, output, scales, rows, cols, scales_stride, global_amax, use_2d_quantization);
-        quantize_nvfp4(OP, input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, global_amax, use_2d_quantization);
+        quantize_nvfp4(OP, input, output, scales, rows, cols, scales_stride, global_amax,
+                       use_fast_nvfp4_scaling, use_2d_quantization);
+        quantize_nvfp4(OP, input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, global_amax,
+                       use_fast_nvfp4_scaling, use_2d_quantization);
     }
 }
 
@@ -511,7 +528,8 @@ void compareResults_nvfp4(const Tensor &test,
 
 template <typename InputType>
 void performTest(float (*OP)(const float),
-                 const std::vector<size_t>& shape) {
+                 const std::vector<size_t>& shape,
+                 const bool use_fast_nvfp4_scaling) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -572,15 +590,16 @@ void performTest(float (*OP)(const float),
                            cols,
                            scales_stride,
                            scales_stride_t,
+                           use_fast_nvfp4_scaling,
                            use_2d_quantization);
-
-    QuantizationConfigWrapper quant_config;
-
     // Initialize stochastic rounding
     Tensor rng_state("rng_state", std::vector<size_t>{2}, DType::kInt64);
     rng_state.rowwise_cpu_dptr<int64_t>()[0] = 123;  // rng_seed
     rng_state.rowwise_cpu_dptr<int64_t>()[1] = 321;  // rng_sequence
     rng_state.from_cpu();
+
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_fast_nvfp4_scaling(use_fast_nvfp4_scaling);
     quant_config.set_stochastic_rounding(false);
     quant_config.set_rng_state(rng_state.data());
 
@@ -658,12 +677,18 @@ std::vector<ActivationType> Activation_types = {
     ActivationType::Identity
 };
 
+std::vector<bool> use_fast_nvfp4_scaling_vec = {
+    false,
+    true
+};
+
 }  // namespace
 
 class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
     <std::tuple<ActivationType,
                 std::vector<size_t>,
-                transformer_engine::DType>> {};
+                transformer_engine::DType,
+                bool>> {};
 
 TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     // Skip tests for pre-Blackwell architectures
@@ -677,6 +702,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     const ActivationType Act_type = std::get<0>(GetParam());
     const auto tensor_dims = std::get<1>(GetParam());
     const DType input_type = std::get<2>(GetParam());
+    const bool use_fast_nvfp4_scaling = std::get<3>(GetParam());
 
     // Skip tests if the input tensor is 1D
     if (tensor_dims.size() < 2) {
@@ -694,7 +720,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     }
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-        performTest<InputType>(OP, tensor_dims);
+        performTest<InputType>(OP, tensor_dims, use_fast_nvfp4_scaling);
     );
 }
 
@@ -716,7 +742,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(tensor_dims),
-        ::testing::Values(DType::kBFloat16)),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::ValuesIn(use_fast_nvfp4_scaling_vec)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param));
       const auto& shape = std::get<1>(info.param);
@@ -724,5 +751,8 @@ INSTANTIATE_TEST_SUITE_P(
         name += "X" + std::to_string(s);
       }
       name += "X" + test::typeName(std::get<2>(info.param));
+      if (std::get<3>(info.param)) {
+        name += "X_FAST_SCALING";
+      }
         return name;
     });

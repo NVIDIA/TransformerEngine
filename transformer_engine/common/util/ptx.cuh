@@ -153,24 +153,6 @@ __device__ __forceinline__ void mbarrier_arrive(uint64_t *mbar) {
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-__device__ __forceinline__ void mbarrier_arrive_relaxed_cta_shared_cta(uint64_t *mbar) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
-  asm volatile("mbarrier.arrive.relaxed.cta.shared::cta.b64 _, [%0], 1;" ::"r"(mbar_ptr));
-#else
-  NVTE_DEVICE_ERROR("mbarrier_arrive_relaxed_cta_shared_cta is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-}
-
-__device__ __forceinline__ void mbarrier_arrive_release_cta_shared_cta(uint64_t *mbar) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
-  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0], 1;" ::"r"(mbar_ptr));
-#else
-  NVTE_DEVICE_ERROR("mbarrier_arrive_release_cta_shared_cta is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-}
-
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
 __device__ __forceinline__ void mbarrier_arrive_expect_tx(uint64_t *mbar, const uint32_t tx_count) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -292,28 +274,6 @@ __device__ __forceinline__ void mbarrier_wait_parity_acquire_cta_shared_cta(uint
       : "memory");
 #else
   NVTE_DEVICE_ERROR("mbarrier_wait_parity_acquire_cta_shared_cta is only supported on SM 10.0+.");
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-}
-
-__device__ __forceinline__ void mbarrier_wait_parity_relaxed_cta_shared_cta(uint64_t *mbar,
-                                                                            uint32_t phase_parity) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
-  asm volatile(
-      "{\n\t"
-      ".reg .b64 r1; \n\t"
-      ".reg .pred waitComplete; \n\t"  // predicate representing if barrier condition is met
-      "WAIT: \n\t"                     // loop around barrier wait
-      "mbarrier.try_wait.parity.relaxed.cta.shared::cta.b64  waitComplete, [%0], %1; \n\t"
-      "@waitComplete bra DONE; \n\t"  // mbarrier conditions are met
-      "bra WAIT; \n\t"                // just a time-out, try again
-      "DONE: \n\t"
-      "}\n\t"
-      :
-      : "r"(mbar_ptr), "r"(phase_parity)
-      : "memory");
-#else
-  NVTE_DEVICE_ERROR("mbarrier_wait_parity_relaxed_cta_shared_cta is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -779,41 +739,89 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, c
   }
 }
 
+template <typename SCALING_COEFFICIENT_TYPE>
 __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
-    const uint64_t in03, const uint64_t in47, const bf16 scaling_coefficient) {
+    const uint64_t in03, const uint64_t in47, const SCALING_COEFFICIENT_TYPE scaling_coefficient) {
   uint32_t out_8x = 0;
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
+    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE,bf16>::value) {
+      asm volatile(
+          "{\n"
+          ".reg.f32 zero; \n\t"
+          "mov.b32 zero, 0; \n\t"
+          ".reg.b16 scaling_coeff; \n\t"
+          "mov.b16 scaling_coeff, %3; \n\t"
+          ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
+          "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
+          "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
+  
+          ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+          "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
+  
+          ".reg.b8 f0, f1, f2, f3; \n\t"
+          // Elements reordered to match e2m1x4 packing order (v1,v0)
+          "cvt.rn.satfinite.e2m1x2.f32 f0, v1, v0;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f1, v3, v2;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f2, v5, v4;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f3, v7, v6;\n\t"
+          "mov.b32 %0, {f0, f1, f2, f3};\n"
+          "}"
+          : "=r"(out_8x)
+          : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)));
+    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE,float>::value) {
     asm volatile(
         "{\n"
-        ".reg.f32 zero; \n\t"
-        "mov.b32 zero, 0; \n\t"
-        ".reg.b16 scaling_coeff; \n\t"
-        "mov.b16 scaling_coeff, %3; \n\t"
-        ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
-        "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
-        "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
+        ".reg.b64 scaling_coeff_2x; \n\t"
+        "mov.b64 scaling_coeff_2x, {%3, %3}; \n\t"
+        ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
+        "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16}, %1; \n\t"
+        "mov.b64 {v4_bf16, v5_bf16, v6_bf16, v7_bf16}, %2; \n\t"
 
-        ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
-        "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
+        ".reg.b32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+        "cvt.f32.bf16 v0, v0_bf16; \n\t"
+        "cvt.f32.bf16 v1, v1_bf16; \n\t"
+        "cvt.f32.bf16 v2, v2_bf16; \n\t"
+        "cvt.f32.bf16 v3, v3_bf16; \n\t"
+        "cvt.f32.bf16 v4, v4_bf16; \n\t"
+        "cvt.f32.bf16 v5, v5_bf16; \n\t"
+        "cvt.f32.bf16 v6, v6_bf16; \n\t"
+        "cvt.f32.bf16 v7, v7_bf16; \n\t"
+
+        ".reg.b64 v01, v23, v45, v67; \n\t"
+        "mov.b64 v01, {v0, v1}; \n\t"
+        "mov.b64 v23, {v2, v3}; \n\t"
+        "mov.b64 v45, {v4, v5}; \n\t"
+        "mov.b64 v67, {v6, v7}; \n\t"
+        "mul.f32x2 v01, v01, scaling_coeff_2x; \n\t"
+        "mul.f32x2 v23, v23, scaling_coeff_2x; \n\t"
+        "mul.f32x2 v45, v45, scaling_coeff_2x; \n\t"
+        "mul.f32x2 v67, v67, scaling_coeff_2x; \n\t"
+        // Elements reordered to match the packing order (v1,v0)
+        "mov.b64 {v1, v0}, v01; \n\t"
+        "mov.b64 {v3, v2}, v23; \n\t"
+        "mov.b64 {v5, v4}, v45; \n\t"
+        "mov.b64 {v7, v6}, v67; \n\t"
 
         ".reg.b8 f0, f1, f2, f3; \n\t"
-        // Elements reordered to match e2m1x4 packing order (v1,v0)
-        "cvt.rn.satfinite.e2m1x2.f32 f0, v1, v0;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f1, v3, v2;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f2, v5, v4;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f3, v7, v6;\n\t"
-        "mov.b32 %0, {f0, f1, f2, f3};\n"
+        "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f2, v4, v5;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 f3, v6, v7;\n\t"
+        "mov.b32 %0, {f0, f1, f2, f3};\n\t"
         "}"
         : "=r"(out_8x)
-        : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)));
+        : "l"(in03), "l"(in47), "f"(scaling_coefficient));
+    } else {
+      NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
+    }
   } else {
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
@@ -822,41 +830,80 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
   return out_8x;
 }
 
+template <typename SCALING_COEFFICIENT_TYPE>
 __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
-    const uint64_t in03, const uint64_t in47, const bf16 scaling_coefficient,
+    const uint64_t in03, const uint64_t in47, const SCALING_COEFFICIENT_TYPE scaling_coefficient,
     const uint32_t rbits03, const uint32_t rbits47) {
   uint32_t out_8x = 0;
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
-    asm volatile(
-        "{\n"
-        ".reg.f32 zero; \n\t"
-        "mov.b32 zero, 0; \n\t"
-        ".reg.b16 scaling_coeff; \n\t"
-        "mov.b16 scaling_coeff, %3; \n\t"
-        ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
-        "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
-        "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
+    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE,bf16>::value) {
+      asm volatile(
+          "{\n"
+          ".reg.f32 zero; \n\t"
+          "mov.b32 zero, 0; \n\t"
+          ".reg.b16 scaling_coeff; \n\t"
+          "mov.b16 scaling_coeff, %3; \n\t"
+          ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
+          "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
+          "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
 
-        ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
-        "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
-        "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
+          ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+          "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
 
-        ".reg.b16 b03, b47; \n\t"
-        // Elements reordered to match e2m1x4 packing order (v3,v2,v1,v0)
-        "cvt.rs.satfinite.e2m1x4.f32 b03, {v3, v2, v1, v0}, %4; \n\t"
-        "cvt.rs.satfinite.e2m1x4.f32 b47, {v7, v6, v5, v4}, %5; \n\t"
-        "mov.b32 %0, {b03, b47};\n"
-        "}"
-        : "=r"(out_8x)
-        : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)),
-          "r"(rbits03), "r"(rbits47));
+          ".reg.b16 b03, b47; \n\t"
+          // Elements reordered to match e2m1x4 packing order (v3,v2,v1,v0)
+          "cvt.rs.satfinite.e2m1x4.f32 b03, {v3, v2, v1, v0}, %4; \n\t"
+          "cvt.rs.satfinite.e2m1x4.f32 b47, {v7, v6, v5, v4}, %5; \n\t"
+          "mov.b32 %0, {b03, b47};\n"
+          "}"
+          : "=r"(out_8x)
+          : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)),
+            "r"(rbits03), "r"(rbits47));
+    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE,float>::value) {
+      asm volatile(
+          "{\n"
+          ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
+          "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16}, %1; \n\t"
+          "mov.b64 {v4_bf16, v5_bf16, v6_bf16, v7_bf16}, %2; \n\t"
+
+          ".reg.b32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+          "cvt.f32.bf16 v0, v0_bf16; \n\t"
+          "cvt.f32.bf16 v1, v1_bf16; \n\t"
+          "cvt.f32.bf16 v2, v2_bf16; \n\t"
+          "cvt.f32.bf16 v3, v3_bf16; \n\t"
+          "cvt.f32.bf16 v4, v4_bf16; \n\t"
+          "cvt.f32.bf16 v5, v5_bf16; \n\t"
+          "cvt.f32.bf16 v6, v6_bf16; \n\t"
+          "cvt.f32.bf16 v7, v7_bf16; \n\t"
+
+          "mul.f32 v0, v0, %3; \n\t"
+          "mul.f32 v1, v1, %3; \n\t"
+          "mul.f32 v2, v2, %3; \n\t"
+          "mul.f32 v3, v3, %3; \n\t"
+          "mul.f32 v4, v4, %3; \n\t"
+          "mul.f32 v5, v5, %3; \n\t"
+          "mul.f32 v6, v6, %3; \n\t"
+          "mul.f32 v7, v7, %3; \n\t"
+          ".reg.b16 b03, b47; \n\t"
+          // Elements reordered to match e2m1x4 packing order (v3,v2,v1,v0)
+          "cvt.rs.satfinite.e2m1x4.f32 b03, {v3, v2, v1, v0}, %4; \n\t"
+          "cvt.rs.satfinite.e2m1x4.f32 b47, {v7, v6, v5, v4}, %5; \n\t"
+          "mov.b32 %0, {b03, b47};\n"
+          "}"
+          : "=r"(out_8x)
+          : "l"(in03), "l"(in47), "f"(scaling_coefficient),
+            "r"(rbits03), "r"(rbits47));
+    } else {
+      NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
+    }
   } else {
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
