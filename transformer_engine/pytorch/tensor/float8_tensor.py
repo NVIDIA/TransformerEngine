@@ -918,8 +918,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         elif self._transpose is not None:
             transpose_shape = self._transpose.shape
             return tuple(transpose_shape[1:]) + (transpose_shape[0],)
-        else:
-            raise RuntimeError("Both data and transpose are None")
+        raise RuntimeError("Both data and transpose are None")
 
     @property
     def is_cuda(self):
