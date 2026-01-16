@@ -145,6 +145,7 @@ def test_dot_product_attention(
 
     if config.window_size == (-1, -1) and swa:
         config.window_size = [2, 2]
+
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
     qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
     if qkv_format == "thd" and "padding" not in config.attn_mask_type:
@@ -162,6 +163,7 @@ def test_dot_product_attention(
         is_training=is_training,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+
     if not fused_attn_supported:
         is_training = False
         available_backends, _, fused_attn_backends = get_available_attention_backends(
@@ -682,9 +684,10 @@ model_configs_swa = {
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_swa])
 @pytest.mark.parametrize("model", model_configs_swa.keys())
-def test_dpa_sliding_window(dtype, model_configs, model):
+@pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "sbhd_sbhd_sbhd"])
+def test_dpa_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with sliding window attention"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, True, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, True, False)
 
 
 model_configs_alibi_slopes = {
