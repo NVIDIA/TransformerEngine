@@ -745,7 +745,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
   uint32_t out_8x = 0;
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
-    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE,bf16>::value) {
+    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
       asm volatile(
           "{\n"
           ".reg.f32 zero; \n\t"
@@ -755,7 +755,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
           ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
           "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
           "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
-  
+
           ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
           "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
           "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
@@ -765,7 +765,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
           "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
           "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
           "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
-  
+
           ".reg.b8 f0, f1, f2, f3; \n\t"
           // Elements reordered to match e2m1x4 packing order (v1,v0)
           "cvt.rn.satfinite.e2m1x2.f32 f0, v1, v0;\n\t"
@@ -776,49 +776,49 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
           "}"
           : "=r"(out_8x)
           : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)));
-    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE,float>::value) {
-    asm volatile(
-        "{\n"
-        ".reg.b64 scaling_coeff_2x; \n\t"
-        "mov.b64 scaling_coeff_2x, {%3, %3}; \n\t"
-        ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
-        "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16}, %1; \n\t"
-        "mov.b64 {v4_bf16, v5_bf16, v6_bf16, v7_bf16}, %2; \n\t"
+    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
+      asm volatile(
+          "{\n"
+          ".reg.b64 scaling_coeff_2x; \n\t"
+          "mov.b64 scaling_coeff_2x, {%3, %3}; \n\t"
+          ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
+          "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16}, %1; \n\t"
+          "mov.b64 {v4_bf16, v5_bf16, v6_bf16, v7_bf16}, %2; \n\t"
 
-        ".reg.b32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
-        "cvt.f32.bf16 v0, v0_bf16; \n\t"
-        "cvt.f32.bf16 v1, v1_bf16; \n\t"
-        "cvt.f32.bf16 v2, v2_bf16; \n\t"
-        "cvt.f32.bf16 v3, v3_bf16; \n\t"
-        "cvt.f32.bf16 v4, v4_bf16; \n\t"
-        "cvt.f32.bf16 v5, v5_bf16; \n\t"
-        "cvt.f32.bf16 v6, v6_bf16; \n\t"
-        "cvt.f32.bf16 v7, v7_bf16; \n\t"
+          ".reg.b32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+          "cvt.f32.bf16 v0, v0_bf16; \n\t"
+          "cvt.f32.bf16 v1, v1_bf16; \n\t"
+          "cvt.f32.bf16 v2, v2_bf16; \n\t"
+          "cvt.f32.bf16 v3, v3_bf16; \n\t"
+          "cvt.f32.bf16 v4, v4_bf16; \n\t"
+          "cvt.f32.bf16 v5, v5_bf16; \n\t"
+          "cvt.f32.bf16 v6, v6_bf16; \n\t"
+          "cvt.f32.bf16 v7, v7_bf16; \n\t"
 
-        ".reg.b64 v01, v23, v45, v67; \n\t"
-        "mov.b64 v01, {v0, v1}; \n\t"
-        "mov.b64 v23, {v2, v3}; \n\t"
-        "mov.b64 v45, {v4, v5}; \n\t"
-        "mov.b64 v67, {v6, v7}; \n\t"
-        "mul.f32x2 v01, v01, scaling_coeff_2x; \n\t"
-        "mul.f32x2 v23, v23, scaling_coeff_2x; \n\t"
-        "mul.f32x2 v45, v45, scaling_coeff_2x; \n\t"
-        "mul.f32x2 v67, v67, scaling_coeff_2x; \n\t"
-        // Elements reordered to match the packing order (v1,v0)
-        "mov.b64 {v1, v0}, v01; \n\t"
-        "mov.b64 {v3, v2}, v23; \n\t"
-        "mov.b64 {v5, v4}, v45; \n\t"
-        "mov.b64 {v7, v6}, v67; \n\t"
+          ".reg.b64 v01, v23, v45, v67; \n\t"
+          "mov.b64 v01, {v0, v1}; \n\t"
+          "mov.b64 v23, {v2, v3}; \n\t"
+          "mov.b64 v45, {v4, v5}; \n\t"
+          "mov.b64 v67, {v6, v7}; \n\t"
+          "mul.f32x2 v01, v01, scaling_coeff_2x; \n\t"
+          "mul.f32x2 v23, v23, scaling_coeff_2x; \n\t"
+          "mul.f32x2 v45, v45, scaling_coeff_2x; \n\t"
+          "mul.f32x2 v67, v67, scaling_coeff_2x; \n\t"
+          // Elements reordered to match the packing order (v1,v0)
+          "mov.b64 {v1, v0}, v01; \n\t"
+          "mov.b64 {v3, v2}, v23; \n\t"
+          "mov.b64 {v5, v4}, v45; \n\t"
+          "mov.b64 {v7, v6}, v67; \n\t"
 
-        ".reg.b8 f0, f1, f2, f3; \n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f2, v4, v5;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 f3, v6, v7;\n\t"
-        "mov.b32 %0, {f0, f1, f2, f3};\n\t"
-        "}"
-        : "=r"(out_8x)
-        : "l"(in03), "l"(in47), "f"(scaling_coefficient));
+          ".reg.b8 f0, f1, f2, f3; \n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f2, v4, v5;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f3, v6, v7;\n\t"
+          "mov.b32 %0, {f0, f1, f2, f3};\n\t"
+          "}"
+          : "=r"(out_8x)
+          : "l"(in03), "l"(in47), "f"(scaling_coefficient));
     } else {
       NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
     }
@@ -837,7 +837,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
   uint32_t out_8x = 0;
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
-    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE,bf16>::value) {
+    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
       asm volatile(
           "{\n"
           ".reg.f32 zero; \n\t"
@@ -867,7 +867,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
           : "=r"(out_8x)
           : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)),
             "r"(rbits03), "r"(rbits47));
-    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE,float>::value) {
+    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
       asm volatile(
           "{\n"
           ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
@@ -899,8 +899,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
           "mov.b32 %0, {b03, b47};\n"
           "}"
           : "=r"(out_8x)
-          : "l"(in03), "l"(in47), "f"(scaling_coefficient),
-            "r"(rbits03), "r"(rbits47));
+          : "l"(in03), "l"(in47), "f"(scaling_coefficient), "r"(rbits03), "r"(rbits47));
     } else {
       NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
     }

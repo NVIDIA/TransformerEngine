@@ -58,7 +58,7 @@ float compute_global_encode_scaling_factor_FP4(const float global_amax, const bo
   constexpr float fp8_max = 448.0f;     // 448.0f;
   constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
-  // If scale is infinity, return the max normalized value 
+  // If scale is infinity, return the max normalized value
   const float max_norm_clamp = use_fast_math
                                ? Numeric_Traits<bf16>::maxNorm
                                : Numeric_Traits<float>::maxNorm;
