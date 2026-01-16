@@ -55,3 +55,12 @@ def register_builtins(registry: OpRegistry) -> None:
     except Exception as e:
         # HYGON may not be available, this is expected
         pass
+
+    # Register Metax (VENDOR) implementations
+    try:
+        from .backends.vendor.metax.register_ops import register_builtins as register_metax
+        register_metax(registry)
+    except Exception as e:
+        # Metax may not be available, this is expected
+        pass
+
