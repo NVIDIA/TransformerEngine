@@ -1091,10 +1091,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         allow_different_data_and_param_types: bool = False,
     ) -> Generator[torch.Tensor, None, None]:
         """Checks and prepares for FWD execution."""
-        yield self.prepare_forward(
+        inp = self.prepare_forward(
             inp, num_gemms, allow_non_contiguous, allow_different_data_and_param_types
         )
-        self.end_forward()
+        try:
+            yield inp
+        finally:
+            self.end_forward()
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
