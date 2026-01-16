@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -20,15 +20,6 @@ using namespace transformer_engine;
 using namespace test;
 
 namespace {
-
-enum ActivationType {
-    Identity,
-    GeLU,
-    SiLU,
-    ReLU,
-    QGeLU,
-    SReLU
-};
 
 double2 cvt_fp4x2_to_double2(fp4e2m1x2 fp4_pair) {
     const __half2_raw raw_truncated_to_fp4e2m1_pair =
@@ -511,7 +502,11 @@ void compareResults_nvfp4(const Tensor &test,
 
 template <typename InputType>
 void performTest(float (*OP)(const float),
-                 const std::vector<size_t>& shape) {
+                 const size_t K,
+                 const size_t M,
+                 const std::vector<size_t>& M_i,
+                 const std::vector<size_t>& Offset_i,
+                 const bool stochastic_rounding = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -520,8 +515,6 @@ void performTest(float (*OP)(const float),
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
 
-    // Use get_scale_tensor_dims for NVFP4 scale tensor dimensions
-    // Now that CheckScaleTensorShape is fixed, this should work correctly
     const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16);
     const std::array<size_t,4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
 
@@ -581,28 +574,13 @@ void performTest(float (*OP)(const float),
     rng_state.rowwise_cpu_dptr<int64_t>()[0] = 123;  // rng_seed
     rng_state.rowwise_cpu_dptr<int64_t>()[1] = 321;  // rng_sequence
     rng_state.from_cpu();
-    quant_config.set_stochastic_rounding(false);
+    quant_config.set_stochastic_rounding(stochastic_rounding);
     quant_config.set_rng_state(rng_state.data());
 
     // Set 2D quantization based on compile-time flag
     quant_config.set_nvfp4_2d_quantization(use_2d_quantization);
 
-    // Call appropriate function based on operation type
-    // Activation functions take 3 parameters (input, output, stream)
-    // nvte_quantize_v2 takes 4 parameters (input, output, quant_config, stream)
-    if (OP == &gelu) {
-        nvte_gelu(input.data(), output.data(), 0);
-    } else if (OP == &silu) {
-        nvte_silu(input.data(), output.data(), 0);
-    } else if (OP == &relu) {
-        nvte_relu(input.data(), output.data(), 0);
-    } else if (OP == &qgelu) {
-        nvte_qgelu(input.data(), output.data(), 0);
-    } else if (OP == &srelu) {
-        nvte_srelu(input.data(), output.data(), 0);
-    } else {
-        nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
-    }
+    nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
 
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
@@ -634,38 +612,57 @@ void performTest(float (*OP)(const float),
                                       scale_mismatches_num);
 }
 
-std::vector<std::vector<size_t>> tensor_dims = {
-    {32, 32},
-    {32, 64},
-    {64, 32},
-    {64, 96},
-    {128, 128},
-    {256, 256},
-    {512, 512},
-    {1024, 1024},
-    {2048, 2048},
-    {128, 256},
-    {8192, 128},
-    {2048, 160},
-    {8, 32, 1024},
-    {16, 8, 4, 512},
-    {1024, 16384},
-    {4096, 13312},
+// K = Hidden dim
+std::vector<size_t> K = {
+    32,
+    64,
+    128,
+    512 + 32,
+    1024 + 64,
 };
 
-// Only the Identity activation is currently supported.
-std::vector<ActivationType> Activation_types = {
-    ActivationType::Identity
+// Logical tensor dim M = Batch Size * Sequence Length
+std::vector<size_t> M = {
+    32,
+    64,
+    256 + 64,
+    1024 + 32,
+};
+
+// Dim M of i-th tensor in a group
+std::vector<std::vector<size_t>> M_i = {
+    {32},
+    {32, 32},
+    {64, 32, 128},
+    {32, 96, 160, 64},
+    {320, 32, 288, 128},
+};
+
+// Offset of i-th tensor in a group
+std::vector<std::vector<size_t>> Offset_i = {
+    {0},
+    {0, 32},
+    {0, 64, 96},
+    {0, 32, 128, 288},
+    {0, 320, 352, 640},
+};
+
+std::vector<bool> stochastic_rounding = {
+    false,
+    // true
 };
 
 }  // namespace
 
-class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
-    <std::tuple<ActivationType,
+class GroupedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
+    <std::tuple<size_t,
+                size_t,
                 std::vector<size_t>,
-                transformer_engine::DType>> {};
+                std::vector<size_t>,
+                transformer_engine::DType,
+                bool>> {};
 
-TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
+TEST_P(GroupedCastTransposeNVFP4TestSuite, TestGroupedCastTransposeNVFP4) {
     // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
@@ -674,55 +671,63 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     using namespace transformer_engine;
     using namespace test;
 
-    const ActivationType Act_type = std::get<0>(GetParam());
-    const auto tensor_dims = std::get<1>(GetParam());
-    const DType input_type = std::get<2>(GetParam());
+    const size_t K = std::get<0>(GetParam());
+    const size_t M = std::get<1>(GetParam());
+    const std::vector<size_t> M_i = std::get<2>(GetParam());
+    const std::vector<size_t> Offset_i = std::get<3>(GetParam());
+    const DType input_type = std::get<4>(GetParam());
+    const bool is_stochastic_rounding = std::get<5>(GetParam());
 
-    // Skip tests if the input tensor is 1D
-    if (tensor_dims.size() < 2) {
+    if (M_i.size() != Offset_i.size()) {
+        GTEST_SKIP();
+    }
+
+    const size_t group_size = M_i.size();
+    // Skip tests if tensors overlap with each other
+    for (size_t i = 0; i < group_size - 1; ++i) {
+        if (Offset_i[i] + M_i[i] > Offset_i[i+1]) {
+            GTEST_SKIP();
+        }
+    }
+    // Last tensor must be within the allocated group tensor
+    if (Offset_i.back() + M_i.back() > M) {
         GTEST_SKIP();
     }
 
     // Forward activations
     auto OP = &identity;
-    switch (Act_type) {
-        case ActivationType::GeLU: OP = &gelu; break;
-        case ActivationType::SiLU: OP = &silu; break;
-        case ActivationType::ReLU: OP = &relu; break;
-        case ActivationType::QGeLU: OP = &qgelu; break;
-        case ActivationType::SReLU: OP = &srelu; break;
-    }
-
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-        performTest<InputType>(OP, tensor_dims);
+        performTest<InputType>(OP, K, M, M_i, Offset_i, is_stochastic_rounding);
     );
-}
-
-std::string to_string(const ActivationType Act_type) {
-    switch (Act_type) {
-        case ActivationType::Identity:  return "CAST_ONLY";
-        case ActivationType::GeLU:      return "GeLU";
-        case ActivationType::SiLU:      return "SiLU";
-        case ActivationType::ReLU:      return "ReLU";
-        case ActivationType::QGeLU:     return "QGeLU";
-        case ActivationType::SReLU:     return "SReLU";
-        default: return "";
-    }
 }
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
-    FusedCastTransposeNVFP4TestSuite,
+    GroupedCastTransposeNVFP4TestSuite,
     ::testing::Combine(
-        ::testing::ValuesIn(Activation_types),
-        ::testing::ValuesIn(tensor_dims),
-        ::testing::Values(DType::kBFloat16)),
-    [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
-        std::string name = to_string(std::get<0>(info.param));
-      const auto& shape = std::get<1>(info.param);
-      for ( const auto& s: shape) {
-        name += "X" + std::to_string(s);
-      }
-      name += "X" + test::typeName(std::get<2>(info.param));
+        ::testing::ValuesIn(K),
+        ::testing::ValuesIn(M),
+        ::testing::ValuesIn(M_i),
+        ::testing::ValuesIn(Offset_i),
+        ::testing::Values(DType::kBFloat16)
+        ::testing::ValuesIn(stochastic_rounding)),
+    [](const testing::TestParamInfo<GroupedCastTransposeNVFP4TestSuite::ParamType>& info) {
+        std::string name = "";
+        name += "K" + std::to_string(std::get<0>(info.param)) + "X";
+        name += "M" + std::to_string(std::get<1>(info.param)) + "X";
+
+        name += "Group";
+        const auto& M_i_ = std::get<2>(info.param);
+        for (const auto& m: M_i_) {
+            name += "X" + std::to_string(m);
+        }
+        name += "Offset";
+        const auto& Offset_i_ = std::get<3>(info.param);
+        for (const auto& offset: Offset_i_) {
+            name += "X" + std::to_string(offset);
+        }
+        name += "X" + test::typeName(std::get<4>(info.param));
+        name += "X" + (std::get<5>(info.param) ? "SR" : "RN");
         return name;
-    });
+    }
+);
