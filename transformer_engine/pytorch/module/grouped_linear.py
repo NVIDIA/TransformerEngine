@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -143,7 +143,12 @@ class _GroupedLinear(torch.autograd.Function):
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
         if fp8 and not debug:
-            inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
+            # Disable bulk allocation when CPU offloading is active: offloading skips small
+            # tensors (like scales), but bulk allocation shares storage across all tensors,
+            # so if scales can't be offloaded, nothing in the group can be offloaded.
+            inputmats = tex.split_quantize(
+                inp_view, m_splits, input_quantizers, disable_bulk_allocation=cpu_offloading
+            )
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
@@ -702,7 +707,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=self.num_gemms)
 
-        self.reset_parameters(defer_init=device == "meta")
+        is_meta = torch.device(device).type == "meta"
+        self.reset_parameters(defer_init=is_meta)
 
         if self.wgrad_store.delay_wgrad_compute():
             for name, param in self.named_parameters():
