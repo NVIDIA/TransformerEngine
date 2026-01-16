@@ -602,6 +602,23 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
     # Cast to FP8 when setting Float8BlockwiseQTensor.data
     data = property(_get_data, _set_data)
 
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.shape
+        elif self._columnwise_data is not None:
+            return self._columnwise_data.shape
+        raise RuntimeError("Float8BlockwiseQTensor has no data!")
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.is_cuda
+        elif self._columnwise_data is not None:
+            return self._columnwise_data.is_cuda
+        raise RuntimeError("Float8BlockwiseQTensor has no data!")
 
 class _ViewFunc(torch.autograd.Function):
     """View function

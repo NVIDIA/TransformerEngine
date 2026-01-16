@@ -923,7 +923,11 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     @property
     def is_cuda(self):
         """Return whether the tensor is on a CUDA device."""
-        return self._data.is_cuda if self._data is not None else self._transpose.is_cuda
+        if self._data is not None:
+            return self._data.is_cuda
+        elif self._transpose is not None:
+            return self._transpose.is_cuda
+        raise RuntimeError("Both data and transpose are None")
 
     @classmethod
     def _make_in_reduce_ex(

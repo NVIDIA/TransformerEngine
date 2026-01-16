@@ -809,21 +809,20 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     @property
     def shape(self):
         """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
-        return (
-            self._rowwise_data.shape
-            if self._rowwise_data is not None
-            else self._columnwise_data.shape
-        )
+        if self._rowwise_data is not None:
+            return self._rowwise_data.shape
+        elif self._columnwise_data is not None:
+            return self._columnwise_data.shape
+        raise RuntimeError("MXFP8Tensor has no data!")
 
     @property
     def is_cuda(self):
         """Return whether the tensor is on a CUDA device."""
-        return (
-            self._rowwise_data.is_cuda
-            if self._rowwise_data is not None
-            else self._columnwise_data.is_cuda
-        )
-
+        if self._rowwise_data is not None:
+            return self._rowwise_data.is_cuda
+        elif self._columnwise_data is not None:
+            return self._columnwise_data.is_cuda
+        raise RuntimeError("MXFP8Tensor has no data!")
 
 class _ViewFunc(torch.autograd.Function):
     """View function
