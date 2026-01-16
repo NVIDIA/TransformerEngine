@@ -291,15 +291,10 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        const bool rowwise_compact = !output_tensor->with_gemm_swizzled_scales;
-        rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
-                                         : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+        rowwise_option = FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        const bool columnwise_compact = !output_tensor->with_gemm_swizzled_scales;
-        columnwise_option = columnwise_compact
-                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
-                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+        columnwise_option = FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
       }
       quantize_transpose_vector_blockwise(
           grad_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
