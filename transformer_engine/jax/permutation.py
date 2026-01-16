@@ -137,7 +137,7 @@ def token_dispatch(
     )
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1, 3, 4, 5, 6))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
 def _token_dispatch(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
@@ -240,6 +240,7 @@ def _token_dispatch_fwd_rule(
             num_experts,
             worst_case_out_tokens,
             hidden_size,
+            align_size=align_size,
         )
     else:
         # No padding
@@ -268,7 +269,6 @@ def _token_dispatch_fwd_rule(
 
 
 def _token_dispatch_bwd_rule(
-    _routing_map: jnp.ndarray,
     _num_out_tokens: int,
     _worst_case_out_tokens: int,
     _align_size: Optional[int],
@@ -281,8 +281,12 @@ def _token_dispatch_bwd_rule(
         Optional[jnp.ndarray],
         Optional[jnp.ndarray],
     ],
-) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-    """Backward pass rule for token_dispatch."""
+) -> Tuple[jnp.ndarray, None, Optional[jnp.ndarray]]:
+    """Backward pass rule for token_dispatch.
+
+    Returns gradients for (inp, routing_map, probs).
+    routing_map gradient is None since it's a discrete routing decision.
+    """
     row_id_map, pad_offsets, num_tokens, num_experts, hidden_size, with_probs = residuals
     output_grad, permuted_probs_grad, _, _, _ = g  # Ignore row_id_map, pad_offsets, target grads
 
@@ -309,7 +313,9 @@ def _token_dispatch_bwd_rule(
             hidden_size,
         )
 
-    return inp_grad, probs_grad if with_probs else None
+    # Return gradients for (inp, routing_map, probs)
+    # routing_map is non-differentiable (discrete routing), so return None
+    return inp_grad, None, probs_grad if with_probs else None
 
 
 _token_dispatch.defvjp(_token_dispatch_fwd_rule, _token_dispatch_bwd_rule)
@@ -497,6 +503,8 @@ def _token_combine_bwd_rule(
     else:
         # Simple case: just permute gradients back
         if pad_offsets is not None:
+            # Note: align_size uses default (128) since buffer sizes are already
+            # determined from forward pass (stored in residuals as num_out_tokens)
             inp_grad, _ = permute_with_mask_map_and_pad(
                 output_grad,
                 row_id_map,
@@ -506,6 +514,7 @@ def _token_combine_bwd_rule(
                 num_experts,
                 num_out_tokens,
                 hidden_size,
+                align_size=128,  # Default, sizes already computed in forward
             )
             # The permute kernel only writes to positions that tokens map to.
             # Padded positions may contain uninitialized (NaN) values - replace with zeros.
