@@ -2737,7 +2737,11 @@ class TestCheckpointing:
         # Check that original and loaded model match exactly
         tols = {"rtol": 0, "atol": 0}
         for param_load, param_save in zip(model_load.parameters(), model_save.parameters()):
-            torch.testing.assert_close(param_load, param_save, **tols)
+            torch.testing.assert_close(  # Force dequantization by casting to FP64
+                param_load.to(dtype=torch.float64, device="cpu"),
+                param_save.to(dtype=torch.float64, device="cpu"),
+                **tols,
+            )
             torch.testing.assert_close(param_load.grad, param_save.grad, **tols)
         for y_load, y_save in zip(ys_load, ys_save):
             torch.testing.assert_close(y_load, y_save, **tols)
@@ -2754,7 +2758,6 @@ class TestSequentialModules:
 
     @pytest.mark.parametrize("requires_grad", (False, True))
     @pytest.mark.parametrize("bias", (False, True))
-    @pytest.mark.parametrize("normalization", ("LayerNorm", "RMSNorm"))
     @pytest.mark.parametrize("quantized_compute", (False, True))
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -2764,25 +2767,18 @@ class TestSequentialModules:
         *,
         requires_grad: bool,
         bias: bool,
-        normalization: str,
         quantized_compute: bool,
         quantized_weight: bool,
         dtype: torch.dtype,
         quantization: Optional[str],
         device: torch.device = "cuda",
-        hidden_size: int = 32,
-        sequence_length: int = 512,
+        hidden_size: int = 256,
+        sequence_length: int = 48,
         batch_size: int = 4,
-        ffn_hidden_size: int = 64,
+        ffn_hidden_size: int = 384,
         layernorm_epsilon: float = 1e-5,
     ) -> None:
-        """
-        LayerNorm/RMSNorm + Linear + GELU + Linear
-
-        Note that this test checks only if the module runs
-        as when chaining multiple modules it is hard to validate
-        numerical accuracy.
-        """
+        """LayerNorm/RMSNorm + Linear + SwiGLU + Linear"""
 
         # Make input shape
         in_shape = (sequence_length, batch_size, hidden_size)
@@ -2798,38 +2794,90 @@ class TestSequentialModules:
             pytest.skip("Quantization scheme is not used")
 
         # Random data
-        _, x_test = make_reference_and_test_tensors(
+        x_ref, x_test = make_reference_and_test_tensors(
             in_shape,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
             requires_grad=requires_grad,
         )
-        _, dy_test = make_reference_and_test_tensors(
+        norm_w_ref, norm_w_test = make_reference_and_test_tensors(
+            hidden_size,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        norm_b_ref, norm_b_test = make_reference_and_test_tensors(
+            hidden_size,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w1_ref, w1_test = make_reference_and_test_tensors(
+            (ffn_hidden_size, hidden_size),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w2_ref, w2_test = make_reference_and_test_tensors(
+            (hidden_size, ffn_hidden_size // 2),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        b1_ref, b1_test, b2_ref, b2_test = None, None, None, None
+        if bias:
+            b1_ref, b1_test = make_reference_and_test_tensors(
+                ffn_hidden_size,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            b2_ref, b2_test = make_reference_and_test_tensors(
+                hidden_size,
+                test_dtype=dtype,
+                test_device=device,
+            )
+        dy_ref, dy_test = make_reference_and_test_tensors(
             in_shape,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
             requires_grad=False,
         )
+        with torch.no_grad():
+            for t in (norm_w_ref, norm_w_test, norm_b_ref, norm_b_test):
+                t -= 0.5
+            for t in (w1_ref, w1_test, w2_ref, w2_test):
+                t *= 1 / 64
+            if bias:
+                for t in (b1_ref, b1_test, b2_ref, b2_test):
+                    t -= 0.5
+            for t in (dy_ref, dy_test):
+                t -= 0.5
 
-        # Implementation with fusible operations
+        # Reference implementation
+        x = x_ref
+        x = torch.nn.functional.layer_norm(
+            x,
+            (hidden_size,),
+            weight=norm_w_ref,
+            bias=norm_b_ref,
+            eps=layernorm_epsilon,
+        )
+        x = torch.nn.functional.linear(x, w1_ref, bias=b1_ref)
+        x1, x2 = x.chunk(2, dim=-1)
+        x = torch.nn.functional.silu(x1) * x2
+        x = torch.nn.functional.linear(x, w2_ref, bias=b2_ref)
+        y_ref = x
+        y_ref.backward(dy_ref)
+
+        # Construct operations
         recipe = make_recipe(quantization)
         with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
-            if normalization == "LayerNorm":
-                norm = te_ops.LayerNorm(
-                    hidden_size,
-                    eps=layernorm_epsilon,
-                    device=device,
-                    dtype=dtype,
-                )
-            else:
-                norm = te_ops.RMSNorm(
-                    hidden_size,
-                    eps=layernorm_epsilon,
-                    device=device,
-                    dtype=dtype,
-                )
+            norm = te_ops.LayerNorm(
+                hidden_size,
+                eps=layernorm_epsilon,
+                device=device,
+                dtype=dtype,
+            )
             ffn1 = te_ops.Linear(
                 hidden_size,
                 ffn_hidden_size,
@@ -2837,15 +2885,48 @@ class TestSequentialModules:
                 device=device,
                 dtype=dtype,
             )
-            act = te_ops.GELU()
+            act = te_ops.SwiGLU()
             ffn2 = te_ops.Linear(
-                ffn_hidden_size,
+                ffn_hidden_size // 2,
                 hidden_size,
                 bias=bias,
                 device=device,
                 dtype=dtype,
             )
+
+        # Copy weights
+        with torch.no_grad():
+            norm.weight.copy_(norm_w_test)
+            norm.bias.copy_(norm_b_test)
+            ffn1.weight.copy_(w1_test)
+            ffn2.weight.copy_(w2_test)
+            if bias:
+                ffn1.bias.copy_(b1_test)
+                ffn2.bias.copy_(b2_test)
+        del norm_w_test, norm_b_test, w1_test, b1_test, w2_test, b2_test
+
+        # Fuse ops and perform forward and backward pass
         forward = te_ops.Sequential(norm, ffn1, act, ffn2)
         with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
+
+        def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+            """Convert to FP64 CPU tensor"""
+            if tensor is None:
+                return None
+            out = tensor.detach().to(dtype=torch.float64, device="cpu")
+            out = out.requires_grad_(requires_grad=tensor.requires_grad)
+            return out
+
+        # Check values
+        tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
+        torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
+        torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(norm.weight.grad), norm_w_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(norm.bias.grad), norm_b_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(ffn2.weight.grad), w2_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(ffn1.weight.grad), w1_ref.grad, **tols)
+        if bias:
+            torch.testing.assert_close(to_cpu(ffn1.bias.grad), b1_ref.grad, **tols)
+            torch.testing.assert_close(to_cpu(ffn2.bias.grad), b2_ref.grad, **tols)
