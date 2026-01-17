@@ -33,7 +33,7 @@ configs = {
     LogFp8TensorStats:
       enabled: True
       tensors: [activation, gradient, weight]
-      stats: [underflows, overflows]
+      stats: [underflows%]
       start_step : 0
       end_step: 1
 """,
