@@ -14,10 +14,8 @@ from .forward_linear_bias_add import ForwardLinearBiasAdd
 from .forward_linear_scale_add import ForwardLinearScaleAdd
 from .userbuffers_backward_linear import UserbuffersBackwardLinear
 from .userbuffers_forward_linear import UserbuffersForwardLinear
-from .forward_grouped_mlp import ForwardGroupedMLP_CuTeGEMMSwiGLU
 
 # Register forward fusions
-register_forward_fusion(ForwardGroupedMLP_CuTeGEMMSwiGLU.fuse_forward_ops)
 register_forward_fusion(UserbuffersForwardLinear.fuse_forward_ops)
 register_forward_fusion(ForwardLinearBiasAdd.fuse_forward_ops)
 register_forward_fusion(ForwardLinearBiasActivation.fuse_forward_ops)
@@ -29,3 +27,6 @@ register_backward_fusion(BackwardLinearAdd.fuse_backward_ops)
 register_backward_fusion(BackwardLinearScale.fuse_backward_ops)
 register_backward_fusion(BackwardActivationBias.fuse_backward_ops)
 register_backward_fusion(BackwardAddRMSNorm.fuse_backward_ops)
+
+from .forward_grouped_mlp import fuse_forward_ops as forward_grouped_mlp_fuse_ops
+register_forward_fusion(forward_grouped_mlp_fuse_ops, prepend=True)

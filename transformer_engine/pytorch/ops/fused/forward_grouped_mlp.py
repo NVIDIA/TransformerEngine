@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
+from cudnn import grouped_gemm_swiglu_wrapper_sm100  ### TODO Check if available
 
 import transformer_engine_torch as tex
 from ...cpp_extensions import general_grouped_gemm
@@ -21,7 +22,7 @@ from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import is_quantized_tensor, maybe_dequantize
 
 
-class ForwardGroupedMLP_CuTeGEMMSwiGLU(FusedOperation):
+class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
     def __init__(
         self,
@@ -70,12 +71,12 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU(FusedOperation):
         fc2_grad_output_quantizers = [None] * group_size
         if with_quantized_compute:
             for idx in range(group_size):
-                fc1_input_quantizers[idx] = fc1_op.get_quantizer("forward", 2 * group_idx)
-                fc1_weight_quantizers[idx] = fc1_op.get_quantizer("forward", 2 * group_idx + 1)
-                fc1_grad_output_quantizers[idx] = fc1_op.get_quantizer("backward", group_idx)
-                fc2_input_quantizers[idx] = fc2_op.get_quantizer("forward", 2 * group_idx)
-                fc2_weight_quantizers[idx] = fc2_op.get_quantizer("forward", 2 * group_idx + 1)
-                fc2_grad_output_quantizers[idx] = fc2_op.get_quantizer("backward", group_idx)
+                fc1_input_quantizers[idx] = fc1_op.get_quantizer("forward", 2 * idx)
+                fc1_weight_quantizers[idx] = fc1_op.get_quantizer("forward", 2 * idx + 1)
+                fc1_grad_output_quantizers[idx] = fc1_op.get_quantizer("backward", idx)
+                fc2_input_quantizers[idx] = fc2_op.get_quantizer("forward", 2 * idx)
+                fc2_weight_quantizers[idx] = fc2_op.get_quantizer("forward", 2 * idx + 1)
+                fc2_grad_output_quantizers[idx] = fc2_op.get_quantizer("backward", idx)
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
@@ -224,73 +225,74 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU(FusedOperation):
 
         return out, [(), (), (), ()]
 
-    @staticmethod
-    def fuse_forward_ops(
-        ops: list[FusibleOperation],
-        *,
-        recipe: Optional[Recipe] = None,
-        **unused,  # pylint: disable=unused-argument
-    ) -> list[FusibleOperation]:
-        """Apply operation fusion for forward pass.
+def fuse_forward_ops(
+    ops: list[FusibleOperation],
+    *,
+    recipe: Optional[Recipe] = None,
+    **unused,  # pylint: disable=unused-argument
+) -> list[FusibleOperation]:
+    """Apply operation fusion for forward pass.
 
-        Parameters
-        ----------
-        ops : list of FusibleOperation
-            Forward pass operations.
-        recipe : Recipe, optional
-            Quantization recipe.
+    Parameters
+    ----------
+    ops : list of FusibleOperation
+        Forward pass operations.
+    recipe : Recipe, optional
+        Quantization recipe.
 
-        Returns
-        -------
-        ops : list of FusibleOperation
-            Updated forward pass operations
+    Returns
+    -------
+    ops : list of FusibleOperation
+        Updated forward pass operations
 
-        """
+    """
 
-        # Check if recipe is supported
-        if recipe is not None:
-            return ops
+    # Check if recipe is supported
+    if recipe is None:
+        return ops
+    if not recipe.mxfp8():
+        return ops
 
-        # Scan through ops, fusing if possible
-        out = []
-        window, ops = ops[:4], ops[4:]
-        while len(window) == 4:
+    # Scan through ops, fusing if possible
+    out = []
+    window, ops = ops[:4], ops[4:]
+    while len(window) == 4:
 
-            # Check if window matches pattern
-            matches_pattern = True
-            if not (
-                isinstance(window[0], GroupedLinear)
-                and isinstance(window[1], SwiGLU)
-                and isinstance(window[2], GroupedLinear)
-                and isinstance(window[3], MultiplyExtraInput)
-            ):
-                matches_pattern = False
-            elif window[0].has_bias or window[2].has_bias:
-                matches_pattern = False
-            elif window[0].group_size != window[2].group_size:
-                matches_pattern = False
+        # Check if window matches pattern
+        matches_pattern = True
+        if not (
+            isinstance(window[0], GroupedLinear)
+            and isinstance(window[1], SwiGLU)
+            and isinstance(window[2], GroupedLinear)
+            and isinstance(window[3], MultiplyExtraInput)
+        ):
+            matches_pattern = False
+        elif window[0].has_bias or window[2].has_bias:
+            matches_pattern = False
+        elif window[0].group_size != window[2].group_size:
+            matches_pattern = False
 
-            if matches_pattern:
-                # Construct fused op if window matches pattern
-                op = ForwardGroupedMLP_CuTeGEMMSwiGLU(
-                    fc1=window[0],
-                    swiglu=window[1],
-                    fc2=window[2],
-                    scale=window[3],
-                )
-                window = [op]
-            else:
-                # Shift window if window doesn't match pattern
-                out.extend(window[:-3])
-                window = window[-3:]
+        if matches_pattern:
+            # Construct fused op if window matches pattern
+            op = ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(
+                fc1=window[0],
+                swiglu=window[1],
+                fc2=window[2],
+                scale=window[3],
+            )
+            window = [op]
+        else:
+            # Shift window if window doesn't match pattern
+            out.extend(window[:-3])
+            window = window[-3:]
 
-            # Adjust window to expected size
-            out.extend(window[:-4])
-            window = window[-4:]
-            while ops and len(window) < 4:
-                window.append(ops[0])
-                ops = ops[1:]
+        # Adjust window to expected size
+        out.extend(window[:-4])
+        window = window[-4:]
+        while ops and len(window) < 4:
+            window.append(ops[0])
+            ops = ops[1:]
 
-        # Return list of ops
-        out.extend(window)
-        return out
+    # Return list of ops
+    out.extend(window)
+    return out
