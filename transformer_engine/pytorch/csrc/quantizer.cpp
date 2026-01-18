@@ -717,7 +717,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     PyDict_SetItemString(kwargs, "rowwise_scale_inv", py::cast(scale_inv_rowwise).ptr());
     PyDict_SetItemString(kwargs, "columnwise_scale_inv", py::cast(scale_inv_colwise).ptr());
     PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
-    PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr()); 
+    PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
     PyDict_SetItemString(kwargs, "is_2D_scaled", py::cast(block_scaling_dim == 2).ptr());
 
     PyObject* args = PyTuple_New(0);

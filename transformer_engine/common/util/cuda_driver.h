@@ -9,9 +9,10 @@
 
 #include <cuda.h>
 
+#include <mutex>
 #include <string>
 #include <unordered_map>
-#include <mutex>
+
 #include "../common.h"
 #include "../util/string.h"
 
@@ -38,11 +39,11 @@ void *get_symbol(const char *symbol, int cuda_version = 12010);
 template <typename... ArgTs>
 inline CUresult call(const char *symbol, ArgTs... args) {
   using FuncT = CUresult(ArgTs...);
-  
+
   static std::unordered_map<std::string, void *> symbol_cache;
   static std::mutex cache_mutex;
-  
   FuncT* func;
+
   {
     std::lock_guard<std::mutex> lock(cache_mutex);
     auto it = symbol_cache.find(symbol);
