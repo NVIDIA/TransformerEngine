@@ -40,23 +40,21 @@ inline CUresult call(const char *symbol, ArgTs... args) {
   using FuncT = CUresult(ArgTs...);
   
   static std::unordered_map<std::string, void *> symbol_cache;
-  static std::unordered_map<std::string, std::once_flag> init_flags;
-  static std::mutex init_mutex;
+  static std::mutex cache_mutex;
   
-  // Get or create the once_flag for this symbol.
-  std::once_flag *flag_ptr;
+  FuncT* func;
   {
-    std::lock_guard<std::mutex> lock(init_mutex);
-    flag_ptr = &init_flags[symbol];  // Safe: mutex protects map insertion
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = symbol_cache.find(symbol);
+    if (it == symbol_cache.end()) {
+      void *ptr = get_symbol(symbol);
+      symbol_cache[symbol] = ptr;
+      func = reinterpret_cast<FuncT *>(ptr);
+    } else {
+      func = reinterpret_cast<FuncT *>(it->second);
+    }
   }
-  
-  // Use call_once with the flag (lock-free on subsequent calls)
-  std::call_once(*flag_ptr, [&]() {
-    void *ptr = get_symbol(symbol);
-    symbol_cache[symbol] = ptr;
-  }); 
-  
-  return (*reinterpret_cast<FuncT *>(symbol_cache[symbol]))(args...);
+  return (*func)(args...);
 }
 
 /*! \brief Ensure that the calling thread has a CUDA context
