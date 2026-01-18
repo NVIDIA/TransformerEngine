@@ -9,9 +9,10 @@
 
 #include <cuda.h>
 
+#include <mutex>
 #include <string>
 #include <unordered_map>
-#include <mutex>
+
 #include "../common.h"
 #include "../util/string.h"
 
@@ -38,24 +39,24 @@ void *get_symbol(const char *symbol, int cuda_version = 12010);
 template <typename... ArgTs>
 inline CUresult call(const char *symbol, ArgTs... args) {
   using FuncT = CUresult(ArgTs...);
-  
+
   static std::unordered_map<std::string, void *> symbol_cache;
   static std::unordered_map<std::string, std::once_flag> init_flags;
   static std::mutex init_mutex;
-  
+
   // Get or create the once_flag for this symbol.
   std::once_flag *flag_ptr;
   {
     std::lock_guard<std::mutex> lock(init_mutex);
     flag_ptr = &init_flags[symbol];  // Safe: mutex protects map insertion
   }
-  
+
   // Use call_once with the flag (lock-free on subsequent calls)
   std::call_once(*flag_ptr, [&]() {
     void *ptr = get_symbol(symbol);
     symbol_cache[symbol] = ptr;
-  }); 
-  
+  });
+
   return (*reinterpret_cast<FuncT *>(symbol_cache[symbol]))(args...);
 }
 
