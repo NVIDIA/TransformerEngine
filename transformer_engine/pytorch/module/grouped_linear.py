@@ -720,13 +720,9 @@ class GroupedLinear(TransformerEngineBaseModule):
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
 
-        # customize quantizers based on each recipe & layer configs
+        # Recipe-specific quantizer configuration
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
-            assert not self.tp_size > 1, (
-                "GroupedLinear doesn't support TP > 1 with Float8 current scaling. "
-                "Because the TP communication is handled outside of this module."
-            )
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
 
     def reset_parameters(self, defer_init=False):
@@ -879,9 +875,12 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""
-        assert (
-            recipe.float8_current_scaling()
-        ), "current scaling recipe quantizer customization here"
+
+        assert not self.tp_size > 1, (
+            "GroupedLinear doesn't support TP > 1 with Float8 current scaling. "
+            "Because the TP communication is handled outside of this module."
+        )
+
         if fwd:
             for i in range(self.num_gemms):
                 # set configs about amax epsilon and power_2_scale
@@ -954,9 +953,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                 ]
                 for i in range(self.num_gemms)
             ]
-            # TODO: use internal after #1638 is merged. # pylint: disable=fixme
             for i in range(self.num_gemms):
-                input_quantizers[i].internal = False
+                input_quantizers[i].internal = True
+                input_quantizers[i].optimize_for_gemm = True
             if torch.is_grad_enabled():
                 grad_output_quantizers = [
                     self.quantizers["scaling_bwd"][
@@ -966,6 +965,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 ]
                 for i in range(self.num_gemms):
                     grad_output_quantizers[i].internal = True
+                    grad_output_quantizers[i].optimize_for_gemm = True
         return (
             input_quantizers,
             weight_quantizers,

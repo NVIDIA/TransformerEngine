@@ -164,16 +164,8 @@ def general_gemm(
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
     if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
-        # There is not use_split_accumulator == False
-        # implementation for Float8BlockwiseQTensorStorage GEMM
+        # FP8 block-scaling requires split accumulator
         use_split_accumulator = True
-
-        # Check that data format is supported
-        if (
-            A._data_format != tex.Float8BlockScaleTensorFormat.GEMM_READY
-            or B._data_format != tex.Float8BlockScaleTensorFormat.GEMM_READY
-        ):
-            raise RuntimeError("GEMM with Float8BlockwiseQTensor requires GEMM_READY format")
 
     args = (
         A,
