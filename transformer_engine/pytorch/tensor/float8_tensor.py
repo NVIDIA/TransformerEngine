@@ -1001,7 +1001,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 )
                 # pylint: disable=unnecessary-dunder-call
                 super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
-                self.dtype = tensor.dtype
 
             # Float8Tensor attributes
             self._data = tensor._data

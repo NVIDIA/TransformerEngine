@@ -355,8 +355,8 @@ class QuantizedTensor(torch.Tensor):
             requires_grad=requires_grad,
             device=torch.cuda.current_device() if device is None else device,
         )
-        # instance._requires_grad = requires_grad
-        # instance._dtype = dtype
+        instance._requires_grad = requires_grad
+        instance._dtype = dtype
         return instance
 
     @property
@@ -369,15 +369,13 @@ class QuantizedTensor(torch.Tensor):
         """
         # Lazy initialization for tensors created via alternate paths
         if not hasattr(self, "_dtype"):
-            self._dtype = torch._C.TensorBase.dtype.__get__(self, type(self))
+            self._dtype = torch._C.TensorBase.dtype.__get__(self, type(self))  # pylint: disable=unnecessary-dunder-call
         return self._dtype
 
     @dtype.setter
     def dtype(self, value: torch.dtype) -> None:
         """Set dtype property"""
-        # Update the cached value
         self._dtype = value
-        warnings.warn("Dtype of QuantizedTensor has been changed. Ensure this is intended.")
 
     @property
     def requires_grad(self) -> bool:
@@ -389,7 +387,7 @@ class QuantizedTensor(torch.Tensor):
         """
         # Fallback to parent if not cached yet
         if not hasattr(self, "_requires_grad"):
-            self._requires_grad = torch._C.TensorBase.requires_grad.__get__(self, type(self))
+            self._requires_grad = torch._C.TensorBase.requires_grad.__get__(self, type(self))  # pylint: disable=unnecessary-dunder-call
         return self._requires_grad
 
     @requires_grad.setter
@@ -406,6 +404,22 @@ class QuantizedTensor(torch.Tensor):
         # Call parent class method to ensure autograd engine is aware
         super().requires_grad_(requires_grad)
         return self
+
+    def _get_data(self) -> torch.Tensor:
+        """Get tensor data property"""
+        return super().data
+
+    def _set_data(self, tensor: torch.Tensor) -> None:
+        """Set tensor data property
+        Updates the underlying tensor data and syncs the dtype cache.
+        """
+        # Update the parent class's data descriptor
+        super(QuantizedTensor, type(self)).data.__set__(self, tensor)
+        # Update the dtype cache
+        self._dtype = tensor.dtype
+
+    # Create the data property with getter and setter
+    data = property(_get_data, _set_data)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Convert quantized data to standard PyTorch tensor"""
