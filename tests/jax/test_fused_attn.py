@@ -53,6 +53,7 @@ from utils import assert_allclose, print_debug_tensor_stats
 # Get determinism
 _deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
+
 @pytest.fixture(autouse=True, scope="module")
 def init():
     """
@@ -1475,7 +1476,7 @@ class TestFusedAttn:
     ],
 )
 @pytest.mark.skipif(not _deterministic, reason="Test determinism only")
-class TestFusedAttnWithDeterminism():
+class TestFusedAttnWithDeterminism:
     """
     Fused attention tester with determinism
     """
