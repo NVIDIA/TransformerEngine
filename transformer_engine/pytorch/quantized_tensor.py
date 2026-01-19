@@ -388,9 +388,10 @@ class QuantizedTensor(torch.Tensor):
         """
         # Lazy initialization for tensors created via alternate paths
         if not hasattr(self, "_dtype"):
+            # pylint: disable=unnecessary-dunder-call
             self._dtype = torch._C.TensorBase.dtype.__get__(
                 self, type(self)
-            )  # pylint: disable=unnecessary-dunder-call
+            )  
         return self._dtype
 
     @dtype.setter
@@ -408,9 +409,10 @@ class QuantizedTensor(torch.Tensor):
         """
         # Fallback to parent if not cached yet
         if not hasattr(self, "_requires_grad"):
+            # pylint: disable=unnecessary-dunder-call
             self._requires_grad = torch._C.TensorBase.requires_grad.__get__(
                 self, type(self)
-            )  # pylint: disable=unnecessary-dunder-call
+            )
         return self._requires_grad
 
     @requires_grad.setter
@@ -437,6 +439,7 @@ class QuantizedTensor(torch.Tensor):
         Updates the underlying tensor data and syncs the dtype cache.
         """
         # Update the parent class's data descriptor
+        # pylint: disable=unnecessary-dunder-call
         super(QuantizedTensor, type(self)).data.__set__(self, tensor)
         # Update the dtype cache
         self._dtype = tensor.dtype
