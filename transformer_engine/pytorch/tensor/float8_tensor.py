@@ -918,7 +918,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return self._data.shape
         if self._transpose is not None:
             transpose_shape = self._transpose.shape
-            return tuple(transpose_shape[1:]) + (transpose_shape[0],)
+            return torch.Size(tuple(transpose_shape[1:]) + (transpose_shape[0],))
         raise RuntimeError("Both data and transpose are None")
 
     @property

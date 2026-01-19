@@ -31,6 +31,23 @@ std::vector<T> make_transpose_shape(const std::vector<S>& shape) {
   return ret;
 }
 
+/*! @brief Calculate stride from shape for contiguous tensors */
+template <typename T>
+std::vector<T> stride_from_shape(const std::vector<T>& shape) {
+  std::vector<T> stride;
+  if (shape.empty()) {
+    return stride;
+  }
+  std::vector<T> rstride;
+  rstride.reserve(shape.size());
+  rstride.push_back(static_cast<T>(1));
+  for (size_t i = shape.size(); i > 1; --i) {
+    rstride.push_back(rstride.back() * shape[i - 1]);
+  }
+  stride.assign(rstride.rbegin(), rstride.rend());
+  return stride;
+}
+
 /*! @brief Convert shape for FP4 data by dividing the last dimension by 2 */
 template <typename T = size_t>
 std::vector<T> convert_shape_for_fp4(const std::vector<T>& shape) {
@@ -177,11 +194,13 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     out_py = py::reinterpret_steal<py::object>(result);
   } else {
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+    const auto stride_int64 = stride_from_shape(shape_int64);
 
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
     PyObject* args = PyTuple_New(0);
     PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).ptr());
+    PyDict_SetItemString(kwargs, "stride", py::cast(stride_int64).ptr());
     PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
     PyDict_SetItemString(kwargs, "data", data_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_scale_inv", scale_inv_py.ptr());
@@ -417,9 +436,11 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     out_py = py::reinterpret_steal<py::object>(result);
   } else {
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+    const auto stride_int64 = stride_from_shape(shape_int64);
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
     PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).ptr());
+    PyDict_SetItemString(kwargs, "stride", py::cast(stride_int64).ptr());
     PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
     PyDict_SetItemString(kwargs, "data", data_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_scale_inv", scale_inv_py.ptr());
@@ -710,7 +731,9 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   } else {
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
+    const auto stride_int64 = stride_from_shape(torch_shape);
     PyDict_SetItemString(kwargs, "shape", py::cast(torch_shape).ptr());
+    PyDict_SetItemString(kwargs, "stride", py::cast(stride_int64).ptr());
     PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
     PyDict_SetItemString(kwargs, "rowwise_data", py::cast(data_rowwise).ptr());
     PyDict_SetItemString(kwargs, "columnwise_data", py::cast(data_colwise).ptr());
@@ -1028,7 +1051,9 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   } else {
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
+    const auto stride_int64 = stride_from_shape(shape_int64);
     PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).ptr());
+    PyDict_SetItemString(kwargs, "stride", py::cast(stride_int64).ptr());
     PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
     PyDict_SetItemString(kwargs, "rowwise_data", rowwise_data_py.ptr());
     PyDict_SetItemString(kwargs, "columnwise_data", columnwise_data_py.ptr());
@@ -1353,7 +1378,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
   } else {
     // Use direct C API call bypassing pybind11 overhead
     PyObject* kwargs = PyDict_New();
+    const auto stride_int64 = stride_from_shape(shape_int64);
     PyDict_SetItemString(kwargs, "shape", py::cast(shape_int64).ptr());
+    PyDict_SetItemString(kwargs, "stride", py::cast(stride_int64).ptr());
     PyDict_SetItemString(kwargs, "dtype", py::cast(GetATenDType(dtype)).ptr());
     PyDict_SetItemString(kwargs, "rowwise_data", rowwise_data_py.ptr());
     PyDict_SetItemString(kwargs, "columnwise_data", columnwise_data_py.ptr());

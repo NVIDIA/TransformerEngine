@@ -357,9 +357,13 @@ class QuantizedTensor(torch.Tensor):
         *,
         requires_grad: bool = False,
         device: Optional[torch.device] = None,
+        stride: Optional[Iterable[int]] = None,
     ):
-        # We are assuming only contiguous tensors
-        stride = _stride_from_shape(shape)
+        # For stride, We are assuming only contiguous tensors
+        # Calculate stride from shape if not provided. When creating this object from
+        # C++ code, we provide the stride computed from shape in C++ to avoid the
+        # PyobjectVectorCall overhead of calling _stride_from_shape from C++ to Python.
+        stride = _stride_from_shape(shape) if stride is None else stride
         instance = torch.Tensor._make_wrapper_subclass(
             cls,
             shape,
