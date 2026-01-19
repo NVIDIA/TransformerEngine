@@ -5,9 +5,12 @@
 """Fusible operation for identity."""
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from ..compile_compat.tensor_info import TensorInfo, PseudoForwardResult
 
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
