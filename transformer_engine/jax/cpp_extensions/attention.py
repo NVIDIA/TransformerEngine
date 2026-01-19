@@ -3572,12 +3572,12 @@ def fused_attn_bwd(
             and (attn_bias_type == AttnBiasType.NO_BIAS or dropout_probability == 0.0)
         ) or (
             not FusedAttnHelper.is_non_deterministic_allowed()
-            and get_cudnn_version() >= (9, 18, 0)
+            and get_cudnn_version() >= (9, 18, 1)
             and attn_bias_type == AttnBiasType.NO_BIAS
             and dropout_probability == 0.0
         ), (
             "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with dropout,"
-            " and deterministic bprop (cuDNN 9.18+) does not support bias or dropout"
+            " and deterministic bprop (cuDNN 9.18.1+) does not support bias or dropout"
         )
 
     fused_config = _FusedAttnConfig(

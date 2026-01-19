@@ -442,13 +442,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (cudnn_runtime_version < 91301 &&
           softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)) &&
         // determinism on Blackwell
-        // pre-9.18.0: fwd: deterministic; bwd: non-deterministic
-        // 9.18.0+: fwd: deterministic; bwd: non-deterministic/deterministic
+        // pre-9.18.1: fwd: deterministic; bwd: non-deterministic
+        // 9.18.1+: fwd: deterministic; bwd: non-deterministic/deterministic
         (sm_arch_ < 100 ||
          (sm_arch_ >= 100 && (!is_training ||
                               (is_training && !deterministic &&
                                (dropout == 0.0 || bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)) ||
-                              (is_training && deterministic && cudnn_runtime_version >= 91800 &&
+                              (is_training && deterministic && cudnn_runtime_version >= 91801 &&
                                dropout == 0.0 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS))))) {
       flag_arb = true;
     }
