@@ -814,12 +814,16 @@ def _make_graphed_callables(
 
                 skip_fp8_weight_update = not user_kwargs["is_first_microbatch"]
 
-            assert "cuda_graph_stream" in user_kwargs
-            assert "cuda_graph_event" in user_kwargs
-            cuda_graph_stream = user_kwargs["cuda_graph_stream"]
-            cuda_graph_event = user_kwargs["cuda_graph_event"]
-            user_kwargs.pop("cuda_graph_stream")
-            user_kwargs.pop("cuda_graph_event")
+            if "cuda_graph_stream" in user_kwargs:
+                cuda_graph_stream = user_kwargs["cuda_graph_stream"]
+                user_kwargs.pop("cuda_graph_stream")
+            else:
+                cuda_graph_stream = torch.cuda.current_stream()
+            if "cuda_graph_event" in user_kwargs:
+                cuda_graph_event = user_kwargs["cuda_graph_event"]
+                user_kwargs.pop("cuda_graph_event")
+            else:
+                cuda_graph_event = torch.cuda.Event()
             # Check that required kwargs are provided
             for key in kwargs_keys:
                 if key not in user_kwargs:
