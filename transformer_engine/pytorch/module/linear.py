@@ -92,6 +92,7 @@ class _Linear(torch.autograd.Function):
         non_tensor_args: Tuple,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
+
         (
             is_first_microbatch,
             fp8,
