@@ -230,12 +230,24 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-# CUTLASS kernels require SM90a and cause hang in debug build
+# Grouped GEMM kernels require SM90a
 set_property(
   SOURCE gemm/cutlass_grouped_gemm.cu
   APPEND
   PROPERTY
-  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a;-g0")
+  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a")
+
+# CUTLASS kernels could cause hang in debug build
+set(CUTLASS_KERNEL_SOURCES
+    gemm/cutlass_grouped_gemm.cu
+    hadamard_transform/group_hadamard_transform_cast_fusion.cu
+    hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+    hadamard_transform/hadamard_transform_cast_fusion.cu)
+set_property(
+  SOURCE ${CUTLASS_KERNEL_SOURCES}
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "-g0;-dopt=on")
 
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC

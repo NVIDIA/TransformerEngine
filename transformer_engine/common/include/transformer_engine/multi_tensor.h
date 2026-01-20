@@ -288,7 +288,7 @@ void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **
  *  and populate the amax of the corresponding output tensor.
  *
  *  \param[in]      input            Input tensor.
- *  \param[in,out]  amaxes           Array of output tensors. Only the amax is updated.
+ *  \param[in,out]  outputs          Array of output tensors. Only the amax is updated.
  *  \param[in]      split_sections   Size of each tensor split along dimension 0.
  *  \param[in]      num_tensors      Number of tensor splits.
  *  \param[in]      stream           CUDA stream used for the operation.
