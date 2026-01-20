@@ -5,6 +5,7 @@
 """LayerNormMLP API"""
 import os
 import warnings
+import weakref
 from typing import Callable, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
@@ -746,13 +747,11 @@ class _LayerNormMLP(torch.autograd.Function):
                     ln_weight,
                     ln_out,
                     fc1_weight_final,
-                    fc1_weight,
                     fc1_bias,
                     fc1_out,
                     fc1_out_without_bias,
                     act_out,
                     fc2_weight_final,
-                    fc2_weight,
                     fc2_bias,
                     mu,
                     rsigma,
@@ -762,6 +761,20 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.tensor_objects = tensor_objects
 
             if fuse_wgrad_accumulation:
+                # Keep weakrefs to weights to preserve attributes like main_grad
+                # when we need to modify the weight python objects
+                ctx.fc1_weight_python_object_ref = (
+                    weakref.ref(fc1_weight) if fc1_weight.requires_grad else None
+                )
+                ctx.fc2_weight_python_object_ref = (
+                    weakref.ref(fc2_weight) if fc2_weight.requires_grad else None
+                )
+                ctx.fc1_weight_overwrites_main_grad = getattr(
+                    fc1_weight, "overwrite_main_grad", False
+                )
+                ctx.fc2_weight_overwrites_main_grad = getattr(
+                    fc2_weight, "overwrite_main_grad", False
+                )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -789,8 +802,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
             ctx.fc1_weight_requires_grad = fc1_weight.requires_grad
             ctx.fc2_weight_requires_grad = fc2_weight.requires_grad
-            ctx.fc1_weight = fc1_weight
-            ctx.fc2_weight = fc2_weight
 
             ctx.device = device
             ctx.activation_dtype = activation_dtype
@@ -842,13 +853,11 @@ class _LayerNormMLP(torch.autograd.Function):
                     ln_weight,
                     ln_out,
                     fc1_weight_final,
-                    fc1_weight,
                     fc1_bias,
                     fc1_out,
                     fc1_out_without_bias,
                     act_out,
                     fc2_weight_final,
-                    fc2_weight,
                     fc2_bias,
                     mu,
                     rsigma,
@@ -962,39 +971,49 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_weight,
                 ln_out,
                 fc1_weight,
-                origin_fc1_weight,
                 fc1_bias,
                 fc1_out,
                 fc1_out_without_bias,
                 act_out,
                 fc2_weight,
-                origin_fc2_weight,
                 fc2_bias,
                 mu,
                 rsigma,
             ) = _LayerNormMLP._recompute(ctx)
 
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            fc1_weight_main_grad = (
-                ctx.fc1_main_grad_func()
-                if fc1_weight is not None
-                and ctx.fuse_wgrad_accumulation
-                and ctx.fc1_weight_requires_grad
-                else None
-            )
-            fc2_weight_main_grad = (
-                ctx.fc2_main_grad_func()
-                if origin_fc2_weight is not None
-                and ctx.fuse_wgrad_accumulation
-                and ctx.fc2_weight_requires_grad
-                else None
-            )
-
-            # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
-            # we need to connect them into one.
+            # Restore origin weights from weakrefs
+            # Only needed when fuse_wgrad_accumulation is enabled.
+            fc1_weight_python_object = None
+            fc2_weight_python_object = None
+            fc1_weight_main_grad = None
+            fc2_weight_main_grad = None
             if ctx.fuse_wgrad_accumulation:
-                origin_fc1_weight.main_grad = fc1_weight_main_grad
-                origin_fc2_weight.main_grad = fc2_weight_main_grad
+                fc1_weight_python_object_ref = getattr(ctx, "fc1_weight_python_object_ref", None)
+                fc2_weight_python_object_ref = getattr(ctx, "fc2_weight_python_object_ref", None)
+                ctx.fc1_weight_python_object_ref = None
+                ctx.fc2_weight_python_object_ref = None
+                fc1_weight_python_object = (
+                    fc1_weight_python_object_ref()
+                    if fc1_weight_python_object_ref is not None
+                    else None
+                )
+                fc2_weight_python_object = (
+                    fc2_weight_python_object_ref()
+                    if fc2_weight_python_object_ref is not None
+                    else None
+                )
+                if ctx.fc1_weight_requires_grad:
+                    assert (
+                        fc1_weight_python_object is not None
+                    ), "fc1_weight was removed while fuse_wgrad_accumulation=True"
+                    fc1_weight_main_grad = ctx.fc1_main_grad_func()
+                    fc1_weight_python_object.main_grad = fc1_weight_main_grad
+                if ctx.fc2_weight_requires_grad:
+                    assert (
+                        fc2_weight_python_object is not None
+                    ), "fc2_weight was removed while fuse_wgrad_accumulation=True"
+                    fc2_weight_main_grad = ctx.fc2_main_grad_func()
+                    fc2_weight_python_object.main_grad = fc2_weight_main_grad
 
             # TODO: Fix this  # pylint: disable=fixme
             # Gather saved autograd context tensors when running with FSDP
@@ -1113,9 +1132,9 @@ class _LayerNormMLP(torch.autograd.Function):
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
             if ctx.fc2_weight_quantizer is not None and isinstance(
-                ctx.fc2_weight, QuantizedTensorStorage
+                fc2_weight, QuantizedTensorStorage
             ):
-                ctx.fc2_weight.update_usage(columnwise_usage=True)
+                fc2_weight.update_usage(columnwise_usage=True)
 
             # Perform GEMM
             gemm_output, *_ = general_gemm(
@@ -1215,18 +1234,18 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Arguments to include in wgrad GEMM closure
                 fc2_wgrad_gemm_kwargs = {
                     "out_dtype": (
-                        origin_fc2_weight.main_grad.dtype
+                        fc2_weight_main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
                         else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.fc2_grad_weight_quantizer,  # wgrad in high precision
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(fc1_weight, "overwrite_main_grad", False)
+                        if not getattr(ctx, "fc2_weight_overwrites_main_grad", False)
                         else False
                     ),
                     "layout": "NT",
-                    "out": origin_fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                    "out": fc2_weight_main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
                     "use_split_accumulator": wgrad_use_split_accumulator,
                     "grad": grad_arg,
@@ -1365,9 +1384,9 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Make sure required data is available
             if ctx.fc1_weight_quantizer is not None and isinstance(
-                ctx.fc1_weight_quantizer, QuantizedTensorStorage
+                fc1_weight, QuantizedTensorStorage
             ):
-                ctx.fc1_weight.update_usage(columnwise_usage=True)
+                fc1_weight.update_usage(columnwise_usage=True)
 
             # Output buffers for Userbuffers reduce-scatter
             gemm_out = None
@@ -1462,18 +1481,18 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Arguments to include in wgrad GEMM closure
                 fc1_wgrad_gemm_kwargs = {
                     "out_dtype": (
-                        origin_fc1_weight.main_grad.dtype
+                        fc1_weight_main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
                         else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.fc1_grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(fc2_weight, "overwrite_main_grad", False)
+                        if not getattr(ctx, "fc1_weight_overwrites_main_grad", False)
                         else False
                     ),
                     "layout": "NT",
-                    "out": origin_fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                    "out": fc1_weight_main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": fc1_bias if fuse_gemm_and_bias_fc1_wgrad else None,
                     "use_split_accumulator": wgrad_use_split_accumulator,
                     "grad": fuse_gemm_and_bias_fc1_wgrad,
@@ -1577,19 +1596,21 @@ class _LayerNormMLP(torch.autograd.Function):
 
         if ctx.fc1_weight_requires_grad:
             # Handle custom DDP from mcore.
-            if ctx.fuse_wgrad_accumulation and hasattr(fc1_weight, "grad_added_to_main_grad"):
-                origin_fc1_weight.grad_added_to_main_grad = True
-                if getattr(origin_fc1_weight, "zero_out_wgrad", False):
+            if ctx.fuse_wgrad_accumulation and hasattr(
+                fc1_weight_python_object, "grad_added_to_main_grad"
+            ):
+                fc1_weight_python_object.grad_added_to_main_grad = True
+                if getattr(fc1_weight_python_object, "zero_out_wgrad", False):
                     fc1_wgrad = torch.zeros(
-                        origin_fc1_weight.main_grad.shape,
-                        dtype=origin_fc1_weight.dtype,
+                        fc1_weight_main_grad.shape,
+                        dtype=fc1_weight_main_grad.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
                     fc1_wgrad = torch.empty(
-                        origin_fc1_weight.main_grad.shape,
-                        dtype=origin_fc1_weight.dtype,
+                        fc1_weight_main_grad.shape,
+                        dtype=fc1_weight_main_grad.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
@@ -1601,20 +1622,20 @@ class _LayerNormMLP(torch.autograd.Function):
         if ctx.fc2_weight_requires_grad:
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(
-                origin_fc2_weight, "grad_added_to_main_grad"
+                fc2_weight_python_object, "grad_added_to_main_grad"
             ):
-                origin_fc2_weight.grad_added_to_main_grad = True
-                if getattr(origin_fc2_weight, "zero_out_wgrad", False):
+                fc2_weight_python_object.grad_added_to_main_grad = True
+                if getattr(fc2_weight_python_object, "zero_out_wgrad", False):
                     fc2_wgrad = torch.zeros(
-                        origin_fc2_weight.main_grad.shape,
-                        dtype=origin_fc2_weight.dtype,
+                        fc2_weight_main_grad.shape,
+                        dtype=fc2_weight_main_grad.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
                     fc2_wgrad = torch.empty(
-                        origin_fc2_weight.main_grad.shape,
-                        dtype=origin_fc2_weight.dtype,
+                        fc2_weight_main_grad.shape,
+                        dtype=fc2_weight_main_grad.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )

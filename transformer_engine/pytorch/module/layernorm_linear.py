@@ -5,6 +5,7 @@
 """LayerNormLinear API"""
 import os
 import warnings
+import weakref
 from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
@@ -451,19 +452,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_weight,
                     ln_bias,
                 )
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_object = weight
 
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 weightmat,
-                weight,
                 bias,
                 ln_weight,
                 ln_out,
@@ -476,6 +468,13 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_wgrad = weight.requires_grad
             ctx.is_weight_param_quantized = is_weight_param_quantized
             if fuse_wgrad_accumulation and weight.requires_grad:
+                # Keep weakref to weight to preserve attributes like main_grad
+                # when we need to modify the weight python object
+                ctx.origin_weight_ref = weakref.ref(weight)
+                # Save overwrite_main_grad flag now while we have access to weight objec
+                ctx.origin_weight_overwrites_main_grad = getattr(
+                    weight, "overwrite_main_grad", False
+                )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -551,7 +550,6 @@ class _LayerNormLinear(torch.autograd.Function):
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 weight,
-                origin_weight,
                 bias,
                 ln_weight,
                 ln_out,
@@ -563,12 +561,25 @@ class _LayerNormLinear(torch.autograd.Function):
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
 
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            main_grad = (
-                ctx.main_grad_func()
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                else None
+            # Restore from weakref to get original weight python object
+            # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
+            # Only needed when fuse_wgrad_accumulation is enabled.
+            origin_weight = None
+            origin_weight_overwrites_main_grad = getattr(
+                ctx, "origin_weight_overwrites_main_grad", False
             )
+            main_grad = None
+            if ctx.fuse_wgrad_accumulation and ctx.requires_wgrad:
+                origin_weight_ref = ctx.origin_weight_ref
+                ctx.origin_weight_ref = None
+                origin_weight = origin_weight_ref() if origin_weight_ref is not None else None
+                assert (
+                    origin_weight is not None
+                ), "weight was removed while fuse_wgrad_accumulation=True"
+                # Since main_grad can be modified inplace, it should not be a part of saved_tensors
+                main_grad = ctx.main_grad_func() if weight is not None else None
+                if main_grad is not None:
+                    origin_weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -583,14 +594,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
-
-            # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
-            # we need to connect them into one.
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    origin_weight = ctx.weight_object
-            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                origin_weight.main_grad = main_grad
 
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
@@ -865,7 +868,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(weight, "overwrite_main_grad", False)
+                        if not origin_weight_overwrites_main_grad
                         else False
                     ),
                     "layout": "NT",
@@ -997,14 +1000,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 origin_weight.grad_added_to_main_grad = True
                 if getattr(origin_weight, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(origin_weight.main_grad.shape),
-                        origin_weight.dtype,
+                        list(main_grad.shape),
+                        main_grad.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(origin_weight.main_grad.shape),
-                        origin_weight.dtype,
+                        list(main_grad.shape),
+                        main_grad.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
