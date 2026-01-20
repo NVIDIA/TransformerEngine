@@ -283,9 +283,14 @@ def test_cp_with_fused_attention(
         pytest.skip(
             "CP implementation only supports cp_comm_type=a2a for non-vanilla softmax types!"
         )
-    if get_cudnn_version() < (9, 18, 0) and config.softmax_type != "vanilla" and qkv_format == "thd":
+    if (
+        get_cudnn_version() < (9, 18, 0)
+        and config.softmax_type != "vanilla"
+        and qkv_format == "thd"
+    ):
         pytest.skip(
-            "Unless cudnn version >= 9.18.0, CP implementation does not support qkv_format=thd for non-vanilla softmax types!"
+            "Unless cudnn version >= 9.18.0, CP implementation does not support qkv_format=thd for"
+            " non-vanilla softmax types!"
         )
 
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
