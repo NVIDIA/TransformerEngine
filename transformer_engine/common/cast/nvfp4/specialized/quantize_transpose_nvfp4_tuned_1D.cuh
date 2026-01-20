@@ -98,9 +98,9 @@ constexpr int BUFF_OUT_DIM_X = (BUFF_DIM_X * 4) / 8;
 constexpr int BUFF_OUT_SIZE = BUFF_OUT_DIM_Y * BUFF_OUT_DIM_X;
 
 // Output transpose buffer (NVFP4)
-constexpr int BUFF_OUT_T_DIM_Y = BUFF_DIM_X;
-constexpr int BUFF_OUT_T_DIM_X = (BUFF_DIM_Y * 4) / 8;
-constexpr int BUFF_OUT_T_SIZE = BUFF_OUT_T_DIM_Y * BUFF_OUT_T_DIM_X;
+constexpr int BUFF_OUT_TR_DIM_Y = BUFF_DIM_X;
+constexpr int BUFF_OUT_TR_DIM_X = (BUFF_DIM_Y * 4) / 8;
+constexpr int BUFF_OUT_TR_SIZE = BUFF_OUT_TR_DIM_Y * BUFF_OUT_TR_DIM_X;
 
 // Manual swizzling parameters to reduce SHMEM bank conflicts
 constexpr int PACK_SIZE = 8;
@@ -109,16 +109,16 @@ constexpr int WAVES = ELTS_PER_THREAD / PACK_SIZE;
 constexpr int THREADS_X_ROWWISE = TILE_DIM_X / ELTS_PER_THREAD;
 constexpr int THREADS_Y_ROWWISE = THREADS_NUM / THREADS_X_ROWWISE;
 
-constexpr int THREADS_X_TRANSP = TILE_DIM_X / 2;
-constexpr int THREADS_Y_TRANSP = THREADS_NUM / THREADS_X_TRANSP;
+constexpr int THREADS_X_TR = TILE_DIM_X / 2;
+constexpr int THREADS_Y_TR = THREADS_NUM / THREADS_X_TR;
 
 constexpr int ITERATIONS_NORMAL = BUFF_DIM_Y / THREADS_Y_ROWWISE;
-constexpr int ITERATIONS_TRANSPOSE = SCALES_PER_TILE_Y / THREADS_Y_TRANSP;
-static_assert(ITERATIONS_TRANSPOSE >= 1 && "Number of transpose iterations should be >=1\0");
-static_assert((SCALES_PER_TILE_Y % THREADS_Y_TRANSP == 0) &&
+constexpr int ITERATIONS_TR = SCALES_PER_TILE_Y / THREADS_Y_TR;
+static_assert(ITERATIONS_TR >= 1 && "Number of transpose iterations should be >=1\0");
+static_assert((SCALES_PER_TILE_Y % THREADS_Y_TR == 0) &&
               "Partial transpose iterations are not supported\0");
 
-constexpr int BUFF_OUT_IT_OFFSET = BUFF_OUT_T_DIM_X / ITERATIONS_TRANSPOSE / STAGES;
+constexpr int BUFF_OUT_IT_OFFSET = BUFF_OUT_TR_DIM_X / ITERATIONS_TR / STAGES;
 
 static_assert(BUFF_DIM_Y >= SCALE_DIM &&
               "Number of buffer rows must be greater or equal to the size of the columwise "
@@ -139,7 +139,7 @@ using IType2 = typename ptx::FPx2<IType>;
 using IType3D = IType[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X];
 using IType2x3D = IType2[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X / 2];
 using OType2x3D = fp4e2m1x2[BUFFS_NUM_OUT][BUFF_OUT_DIM_Y][BUFF_OUT_DIM_X];
-using OType2xt3D = fp4e2m1x2[BUFFS_NUM_OUT_TR][BUFF_OUT_T_DIM_Y][BUFF_OUT_T_DIM_X];
+using OType2xt3D = fp4e2m1x2[BUFFS_NUM_OUT_TR][BUFF_OUT_TR_DIM_Y][BUFF_OUT_TR_DIM_X];
 using ScalesType2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
 using ScalesTypeTr2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
 using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<10>;
@@ -367,7 +367,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   constexpr int buff_size_aligned_out =
       DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
   constexpr int buff_size_aligned_out_t =
-      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_T_SIZE, TMA_SHMEM_ALIGNMENT);
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
 
   constexpr int in_mem = buff_size_aligned_in;
 
@@ -744,7 +744,7 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   constexpr int buff_size_aligned_out =
       DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
   constexpr int buff_size_aligned_out_t =
-      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_T_SIZE, TMA_SHMEM_ALIGNMENT);
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
 
   constexpr int buff_size_scales = DIVUP_TO_MULTIPLE(
       TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
