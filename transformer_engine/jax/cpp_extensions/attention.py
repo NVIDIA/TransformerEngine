@@ -370,6 +370,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
+        bottom_right_diagonal = config.attn_mask_type in [
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
         # prepare for the active fused-attn backend
         input_batch = reduce(operator.mul, batch_shape)
@@ -394,6 +399,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.max_segments_per_seq,
             config.window_size[0],
             config.window_size[1],
+            bottom_right_diagonal,
         )
         wkspace_aval = q_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
@@ -789,6 +795,10 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
         deterministic = not FusedAttnHelper.is_non_deterministic_allowed()
 
+        bottom_right_diagonal = config.attn_mask_type in [
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
         input_batch = reduce(operator.mul, batch_shape)
         wkspace_shape, wkspace_dtype = transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
             input_batch,
@@ -812,6 +822,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             config.max_segments_per_seq,
             config.window_size[0],
             config.window_size[1],
+            bottom_right_diagonal,
         )
 
         dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)

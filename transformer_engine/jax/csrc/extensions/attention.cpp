@@ -144,7 +144,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
     DType dtype, bool is_training, size_t max_segments_per_seq, int64_t window_size_left,
-    int64_t window_size_right) {
+    int64_t window_size_right, bool bottom_right_diagonal) {
   auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
   auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
   auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
@@ -192,7 +192,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         ragged_offset_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
         dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, false,
         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
-        window_size_left, window_size_right, query_workspace_tensor.data(), nullptr);
+        window_size_left, window_size_right, bottom_right_diagonal, query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
@@ -415,7 +415,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
     DType dtype, bool is_training, bool deterministic, size_t max_segments_per_seq,
-    int64_t window_size_left, int64_t window_size_right) {
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal) {
   auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
   auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
   auto dq_tensor = TensorWrapper(nullptr, q_shape, dtype);
@@ -477,7 +477,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
         kv_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
         dummy_ragged_offset_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
         dropout_probability, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
-        window_size_right, deterministic, false, query_workspace_tensor.data(), nullptr);
+        window_size_right, bottom_right_diagonal, deterministic, false, query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
