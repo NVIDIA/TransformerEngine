@@ -1037,7 +1037,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "columnwise_scale_inv", columnwise_scale_inv_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "with_gemm_swizzled_scales", py::cast(with_gemm_swizzled_scales).ptr());
+    PyDict_SetItemString(kwargs, "with_gemm_swizzled_scales",
+                         py::cast(with_gemm_swizzled_scales).ptr());
 
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass), args, kwargs);
@@ -1062,7 +1063,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "columnwise_scale_inv", columnwise_scale_inv_py.ptr());
     PyDict_SetItemString(kwargs, "fp8_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "with_gemm_swizzled_scales", py::cast(with_gemm_swizzled_scales).ptr());
+    PyDict_SetItemString(kwargs, "with_gemm_swizzled_scales",
+                         py::cast(with_gemm_swizzled_scales).ptr());
 
     PyObject* args = PyTuple_New(0);
     PyObject* result =
@@ -1364,7 +1366,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "amax_columnwise", amax_columnwise_py.ptr());
     PyDict_SetItemString(kwargs, "fp4_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "with_gemm_swizzled_scales", py::cast(with_gemm_swizzled_scales).ptr());
+    PyDict_SetItemString(kwargs, "with_gemm_swizzled_scales",
+                         py::cast(with_gemm_swizzled_scales).ptr());
 
     PyObject* args = PyTuple_New(0);
 
@@ -1393,7 +1396,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     PyDict_SetItemString(kwargs, "amax_columnwise", amax_columnwise_py.ptr());
     PyDict_SetItemString(kwargs, "fp4_dtype", py::cast(this->dtype).ptr());
     PyDict_SetItemString(kwargs, "quantizer", this->quantizer.ptr());
-    PyDict_SetItemString(kwargs, "with_gemm_swizzled_scales", py::cast(with_gemm_swizzled_scales).ptr());
+    PyDict_SetItemString(kwargs, "with_gemm_swizzled_scales",
+                         py::cast(with_gemm_swizzled_scales).ptr());
     PyObject* args = PyTuple_New(0);
     PyObject* result =
         PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass), args, kwargs);
