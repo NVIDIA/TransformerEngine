@@ -1094,6 +1094,7 @@ __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
   return pred;
 #else
   NVTE_DEVICE_ERROR("elect_one_sync is only supported on SM 10.0+.");
+  return 0;
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -1145,6 +1146,7 @@ __device__ __forceinline__ bf16 get_amax(bf16 a, bf16 b) {
   return r;
 #else
   NVTE_DEVICE_ERROR("get_amax is only supported on SM 10.0+.");
+  return 0.f;
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -1157,6 +1159,7 @@ __device__ __forceinline__ fp16 get_amax(fp16 a, fp16 b) {
   return r;
 #else
   NVTE_DEVICE_ERROR("get_amax is only supported on SM 10.0+.");
+  return 0.f;
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
