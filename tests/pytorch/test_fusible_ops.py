@@ -3143,6 +3143,153 @@ class TestSequentialModules:
             torch.testing.assert_close(to_cpu(ffn1.bias.grad), b1_ref.grad, **tols)
             torch.testing.assert_close(to_cpu(ffn2.bias.grad), b2_ref.grad, **tols)
 
+    def test_grouped_mlp(
+        self,
+        *,
+        dtype: torch.dtype = torch.bfloat16,
+        quantization: Optional[str] = "mxfp8",
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+    ) -> None:
+        """GroupedLinear + SwiGLU + GroupedLinear"""
+
+        # Split sizes
+        split_sizes = [split_alignment * i for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device="cpu")
+
+        # Make input shape
+        in_shape = (split_sizes.sum().item(), hidden_size)
+        out_shape = in_shape
+
+        # Skip invalid configurations
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        if quantization != "mxfp8":
+            pytest.skip("Quantization scheme is not supported")
+        if dtype != torch.bfloat16:
+            pytest.skip("Non-quantized dtype must be BF16")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        probs_ref, probs_test = make_reference_and_test_tensors(
+            (in_shape[0], 1),
+            test_dtype=dtype,
+            test_device=device,
+        )
+        fc1_ws_ref, fc1_ws_test = [], []
+        fc2_ws_ref, fc2_ws_test = [], []
+        for _ in range(group_size):
+            fc1_w_ref, fc1_w_test = make_reference_and_test_tensors(
+                (2 * hidden_size, hidden_size),
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            fc2_w_ref, fc2_w_test = make_reference_and_test_tensors(
+                (hidden_size, hidden_size),
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            fc1_ws_ref.append(fc1_w_ref)
+            fc1_ws_test.append(fc1_w_test)
+            fc2_ws_ref.append(fc2_w_ref)
+            fc2_ws_test.append(fc2_w_test)
+        with torch.no_grad():
+            for t in fc1_ws_ref + fc1_ws_test + fc2_ws_ref + fc2_ws_test:
+                t *= 1 / 64
+            for t in (x_ref, x_test, dy_ref, dy_test):
+                t -= 0.5
+
+        # Reference implementation
+        xs = torch.split(x_ref, split_sizes.tolist())
+        ys = []
+        for x, fc1_w, fc2_w, prob in zip(xs, fc1_ws_ref, fc2_ws_ref, probs_ref):
+            x = torch.nn.functional.linear(x, fc1_w)
+            x1, x2 = x.chunk(2, dim=-1)
+            x = torch.nn.functional.silu(x1) * x2
+            x = torch.nn.functional.linear(x, fc2_w)
+            x = x * prob
+            ys.append(x)
+        y_ref = torch.cat(ys)
+        y_ref.backward(dy_ref)
+
+        # Construct operations
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(recipe=recipe):
+            fc1 = te_ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+            )
+            fc2 = te_ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+            )
+            module = te_ops.Sequential(
+                fc1,
+                te_ops.SwiGLU(),
+                fc2,
+                te_ops.MultiplyExtraInput()
+            )
+
+        # Copy weights
+        with torch.no_grad():
+            for group_idx in range(group_size):
+                getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_test[group_idx])
+                getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_test[group_idx])
+        del fc1_ws_test, fc2_ws_test
+
+        # Fuse ops and perform forward and backward pass
+        with te.autocast(recipe=recipe):
+            y_test = module(x_test, split_sizes, split_sizes, probs_test)
+        y_test.backward(dy_test)
+
+        # Check that forward operations have been fused
+        forward_ops = module._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1
+
+        def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+            """Convert to FP64 CPU tensor"""
+            if tensor is None:
+                return None
+            out = tensor.detach().to(dtype=torch.float64, device="cpu")
+            out = out.requires_grad_(requires_grad=tensor.requires_grad)
+            return out
+
+        # Check values
+        tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
+        torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
+        torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
+        for group_idx in range(group_size):
+            fc1_dw_test = to_cpu(getattr(fc1, f"weight{group_idx}").grad)
+            fc1_dw_ref = fc1_ws_ref[group_idx].grad
+            fc2_dw_test = to_cpu(getattr(fc2, f"weight{group_idx}").grad)
+            fc2_dw_ref = fc2_ws_ref[group_idx].grad
+            torch.testing.assert_close(fc2_dw_test, fc2_dw_ref, **tols)
+            torch.testing.assert_close(fc1_dw_test, fc1_dw_ref, **tols)
+
 
 class TestCustomOps:
     """Test with ops that are defined externally"""
