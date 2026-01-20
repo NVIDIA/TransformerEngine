@@ -46,6 +46,9 @@ RUN pip install nvidia-nvshmem-cu${CUDA_VERSION%%.*} \
 RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts <<"EOF" bash -e
   [[ "${FRAMEWORK}" == "jax" ]] \
   && export CUBLASMP_VERSION=0.7.0.125 \
+  && apt-get update \
+  && apt-get install -y python3 python3-pip \
+  && pip3 install cmake==3.21.0 \
   || [[ ! "${FRAMEWORK}" == "jax" ]]
 
   /nvidia/build-scripts/installCUBLASMP.sh
