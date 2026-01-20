@@ -30,6 +30,13 @@ configs = {
       stats: [min, max, mean, std, l1_norm, l2_norm, cur_amax, dynamic_range]
       start_step : 0
       end_step: 1
+""",
+    "log_fp8": """log_fp8:
+  layers:
+    layer_types: [linear]
+  enabled:
+    True
+  transformer_engine:
     LogFp8TensorStats:
       enabled: True
       tensors: [activation, gradient, weight]
@@ -46,22 +53,26 @@ fake_quant_config:
     FakeQuant:
       enabled: True
       gemms: [fprop, dgrad, wgrad]
+      tensors: [activation, weight, gradient]
       quant_format: FP8E5M2
 """,
 }
 
+# Configs that require FP8 to be enabled
+fp8_required_configs = {"log_fp8"}
+
 
 def _get_model(model_key):
     if model_key == "linear":
-        return te.Linear(D, D)
+        return te.Linear(D, D, name="layer")
     if model_key == "layernorm_linear":
-        return te.LayerNormLinear(D, D)
+        return te.LayerNormLinear(D, D, name="layer")
     if model_key == "layernorm_mlp":
-        return te.LayerNormMLP(D, D, D)
+        return te.LayerNormMLP(D, D, D, name="layer")
     if model_key == "mha_attention":
-        return te.MultiheadAttention(D, H)
+        return te.MultiheadAttention(D, H, name="layer")
     if model_key == "transformer_layer":
-        return te.TransformerLayer(D, D, H)
+        return te.TransformerLayer(D, D, H, name="layer")
 
 
 def _run_forward_backward(model, fp8):
@@ -95,4 +106,6 @@ def _run_test(model_key, fp8, config, feature_dirs, config_file, log_dir):
 def test_sanity_debug(model_key, fp8, config_key, feature_dirs):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if not fp8 and config_key in fp8_required_configs:
+        pytest.skip(f"Config '{config_key}' requires FP8")
     _run_test(model_key, fp8, configs[config_key], feature_dirs)
