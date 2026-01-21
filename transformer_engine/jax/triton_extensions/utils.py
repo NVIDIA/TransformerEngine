@@ -307,8 +307,6 @@ def compile_triton(
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
-    from packaging import version
-
     if version.parse(jax.__version__) >= version.parse("0.8.2"):
         kernel = gpu_triton.TritonKernel(
             compiled.name,  # arg0: kernel_name (str)
