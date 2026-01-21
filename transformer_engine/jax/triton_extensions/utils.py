@@ -33,6 +33,7 @@ Environment Variables:
 import hashlib
 import os
 import warnings
+from packaging import version
 from typing import Any, Callable, Mapping
 import zlib
 
@@ -274,13 +275,16 @@ def compile_triton(
         return _TRITON_KERNEL_CACHE[cache_key]
 
     # Compile kernel
+    cuda_option_kwargs = {}
+    if version.parse(triton.__version__) <= version.parse("3.6.0"):
+        cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
     options = cb.CUDAOptions(
         num_warps=num_warps,
         num_stages=num_stages,
         num_ctas=num_ctas,
-        cluster_dims=(1, 1, 1),
         debug=False,
         enable_fp_fusion=enable_fp_fusion,
+        **cuda_option_kwargs
     )
 
     # Mark constants as constexpr in signature
