@@ -28,10 +28,10 @@ class TestBasicLinear:
 
         # Create operation
         linear = te.ops.BasicLinear(256, 512, device="cuda", dtype=dtype)
-        
+
         # Create TorchCompileCompatibleFuser OUTSIDE compiled region
         fuser = TorchCompileCompatibleFuser([linear])
-        
+
         x = torch.randn(32, 64, 256, device="cuda", dtype=dtype, requires_grad=True)
 
         # Eager reference
@@ -70,10 +70,10 @@ class TestBias:
 
         # Create operation
         bias = te.ops.Bias(512, device="cuda", dtype=dtype)
-        
+
         # Create TorchCompileCompatibleFuser
         fuser = TorchCompileCompatibleFuser([bias])
-        
+
         x = torch.randn(32, 64, 512, device="cuda", dtype=dtype, requires_grad=True)
 
         # Eager reference
@@ -112,10 +112,10 @@ class TestLinearWithBias:
 
         # Create fused Linear operation (contains BasicLinear + Bias)
         linear = te.ops.Linear(256, 512, bias=True, device="cuda", dtype=dtype)
-        
+
         # Create TorchCompileCompatibleFuser
         fuser = TorchCompileCompatibleFuser([linear])
-        
+
         x = torch.randn(32, 64, 256, device="cuda", dtype=dtype, requires_grad=True)
 
         # Eager reference
@@ -153,9 +153,9 @@ class TestLinearWithBias:
 
         # Create Linear without bias
         linear = te.ops.Linear(256, 512, bias=False, device="cuda", dtype=dtype)
-        
+
         fuser = TorchCompileCompatibleFuser([linear])
-        
+
         x = torch.randn(32, 64, 256, device="cuda", dtype=dtype, requires_grad=True)
 
         # Eager reference
@@ -196,15 +196,16 @@ class TestFP8:
             linear = te.ops.BasicLinear(256, 512, device="cuda", dtype=torch.bfloat16)
         else:
             linear = te.ops.Linear(256, 512, bias=True, device="cuda", dtype=torch.bfloat16)
-        
+
         fuser = TorchCompileCompatibleFuser([linear])
-        
+
         x = torch.randn(32, 64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
         # Enable FP8
         from transformer_engine.common.recipe import DelayedScaling, Format
+
         fp8_recipe = DelayedScaling(fp8_format=Format.HYBRID)
-        
+
         # Warmup: run several iterations to stabilize DelayedScaling amax history
         # This ensures eager and compiled use the same scaling factors
         for _ in range(5):
@@ -213,11 +214,11 @@ class TestFP8:
             with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
                 y_warmup = fuser(x)
             y_warmup.sum().backward()
-        
+
         # Reset grads after warmup
         x.grad = None
         linear.weight.grad = None
-        
+
         # Eager reference with FP8 (amax history is now stable)
         with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
             y_eager = fuser(x)
@@ -250,7 +251,7 @@ class TestFusion:
 
     def test_linear_bias_fusion_bf16(self):
         """Test BasicLinear + Bias fusion with torch.compile(fullgraph=True).
-        
+
         This pattern should trigger ForwardLinearBiasActivation fusion when using bf16.
         """
         reset_rng_states()
@@ -259,21 +260,21 @@ class TestFusion:
         # Create operations - this pattern triggers fusion in bf16
         linear = te.ops.BasicLinear(256, 512, device="cuda", dtype=dtype)
         bias = te.ops.Bias(512, device="cuda", dtype=dtype)
-        
+
         fuser = TorchCompileCompatibleFuser([linear, bias])
-        
+
         # Check that fusion happened
         # After _maybe_fuse_ops, forward_ops should have fewer entries than basic_ops
         x = torch.randn(32, 64, 256, device="cuda", dtype=dtype, requires_grad=True)
-        
+
         # Trigger fusion by running forward
         _ = fuser(x)
-        
+
         # Verify fusion: 2 basic ops should become 1 fused forward op
-        assert len(fuser.ops_container._forward_ops) == 1, (
-            f"Expected 1 fused forward op, got {len(fuser.ops_container._forward_ops)}"
-        )
-        
+        assert (
+            len(fuser.ops_container._forward_ops) == 1
+        ), f"Expected 1 fused forward op, got {len(fuser.ops_container._forward_ops)}"
+
         # Eager reference
         y_eager = fuser(x)
         y_eager.sum().backward()
@@ -309,19 +310,20 @@ class TestFusion:
         # Create operations - fp32 should NOT trigger fusion
         linear = te.ops.BasicLinear(256, 512, device="cuda", dtype=dtype)
         bias = te.ops.Bias(512, device="cuda", dtype=dtype)
-        
+
         fuser = TorchCompileCompatibleFuser([linear, bias])
-        
+
         x = torch.randn(32, 64, 256, device="cuda", dtype=dtype, requires_grad=True)
-        
+
         # Trigger fusion attempt by running forward
         _ = fuser(x)
-        
+
         # Verify no fusion: 2 basic ops should remain as 2 forward ops
         assert len(fuser.ops_container._forward_ops) == 2, (
-            f"Expected 2 forward ops (no fusion for fp32), got {len(fuser.ops_container._forward_ops)}"
+            "Expected 2 forward ops (no fusion for fp32), got"
+            f" {len(fuser.ops_container._forward_ops)}"
         )
-        
+
         # Still test that it works correctly
         y_eager = fuser(x)
         y_eager.sum().backward()
@@ -352,9 +354,9 @@ class TestMultipleOps:
         # Create operations
         linear1 = te.ops.BasicLinear(256, 512, device="cuda", dtype=dtype)
         linear2 = te.ops.BasicLinear(512, 128, device="cuda", dtype=dtype)
-        
+
         fuser = TorchCompileCompatibleFuser([linear1, linear2])
-        
+
         x = torch.randn(32, 64, 256, device="cuda", dtype=dtype, requires_grad=True)
 
         # Eager reference
@@ -386,7 +388,7 @@ class TestMultipleOps:
 
     def test_linear_bias_linear_with_fusion(self):
         """Test BasicLinear + Bias + BasicLinear with fusion (bf16).
-        
+
         The first Linear+Bias should fuse into ForwardLinearBiasActivation.
         """
         reset_rng_states()
@@ -396,19 +398,19 @@ class TestMultipleOps:
         linear1 = te.ops.BasicLinear(256, 512, device="cuda", dtype=dtype)
         bias = te.ops.Bias(512, device="cuda", dtype=dtype)
         linear2 = te.ops.BasicLinear(512, 128, device="cuda", dtype=dtype)
-        
+
         fuser = TorchCompileCompatibleFuser([linear1, bias, linear2])
-        
+
         x = torch.randn(32, 64, 256, device="cuda", dtype=dtype, requires_grad=True)
 
         # Trigger fusion
         _ = fuser(x)
-        
-        # Verify fusion: 3 basic ops should become 2 forward ops 
+
+        # Verify fusion: 3 basic ops should become 2 forward ops
         # (linear1+bias fused, linear2 separate)
-        assert len(fuser.ops_container._forward_ops) == 2, (
-            f"Expected 2 forward ops after fusion, got {len(fuser.ops_container._forward_ops)}"
-        )
+        assert (
+            len(fuser.ops_container._forward_ops) == 2
+        ), f"Expected 2 forward ops after fusion, got {len(fuser.ops_container._forward_ops)}"
 
         # Eager reference
         y_eager = fuser(x)

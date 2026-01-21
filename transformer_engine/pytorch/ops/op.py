@@ -23,6 +23,7 @@ from ..tensor import Quantizer
 
 # Import for type hints only (avoid circular import)
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from .compile_compat.tensor_info import TensorInfo, PseudoForwardResult
 
@@ -475,33 +476,33 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         **kwargs,
     ) -> "PseudoForwardResult":
         """Compute forward metadata WITHOUT actual tensor computation.
-        
+
         Used for:
         1. Compile-time shape inference (register_fake)
         2. Backward ctx reconstruction (avoids storing ctx in opaque container)
-        
+
         This default implementation provides basic shape propagation.
         Subclasses should override if they have different output shapes
         or need to save tensors for backward.
-        
+
         Args:
             input_info: TensorInfo describing input tensor
             extra_inputs_info: TensorInfo for extra inputs (uses num_extra_inputs attr)
             **kwargs: op-specific arguments
-            
+
         Returns:
             PseudoForwardResult with output shape, tensors_to_save shapes, and ctx data
         """
         # Lazy import to avoid circular dependency
         from .compile_compat.tensor_info import TensorInfo, PseudoForwardResult
-        
+
         # Default: output has same shape/dtype as input
         output_info = TensorInfo(
             shape=input_info.shape,
             dtype=input_info.dtype,
             requires_grad=input_info.requires_grad,
         )
-        
+
         return PseudoForwardResult(
             output_info=output_info,
             tensors_to_save_info=[],
@@ -553,7 +554,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 f"and {self.num_extra_outputs} extra tensor outputs. "
                 "It should override `fuser_backward` instead of `op_backward`."
             )
-        
+
         grad_input, grad_params = self.op_backward(basic_op_ctxs[0], grad_output)
 
         return grad_input, [grad_params], [()]

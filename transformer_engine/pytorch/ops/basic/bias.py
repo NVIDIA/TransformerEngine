@@ -153,19 +153,19 @@ class Bias(BasicOperation):
         **kwargs,
     ) -> "PseudoForwardResult":
         """Compute forward metadata for Bias.
-        
+
         Bias is element-wise addition - output shape equals input shape.
         No tensors saved for backward.
         """
         from ..compile_compat.tensor_info import TensorInfo, PseudoForwardResult
-        
+
         # Output has same shape as input
         output_info = TensorInfo(
             shape=input_info.shape,
             dtype=input_info.dtype,
             requires_grad=input_info.requires_grad,
         )
-        
+
         # Note: grad_input_quantizer is set by the fuser based on prev_op
         # For now, set to None (will be overwritten by run_backward if needed)
         return PseudoForwardResult(

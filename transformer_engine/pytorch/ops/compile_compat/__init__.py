@@ -4,15 +4,15 @@
 
 """torch.compile compatibility module for Transformer Engine operations.
 
-This module provides components to make te.ops work with 
+This module provides components to make te.ops work with
 torch.compile(fullgraph=True) by using custom operators that wrap fusion logic.
 
 Usage:
     from transformer_engine.pytorch.ops.compile_compat import TorchCompileCompatibleFuser
-    
+
     # Create fuser OUTSIDE compiled region
     fuser = TorchCompileCompatibleFuser([op1, op2, op3])
-    
+
     @torch.compile(fullgraph=True)
     def forward(x):
         return fuser(x)
@@ -29,16 +29,14 @@ from .fuser import TorchCompileCompatibleFuser
 __all__ = [
     # Main API
     "TorchCompileCompatibleFuser",
-    
     # Supporting classes
     "TensorInfo",
     "TensorInfoList",
-    "PseudoForwardResult", 
+    "PseudoForwardResult",
     "OpaqueKwargs",
     "OpsContainer",
     "NoneRecipe",
     "NONE_RECIPE",
-    
     # Custom operators (for advanced usage)
     "fused_forward_impl",
     "fused_backward_impl",

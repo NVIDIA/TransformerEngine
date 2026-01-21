@@ -1039,7 +1039,6 @@ class BasicLinear(BasicOperation):
         else:
             accumulate_into_main_grad = False
 
-
         # Linear backward pass
         grad_input, grad_weight = BasicLinear._functional_backward(
             grad_output=grad_output,
@@ -1059,9 +1058,9 @@ class BasicLinear(BasicOperation):
             grad_output_quantizer=ctx.grad_output_quantizer,
             grad_input_quantizer=ctx.grad_input_quantizer,
         )
-        
+
         # Clear input tensor if possible
-        #clear_tensor_data(x_local)
+        # clear_tensor_data(x_local)
 
         # Megatron-LM wgrad fusion
         # Note: Return dummy tensor for grad weight if needed.
@@ -1085,12 +1084,12 @@ class BasicLinear(BasicOperation):
         **kwargs,
     ) -> "PseudoForwardResult":
         """Compute forward metadata for BasicLinear.
-        
+
         Output shape: input shape with last dim changed from in_features to out_features.
         Saves: x_local (input), w (weight) for backward.
         """
         from ..compile_compat.tensor_info import TensorInfo, PseudoForwardResult
-        
+
         # Output shape: replace last dim with out_features
         output_shape = input_info.shape[:-1] + (self.local_out_features,)
         output_info = TensorInfo(
@@ -1098,7 +1097,7 @@ class BasicLinear(BasicOperation):
             dtype=input_info.dtype,
             requires_grad=input_info.requires_grad,
         )
-        
+
         # Tensors to save for backward: x_local and w
         # x_local has same shape as input (possibly after sequence parallel gather)
         # w has shape (out_features, in_features)
@@ -1107,7 +1106,7 @@ class BasicLinear(BasicOperation):
         # At runtime, if requires_grad=False, we may save empty/dummy tensors.
         tensors_to_save_info = []
         tensor_sources = []  # -1 = new tensor, 0 = x, 1+ = params/extra_inputs
-        
+
         # Always add tensors to save (structure must be consistent for torch.compile)
         if True:  # was: if input_info.requires_grad:
             # x_local shape depends on tensor parallel mode
@@ -1118,12 +1117,14 @@ class BasicLinear(BasicOperation):
                 ) + input_info.shape[1:]
             else:
                 x_local_shape = input_info.shape
-            
-            tensors_to_save_info.append(TensorInfo(
-                shape=x_local_shape,
-                dtype=input_info.dtype,
-                requires_grad=False,  # Saved tensors don't track grad
-            ))
+
+            tensors_to_save_info.append(
+                TensorInfo(
+                    shape=x_local_shape,
+                    dtype=input_info.dtype,
+                    requires_grad=False,  # Saved tensors don't track grad
+                )
+            )
             # x_local aliases the input only for the FIRST op in the pipeline.
             # For subsequent ops, x_local is an intermediate output (new tensor).
             # The fuser passes _is_first_op in kwargs to indicate this.
@@ -1136,29 +1137,33 @@ class BasicLinear(BasicOperation):
             else:
                 # Intermediate op - x_local is previous op's output (new tensor, not alias)
                 tensor_sources.append(-1)
-            
+
             # Weight shape - this IS the weight parameter (params[0] for this op)
-            tensors_to_save_info.append(TensorInfo(
-                shape=(self.local_out_features, self.local_in_features),
-                dtype=self.weight.dtype,
-                requires_grad=False,
-            ))
+            tensors_to_save_info.append(
+                TensorInfo(
+                    shape=(self.local_out_features, self.local_in_features),
+                    dtype=self.weight.dtype,
+                    requires_grad=False,
+                )
+            )
             # w is params[0], so source = 1 (offset by 1 because 0 = input x)
             tensor_sources.append(1)
-        
+
         # Context data for backward reconstruction
         # Note: dtype and quantizers are determined at backward time from op state
         from ...quantization import FP8GlobalStateManager
-        
+
         # Get dtype (same logic as op_forward)
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
         else:
             dtype = self.weight.dtype
-        
+
         ctx_data = {
             "input_requires_grad": input_info.requires_grad,
-            "weight_requires_grad": self.weight.requires_grad if input_info.requires_grad else False,
+            "weight_requires_grad": (
+                self.weight.requires_grad if input_info.requires_grad else False
+            ),
             "num_saved_tensors": len(tensors_to_save_info),
             "dtype": dtype,
             "with_quantized_compute": FP8GlobalStateManager.is_fp8_enabled(),
@@ -1169,7 +1174,7 @@ class BasicLinear(BasicOperation):
             "grad_output_quantizer": None,
             "grad_input_quantizer": None,
         }
-        
+
         return PseudoForwardResult(
             output_info=output_info,
             tensors_to_save_info=tensors_to_save_info,
