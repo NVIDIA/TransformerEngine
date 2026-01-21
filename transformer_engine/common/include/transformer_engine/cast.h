@@ -89,6 +89,17 @@ extern "C" {
  */
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Casts input grouped tensor to MXFP8.
+ *         The type of quantized tensor in the output depends on the scaling mode of the output
+ *         tensor. See file level comments.
+ *
+ *  \param[in]     input            Input grouped tensor to be cast.
+ *  \param[in,out] output           Output grouped MXFP8 tensor.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_quantize_grouped(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                           cudaStream_t stream);
+
 /*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
  *         The type of quantized tensor in the output depends on the scaling mode of the output
