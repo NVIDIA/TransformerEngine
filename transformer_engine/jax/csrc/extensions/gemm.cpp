@@ -399,127 +399,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler, GroupedGemmD2HGro
                                   .Ret<Buffer_Type>()      // dummy_output
                                   .Attr<int64_t>("num_gemms"));
 
-class JAXX_GroupedTensorWrapper {
-public:
-  JAXX_GroupedTensorWrapper() = delete;
-  JAXX_GroupedTensorWrapper(JAXX_Scaling_Mode scaling_mode, size_t num_tensors,
-                            NVTEShape const& dataShape);
-  ~JAXX_GroupedTensorWrapper() = default;
-
-  void set_rowwise(Buffer_Type const& data, std::optional<Buffer_Type> const& scale_inv);
-  void set_group_info(Buffer_Type const& group_sizes, Buffer_Type const& group_offsets);
-
-  operator NVTEGroupedTensor() const { return m_grouped_tensor; }
-  NVTEGroupedTensor const& get_grouped_tensor() const;
-
-private:
-  NVTEShape m_data_shape{};
-  NVTEGroupedTensor m_grouped_tensor{};
-
-  // Internal tensors. These need to be kept alive as long as the grouped tensor is alive.
-  NVTEBasicTensor m_data_tensor{};
-  NVTEBasicTensor m_scale_inv_tensor{};
-
-  NVTEBasicTensor m_sizes_tensor{};
-  NVTEBasicTensor m_offsets_tensor{};
-};
-
-JAXX_GroupedTensorWrapper::JAXX_GroupedTensorWrapper(JAXX_Scaling_Mode scaling_mode,
-                                                     size_t num_tensors,
-                                                     NVTEShape const& dataShape) {
-  m_data_shape = dataShape;
-  m_grouped_tensor = nvte_create_grouped_tensor(get_nvte_scaling_mode(scaling_mode), num_tensors, dataShape);
-}
-
-void JAXX_GroupedTensorWrapper::set_rowwise(Buffer_Type const& data,
-                                            std::optional<Buffer_Type> const& scale_inv) {
-  printf("set_rowwise data shape: XLA buffer shape: ");
-  for (auto dim : data.dimensions()) {
-    printf("%zu, ", dim);
-  }
-  printf("NVTEShape: ");
-  for (int i = 0; i < m_data_shape.ndim; ++i) {
-    printf("%d, ", m_data_shape.data[i]);
-  }
-  printf("\n");
-  NVTEDType data_dtype = static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(data.element_type()));
-  m_data_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(data.untyped_data()), data_dtype,
-                                  m_data_shape};
-
-  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedRowwiseData, &m_data_tensor);
-
-  if (scale_inv.has_value()) {
-    NVTEDType scale_inv_dtype =
-        static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(scale_inv->element_type()));
-    NVTEShape logical_scale_shape{};
-    if (scale_inv->dimensions().size() == 1) {
-      logical_scale_shape.ndim = 1;
-      logical_scale_shape.data[0] = scale_inv->dimensions()[0];
-    } else if (scale_inv->dimensions().size() == 2) {
-      logical_scale_shape.ndim = 2;
-      logical_scale_shape.data[0] = scale_inv->dimensions()[0];
-      logical_scale_shape.data[1] = scale_inv->dimensions()[1];
-    } else {
-      NVTE_CHECK(false, "Expected 1D or 2D tensor for GEMM scale_inv but received ndim=",
-                 scale_inv->dimensions().size());
-    }
-    m_scale_inv_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(scale_inv->untyped_data()),
-                                        scale_inv_dtype, logical_scale_shape};
-    nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedRowwiseScaleInv,
-                                  &m_scale_inv_tensor);
-  }
-}
-
-void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const& group_sizes,
-                                               Buffer_Type const& group_offsets) {
-  NVTEDType sizes_dtype =
-      static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(group_sizes.element_type()));
-  NVTEDType offsets_dtype =
-      static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(group_offsets.element_type()));
-
-  NVTE_CHECK(sizes_dtype == NVTEDType::kNVTEInt32,
-             "group_sizes must be of type int32.");
-  NVTE_CHECK(offsets_dtype == NVTEDType::kNVTEInt32,
-             "group_offsets must be of type int32.");
-
-  // JAX only supports int32 but cuBLAS requires int64 so we pack two int32 into one int64
-  size_t num_tensors = group_sizes.dimensions()[0] / 2;
-  NVTE_CHECK(group_sizes.dimensions().size() == 1,
-             "group_sizes must be a 1D tensor with length equal to the number of tensors.");
-  NVTE_CHECK(group_offsets.dimensions().size() == 1,
-             "group_offsets must be a 1D tensor with length equal to the number of tensors.");
-  NVTE_CHECK(group_offsets.dimensions()[0] == 2 * num_tensors,
-             "group_sizes and group_offsets must have the same number of elements.");
-
-  NVTEShape shape{};
-  shape.ndim = 1;
-  shape.data[0] = num_tensors;
-
-  m_sizes_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(group_sizes.untyped_data()),
-                              NVTEDType::kNVTEInt64,
-                              shape};
-  m_offsets_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(group_offsets.untyped_data()),
-                                 NVTEDType::kNVTEInt64,
-                                 shape};
-
-  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedFirstDims, &m_sizes_tensor);
-  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedTensorOffsets, &m_offsets_tensor);
-}
-
-NVTEGroupedTensor const& JAXX_GroupedTensorWrapper::get_grouped_tensor() const {
-  return m_grouped_tensor;
-}
-
-JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const& data, std::optional<Buffer_Type> scale_inv, JAXX_Scaling_Mode scaling_mode, size_t num_tensors, NVTEShape const& dataShape) {
-  JAXX_GroupedTensorWrapper grouped_tensor_wrapper(scaling_mode, num_tensors, dataShape);
-  if (scaling_mode == JAXX_Scaling_Mode::NO_SCALING) {
-    scale_inv = std::nullopt;
-  }
-  grouped_tensor_wrapper.set_rowwise(data, scale_inv);
-
-  return grouped_tensor_wrapper;
-}
-
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
                           Buffer_Type group_sizes, Buffer_Type group_offsets,
@@ -654,68 +533,145 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   TensorWrapper beta_tensor(static_cast<void *>(beta.untyped_data()), std::vector<size_t>{num_gemms},
                            convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
+  // Grouped GEMM currently only supports tensor scaling
+  NVTE_CHECK(is_tensor_scaling,
+             "Grouped GEMM only supports tensor scaling (DELAYED_TENSOR_SCALING or CURRENT_TENSOR_SCALING)");
 
-  printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0] / 2, lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
+  // To make the output compatible with JAX row-major, we swap A and B in cuBLAS GEMM call.
+  // JAX: C = LHS @ RHS  =>  cuBLAS: C^T = RHS^T @ LHS^T
+  // So we pass: A = rhs (swapped), B = lhs (swapped)
+  // trans_a = !rhs_is_trans (flip because of the swap)
+  // trans_b = !lhs_is_trans (flip because of the swap)
+  bool trans_a = !rhs_is_trans;
+  bool trans_b = !lhs_is_trans;
 
-  //// RHS
-  NVTEShape rhsShape{.data={k, n}, .ndim=2};
-  if (rhs_is_trans && !is_grouped_dense_wgrad) {
-    std::swap(rhsShape.data[0], rhsShape.data[1]);
+  // Calculate logical shapes for grouped tensors
+  // After swap: A (from rhs) has shape [num_gemms, K, N] or [num_gemms, N, K] if transposed
+  // B (from lhs) has shape [M, K] or [K, M] if transposed (M varies across gemms)
+  // D has shape [M, N] (M varies across gemms for non-wgrad case, or [num_gemms, M, N] for wgrad)
+
+  // The group_sizes array contains the M dimension for each GEMM (packed as int32 pairs for int64)
+  // For grouped GEMM: lhs is [sum(M_i), K], rhs is [num_gemms, K, N], output is [sum(M_i), N]
+  // For grouped dense wgrad: lhs is [K, M], rhs is [K, N], output is [num_gemms, M, N]
+
+  auto nvte_scaling_mode = get_nvte_scaling_mode(scaling_mode);
+
+  // Create grouped tensor A (from rhs - after swap for cuBLAS)
+  // For non-wgrad: rhs is [num_gemms, K, N] -> each tensor is [K, N]
+  // Shape: uniform first dim = K (if !rhs_trans) or N (if rhs_trans)
+  //        uniform last dim = N (if !rhs_trans) or K (if rhs_trans)
+  size_t a_first_dim = rhs_is_trans ? n : k;
+  size_t a_last_dim = rhs_is_trans ? k : n;
+  size_t a_logical_shape_data[2] = {num_gemms * a_first_dim, a_last_dim};
+  NVTEShape a_logical_shape = nvte_make_shape(a_logical_shape_data, 2);
+  NVTEGroupedTensor grouped_a = nvte_create_grouped_tensor(nvte_scaling_mode, num_gemms, a_logical_shape);
+
+  NVTEBasicTensor a_data_tensor{rhs_ptr, static_cast<NVTEDType>(rhs_dtype), a_logical_shape};
+  nvte_set_grouped_tensor_param(&grouped_a, kNVTEGroupedRowwiseData, &a_data_tensor);
+
+  // Set scale_inv for A (rhs) if FP8
+  if (is_fp8_gemm) {
+    NVTEShape a_scale_shape = nvte_make_shape(&num_gemms, 1);
+    NVTEBasicTensor a_scale_tensor{rhs_scatter_aligned_ptr, kNVTEFloat32, a_scale_shape};
+    nvte_set_grouped_tensor_param(&grouped_a, kNVTEGroupedRowwiseScaleInv, &a_scale_tensor);
+    // Scatter rhs scale_inv values to aligned positions
+    for (size_t i = 0; i < num_gemms; ++i) {
+      cudaMemcpyAsync(rhs_scatter_aligned_ptr + i * tensor_scaling_sinv_aligment,
+                      rhs_sinv_ptr + i * sizeof(float),
+                      sizeof(float), cudaMemcpyDeviceToDevice, stream);
+    }
   }
-  if (!is_grouped_dense_wgrad) {
-    // If is_grouped_dense_wgrad, then n already includes num_gemms (G) pre-multiplied in gemm.py, so we don't need to multiply it here.
-    rhsShape.data[0] *= num_gemms;
-  }
-  auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
+
+  // Create grouped tensor B (from lhs - after swap for cuBLAS)
+  // For non-wgrad: lhs is [sum(M_i), K] with varying M_i per gemm
+  // For wgrad: lhs is [K, M] uniform
+  size_t b_first_dim, b_last_dim;
+  bool b_has_varying_first_dim = !is_grouped_dense_wgrad;
   if (is_grouped_dense_wgrad) {
-    rhs_tensor.set_group_info(group_sizes, group_offsets);
+    b_first_dim = lhs_is_trans ? m : k;
+    b_last_dim = lhs_is_trans ? k : m;
+  } else {
+    // Varying M: first_dim varies, last_dim is K
+    b_first_dim = lhs_is_trans ? k : m;  // total M for logical shape
+    b_last_dim = lhs_is_trans ? m : k;   // but this is the sum, we need to handle varying dims
+  }
+  size_t b_logical_shape_data[2] = {b_first_dim, b_last_dim};
+  NVTEShape b_logical_shape = nvte_make_shape(b_logical_shape_data, 2);
+  NVTEGroupedTensor grouped_b = nvte_create_grouped_tensor(nvte_scaling_mode, num_gemms, b_logical_shape);
+
+  NVTEBasicTensor b_data_tensor{lhs_ptr, static_cast<NVTEDType>(lhs_dtype), b_logical_shape};
+  nvte_set_grouped_tensor_param(&grouped_b, kNVTEGroupedRowwiseData, &b_data_tensor);
+
+  // Set first_dims for B if varying (non-wgrad case)
+  // group_sizes contains the M values as int64 (packed as pairs of int32)
+  // group_offsets contains cumulative offsets
+  if (b_has_varying_first_dim) {
+    NVTEShape first_dims_shape = nvte_make_shape(&num_gemms, 1);
+    NVTEBasicTensor first_dims_tensor{group_sizes.untyped_data(), kNVTEInt64, first_dims_shape};
+    nvte_set_grouped_tensor_param(&grouped_b, kNVTEGroupedFirstDims, &first_dims_tensor);
+
+    NVTEBasicTensor offsets_tensor{group_offsets.untyped_data(), kNVTEInt64, first_dims_shape};
+    nvte_set_grouped_tensor_param(&grouped_b, kNVTEGroupedTensorOffsets, &offsets_tensor);
   }
 
-  //// LHS
-  NVTEShape lhsShape{.data={k, m}, .ndim=2};
-  if (lhs_is_trans && is_grouped_dense_wgrad) {
-    std::swap(lhsShape.data[0], lhsShape.data[1]);
+  // Set scale_inv for B (lhs) if FP8
+  if (is_fp8_gemm) {
+    NVTEShape b_scale_shape = nvte_make_shape(&num_gemms, 1);
+    NVTEBasicTensor b_scale_tensor{lhs_scatter_aligned_ptr, kNVTEFloat32, b_scale_shape};
+    nvte_set_grouped_tensor_param(&grouped_b, kNVTEGroupedRowwiseScaleInv, &b_scale_tensor);
+    // Scatter lhs scale_inv values to aligned positions
+    for (size_t i = 0; i < num_gemms; ++i) {
+      cudaMemcpyAsync(lhs_scatter_aligned_ptr + i * tensor_scaling_sinv_aligment,
+                      lhs_sinv_ptr + i * sizeof(float),
+                      sizeof(float), cudaMemcpyDeviceToDevice, stream);
+    }
   }
+
+  // Create grouped tensor D (output)
+  // For non-wgrad: output is [sum(M_i), N] with varying M_i
+  // For wgrad: output is [num_gemms, M, N] with uniform M
+  size_t d_first_dim, d_last_dim;
+  bool d_has_varying_first_dim = !is_grouped_dense_wgrad;
   if (is_grouped_dense_wgrad) {
-    // If is_grouped_dense_wgrad, then m already includes num_gemms (G) pre-multiplied in gemm.py, so we don't need to multiply it here.
-    lhsShape.data[0] *= num_gemms;
+    d_first_dim = num_gemms * m;
+    d_last_dim = n;
+  } else {
+    d_first_dim = m;  // total M
+    d_last_dim = n;
   }
-  auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  if (!is_grouped_dense_wgrad) {
-    lhs_tensor.set_group_info(group_sizes, group_offsets);
+  size_t d_logical_shape_data[2] = {d_first_dim, d_last_dim};
+  NVTEShape d_logical_shape = nvte_make_shape(d_logical_shape_data, 2);
+  NVTEGroupedTensor grouped_d = nvte_create_grouped_tensor(nvte_scaling_mode, num_gemms, d_logical_shape);
+
+  NVTEBasicTensor d_data_tensor{out_ptr, static_cast<NVTEDType>(out_dtype), d_logical_shape};
+  nvte_set_grouped_tensor_param(&grouped_d, kNVTEGroupedRowwiseData, &d_data_tensor);
+
+  // Set first_dims and offsets for D if varying
+  if (d_has_varying_first_dim) {
+    NVTEShape first_dims_shape = nvte_make_shape(&num_gemms, 1);
+    NVTEBasicTensor first_dims_tensor{group_sizes.untyped_data(), kNVTEInt64, first_dims_shape};
+    nvte_set_grouped_tensor_param(&grouped_d, kNVTEGroupedFirstDims, &first_dims_tensor);
+
+    NVTEBasicTensor offsets_tensor{group_offsets.untyped_data(), kNVTEInt64, first_dims_shape};
+    nvte_set_grouped_tensor_param(&grouped_d, kNVTEGroupedTensorOffsets, &offsets_tensor);
   }
 
-  //// OUTPUT
-  NVTEShape outShape{.data={m, n}, .ndim=2};
-  if (is_grouped_dense_wgrad) {
-    outShape.data[0] *= num_gemms;
-  }
-  auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
-  if (!is_grouped_dense_wgrad) {
-    out_tensor.set_group_info(group_sizes, group_offsets);
-  }
+  // Call nvte_grouped_gemm
+  // Note: C is nullptr since beta=0 (no accumulation)
+  nvte_grouped_gemm(grouped_a, trans_a, grouped_b, trans_b,
+                    nullptr,  // C tensor (nullptr for beta=0)
+                    grouped_d,
+                    alpha_tensor.data(),
+                    beta_tensor.data(),
+                    workspace_setup.data(),
+                    workspace_cublas.data(),
+                    nullptr,  // config (use defaults)
+                    stream);
 
-  printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
-         rhsShape.data[0], rhsShape.data[1],
-         lhsShape.data[0], lhsShape.data[1],
-         outShape.data[0], outShape.data[1]);
-
-  printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
-
-  // HACK: jberchtold FIXME
-  cudaMemsetAsync(output->untyped_data(), 0xFF, output->size_bytes(), stream);
-
-  nvte_grouped_gemm(
-    rhs_tensor, rhs_is_trans,
-    lhs_tensor, lhs_is_trans,
-    nullptr,
-    out_tensor,
-    alpha_tensor.data(),
-    beta_tensor.data(),
-    workspace_setup.data(),
-    workspace_cublas.data(),
-    nullptr,  // config (use defaults)
-    stream);
+  // Clean up grouped tensors
+  nvte_destroy_grouped_tensor(grouped_a);
+  nvte_destroy_grouped_tensor(grouped_b);
+  nvte_destroy_grouped_tensor(grouped_d);
 
   return ffi_with_cuda_error_check();
 }
