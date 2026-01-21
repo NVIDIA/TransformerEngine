@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -293,6 +293,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             amax=self.amax,
         )
         quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
 
         return quantizer
 
@@ -551,24 +552,31 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     ) -> Float8Tensor:
         """Returns tensor with data in provided memory format
 
-        Returns `self` if data is already in correct memory format.
+        Returns ``self`` if data is already in correct memory format.
 
         """
-        # requires_grad remains unaltered when calling contiguous on
-        # torch tensor and so should be the case for our custom float8 tensor
-        # as well.
-        return Float8Tensor.make_like(
-            tensor=self,
-            data=self._data.contiguous(memory_format=memory_format),
-            data_transpose=(
-                self._transpose.contiguous(memory_format=memory_format)
-                if self._transpose is not None
-                else None
-            ),
-            requires_grad=self.requires_grad,
-        )
 
-        # raise ValueError("Float8Tensor does not support different memory formats!")
+        # Check if tensor already has correct memory format
+        if self._data is not None and not self._data.is_contiguous(memory_format=memory_format):
+            pass
+        elif self._transpose is not None and not self._transpose.is_contiguous(
+            memory_format=memory_format
+        ):
+            pass
+        else:
+            # Tensor has correct memory format, so return immediately
+            return self
+
+        # Construct tensor with correct data format
+        data, data_transpose = None, None
+        if self._data is not None:
+            data = self._data.contiguous(memory_format=memory_format)
+        if self._transpose is not None and not self._transpose_invalid:
+            data_transpose = self._transpose.contiguous(memory_format=memory_format)
+        return _IdentityFunc.apply(
+            self,
+            {"data": data, "data_transpose": data_transpose},
+        )
 
     def _reset_caches(self) -> None:
         """

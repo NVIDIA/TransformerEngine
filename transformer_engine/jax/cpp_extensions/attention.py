@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
@@ -26,7 +26,7 @@ from transformer_engine.jax.attention import (
     CPStrategy,
     SequenceDescriptor,
 )
-from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES
+from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES, is_mesh_available
 
 from .base import BasePrimitive, register_primitive
 from .misc import (
@@ -144,6 +144,7 @@ class FusedAttnHelper:
             self.head_dim_v,
             self.window_size[0],
             self.window_size[1],
+            not self.is_non_deterministic_allowed(),
         )
 
     @staticmethod
@@ -3288,7 +3289,7 @@ register_primitive(FusedRingAttnStripedBwdPrimitive)
 
 
 def _maybe_context_parallel_axis(cp_axis: str):
-    if not cp_axis:
+    if not cp_axis and is_mesh_available():
         gmr = global_mesh_resource()
         if gmr is not None:
             cp_axis = gmr.cp_resource
@@ -3563,13 +3564,21 @@ def fused_attn_bwd(
                 softmax_offset, (None, HEAD_AXES, None, None)
             )
 
-    # TODO(KshitijLakhani): Add a check for cuDNN version when determinism does get supported on
-    # sm100+
     compute_capabilities = get_all_device_compute_capability()
-    if any(x >= 100 for x in compute_capabilities):
-        assert not (
-            attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
-        ), "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
+    if any(x >= 100 for x in compute_capabilities) and is_training:
+        assert (
+            FusedAttnHelper.is_non_deterministic_allowed()
+            and get_cudnn_version() >= (9, 7, 0)
+            and (attn_bias_type == AttnBiasType.NO_BIAS or dropout_probability == 0.0)
+        ) or (
+            not FusedAttnHelper.is_non_deterministic_allowed()
+            and get_cudnn_version() >= (9, 18, 1)
+            and attn_bias_type == AttnBiasType.NO_BIAS
+            and dropout_probability == 0.0
+        ), (
+            "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with dropout,"
+            " and deterministic bprop (cuDNN 9.18.1+) does not support bias or dropout"
+        )
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,

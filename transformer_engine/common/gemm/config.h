@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -23,11 +23,11 @@ struct MatmulConfig {
   static constexpr size_t attr_sizes[] = {
       sizeof(NVTETensor),  // bias_tensor
       sizeof(NVTETensor),  // dbias_tensor
-      sizeof(bool),        // with_gelu_epilogue
-      sizeof(bool),        // with_dgelu_epilogue
+      sizeof(uint8_t),     // with_gelu_epilogue
+      sizeof(uint8_t),     // with_dgelu_epilogue
       sizeof(NVTETensor),  // epilogue_aux_tensor
-      sizeof(bool),        // use_split_accumulator
-      sizeof(int)          // sm_count
+      sizeof(uint8_t),     // use_split_accumulator
+      sizeof(int32_t)      // sm_count
   };
 };
 

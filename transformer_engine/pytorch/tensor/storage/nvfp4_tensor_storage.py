@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -71,14 +71,28 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
     """
 
+    # Row-scaled FP4 data
     _rowwise_data: Optional[torch.Tensor]
+    # Column-scaled FP4 data
     _columnwise_data: Optional[torch.Tensor]
-    _quantizer: Optional[Quantizer]
+    # Block scaling factors for row-scaled FP4 data
     _rowwise_scale_inv: torch.Tensor
+    # Block scaling factors for column-scaled FP4 data
     _columnwise_scale_inv: torch.Tensor
-    _fp4_dtype: TE_DType
+    # Input absolute maximum value (used to compute tensor scale for
+    # row-scaled FP4 data)
     _amax_rowwise: torch.Tensor
+    # Input absolute maximum value (used to compute tensor scale for
+    # column-scaled FP4 data)
     _amax_columnwise: torch.Tensor
+
+    # Builder class for casting to MXFP8
+    _quantizer: Optional[Quantizer]
+    # FP4 data type
+    _fp4_dtype: TE_DType
+    # Whether scaling factors are in the swizzled format expected by
+    # GEMM
+    _with_gemm_swizzled_scales: bool
 
     def __new__(
         cls,
@@ -90,6 +104,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         amax_columnwise: torch.Tensor,
         fp4_dtype: TE_DType,
         quantizer: Optional[Quantizer],
+        with_gemm_swizzled_scales: bool,
         *args,
         **kwargs,
     ):
@@ -104,6 +119,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._amax_rowwise = amax_rowwise
         instance._amax_columnwise = amax_columnwise
+        instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
         return instance
 
@@ -131,6 +147,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "amax_columnwise": self._amax_columnwise,
             "fp4_dtype": self._fp4_dtype,
             "quantizer": self._quantizer,
+            "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], NVFP4TensorStorage]:
@@ -248,6 +265,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             amax_columnwise=self._amax_columnwise,
             quantizer=self._quantizer,
             fp4_dtype=self._fp4_dtype,
+            with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
         )
 
     def __repr__(self):

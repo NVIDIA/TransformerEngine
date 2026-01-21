@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,7 +11,6 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
-from transformer_engine_torch import Float8BlockScaleTensorFormat
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
@@ -36,7 +35,6 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _rowwise_scale_inv: Optional[torch.Tensor]
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
-    _data_format: Float8BlockScaleTensorFormat
 
     def __new__(
         cls,
@@ -47,7 +45,6 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         fp8_dtype: TE_DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
-        data_format: Float8BlockScaleTensorFormat,
         *args,
         **kwargs,
     ):
@@ -62,7 +59,6 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
-        instance._data_format = data_format
 
         return instance
 
@@ -87,12 +83,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "is_2D_scaled": self._is_2D_scaled,
-            "data_format": self._data_format,
         }
-
-    def _is_gemm_ready_format(self) -> bool:
-        """Whether data is in GEMM_READY format"""
-        return self._data_format == Float8BlockScaleTensorFormat.GEMM_READY
 
     def prepare_for_saving(
         self,
@@ -153,36 +144,18 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
             inner_q_dimension_tiled = True
-            if self._is_gemm_ready_format():
-                scales_tiled_dim, scales_untiled_dim = scale_inv.shape
-                inner_scale_dimension_tiled = False
-                scales_are_compact = False
-            else:
-                scales_untiled_dim, scales_tiled_dim = scale_inv.shape
-                inner_scale_dimension_tiled = True
-                scales_are_compact = True
+            scales_tiled_dim, scales_untiled_dim = scale_inv.shape
         else:
             assert self._columnwise_data is not None, "No data to dequantize"
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
             scales_tiled_dim, scales_untiled_dim = scale_inv.shape
-            inner_scale_dimension_tiled = False
-            if self._is_gemm_ready_format():
-                inner_q_dimension_tiled = True
-                transpose_output = True
-                if len(q.shape) >= 1:
-                    q_M = q.shape[0]
-                for i in range(1, len(q.shape)):
-                    q_K *= q.shape[i]
-                scales_are_compact = False
-            else:
-                inner_q_dimension_tiled = False
-                transpose_output = False
-                if len(q.shape) >= 1:
-                    q_K = q.shape[-1]
-                for i in range(len(q.shape) - 1):
-                    q_M *= q.shape[i]
-                scales_are_compact = True
+            inner_q_dimension_tiled = True
+            transpose_output = True
+            if len(q.shape) >= 1:
+                q_M = q.shape[0]
+            for i in range(1, len(q.shape)):
+                q_K *= q.shape[i]
 
         orig_shape = q.shape
         q = q.reshape(q_M, q_K)
@@ -202,15 +175,10 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
                 ).contiguous()
             padded_M, padded_K = q.shape
             q_tiled = q.reshape(scales_tiled_dim, block_len, q_K)
-        if not scales_are_compact and scales_untiled_dim > q_M:
+        if scales_untiled_dim > q_M:
             # untiled scale dimension is 4 element aligned.
             scale_inv = scale_inv[:, :q_M].contiguous()
-        if scales_are_compact and inner_scale_dimension_tiled:
-            dq_scale = scale_inv.contiguous().reshape(q_M, scales_tiled_dim, 1)
-        elif scales_are_compact and not inner_scale_dimension_tiled:
-            dq_scale = scale_inv.contiguous().reshape(scales_tiled_dim, 1, q_K)
-        else:
-            dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(q_M, scales_tiled_dim, 1)
+        dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(q_M, scales_tiled_dim, 1)
         torch_q_dtype = TE_DType_To_Torch[self._fp8_dtype]
         result = q_tiled.view(torch_q_dtype).to(torch.float32) * dq_scale
         if padded_M != q_M or padded_K != q_K:
@@ -232,12 +200,6 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         block_len = 128
         if not self._is_2D_scaled:
             return self._dequantize_vectorwise(dtype=dtype)
-
-        if not self._is_gemm_ready_format():
-            raise NotImplementedError(
-                "Dequantize is only supported with GEMM_READY data format, "
-                f"but found _data_format={self._data_format}"
-            )
 
         def format_scale_as_logical_shape(q_K, scales, block_len):
             # The GEMM for 2D blocks required padding in the scales.
@@ -304,8 +266,6 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
         dims = list(self._columnwise_data.size(*args, **kwargs))
-        if not self._is_gemm_ready_format():  # compact format
-            return torch.Size(dims)
         reordered = []
         for i in range(1, len(dims)):
             reordered.append(dims[i])
@@ -366,7 +326,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         return (
             "Float8BlockwiseQTensorStorage("
             f"fp8_dtype={self._fp8_dtype}, "
-            f"{descriptor}_scaled_data={data}"
+            f"{descriptor}_scaled_data={data})"
         )
 
     def update_usage(

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -248,7 +248,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
         "Split and multi-tensor quantize", py::arg("tensor"), py::arg("split_sections"),
-        py::arg("quantizer_list"));
+        py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false);
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
@@ -355,6 +355,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
+  m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
+        "Convert tensor block scales into GEMM swizzled format");
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -1179,6 +1179,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   NVTE_CHECK(output->has_data(), "NVFP4 output tensor must be allocated.");
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+  NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
   if (return_transpose) {
     NVTE_CHECK(output->has_columnwise_data(), "NVFP4 transposed output tensor must be allocated.");
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),

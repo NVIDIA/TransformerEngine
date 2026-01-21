@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -431,8 +431,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 if fp8 or debug:
                     ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
-                    if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
-                        fc1_input_quantizer.all_gather_usage = False
                     ln_out_total = fc1_input_quantizer(ln_out_total)
             else:
                 quantizer = None
@@ -1964,15 +1962,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
 
-        # customize quantizers based on each recipe & layer configs
+        # Recipe-specific quantizer configuration
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
-        elif recipe.float8_block_scaling():
-            self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
         elif recipe.nvfp4():
             self._customize_quantizers_nvfp4(fwd, recipe)
-        # elif for other recipes (mxfp8, etc.)
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -2193,6 +2188,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if self.fp8 or self.fp8_calibration:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
             fc1_input_quantizer.internal = True
+            if not self.sequence_parallel:
+                fc1_input_quantizer.optimize_for_gemm = True
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True,
@@ -2201,7 +2198,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer),
                 ),
             )
-            fc1_input_quantizer.internal = True
+            fc2_input_quantizer.internal = True
+            fc2_input_quantizer.optimize_for_gemm = True
             if fp8_output:
                 fc2_output_quantizer = self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM2_OUTPUT
@@ -2211,10 +2209,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     tex.FP8BwdTensors.GRAD_OUTPUT2
                 ]
                 fc2_grad_output_quantizer.internal = True
+                if not self.sequence_parallel:
+                    fc2_grad_output_quantizer.optimize_for_gemm = True
                 fc1_grad_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ]
                 fc1_grad_output_quantizer.internal = True
+                fc1_grad_output_quantizer.optimize_for_gemm = True
 
         return (
             fc1_input_quantizer,
@@ -2243,14 +2244,23 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export"
         assert_warmed_up(self)
+
+        # Get quantizers
         (
             fc1_input_quantizer,
             fc1_weight_quantizer,
+            _,
+            _,
+            _,
+            _,
             fc2_input_quantizer,
             fc2_weight_quantizer,
-            output_quantizer,
-            *_,
+            fc2_output_quantizer,
+            _,
+            _,
+            _,
         ) = self._get_quantizers(False, is_grad_enabled)
+
         inp_dtype = inp.dtype
 
         fc1_weight, fc2_weight = self._get_weight_tensors()
@@ -2324,7 +2334,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         fc2_out = onnx_gemm(fc2_weight, act_out, fc2_bias)
 
-        if output_quantizer is not None:
+        if fc2_output_quantizer is not None:
             raise NotImplementedError("ONNX export of quantized output is not supported")
 
         if self.return_layernorm_output:
@@ -2457,22 +2467,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
         fc2_weight_quantizer.internal = True
         return [fc1_weight_quantizer, fc2_weight_quantizer]
-
-    def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on blockwise scaling recipe + layernorm_mlp."""
-        assert (
-            recipe.float8_block_scaling()
-        ), "blockwise scaling recipe quantizer customization here"
-        if fwd:
-            if self.sequence_parallel and self.set_parallel_mode:
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].all_gather_usage = True
-        else:
-            if self.sequence_parallel and self.set_parallel_mode:
-                self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT2
-                ].all_gather_usage = True
 
     def backward_dw(self):
         """

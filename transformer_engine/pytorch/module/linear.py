@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -428,7 +428,8 @@ class _Linear(torch.autograd.Function):
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
 
-            mark_not_offload(weight, weightmat, bias)
+            if cpu_offloading:
+                mark_not_offload(weight, weightmat, bias)
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
@@ -1312,15 +1313,12 @@ class Linear(TransformerEngineBaseModule):
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
 
-        # customize quantizers based on each recipe & layer configs
+        # Recipe-specific quantizer configuration
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
-        elif recipe.float8_block_scaling():
-            self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
         elif recipe.nvfp4():
             self._customize_quantizers_nvfp4(fwd, recipe)
-        # elif for other recipes (mxfp8, etc.)
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
@@ -1488,12 +1486,16 @@ class Linear(TransformerEngineBaseModule):
         output_quantizer = None
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = True
+        if not (self.parallel_mode == "column" and self.sequence_parallel):
+            input_quantizer.optimize_for_gemm = True
         (weight_quantizer,) = self._get_weight_quantizers()
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if is_grad_enabled:
             grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
             grad_output_quantizer.internal = True
+            if not (self.parallel_mode == "row" and self.sequence_parallel):
+                grad_output_quantizer.optimize_for_gemm = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
         return (
@@ -1668,22 +1670,3 @@ class Linear(TransformerEngineBaseModule):
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         return [weight_quantizer]
-
-    def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on blockwise scaling recipe + linear."""
-        assert (
-            recipe.float8_block_scaling()
-        ), "blockwise scaling recipe quantizer customization here"
-
-        if fwd:
-            if self.sequence_parallel and self.parallel_mode == "column":
-                # set compact for inp tensor X
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].all_gather_usage = True
-        else:
-            if self.sequence_parallel and self.parallel_mode == "row":
-                # set compact for grad_output tensor dY
-                self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
-                ].all_gather_usage = True

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -45,12 +45,12 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_logit, bool cuda_graph) {
+    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
       bias_type, attn_mask_type, softmax_type, p_dropout, num_attn_heads, num_gqa_groups,
       max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right,
-      return_max_logit, cuda_graph);
+      return_max_logit, cuda_graph, deterministic);
   return fused_attention_backend;
 }
 

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -89,14 +89,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   TensorWrapper mu_nvte = makeTransformerEngineTensor(mu_py);
   TensorWrapper rsigma_nvte = makeTransformerEngineTensor(rsigma_py);
 
-  // Output tensor
+  // Quantizer
   auto quantizer_cpp = convert_quantizer(quantizer);
-  TensorWrapper out_nvte;
-  if (out.is_none()) {
-    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
-  } else {
-    out_nvte = makeTransformerEngineTensor(out, quantizer);
-  }
 
   // Choose implementation
   enum class Impl {
@@ -133,6 +127,19 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       // TE kernel supports amax output
       impl = Impl::FUSED_NORM_AMAX_NVFP4;
     }
+  }
+
+  // Output tensor
+  TensorWrapper out_nvte;
+  if (out.is_none()) {
+    if (impl == Impl::FULLY_FUSED) {
+      // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
+      // kernel does not support GEMM swizzled scales
+      quantizer_cpp->optimize_for_gemm = false;
+    }
+    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
+  } else {
+    out_nvte = makeTransformerEngineTensor(out, quantizer);
   }
 
   // Construct unquantized output tensor if needed
@@ -318,14 +325,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   at::Tensor rsigma_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
   TensorWrapper rsigma_nvte = makeTransformerEngineTensor(rsigma_py);
 
-  // Output tensor
+  // Quantizer
   auto quantizer_cpp = convert_quantizer(quantizer);
-  TensorWrapper out_nvte;
-  if (out.is_none()) {
-    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
-  } else {
-    out_nvte = makeTransformerEngineTensor(out, quantizer);
-  }
 
   // Choose implementation
   enum class Impl {
@@ -362,6 +363,19 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       // TE kernel supports amax output
       impl = Impl::FUSED_NORM_AMAX_NVFP4;
     }
+  }
+
+  // Output tensor
+  TensorWrapper out_nvte;
+  if (out.is_none()) {
+    if (impl == Impl::FULLY_FUSED) {
+      // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
+      // kernel does not support GEMM swizzled scales
+      quantizer_cpp->optimize_for_gemm = false;
+    }
+    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
+  } else {
+    out_nvte = makeTransformerEngineTensor(out, quantizer);
   }
 
   // Construct unquantized output tensor if needed
