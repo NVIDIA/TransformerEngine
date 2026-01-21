@@ -1816,6 +1816,7 @@ def make_row_id_map(
     routing_map: jnp.ndarray,
     num_tokens: int,
     num_experts: int,
+    return_tokens_per_expert: bool = False,
 ) -> jnp.ndarray:
     """
     Prepare the row_id_map for the permutation.
@@ -1832,6 +1833,11 @@ def make_row_id_map(
         Number of tokens in the input tensor.
     num_experts : int
         Number of experts in the input tensor.
+    return_tokens_per_expert : bool
+        If True, also return the tokens_per_expert array computed from the workspace
+        after pass 2. The workspace contains per-block token counts for each expert,
+        and summing along the block dimension gives the total tokens per expert.
+        This avoids needing to iterate through routing_map a second time.
 
     Returns
     -------
@@ -1841,10 +1847,14 @@ def make_row_id_map(
         The first n_routed items are the destination row indices in the permuted tokens.
         The [num_experts, num_experts + n_routed) items are the indices of the experts corresponding
         to the first n_routed row indices above.
+    tokens_per_expert : jnp.ndarray (only if return_tokens_per_expert=True)
+        Array of shape `[num_experts]` with the number of tokens routed to each expert.
+        Computed from the workspace tensor, avoiding a separate iteration over routing_map.
     """
     block_size = DEFAULT_BLOCK_SIZE
 
     # Pass 1: Block cumsum
+    # workspace_tensor shape: [num_experts, num_blocks] with per-block token counts
     row_id_map_pass1, workspace_tensor = RowIdMapPass1Primitive.outer_primitive.bind(
         routing_map,
         num_tokens=num_tokens,
@@ -1853,6 +1863,7 @@ def make_row_id_map(
     )
 
     # Pass 2: Cumsum all and process the mask
+    # Pass 2 uses workspace_tensor read-only to compute cumulative offsets
     row_id_map_pass2, _ = RowIdMapPass2Primitive.outer_primitive.bind(
         row_id_map_pass1,
         workspace_tensor,
@@ -1860,6 +1871,12 @@ def make_row_id_map(
         num_experts=num_experts,
         block_size=block_size,
     )
+
+    # tokens_per_expert: sum workspace along block dimension
+    # This is done after Pass 2 to ensure workspace_tensor is available
+
+    if return_tokens_per_expert:
+        tokens_per_expert = jnp.sum(workspace_tensor, axis=1, dtype=jnp.int32)
 
     # Initialize columns [num_experts:] to -1 since Pass 1/2 only wrote to [0:num_experts]
     # Reference implementation expects -1 for invalid entries
@@ -1872,6 +1889,8 @@ def make_row_id_map(
         num_experts=num_experts,
     )
 
+    if return_tokens_per_expert:
+        return row_id_map, tokens_per_expert
     return row_id_map
 
 
