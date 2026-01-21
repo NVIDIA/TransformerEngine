@@ -20,11 +20,6 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _stride_from_shape,
 )
 
-_quantized_tensor_cpu_supported_ops = (
-    torch.ops.aten.empty_like.default,
-    torch.ops.aten.copy_.default,
-)
-
 
 class QuantizedTensorStorage:
     r"""Base class for all TensorStorage classes.
@@ -204,10 +199,21 @@ class Quantizer(abc.ABC):
     """
     internal: bool
 
+    """Whether to solely optimize for matrix multiplication
+
+    The resulting quantized tensors are not guaranteed to support any
+    operation other than matrix multiplication. Use with care since
+    this is likely to break communication, checkpointing, and many
+    other features.
+
+    """
+    optimize_for_gemm: bool
+
     def __init__(self, *, rowwise: bool, columnwise: bool) -> None:
         self.rowwise_usage = rowwise
         self.columnwise_usage = columnwise
         self.internal = False
+        self.optimize_for_gemm = False
 
     def __repr__(self):
         return (
@@ -319,7 +325,11 @@ class Quantizer(abc.ABC):
         return False
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
-        """Returns whether or not given tensor can be quantized"""
+        """Whether tensor supports quantized all-gather
+
+        Consider a less misleading function name.
+
+        """
         return True
 
     def get_usages(self) -> Dict[str, bool]:
@@ -538,15 +548,6 @@ class QuantizedTensor(torch.Tensor):
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-
-        def check_if_cpu(arg):
-            if isinstance(cls, QuantizedTensor) and arg.device.type == "cpu":
-                assert (
-                    func in _quantized_tensor_cpu_supported_ops
-                ), f"QuantizedTensor on CPU does not support this operation: {func}"
-            return arg
-
-        args = tree_map(check_if_cpu, args)
 
         # Do not force the QuantizedTensor type on the returned tensor
         return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
