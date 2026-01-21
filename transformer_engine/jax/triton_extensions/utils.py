@@ -409,7 +409,8 @@ def triton_call_lowering(
     kernel_constexprs = constexprs if constexprs is not None else {}
 
     # Handle autotuned kernels - compile all configs
-    if isinstance(kernel_fn, autotuner.Autotuner):
+    is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
+    if is_autotuned:
         # Compile all configs for runtime selection
         kernel_calls = []
         actual_kernel_fn = kernel_fn.fn
@@ -450,24 +451,23 @@ def triton_call_lowering(
 
             kernel_calls.append((config_call, str(config)))
 
-        # Create autotuned kernel call
-        # Convert input_output_aliases to format with sizes
-        if input_output_aliases is None:
-            input_output_aliases = {}
-
-        input_output_aliases_with_sizes = tuple(
-            (
-                input_idx,
-                output_idx,
-                ctx.avals_in[input_idx].size * ctx.avals_in[input_idx].dtype.itemsize,
-            )
-            for input_idx, output_idx in input_output_aliases.items()
-        )
-
+        # IMPORTANT: We pass an empty tuple for input_output_aliases_with_sizes.
+        #
+        # Background:
+        # 1. jax.ffi.ffi_lowering(operand_output_aliases=...) is a HINT to XLA that an
+        #    output can reuse an input's buffer. XLA may or may not honor this.
+        # 2. TritonAutotunedKernelCall's input_output_aliases_with_sizes triggers
+        #    save/restore logic during autotuning (see jaxlib/gpu/triton_kernels.cc:630-701).
+        #
+        # The problem: The save phase (triton_kernels.cc:632) only saves if buffers[input_idx] == buffers[output_idx],
+        # but the restore phase (triton_kernels.cc:697-700) unconditionally iterates over all aliases and tries
+        # to access input_copies[input_idx]. If XLA didn't actually alias the buffers, input_copies[input_idx] doesn't exist, creating an empty vector whose .data() returns nullptr, causing CUDA_ERROR_INVALID_VALUE during the restore memcpy.
+        #
+        # WAR: Don't pass aliases to TritonAutotunedKernelCall.
         kernel_call = gpu_triton.TritonAutotunedKernelCall(
             f"{actual_kernel_fn.__name__}_autotuned",
             kernel_calls,
-            input_output_aliases_with_sizes,
+            (),  # Empty to avoid buggy save/restore in jaxlib/gpu/triton_kernels.cc
         )
 
     else:
@@ -498,15 +498,17 @@ def triton_call_lowering(
     serialized_metadata = b""
     call_proto = kernel_call.to_proto(actual_kernel_fn.__name__, serialized_metadata)
 
-    if input_output_aliases is None:
-        input_output_aliases = {}
+    if input_output_aliases:
+        ffi_operand_output_aliases = input_output_aliases
+    else:
+        ffi_operand_output_aliases = None
 
     # Use JAX FFI lowering with compressed protobuf
     rule = jax.ffi.ffi_lowering(
         "triton_kernel_call",  # Custom call target registered in gpu_triton.py
         api_version=2,
         backend_config=zlib.compress(call_proto),
-        operand_output_aliases=input_output_aliases,
+        operand_output_aliases=ffi_operand_output_aliases,
     )
 
     return rule(ctx, *array_args)

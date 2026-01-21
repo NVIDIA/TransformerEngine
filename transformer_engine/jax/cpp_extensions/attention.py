@@ -144,6 +144,7 @@ class FusedAttnHelper:
             self.head_dim_v,
             self.window_size[0],
             self.window_size[1],
+            not self.is_non_deterministic_allowed(),
         )
 
     @staticmethod
@@ -3563,13 +3564,21 @@ def fused_attn_bwd(
                 softmax_offset, (None, HEAD_AXES, None, None)
             )
 
-    # TODO(KshitijLakhani): Add a check for cuDNN version when determinism does get supported on
-    # sm100+
     compute_capabilities = get_all_device_compute_capability()
-    if any(x >= 100 for x in compute_capabilities):
-        assert not (
-            attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
-        ), "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
+    if any(x >= 100 for x in compute_capabilities) and is_training:
+        assert (
+            FusedAttnHelper.is_non_deterministic_allowed()
+            and get_cudnn_version() >= (9, 7, 0)
+            and (attn_bias_type == AttnBiasType.NO_BIAS or dropout_probability == 0.0)
+        ) or (
+            not FusedAttnHelper.is_non_deterministic_allowed()
+            and get_cudnn_version() >= (9, 18, 1)
+            and attn_bias_type == AttnBiasType.NO_BIAS
+            and dropout_probability == 0.0
+        ), (
+            "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with dropout,"
+            " and deterministic bprop (cuDNN 9.18.1+) does not support bias or dropout"
+        )
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,

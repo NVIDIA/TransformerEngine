@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file cast.h
- *  \brief Functions to cast to/from FP8.
+/*! \file swizzle.h
+ *  \brief Functions to convert scaling factors into format expected by GEMM.
  */
 
 #ifndef TRANSFORMER_ENGINE_SWIZZLE_H_
@@ -47,7 +47,7 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
 
 /*! \brief Swizzling FP8 block scaling scaling factors into mxfp8 interleaved layout for GEMM
  *
- *  \param[in]     input        Input FP8 block scaling tensor with GEMM_READY scale_inv.
+ *  \param[in]     input        Input FP8 block-scaled tensor.
  *  \param[in,out] output       Output mxfp8 tensor which hosts swizzled scale_inv.
  *  \param[in]     stream       CUDA stream used for the operation.
  *
@@ -57,7 +57,6 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
  *  Requirements:
  *  - input is an FP8 block scaling tensor
  *  - input has rowwise usage
- *  - input.scale_inv is in GEMM_READY format
  *  - output is an MXFP8 tensor
  *  - output has rowwise usage
  *  - output.scale_inv has appropriate shape

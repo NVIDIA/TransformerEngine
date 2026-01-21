@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Encoder training on multi-GPU with tesnor parallelism"""
 import argparse
+import os
 import unittest
 from functools import partial
 
@@ -489,6 +490,9 @@ class TestEncoder(unittest.TestCase):
 
     def setUp(self):
         """Run 5 epochs for testing"""
+        # TODO(jberchtold): Remove once fused attention from cuDNN supports determinism on Blackwell
+        if "NVTE_FUSED_ATTN" not in os.environ:
+            os.environ["NVTE_FUSED_ATTN"] = "0"
         self.args = encoder_parser(["--epochs", "5"])
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")

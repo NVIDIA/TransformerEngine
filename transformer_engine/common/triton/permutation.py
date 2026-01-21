@@ -201,8 +201,15 @@ def _permute_kernel(
     scale_ptr,
     permuted_scale_ptr,
     pad_offsets_ptr,
+    # Pre-allocated output buffers for JAX input_output_aliases.
+    # These are aliased to output_ptr/permuted_probs_ptr in JAX, so they point to the same memory.
+    # In PyTorch, pass the same tensors as output_ptr/permuted_probs_ptr.
+    output_buf_ptr,  # pylint: disable=unused-argument
+    permuted_probs_buf_ptr,  # pylint: disable=unused-argument
     # sizes
     scale_hidden_dim,
+    num_tokens,  # pylint: disable=unused-argument
+    num_out_tokens,  # pylint: disable=unused-argument
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -228,12 +235,17 @@ def _permute_kernel(
     FUSION_PAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    # Note: When FUSION_PAD=True, output buffers should be pre-zeroed by the caller
+    # to ensure padding positions contain zeros.
+    # PyTorch: Use torch.zeros() for output buffer allocation
+    # JAX: Pre-zeroed buffers should be passed (when input_output_aliases works)
     expert_idx = 0
 
     pid_t = tl.program_id(0)
     pid_h = tl.program_id(1)
     cur_off = pid_h * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = cur_off < hidden_size
+
     src_row = pid_t.to(tl.int64)
     input_off = src_row * stride_input_token + cur_off * stride_input_hidden
     inp = tl.load(input_ptr + input_off, mask=mask)
@@ -306,6 +318,10 @@ def _unpermute_kernel(
     merging_probs_ptr,
     permuted_probs_ptr,
     pad_offsets_ptr,
+    # Dummy parameters for JAX input_output_aliases compatibility (matches _permute_kernel signature pattern)
+    # These are unused in the unpermute kernel but maintain consistency with the permute kernel.
+    output_buf_ptr,  # pylint: disable=unused-argument
+    unpermuted_probs_buf_ptr,  # pylint: disable=unused-argument
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
