@@ -3211,9 +3211,11 @@ class TestSequentialModules:
             fc2_ws_test.append(fc2_w_test)
         with torch.no_grad():
             for t in fc1_ws_ref + fc1_ws_test + fc2_ws_ref + fc2_ws_test:
-                t *= 1 / 64
+                t -= 0.5
+                t *= 1 / 2
             for t in (x_ref, x_test, dy_ref, dy_test):
                 t -= 0.5
+                t *= 1 / 2
 
         # Reference implementation
         xs = torch.split(x_ref, split_sizes.tolist())

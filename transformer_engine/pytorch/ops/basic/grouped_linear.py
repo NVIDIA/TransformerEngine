@@ -374,6 +374,7 @@ class GroupedLinear(BasicOperation):
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         group_size = self.group_size
         has_bias = self.has_bias
+        device = self.weight0.device
 
         # Check which grads are required
         ctx = basic_op_ctxs[0]
@@ -433,7 +434,7 @@ class GroupedLinear(BasicOperation):
         # Allocate output tensor
         in_shape = list(input_.size())
         out_shape = in_shape[:-1] + [self.out_features]
-        out = torch.empty(out_shape, dtype=dtype, device=input_.device)
+        out = torch.empty(out_shape, dtype=dtype, device=device)
 
         # Perform GEMMs
         general_grouped_gemm(
@@ -491,6 +492,7 @@ class GroupedLinear(BasicOperation):
     ]:
         group_size = self.group_size
         has_bias = self.has_bias
+        device = self.weight0.device
 
         # Saved tensors from forward pass
         ctx = basic_op_ctxs[0]
@@ -539,7 +541,6 @@ class GroupedLinear(BasicOperation):
                     grad_weights[group_idx] = weight_param.main_grad
             else:
                 weight_shape = ws[0].size()
-                device = grad_output.device
                 for group_idx in range(group_size):
                     grad_weights[group_idx] = torch.empty(
                         weight_shape,
@@ -557,7 +558,7 @@ class GroupedLinear(BasicOperation):
             grad_input = torch.empty(
                 in_shape,
                 dtype=ctx.dtype,
-                device=grad_output.device,
+                device=device,
             )
             general_grouped_gemm(
                 ws,

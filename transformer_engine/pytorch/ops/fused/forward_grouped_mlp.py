@@ -137,15 +137,11 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             quantizer.optimize_for_gemm = True
         fc1_xs = tex.split_quantize(fc1_x, split_sizes_int, fc1_input_quantizers)
 
-        # Pack tensors
+        # Pack data tensors
         fc1_x_data = torch.cat([x._rowwise_data for x in fc1_xs])
-        fc1_x_scales = torch.cat([x._rowwise_scale_inv for x in fc1_xs])
-        fc1_w_data = torch.cat([w._rowwise_data for w in fc1_weights])
-        fc1_w_scales = torch.cat([w._rowwise_scale_inv for w in fc1_weights])
-
-        # Reorder and reshape tensors
         fc1_x_data = fc1_x_data.view(dtype=torch.float8_e4m3fn)
         fc1_x_data = fc1_x_data.unsqueeze(0).permute(1, 2, 0)
+        fc1_x_scales = torch.cat([x._rowwise_scale_inv for x in fc1_xs])
         fc1_x_scales = fc1_x_scales.view(dtype=torch.float8_e8m0fnu)
         fc1_x_scales = fc1_x_scales.reshape(
             1,
@@ -156,8 +152,12 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             4,
         )
         fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
+
+        # Pack weight tensors
+        fc1_w_data = torch.stack([w._rowwise_data for w in fc1_weights])
         fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
         fc1_w_data = fc1_w_data.permute(1, 2, 0)
+        fc1_w_scales = torch.stack([w._rowwise_scale_inv for w in fc1_weights])
         fc1_w_scales = fc1_w_scales.view(dtype=torch.float8_e8m0fnu)
         fc1_w_scales = fc1_w_scales.reshape(
             group_size,
@@ -332,6 +332,13 @@ def fuse_forward_ops(
         elif window[0].has_bias or window[3].has_bias:
             matches_pattern = False
         elif window[0].group_size != window[3].group_size:
+            matches_pattern = False
+        elif (
+            window[0].in_features % 256 != 0
+            or window[0].out_features % 256 != 0
+            or window[3].in_features % 256 != 0
+            or window[3].out_features % 256 != 0
+        ):
             matches_pattern = False
 
         if matches_pattern:
