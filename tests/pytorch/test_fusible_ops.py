@@ -3222,8 +3222,8 @@ class TestSequentialModules:
             x = torch.nn.functional.linear(x, fc1_w)
             x1, x2 = x.chunk(2, dim=-1)
             x = torch.nn.functional.silu(x1) * x2
-            x = torch.nn.functional.linear(x, fc2_w)
             x = x * prob
+            x = torch.nn.functional.linear(x, fc2_w)
             ys.append(x)
         y_ref = torch.cat(ys)
         y_ref.backward(dy_ref)
@@ -3250,8 +3250,8 @@ class TestSequentialModules:
             module = te_ops.Sequential(
                 fc1,
                 te_ops.SwiGLU(),
+                te_ops.MultiplyExtraInput(),
                 fc2,
-                te_ops.MultiplyExtraInput()
             )
 
         # Copy weights
@@ -3263,7 +3263,7 @@ class TestSequentialModules:
 
         # Fuse ops and perform forward and backward pass
         with te.autocast(recipe=recipe):
-            y_test = module(x_test, split_sizes, split_sizes, probs_test)
+            y_test = module(x_test, split_sizes, probs_test, split_sizes)
         y_test.backward(dy_test)
 
         # Check that forward operations have been fused
