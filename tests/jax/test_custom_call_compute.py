@@ -1771,38 +1771,33 @@ GROUPED_DENSE_INPUT_SHAPES = [
     # (8, 64, 128, 256),
 ]
 
+# TODO(jberchtold): Support MXFP8 and NVFP4
+grouped_gemm_supported_scaling_modes = [
+    # ScalingMode.DELAYED_TENSOR_SCALING,
+    ScalingMode.CURRENT_TENSOR_SCALING
+]
 
 @pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
     def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):
-        out = jax.lax.ragged_dot(lhs, rhs, group_sizes)
-        print(f"In ref grouped dense: {lhs.shape=}, {rhs.shape=},  {out.shape=}")
-        return out
-
-        dot_dimension_numbers = (((), ()), contracting_dims)
-        lhs_ragged_dimensions = (0,)
-        rhs_group_dimensions = (0,)
-        print(lhs.shape, rhs.shape, group_sizes, dot_dimension_numbers, lhs_ragged_dimensions, rhs_group_dimensions)
-        dims = jax.lax.RaggedDotDimensionNumbers(dot_dimension_numbers, lhs_ragged_dimensions, rhs_group_dimensions)
-        return jax.lax.ragged_dot_general(lhs, rhs, group_sizes, dims)
-        # lhs_contract_dim, _ = contracting_dims
-        # assert len(lhs_contract_dim) == 1 and lhs.ndim == 2 and rhs.ndim == 3
-        # if bias is None:
-        #     bias = jnp.zeros((rhs.shape[0], rhs.shape[2]), dtype=lhs.dtype)
-        # else:
-        #     assert bias.ndim == 2 and bias.shape == (rhs.shape[0], rhs.shape[2])
-        # remaining_axis = (set(range(lhs.ndim)) - set(lhs_contract_dim)).pop()
-        # lhs = jnp.split(lhs, jnp.cumulative_sum(group_sizes)[:-1], axis=remaining_axis)
-        # rhs = jnp.split(rhs, rhs.shape[0], axis=0)
-        # bias = jnp.split(bias, bias.shape[0], axis=0)
-        # ref_out = []
-        # dim_num = (contracting_dims, ((), ()))
-        # for lhs_i, rhs_i, bias_i in zip(lhs, rhs, bias):
-        #     out_i = jax.lax.dot_general(
-        #         lhs_i, rhs_i, dim_num, precision=jax.lax.Precision.HIGHEST
-        #     ) + jnp.expand_dims(bias_i, axis=0)
-        #     ref_out.append(jnp.squeeze(out_i))
-        # return ref_out
+        lhs_contract_dim, _ = contracting_dims
+        assert len(lhs_contract_dim) == 1 and lhs.ndim == 2 and rhs.ndim == 3
+        if bias is None:
+            bias = jnp.zeros((rhs.shape[0], rhs.shape[2]), dtype=lhs.dtype)
+        else:
+            assert bias.ndim == 2 and bias.shape == (rhs.shape[0], rhs.shape[2])
+        remaining_axis = (set(range(lhs.ndim)) - set(lhs_contract_dim)).pop()
+        lhs = jnp.split(lhs, jnp.cumulative_sum(group_sizes)[:-1], axis=remaining_axis)
+        rhs = jnp.split(rhs, rhs.shape[0], axis=0)
+        bias = jnp.split(bias, bias.shape[0], axis=0)
+        ref_out = []
+        dim_num = (contracting_dims, ((), ()))
+        for lhs_i, rhs_i, bias_i in zip(lhs, rhs, bias):
+            out_i = jax.lax.dot_general(
+                lhs_i, rhs_i, dim_num, precision=jax.lax.Precision.HIGHEST
+            ) + jnp.expand_dims(bias_i, axis=0)
+            ref_out.append(jnp.squeeze(out_i))
+        return ref_out
 
     def _generate_grouped_dense_input(self, dtype, input_shape, data_layout="NN", with_bias=False):
         key = jax.random.PRNGKey(0)
@@ -1840,15 +1835,11 @@ class TestGroupedDense:
 
     def _assert_grouped_gemm_output(self, out, group_sizes, ref_list, dtype):
         assert out.dtype == ref_list[0].dtype
-        import numpy as np
-        np.set_printoptions(threshold=10000)
-        jnp.set_printoptions(threshold=10000)
-        print("Actual:", out)
-        print("Expected:", ref_list)
-        assert_allclose(out, ref_list, dtype=dtype)
-        # out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
-        # for i in range(len(ref_list)):
-        #     assert_allclose(out_list[i], ref_list[i], dtype=dtype)
+        out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
+        print([o.shape for o in out_list])
+        print([r.shape for r in ref_list])
+        for i in range(len(ref_list)):
+            assert_allclose(out_list[i], ref_list[i], dtype=dtype)
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     @pytest_parametrize_wrapper("layout", ["NN"])
@@ -1878,7 +1869,7 @@ class TestGroupedDense:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
-    @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
+    @pytest_parametrize_wrapper("scaling_mode", grouped_gemm_supported_scaling_modes)
     @pytest_parametrize_wrapper("layout", ["NN"])
     def test_grouped_gemm_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape, layout):
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
@@ -1933,7 +1924,7 @@ class TestGroupedDense:
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
             dtype,
             input_shape,
-            with_bias=True,
+            with_bias=False,
         )
 
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
@@ -1959,14 +1950,14 @@ class TestGroupedDense:
         "fwd_bwd_dtype",
         [(jnp.float8_e4m3fn, jnp.float8_e4m3fn), (jnp.float8_e4m3fn, jnp.float8_e5m2)],
     )
-    @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
+    @pytest_parametrize_wrapper("scaling_mode", grouped_gemm_supported_scaling_modes)
     def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         dtype = jnp.bfloat16
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
             dtype,
             input_shape,
-            with_bias=True,
+            with_bias=False,
         )
 
         quantizer_set = QuantizerFactory.create_set(

@@ -512,6 +512,9 @@ NVTEGroupedTensor const& JAXX_GroupedTensorWrapper::get_grouped_tensor() const {
 
 JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const& data, std::optional<Buffer_Type> scale_inv, JAXX_Scaling_Mode scaling_mode, size_t num_tensors, NVTEShape const& dataShape) {
   JAXX_GroupedTensorWrapper grouped_tensor_wrapper(scaling_mode, num_tensors, dataShape);
+  if (scaling_mode == JAXX_Scaling_Mode::NO_SCALING) {
+    scale_inv = std::nullopt;
+  }
   grouped_tensor_wrapper.set_rowwise(data, scale_inv);
 
   return grouped_tensor_wrapper;
@@ -713,14 +716,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     // If is_grouped_dense_wgrad, then n already includes num_gemms (G) pre-multiplied in gemm.py, so we don't need to multiply it here.
     rhsShape.data[0] *= num_gemms;
   }
-  auto rhs_tensor = make_grouped_tensor(rhs_data, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,/*rhs_sinv, scaling_mode,*/ num_gemms, rhsShape);
+  auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
   
   //// LHS
   NVTEShape lhsShape{.data={m, k}, .ndim=2};
   if (lhs_is_trans && is_grouped_dense_wgrad) {
     std::swap(lhsShape.data[0], lhsShape.data[1]);
   }
-  auto lhs_tensor = make_grouped_tensor(lhs_data, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,/*lhs_sinv, scaling_mode,*/ num_gemms, lhsShape);
+  auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
   if (!is_grouped_dense_wgrad) {
     lhs_tensor.set_group_info(group_sizes, group_offsets);
   }
