@@ -284,7 +284,7 @@ def compile_triton(
         num_ctas=num_ctas,
         debug=False,
         enable_fp_fusion=enable_fp_fusion,
-        **cuda_option_kwargs
+        **cuda_option_kwargs,
     )
 
     # Mark constants as constexpr in signature
