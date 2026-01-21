@@ -276,7 +276,7 @@ def compile_triton(
 
     # Compile kernel
     cuda_option_kwargs = {}
-    if version.parse(triton.__version__) <= version.parse("3.6.0"):
+    if version.parse(triton.__version__) < version.parse("3.6.0"):
         cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
     options = cb.CUDAOptions(
         num_warps=num_warps,
