@@ -33,7 +33,9 @@ class Platform:
         cc = torch.cuda.get_device_capability(device)
 
         if cc[0] == 10:
-            from transformer_engine.pytorch.cutedsl import linear_cross_entropy_blackwell as gpu_entry
+            from transformer_engine.pytorch.cutedsl import (
+                linear_cross_entropy_blackwell as gpu_entry,
+            )
 
             self.forward_func: typing.Callable[..., typing.Any] = gpu_entry.forward
             self.backward_func: typing.Callable[..., typing.Any] = gpu_entry.backward

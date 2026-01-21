@@ -14,6 +14,7 @@ import torch.distributed as dist
 
 from transformer_engine.pytorch import linear_cross_entropy
 
+
 @pytest.mark.skipif(
     "WORLD_SIZE" in os.environ and os.environ["WORLD_SIZE"] != "1", reason="Requires single GPU"
 )
@@ -219,16 +220,20 @@ class TestFusedLinearCrossEntropyDataParallel:
         print()
         print(f"[INFO]: On problem {problem}, dtype {dtype}, reduction {reduction}:")
         print(
-            f"[INFO]: Torch forward latency: {sum(torch_fwd_latency) / len(torch_fwd_latency):.2f} ms"
+            "[INFO]: Torch forward latency:"
+            f" {sum(torch_fwd_latency) / len(torch_fwd_latency):.2f} ms"
         )
         print(
-            f"[INFO]: Custom forward latency: {sum(custom_fwd_latency) / len(custom_fwd_latency):.2f} ms"
+            "[INFO]: Custom forward latency:"
+            f" {sum(custom_fwd_latency) / len(custom_fwd_latency):.2f} ms"
         )
         print(
-            f"[INFO]: Torch backward latency: {sum(torch_bwd_latency) / len(torch_bwd_latency):.2f} ms"
+            "[INFO]: Torch backward latency:"
+            f" {sum(torch_bwd_latency) / len(torch_bwd_latency):.2f} ms"
         )
         print(
-            f"[INFO]: Custom backward latency: {sum(custom_bwd_latency) / len(custom_bwd_latency):.2f} ms"
+            "[INFO]: Custom backward latency:"
+            f" {sum(custom_bwd_latency) / len(custom_bwd_latency):.2f} ms"
         )
 
     @pytest.mark.parametrize("problem", [((1, 4096), 129280, 7168)])
@@ -650,19 +655,24 @@ class TestFusedLinearCrossEntropyTensorParallel:
         if self.is_chief:
             print()
             print(
-                f"[INFO]: On problem {problem}, dtype {dtype}, reduction {reduction}, TP size {self.tp_world_size}:"
+                f"[INFO]: On problem {problem}, dtype {dtype}, reduction {reduction}, TP size"
+                f" {self.tp_world_size}:"
             )
             print(
-                f"[INFO]: Torch forward latency: {sum(torch_fwd_latency) / len(torch_fwd_latency):.2f} ms"
+                "[INFO]: Torch forward latency:"
+                f" {sum(torch_fwd_latency) / len(torch_fwd_latency):.2f} ms"
             )
             print(
-                f"[INFO]: Custom forward latency: {sum(custom_fwd_latency) / len(custom_fwd_latency):.2f} ms"
+                "[INFO]: Custom forward latency:"
+                f" {sum(custom_fwd_latency) / len(custom_fwd_latency):.2f} ms"
             )
             print(
-                f"[INFO]: Torch backward latency: {sum(torch_bwd_latency) / len(torch_bwd_latency):.2f} ms"
+                "[INFO]: Torch backward latency:"
+                f" {sum(torch_bwd_latency) / len(torch_bwd_latency):.2f} ms"
             )
             print(
-                f"[INFO]: Custom backward latency: {sum(custom_bwd_latency) / len(custom_bwd_latency):.2f} ms"
+                "[INFO]: Custom backward latency:"
+                f" {sum(custom_bwd_latency) / len(custom_bwd_latency):.2f} ms"
             )
 
     @pytest.mark.parametrize("problem", [((1, 4096), 129280, 7168)])
@@ -676,7 +686,8 @@ class TestFusedLinearCrossEntropyTensorParallel:
         if self.is_chief:
             print()
             print(
-                f"[INFO]: On problem {problem}, dtype {dtype}, reduction {reduction}, TP size {self.tp_world_size}:"
+                f"[INFO]: On problem {problem}, dtype {dtype}, reduction {reduction}, TP size"
+                f" {self.tp_world_size}:"
             )
 
         def torch_storage():
@@ -703,7 +714,8 @@ class TestFusedLinearCrossEntropyTensorParallel:
             torch_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
             if self.is_chief:
                 print(
-                    f"[INFO]: On GPU {self.tp_rank}, Torch Forward pass peak memory: {torch_max_memory:.2f} MB"
+                    f"[INFO]: On GPU {self.tp_rank}, Torch Forward pass peak memory:"
+                    f" {torch_max_memory:.2f} MB"
                 )
 
             g_logprobs = torch.empty_like(torch_logprobs).uniform_(-0.1, 0.1)
@@ -717,7 +729,8 @@ class TestFusedLinearCrossEntropyTensorParallel:
             torch_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
             if self.is_chief:
                 print(
-                    f"[INFO]: On GPU {self.tp_rank}, Torch Backward pass peak memory: {torch_max_memory:.2f} MB"
+                    f"[INFO]: On GPU {self.tp_rank}, Torch Backward pass peak memory:"
+                    f" {torch_max_memory:.2f} MB"
                 )
 
         def custom_storage():
@@ -744,7 +757,8 @@ class TestFusedLinearCrossEntropyTensorParallel:
             custom_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
             if self.is_chief:
                 print(
-                    f"[INFO]: On GPU {self.tp_rank}, Custom Forward pass peak memory: {custom_max_memory:.2f} MB"
+                    f"[INFO]: On GPU {self.tp_rank}, Custom Forward pass peak memory:"
+                    f" {custom_max_memory:.2f} MB"
                 )
 
             g_logprobs = torch.empty_like(custom_logprobs).uniform_(-0.1, 0.1)
@@ -758,7 +772,8 @@ class TestFusedLinearCrossEntropyTensorParallel:
             custom_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
             if self.is_chief:
                 print(
-                    f"[INFO]: On GPU {self.tp_rank}, Custom Backward pass peak memory: {custom_max_memory:.2f} MB"
+                    f"[INFO]: On GPU {self.tp_rank}, Custom Backward pass peak memory:"
+                    f" {custom_max_memory:.2f} MB"
                 )
 
         self.cleanup()
@@ -1170,19 +1185,24 @@ class TestFusedLinearCrossEntropySequenceParallel:
         if self.is_chief:
             print()
             print(
-                f"[INFO]: On problem {problem}, dtype {dtype}, reduction {reduction}, TP size {self.tp_world_size}, Sequence Parallel: True:"
+                f"[INFO]: On problem {problem}, dtype {dtype}, reduction {reduction}, TP size"
+                f" {self.tp_world_size}, Sequence Parallel: True:"
             )
             print(
-                f"[INFO]: Torch forward latency: {sum(torch_fwd_latency) / len(torch_fwd_latency):.2f} ms"
+                "[INFO]: Torch forward latency:"
+                f" {sum(torch_fwd_latency) / len(torch_fwd_latency):.2f} ms"
             )
             print(
-                f"[INFO]: Custom forward latency: {sum(custom_fwd_latency) / len(custom_fwd_latency):.2f} ms"
+                "[INFO]: Custom forward latency:"
+                f" {sum(custom_fwd_latency) / len(custom_fwd_latency):.2f} ms"
             )
             print(
-                f"[INFO]: Torch backward latency: {sum(torch_bwd_latency) / len(torch_bwd_latency):.2f} ms"
+                "[INFO]: Torch backward latency:"
+                f" {sum(torch_bwd_latency) / len(torch_bwd_latency):.2f} ms"
             )
             print(
-                f"[INFO]: Custom backward latency: {sum(custom_bwd_latency) / len(custom_bwd_latency):.2f} ms"
+                "[INFO]: Custom backward latency:"
+                f" {sum(custom_bwd_latency) / len(custom_bwd_latency):.2f} ms"
             )
 
     @pytest.mark.parametrize("problem", [((1, 1024), 129280, 7168)])
@@ -1200,7 +1220,8 @@ class TestFusedLinearCrossEntropySequenceParallel:
         if self.is_chief:
             print()
             print(
-                f"[INFO]: On problem {problem}, dtype {dtype}, reduction {reduction}, TP size {self.tp_world_size}, Sequence Parallel: True:"
+                f"[INFO]: On problem {problem}, dtype {dtype}, reduction {reduction}, TP size"
+                f" {self.tp_world_size}, Sequence Parallel: True:"
             )
 
         def torch_storage():
@@ -1227,7 +1248,8 @@ class TestFusedLinearCrossEntropySequenceParallel:
             torch_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
             if self.is_chief:
                 print(
-                    f"[INFO]: On GPU {self.tp_rank}, Torch Forward pass peak memory: {torch_max_memory:.2f} MB"
+                    f"[INFO]: On GPU {self.tp_rank}, Torch Forward pass peak memory:"
+                    f" {torch_max_memory:.2f} MB"
                 )
 
             g_logprobs = torch.empty_like(torch_logprobs).uniform_(-0.1, 0.1)
@@ -1241,7 +1263,8 @@ class TestFusedLinearCrossEntropySequenceParallel:
             torch_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
             if self.is_chief:
                 print(
-                    f"[INFO]: On GPU {self.tp_rank}, Torch Backward pass peak memory: {torch_max_memory:.2f} MB"
+                    f"[INFO]: On GPU {self.tp_rank}, Torch Backward pass peak memory:"
+                    f" {torch_max_memory:.2f} MB"
                 )
 
         def custom_storage():
@@ -1273,7 +1296,8 @@ class TestFusedLinearCrossEntropySequenceParallel:
             custom_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
             if self.is_chief:
                 print(
-                    f"[INFO]: On GPU {self.tp_rank}, Custom Forward pass peak memory: {custom_max_memory:.2f} MB"
+                    f"[INFO]: On GPU {self.tp_rank}, Custom Forward pass peak memory:"
+                    f" {custom_max_memory:.2f} MB"
                 )
 
             g_logprobs = torch.empty_like(custom_logprobs).uniform_(-0.1, 0.1)
@@ -1287,7 +1311,8 @@ class TestFusedLinearCrossEntropySequenceParallel:
             custom_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
             if self.is_chief:
                 print(
-                    f"[INFO]: On GPU {self.tp_rank}, Custom Backward pass peak memory: {custom_max_memory:.2f} MB"
+                    f"[INFO]: On GPU {self.tp_rank}, Custom Backward pass peak memory:"
+                    f" {custom_max_memory:.2f} MB"
                 )
 
         self.cleanup()
