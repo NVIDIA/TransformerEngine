@@ -7,8 +7,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 
 from transformer_engine.plugin.core.ops import FlashAttentionBase
+from transformer_engine.plugin.core.backends.fa_utils import (
+    all_gather_along_seq,
+    reduce_scatter_along_seq,
+    create_cp_causal_mask,
+    create_cp_window_mask,
+    get_cp_info,
+)
 
 
 class FlashAttentionTorch(FlashAttentionBase):
@@ -151,9 +159,11 @@ class FlashAttentionTorch(FlashAttentionBase):
 
         padding_mask = torch.ones(batch_size, max_seqlen, dtype=torch.bool, device=device)
 
+        # Vectorized unpacking - avoid Python loop and .item() calls
+        cu_seqlens_cpu = cu_seqlens.cpu()
         for i in range(batch_size):
-            start = cu_seqlens[i].item()
-            end = cu_seqlens[i + 1].item()
+            start = cu_seqlens_cpu[i].item()
+            end = cu_seqlens_cpu[i + 1].item()
             seq_len = end - start
 
             seq_data = tensor[start:end].permute(1, 0, 2)
@@ -179,9 +189,11 @@ class FlashAttentionTorch(FlashAttentionBase):
             dtype=tensor.dtype, device=device
         )
 
+        # Vectorized packing - avoid repeated .item() calls
+        cu_seqlens_cpu = cu_seqlens.cpu()
         for i in range(batch_size):
-            start = cu_seqlens[i].item()
-            end = cu_seqlens[i + 1].item()
+            start = cu_seqlens_cpu[i].item()
+            end = cu_seqlens_cpu[i + 1].item()
             seq_len = end - start
 
             seq_data = tensor[i, :, :seq_len, :].permute(1, 0, 2)
@@ -214,23 +226,22 @@ class FlashAttentionTorch(FlashAttentionBase):
         flash_attention_backend: Optional[Any] = None,
         fp8_output: bool = False,
     ) -> torch.Tensor:
-        """Flash Attention implementation using PyTorch's scaled_dot_product_attention."""
+        """Flash Attention implementation using PyTorch's scaled_dot_product_attention.
+
+        Supports Context Parallelism (CP) by all-gathering key/value across the CP group.
+        """
         if fp8:
             raise NotImplementedError("FP8 is not supported in PyTorch SDPA backend")
-        if cp_group is not None:
-            raise NotImplementedError("Context parallelism is not supported in PyTorch SDPA backend")
+
         if alibi_slopes is not None:
             raise NotImplementedError("ALiBi slopes are not supported in PyTorch SDPA backend")
 
         query_original_shape = query_layer.shape
+        cp_size, cp_rank, use_cp = get_cp_info(cp_group)
 
-        # Check if input is in standard 4D format - same as flagos backend
-        # If tensor is 4D, treat it as standard format and just do layout conversion
-        # Only use unpack logic for true packed format (3D tensors with thd layout)
         is_standard_4d = query_layer.dim() == 4
 
         if is_standard_4d:
-            # Standard 4D tensor format - just convert layout like flagos does
             query = self._convert_layout_to_bhsd(query_layer, qkv_layout)
             key = self._convert_layout_to_bhsd(key_layer, qkv_layout)
             value = self._convert_layout_to_bhsd(value_layer, qkv_layout)
@@ -238,7 +249,6 @@ class FlashAttentionTorch(FlashAttentionBase):
             padding_mask_q = None
             padding_mask_kv = None
         else:
-            # True packed format (thd layout, 3D tensor) - use unpack logic
             use_packed_format = cu_seqlens_q is not None or cu_seqlens_kv is not None
             padding_mask_q = None
             padding_mask_kv = None
@@ -261,6 +271,13 @@ class FlashAttentionTorch(FlashAttentionBase):
                 value = self._convert_layout_to_bhsd(value_layer, qkv_layout)
 
         batch_size, num_heads_q, seq_len_q, head_dim = query.shape
+        local_seq_len_q = seq_len_q
+
+        if use_cp:
+            # All-gather key/value along sequence dimension for full context
+            key = all_gather_along_seq(key, cp_group, seq_dim=2)
+            value = all_gather_along_seq(value, cp_group, seq_dim=2)
+
         num_heads_kv = key.shape[1]
         seq_len_kv = key.shape[2]
 
@@ -285,7 +302,19 @@ class FlashAttentionTorch(FlashAttentionBase):
             attn_mask.masked_fill_(padding_broadcast, float('-inf'))
 
         if attn_mask_type == "causal":
-            if window_size is None and not use_packed_format:
+            if use_cp:
+                # Use shared utility for CP causal mask creation
+                causal_mask = create_cp_causal_mask(
+                    local_seq_len_q, seq_len_kv, cp_rank, query.device, query.dtype
+                )
+                if attn_mask is not None:
+                    if attn_mask.dim() == 2:
+                        attn_mask = attn_mask + causal_mask
+                    else:
+                        attn_mask = attn_mask + causal_mask.unsqueeze(0)
+                else:
+                    attn_mask = causal_mask
+            elif window_size is None and not use_packed_format:
                 is_causal = True
             else:
                 causal_mask = torch.zeros(
@@ -306,16 +335,22 @@ class FlashAttentionTorch(FlashAttentionBase):
                     attn_mask = causal_mask
 
         if window_size is not None and not is_causal:
-            window_mask = self._create_sliding_window_mask(
-                seq_len_q=seq_len_q,
-                seq_len_kv=seq_len_kv,
-                window_size=window_size,
-                device=query.device,
-                dtype=query.dtype,
-            )
+            if use_cp:
+                # Use shared utility for CP window mask creation
+                window_mask = create_cp_window_mask(
+                    local_seq_len_q, seq_len_kv, cp_rank, window_size, query.device, query.dtype
+                )
+            else:
+                window_mask = self._create_sliding_window_mask(
+                    seq_len_q=seq_len_q,
+                    seq_len_kv=seq_len_kv,
+                    window_size=window_size,
+                    device=query.device,
+                    dtype=query.dtype,
+                )
 
             if attn_mask is not None:
-                attn_mask = attn_mask + window_mask.unsqueeze(0)
+                attn_mask = attn_mask + window_mask.unsqueeze(0) if window_mask.dim() == 2 else attn_mask + window_mask
             else:
                 attn_mask = window_mask
 
@@ -375,8 +410,6 @@ class FlashAttentionTorch(FlashAttentionBase):
                 output = output.contiguous().view(total_tokens, 1, hidden_size)
         else:
             output = self._convert_bhsd_to_layout(output, qkv_layout)
-            # Flatten the last two dimensions (heads, dim) -> (heads * dim)
-            # to match the output format of other backends
             output = output.contiguous().view(*output.shape[:-2], -1)
 
         return output

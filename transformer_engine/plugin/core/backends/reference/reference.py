@@ -29,7 +29,8 @@ from .impl import (
     scaled_aligned_causal_masked_softmax_backward_torch,
     dropout_fwd_torch, dropout_bwd_torch,
     multi_tensor_scale_torch, multi_tensor_l2norm_torch,
-    multi_tensor_adam_torch, multi_tensor_sgd_torch,
+    multi_tensor_adam_torch, multi_tensor_adam_param_remainder_torch,
+    multi_tensor_sgd_torch,
 )
 
 class ReferenceBackend(TEFLBackendBase):
@@ -506,8 +507,10 @@ class ReferenceBackend(TEFLBackendBase):
             return multi_tensor_adam_torch
         return multi_tensor_adam_torch(*args, **kwargs)
 
-    def multi_tensor_adam_param_remainder(self, *args, **kwargs) -> None:
-        raise NotImplementedError("multi_tensor_adam_param_remainder - not implemented in reference backend")
+    def multi_tensor_adam_param_remainder(self, *args, **kwargs):
+        if not args and not kwargs:
+            return multi_tensor_adam_param_remainder_torch
+        return multi_tensor_adam_param_remainder_torch(*args, **kwargs)
 
     def multi_tensor_adam_fp8(self, *args, **kwargs) -> None:
         raise NotImplementedError("multi_tensor_adam_fp8 - not implemented in reference backend")

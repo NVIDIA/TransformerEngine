@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Any
 
 from .discovery import discover_plugin
 from .registry import OpRegistry
@@ -42,7 +42,8 @@ class OpManager:
         self._registry = registry or OpRegistry()
         self._state = _OpManagerState()
         self._dispatch_cache: Dict[Tuple[str, str, int], Callable] = {}
-        self._called_ops: Dict[str, str] = {}  # Map op_name -> last_used_impl_id (for logging)
+        self._impl_cache: Dict[str, OpImpl] = {}
+        self._impl_cache_meta: Dict[str, Tuple[str, int]] = {}
 
         # Register at_fork handler for multi-process safety
         try:
@@ -63,7 +64,8 @@ class OpManager:
             self._state.init_pid = -1
             self._state.policy_epoch += 1
             self._dispatch_cache.clear()
-            self._called_ops.clear()
+            self._impl_cache.clear()
+            self._impl_cache_meta.clear()
             logger.debug("OpManager reset after fork")
 
     def bump_policy_epoch(self) -> None:
@@ -320,14 +322,36 @@ class OpManager:
 
         return unique_candidates
 
+    def _is_cache_valid(self, op_name: str) -> bool:
+        """Check if cached impl is still valid for current policy"""
+        meta = self._impl_cache_meta.get(op_name)
+        if meta is None:
+            return False
+        cached_fp, cached_epoch = meta
+        policy = get_policy()
+        return cached_fp == policy.fingerprint() and cached_epoch == self._state.policy_epoch
+
+    def _update_cache(self, op_name: str, impl: OpImpl) -> None:
+        """Update cache with new impl"""
+        policy = get_policy()
+        self._impl_cache[op_name] = impl
+        self._impl_cache_meta[op_name] = (policy.fingerprint(), self._state.policy_epoch)
+
+    def _invalidate_cache(self, op_name: str) -> None:
+        """Invalidate cache for an op"""
+        self._impl_cache.pop(op_name, None)
+        self._impl_cache_meta.pop(op_name, None)
+
+    def _get_last_impl_id(self, op_name: str) -> Optional[str]:
+        """Get last used impl_id (even if cache is stale)"""
+        impl = self._impl_cache.get(op_name)
+        return impl.impl_id if impl else None
+
     def call(self, op_name: str, *args, **kwargs):
         """
         Resolve and call an operator implementation with optional fallback support.
 
-        When TE_FL_STRICT=1, this method will try alternative implementations
-        if the primary one fails. Otherwise, it behaves like the original implementation.
-
-        Logs on first call or when the implementation changes (e.g., backend switch).
+        Logs on first call or when the implementation changes.
 
         Args:
             op_name: Name of the operator
@@ -337,42 +361,49 @@ class OpManager:
             Result from the implementation
 
         Raises:
-            RuntimeError: If all implementations fail (when fallback enabled) or
-                         if the primary implementation fails (when fallback disabled)
+            RuntimeError: If all implementations fail
         """
         enable_fallback = os.getenv("TE_FL_STRICT", "1") != "0"
 
+        cached_impl = self._impl_cache.get(op_name)
+        cache_valid = self._is_cache_valid(op_name)
+
+        if cache_valid and cached_impl is not None:
+            try:
+                return cached_impl.fn(*args, **kwargs)
+            except Exception as e:
+                if enable_fallback:
+                    logger.warning_once(
+                        f"Cached implementation '{cached_impl.impl_id}' failed for op '{op_name}': {e}"
+                    )
+                    self._invalidate_cache(op_name)
+                else:
+                    raise
+
+        last_impl_id = self._get_last_impl_id(op_name)
+
         if not enable_fallback:
-            # Original behavior: use cached resolve() and fast-fail
             fn = self.resolve(op_name)
 
-            # Get current impl_id and log
-            impl_id = self.get_selected_impl_id(op_name)
-            last_impl_id = self._called_ops.get(op_name)
-
-            # Get impl details for logging
             snap = self._registry.snapshot()
-            for impl in snap.impls_by_op.get(op_name, []):
-                if impl.impl_id == impl_id:
-                    # Only log if first time or implementation actually changed
+            for candidate in snap.impls_by_op.get(op_name, []):
+                if candidate.fn is fn:
+                    self._update_cache(op_name, candidate)
+
                     if last_impl_id is None:
                         logger.info_once(
-                            f"Op '{op_name}' using '{impl_id}' "
-                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                            f"Op '{op_name}' using '{candidate.impl_id}' "
+                            f"(kind={candidate.kind.value}, vendor={candidate.vendor})"
                         )
-                    elif last_impl_id != impl_id:
+                    elif last_impl_id != candidate.impl_id:
                         logger.info_once(
-                            f"Op '{op_name}' switched from '{last_impl_id}' to '{impl_id}' "
-                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                            f"Op '{op_name}' switched from '{last_impl_id}' to '{candidate.impl_id}' "
+                            f"(kind={candidate.kind.value}, vendor={candidate.vendor})"
                         )
                     break
 
-            # Update tracking
-            self._called_ops[op_name] = impl_id
-
             return fn(*args, **kwargs)
 
-        # Fallback mode: try candidates in priority order
         candidates = self.resolve_candidates(op_name)
         last_error = None
 
@@ -380,46 +411,155 @@ class OpManager:
             try:
                 result = impl.fn(*args, **kwargs)
 
-                # Log on success
-                last_impl_id = self._called_ops.get(op_name)
-                if idx == 0:
-                    # Primary implementation - only log if first time or changed
-                    if last_impl_id is None:
-                        logger.info_once(
-                            f"Op '{op_name}' using '{impl.impl_id}' "
-                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
-                        )
-                    elif last_impl_id != impl.impl_id:
+                self._update_cache(op_name, impl)
+
+                if last_impl_id is None:
+                    logger.info_once(
+                        f"Op '{op_name}' using '{impl.impl_id}' "
+                        f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                    )
+                elif last_impl_id != impl.impl_id:
+                    if idx == 0:
                         logger.info_once(
                             f"Op '{op_name}' switched from '{last_impl_id}' to '{impl.impl_id}' "
                             f"(kind={impl.kind.value}, vendor={impl.vendor})"
                         )
-                else:
-                    # Fallback succeeded
-                    logger.info_once(
-                        f"Op '{op_name}' fallback to '{impl.impl_id}' "
-                        f"(kind={impl.kind.value}, vendor={impl.vendor})"
-                    )
-
-                # Update tracking on success
-                self._called_ops[op_name] = impl.impl_id
+                    else:
+                        logger.info_once(
+                            f"Op '{op_name}' fallback to '{impl.impl_id}' "
+                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                        )
 
                 return result
 
             except Exception as e:
                 last_error = e
                 if idx < len(candidates) - 1:
-                    # Not the last candidate, log warning and try next
                     logger.warning_once(
                         f"Implementation '{impl.impl_id}' failed for op '{op_name}': {e}"
                     )
                 else:
-                    # Last candidate failed, log error
                     logger.error(
                         f"Last implementation '{impl.impl_id}' failed for op '{op_name}': {e}"
                     )
 
-        # All implementations failed
+        raise RuntimeError(
+            f"All {len(candidates)} implementation(s) failed for op='{op_name}'. "
+            f"Last error: {last_error}"
+        ) from last_error
+
+    def call_with_custom_impl(
+        self,
+        op_name: str,
+        current_impl_class: type,
+        call_impl_fn: Callable[[type], Any],
+    ):
+        """
+        Call an operator with custom implementation class support (for FlashAttention).
+
+        Args:
+            op_name: Name of the operator
+            current_impl_class: The current implementation class
+            call_impl_fn: Function that takes impl_class and calls it
+
+        Returns:
+            Result from the implementation
+        """
+        enable_fallback = os.getenv("TE_FL_STRICT", "1") != "0"
+
+        cached_impl = self._impl_cache.get(op_name)
+        cache_valid = self._is_cache_valid(op_name)
+
+        if cache_valid and cached_impl is not None:
+            try:
+                cached_class = cached_impl.fn()
+                return call_impl_fn(cached_class)
+            except Exception as e:
+                if enable_fallback:
+                    logger.warning_once(
+                        f"Cached implementation '{cached_impl.impl_id}' failed for op '{op_name}': {e}"
+                    )
+                    self._invalidate_cache(op_name)
+                else:
+                    raise
+
+        last_impl_id = self._get_last_impl_id(op_name)
+
+        if not enable_fallback:
+            snap = self._registry.snapshot()
+            for impl in snap.impls_by_op.get(op_name, []):
+                try:
+                    impl_class = impl.fn()
+                    if impl_class == current_impl_class:
+                        result = call_impl_fn(impl_class)
+
+                        self._update_cache(op_name, impl)
+
+                        if last_impl_id is None:
+                            logger.info_once(
+                                f"Op '{op_name}' using '{impl.impl_id}' "
+                                f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                            )
+                        elif last_impl_id != impl.impl_id:
+                            logger.info_once(
+                                f"Op '{op_name}' switched from '{last_impl_id}' to '{impl.impl_id}' "
+                                f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                            )
+                        return result
+                except Exception:
+                    continue
+
+            return call_impl_fn(current_impl_class)
+
+        candidates = self.resolve_candidates(op_name)
+        last_error = None
+        current_impl_id = None
+
+        for impl in candidates:
+            try:
+                if impl.fn() == current_impl_class:
+                    current_impl_id = impl.impl_id
+                    break
+            except:
+                continue
+
+        for idx, impl in enumerate(candidates):
+            try:
+                impl_class = impl.fn()
+                result = call_impl_fn(impl_class)
+
+                self._update_cache(op_name, impl)
+
+                if last_impl_id is None:
+                    logger.info_once(
+                        f"Op '{op_name}' using '{impl.impl_id}' "
+                        f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                    )
+                elif last_impl_id != impl.impl_id:
+                    if impl.impl_id == current_impl_id or idx == 0:
+                        logger.info_once(
+                            f"Op '{op_name}' switched from '{last_impl_id}' to '{impl.impl_id}' "
+                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                        )
+                    else:
+                        logger.info_once(
+                            f"Op '{op_name}' fallback to '{impl.impl_id}' "
+                            f"(kind={impl.kind.value}, vendor={impl.vendor})"
+                        )
+
+                return result
+
+            except Exception as e:
+                last_error = e
+                if idx < len(candidates) - 1:
+                    logger.warning_once(
+                        f"Implementation '{impl.impl_id}' failed for op '{op_name}': {e}"
+                    )
+                else:
+                    logger.error(
+                        f"Last implementation '{impl.impl_id}' failed for op '{op_name}': {e}"
+                    )
+
         raise RuntimeError(
             f"All {len(candidates)} implementation(s) failed for op='{op_name}'. "
             f"Last error: {last_error}"

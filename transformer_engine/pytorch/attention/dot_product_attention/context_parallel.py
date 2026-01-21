@@ -1008,6 +1008,9 @@ def cp_p2p_bwd_flash_attn(
     dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
     if use_flash_attn_3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
         fa_backward_kwargs["window_size"] = (-1, -1)
+        # Fix: flash-attn 2.3.x ~ 2.6.x also needs rng_state for dropout
+        if not use_flash_attn_3 and rng_states is not None:
+            fa_backward_kwargs["rng_state"] = rng_states[cp_size - step - 1]
     elif fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size_left"] = -1
         fa_backward_kwargs["window_size_right"] = -1

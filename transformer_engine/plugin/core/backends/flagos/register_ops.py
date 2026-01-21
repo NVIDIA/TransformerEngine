@@ -45,6 +45,7 @@ def register_builtins(registry) -> None:
         OpImpl(op_name="generic_gemm", impl_id="default.flagos", kind=BackendImplKind.DEFAULT, fn=_bind_is_available(backend.generic_gemm, is_avail), vendor=None, priority=150),
         OpImpl(op_name="multi_tensor_scale", impl_id="default.flagos", kind=BackendImplKind.DEFAULT, fn=_bind_is_available(backend.multi_tensor_scale, is_avail), vendor=None, priority=150),
         OpImpl(op_name="multi_tensor_adam", impl_id="default.flagos", kind=BackendImplKind.DEFAULT, fn=_bind_is_available(backend.multi_tensor_adam, is_avail), vendor=None, priority=150),
+        OpImpl(op_name="multi_tensor_adam_param_remainder", impl_id="default.flagos", kind=BackendImplKind.DEFAULT, fn=_bind_is_available(backend.multi_tensor_adam_param_remainder, is_avail), vendor=None, priority=150),
         OpImpl(op_name="multi_tensor_l2norm", impl_id="default.flagos", kind=BackendImplKind.DEFAULT, fn=_bind_is_available(backend.multi_tensor_l2norm, is_avail), vendor=None, priority=150),
 
         # FlashAttention class getter

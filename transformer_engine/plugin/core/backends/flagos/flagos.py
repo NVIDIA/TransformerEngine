@@ -12,6 +12,7 @@ from ...ops import TEFLBackendBase, FP8TensorMeta, NVTE_Fused_Attn_Backend
 from .impl import (
     rmsnorm_fwd_fl, rmsnorm_bwd_fl,
     multi_tensor_scale_fl, multi_tensor_adam_fl,
+    multi_tensor_adam_param_remainder_fl,
     multi_tensor_l2_norm_fl,
     generic_gemm_fl
 )
@@ -166,6 +167,28 @@ class FlagOSBackend(TEFLBackendBase):
         if chunk_size is None:
             return multi_tensor_adam_fl
         return multi_tensor_adam_fl(
+            chunk_size=chunk_size, noop_flag=noop_flag, tensor_lists=tensor_lists,
+            lr=lr, beta1=beta1, beta2=beta2, eps=eps,
+            step=step, mode=mode, bias_correction=bias_correction, weight_decay=weight_decay,
+        )
+
+    def multi_tensor_adam_param_remainder(
+        self,
+        chunk_size: int = None,
+        noop_flag: torch.Tensor = None,
+        tensor_lists: List[List[torch.Tensor]] = None,
+        lr: float = None,
+        beta1: float = None,
+        beta2: float = None,
+        eps: float = None,
+        step: int = None,
+        mode: int = None,
+        bias_correction: int = None,
+        weight_decay: float = None,
+    ):
+        if chunk_size is None:
+            return multi_tensor_adam_param_remainder_fl
+        return multi_tensor_adam_param_remainder_fl(
             chunk_size=chunk_size, noop_flag=noop_flag, tensor_lists=tensor_lists,
             lr=lr, beta1=beta1, beta2=beta2, eps=eps,
             step=step, mode=mode, bias_correction=bias_correction, weight_decay=weight_decay,

@@ -9,6 +9,7 @@ __all__ = [
     "multi_tensor_scale_torch",
     "multi_tensor_l2norm_torch",
     "multi_tensor_adam_torch",
+    "multi_tensor_adam_param_remainder_torch",
     "multi_tensor_sgd_torch",
     "multi_tensor_compute_scale_and_scale_inv_torch",
 ]
@@ -109,6 +110,115 @@ def multi_tensor_adam_torch(
 
         denom = corrected_exp_avg_sq.sqrt().add_(eps)
         param.addcdiv_(corrected_exp_avg, denom, value=-lr)
+
+
+def multi_tensor_adam_param_remainder_torch(
+    chunk_size: int,
+    noop_flag: torch.Tensor,
+    tensor_lists: List[List[torch.Tensor]],
+    lr: float,
+    beta1: float,
+    beta2: float,
+    eps: float,
+    step: int,
+    mode: int,
+    bias_correction: int,
+    weight_decay: float,
+) -> None:
+    """
+    Adam optimizer with parameter remainders for BF16 precision.
+
+    This variant stores BF16 parameters + int16 remainders to reconstruct FP32 master weights.
+    Used when you have BF16 params and need FP32 master params without storing full FP32 copies.
+
+    Args:
+        chunk_size: Chunk size for processing (unused in PyTorch implementation)
+        noop_flag: If non-zero, skip computation
+        tensor_lists: [grads, params (bf16), exp_avgs (fp32), exp_avg_sqs (fp32), param_remainders (int16)]
+        lr: Learning rate
+        beta1: First moment decay rate
+        beta2: Second moment decay rate
+        eps: Epsilon for numerical stability
+        step: Current optimization step
+        mode: 0 = L2 regularization, 1 = AdamW (decoupled weight decay)
+        bias_correction: Whether to apply bias correction (1 = yes, 0 = no)
+        weight_decay: Weight decay coefficient
+    """
+    if noop_flag.item() != 0:
+        return
+
+    if len(tensor_lists) != 5:
+        raise ValueError(
+            "tensor_lists should contain [grads, params, exp_avgs, exp_avg_sqs, param_remainders]"
+        )
+
+    grads, params, exp_avgs, exp_avg_sqs, param_remainders = tensor_lists
+
+    if not (len(params) == len(grads) == len(exp_avgs) == len(exp_avg_sqs) == len(param_remainders)):
+        raise ValueError("All tensor lists must have the same length")
+
+    if bias_correction:
+        bias_correction1 = 1 - beta1 ** step
+        bias_correction2 = 1 - beta2 ** step
+    else:
+        bias_correction1 = 1.0
+        bias_correction2 = 1.0
+
+    for grad, param, exp_avg, exp_avg_sq, param_remainder in zip(
+        grads, params, exp_avgs, exp_avg_sqs, param_remainders
+    ):
+        if grad is None:
+            continue
+
+        # Reconstruct FP32 master weight from BF16 param + int16 remainder
+        # The CUDA implementation uses bit manipulation to combine them
+        # In PyTorch, we approximate this by:
+        # 1. Convert param (bf16) to fp32 - this gives us the high-precision bits
+        # 2. Add the remainder scaled appropriately
+        param_fp32 = param.float()
+
+        # The remainder represents the lower 16 bits lost in BF16 conversion
+        # We need to scale it back to the proper magnitude
+        # BF16 has 16 bits total (1 sign, 8 exponent, 7 mantissa)
+        # The remainder compensates for the lost precision
+        param_master = param_fp32 + param_remainder.float() * (2.0 ** -16)
+
+        # Standard Adam update on FP32 master weight
+        if mode == 0:  # L2 regularization
+            grad_with_decay = grad.float() + weight_decay * param_master
+        else:  # mode == 1, AdamW
+            grad_with_decay = grad.float()
+
+        # Update moments
+        exp_avg.mul_(beta1).add_(grad_with_decay, alpha=1 - beta1)
+        exp_avg_sq.mul_(beta2).addcmul_(grad_with_decay, grad_with_decay, value=1 - beta2)
+
+        # Apply bias correction
+        corrected_exp_avg = exp_avg / bias_correction1
+        corrected_exp_avg_sq = exp_avg_sq / bias_correction2
+
+        # Compute update
+        denom = corrected_exp_avg_sq.sqrt().add_(eps)
+        update = corrected_exp_avg / denom
+
+        if mode == 1:  # AdamW: apply weight decay directly
+            update = update + weight_decay * param_master
+
+        # Update master weight
+        param_master.add_(update, alpha=-lr)
+
+        # Split back into BF16 param + int16 remainder
+        # Convert to BF16 (this is the rounded version)
+        param_bf16 = param_master.to(dtype=param.dtype)
+
+        # Compute remainder: difference between FP32 master and BF16 representation
+        # Scale and quantize to int16 range
+        remainder_fp32 = (param_master - param_bf16.float()) * (2.0 ** 16)
+        remainder_int16 = remainder_fp32.round().clamp(-32768, 32767).to(dtype=torch.int16)
+
+        # Write back
+        param.copy_(param_bf16)
+        param_remainder.copy_(remainder_int16)
 
 
 def multi_tensor_sgd_torch(

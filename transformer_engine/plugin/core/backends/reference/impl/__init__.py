@@ -35,6 +35,7 @@ from .optimizer import (
     multi_tensor_scale_torch,
     multi_tensor_l2norm_torch,
     multi_tensor_adam_torch,
+    multi_tensor_adam_param_remainder_torch,
     multi_tensor_sgd_torch,
     multi_tensor_compute_scale_and_scale_inv_torch,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "multi_tensor_scale_torch",
     "multi_tensor_l2norm_torch",
     "multi_tensor_adam_torch",
+    "multi_tensor_adam_param_remainder_torch",
     "multi_tensor_sgd_torch",
     "multi_tensor_compute_scale_and_scale_inv_torch",
 ]
