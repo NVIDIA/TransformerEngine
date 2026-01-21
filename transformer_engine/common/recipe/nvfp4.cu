@@ -60,11 +60,6 @@ namespace nvfp4_recipe {
  *          Warp 1 -> rows 2-3   (groups of 4 elements per thread)
  *          ...
  *          Warp 7 -> rows 14-15
- *
- * The host helper `_cast_master_weights_to_nvfp4_2d` reduces per-tile amax
- * values, packs the resulting FP32 scales into the uint8 `_rowwise_scale_inv`,
- * and launches `tex.nvfp4_2d_partial_cast`. The resulting bytes match TE’s full
- * NVFP4 quantizer, so downstream GEMMs/checkpoints remain unchanged.
  * ---------------------------------------------------------------------------
  */
 
@@ -337,12 +332,6 @@ void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
  *   - Before transpose: elements [m, 2c] and [m, 2c+1] share a byte
  *   - After transpose:  elements [k, 2*m_packed] and [k, 2*m_packed+1] share a byte
  *                       which were originally [2*m_packed, k] and [2*m_packed+1, k]
- *
- * Two implementations:
- * 1. TMA version (SM100+/Hopper): Uses bulk async copy for ~3x bandwidth
- * 2. Vectorized version (fallback): Uses uint2 loads/stores
- *
- * Tile size: 64x64 logical FP4 elements = 64x32 input bytes = 64x32 output bytes
  * ---------------------------------------------------------------------------
  */
 
@@ -579,7 +568,7 @@ void nvfp4_scale_transpose(const Tensor input, Tensor output,
  * ---------------------------------------------------------------------------
  * NVFP4 SCALE EXPANSION KERNEL
  *
- * Expands tile-level scales to row-level scales and converts to FP8 E4M3.
+ * Expands tile-level scales to row-level scales and converts to FP8 E4M3, used in partial cast.
  * 
  * Input (per_block_decode_scale): [tile_rows, tile_cols] in float32
  * Output (target_scale): [rows_padded, tile_cols] in uint8 (E4M3)

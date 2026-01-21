@@ -356,10 +356,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         # NVFP4 requires a specialized transpose that handles nibble repacking
         self._columnwise_data = tex.nvfp4_transpose(rowwise_data, out=self._columnwise_data)
         if self._columnwise_scale_inv is None:
-            assert self._quantizer is not None, (
-                "._quantizer of Float8BlockwiseQTensor cannot be None because all the blockwise "
-                "quantized tensors are supposed to be generated from the quantizer."
-            )
+            assert self._quantizer is not None,
             # Use logical shape (self.size()), not packed byte shape (rowwise_data.shape)
             # NVFP4 packs 2 elements per byte, so rowwise_data.shape[-1] is K/2
             logical_shape = self.size()
@@ -376,8 +373,6 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         # is repeated 16 times (once per row in the 16x16 tile).
         # columnwise_scale_inv has shape [K_padded, M_tiles] where scales are
         # repeated 16 times per tile row.
-        # 
-        # Use GPU kernel to efficiently transpose and expand the scales.
         TILE_SIZE = 16
         logical_shape = self.size()
         M, K = logical_shape[0], logical_shape[-1]

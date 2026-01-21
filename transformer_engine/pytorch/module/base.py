@@ -1268,6 +1268,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     quantizer.with_amax_reduction = True
                 # Quantize parameter
                 param = quantizer(param)
+
             # Redo parameter wrap in case we broke it above
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already

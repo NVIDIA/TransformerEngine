@@ -309,12 +309,45 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
                                          const NVTETensor inpB, const bool use_rowwise_amax_B,
                                          float alpha_in, NVTETensor alpha_out, cudaStream_t stream);
 
-// NVFP4 2D (16x16) partial-shard APIs
+/*! \brief Compute tile-level amax for a partial shard of a 2D tensor.
+ *
+ *  For NVFP4 2D quantization with 16x16 tiles. Computes the maximum absolute
+ *  value within each tile, but only for elements in [start_offset, start_offset + len)
+ *  of the flattened tensor. Used in distributed settings where each rank owns a shard.
+ *
+ *  \param[in]     inp             Input tensor (partial shard, high-precision).
+ *  \param[out]    amax            Output amax buffer [tile_rows, tile_cols], float32.
+ *  \param[in]     h               Number of rows in the full 2D tensor.
+ *  \param[in]     w               Number of columns in the full 2D tensor.
+ *  \param[in]     amax_stride_h   Stride for amax in tile-row dimension.
+ *  \param[in]     amax_stride_w   Stride for amax in tile-col dimension.
+ *  \param[in]     start_offset    Starting element offset in the flattened tensor.
+ *  \param[in]     block_len       Tile dimension (must be 16 for NVFP4 2D).
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
 void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, size_t h, size_t w,
                                         size_t amax_stride_h, size_t amax_stride_w,
                                         size_t start_offset, size_t block_len,
                                         cudaStream_t stream);
 
+/*! \brief Cast a partial shard of a tensor to NVFP4 using 2D tile-based quantization.
+ *
+ *  Quantizes elements in [start_offset, start_offset + len) of the flattened tensor
+ *  using precomputed per-tile scales. Each 16x16 tile uses its own scale factor.
+ *  Used in distributed settings where each rank casts its owned shard.
+ *
+ *  \param[in]     inp             Input tensor (partial shard, high-precision).
+ *  \param[out]    out             Output NVFP4 packed tensor (2 values per byte).
+ *  \param[in]     scale           Per-tile scale factors [tile_rows, tile_cols], float32.
+ *  \param[in]     global_scale    Global scale factor [1], float32.
+ *  \param[in]     h               Number of rows in the full 2D tensor.
+ *  \param[in]     w               Number of columns in the full 2D tensor.
+ *  \param[in]     scale_stride_h  Stride for scale in tile-row dimension.
+ *  \param[in]     scale_stride_w  Stride for scale in tile-col dimension.
+ *  \param[in]     start_offset    Starting element offset in the flattened tensor.
+ *  \param[in]     block_len       Tile dimension (must be 16 for NVFP4 2D).
+ *  \param[in]     stream          CUDA stream used for the operation.
+ */
 void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
                                 const NVTETensor global_scale, size_t h, size_t w,
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
@@ -346,7 +379,7 @@ void nvte_nvfp4_transpose(const NVTETensor input, NVTETensor output, cudaStream_
 void nvte_nvfp4_scale_transpose(const NVTETensor input, NVTETensor output,
                                 size_t M_tiles, size_t K_tiles, cudaStream_t stream);
 
-/*! \brief Expand tile-level scales to row-level scales and convert to FP8 E4M3.
+/*! \brief Expand tile-level scales to row-level scales and convert to FP8 E4M3, used in partial cast.
  *
  * Each tile row's scale is repeated block_len times in the output.
  *

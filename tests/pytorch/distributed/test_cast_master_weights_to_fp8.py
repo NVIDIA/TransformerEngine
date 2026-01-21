@@ -878,23 +878,6 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
-    # Use 2048x2048 weights shape for testing.
-    # with te.quantized_model_init(
-    #     enabled=True, recipe=nvfp4_recipe, preserve_high_precision_init_val=True
-    # ):
-    #     model_nvfp4 = nn.Sequential(
-    #         te.Linear(2048, 2048, **linear_kwargs),
-    #         te.Linear(2048, 2048, **linear_kwargs),
-    #         te.Linear(2048, 2048, **linear_kwargs),
-    #     )
-
-    # # BF16 model (created outside quantized_model_init)
-    # model = nn.Sequential(
-    #     te.Linear(2048, 2048, **linear_kwargs),
-    #     te.Linear(2048, 2048, **linear_kwargs),
-    #     te.Linear(2048, 2048, **linear_kwargs),
-    # )
-
     for w_nvfp4, w in zip(model_nvfp4.parameters(), model.parameters()):
         high_precision_init_val = w_nvfp4.get_high_precision_init_val()
         w.data.copy_(high_precision_init_val)
@@ -913,7 +896,6 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
             w_nvfp4.main_grad.zero_()
             w.main_grad.zero_()
 
-        # Original input shape: torch.randn(128, 128, ...)
         inputs = [
             torch.randn(2048, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
         ]
@@ -972,7 +954,6 @@ def run_parallel_tests() -> None:
 
     quantizations = []
     if is_fp8_available():
-        print("fp8 available")
         quantizations.extend(["fp8", "fp8_cs"])
     if is_fp8_block_scaling_available():
         quantizations.append("fp8_block")
@@ -990,7 +971,6 @@ def run_parallel_tests() -> None:
     print("starting cast master weights to nvfp4 test")
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:
-        #for post_ag_processing in manual_post_all_gather_processings:
         _test_cast_master_weights_to_nvfp4(dp_group, False)
 
     dist.destroy_process_group()
@@ -1052,14 +1032,6 @@ def test_nvfp4_transpose_kernel() -> None:
     reference_columnwise_data = reference_tensor._columnwise_data.detach().clone()
     reference_columnwise_scale_inv = reference_tensor._columnwise_scale_inv.detach().clone()
     reference_columnwise_amax = reference_tensor._amax_columnwise.detach().clone() if reference_tensor._amax_columnwise is not None else None
-    print(
-        "reference columnwise_data shape:",
-        reference_columnwise_data.shape,
-    )
-    print(
-        "reference columnwise_scale_inv shape:",
-        reference_columnwise_scale_inv.shape,
-    )
 
     # Create tensor with only rowwise data, then call _create_columnwise()
     quantizer_rowwise_only = NVFP4Quantizer(
@@ -1072,14 +1044,6 @@ def test_nvfp4_transpose_kernel() -> None:
     test_tensor.update_usage(rowwise_usage=True, columnwise_usage=True)
     assert test_tensor._columnwise_data is not None, "Test tensor should have columnwise data after _create_columnwise()"
     assert test_tensor._columnwise_scale_inv is not None, "Test tensor should have columnwise scale_inv after _create_columnwise()"
-    print(
-        "test_tensor columnwise_data shape after transpose:",
-        test_tensor._columnwise_data.shape,
-    )
-    print(
-        "test_tensor columnwise_scale_inv shape after transpose:",
-        test_tensor._columnwise_scale_inv.shape,
-    )
 
     # Compare columnwise data - should be bitwise identical
     torch.testing.assert_close(
@@ -1089,22 +1053,6 @@ def test_nvfp4_transpose_kernel() -> None:
         rtol=0,
         msg="NVFP4 transpose kernel produced different columnwise data than reference!",
     )
-    print("columnwise_data matches!")
-
-    # Compare columnwise scale_inv - should be bitwise identical
-    print("reference columnwise_scale_inv:\n", reference_columnwise_scale_inv)
-    print("test columnwise_scale_inv:\n", test_tensor._columnwise_scale_inv)
-    print("reference rowwise_scale_inv shape:", reference_tensor._rowwise_scale_inv.shape)
-    print("test rowwise_scale_inv shape:", test_tensor._rowwise_scale_inv.shape)
-    
-    # Check if they match
-    scale_match = torch.equal(test_tensor._columnwise_scale_inv, reference_columnwise_scale_inv)
-    if not scale_match:
-        diff_mask = test_tensor._columnwise_scale_inv != reference_columnwise_scale_inv
-        print("Number of mismatches:", diff_mask.sum().item())
-        print("Mismatch locations:", diff_mask.nonzero()[:10])
-        print("Test values at mismatch:", test_tensor._columnwise_scale_inv[diff_mask][:10])
-        print("Reference values at mismatch:", reference_columnwise_scale_inv[diff_mask][:10])
     
     torch.testing.assert_close(
         test_tensor._columnwise_scale_inv,
@@ -1113,21 +1061,14 @@ def test_nvfp4_transpose_kernel() -> None:
         rtol=0,
         msg="NVFP4 _create_columnwise produced different columnwise scale_inv than reference!",
     )
-    print("columnwise_scale_inv matches!")
 
-    # Compare columnwise amax if available
-    if reference_columnwise_amax is not None:
-        torch.testing.assert_close(
-            test_tensor._amax_columnwise,
-            reference_columnwise_amax,
-            atol=0,
-            rtol=0,
-            msg="NVFP4 _create_columnwise produced different columnwise amax than reference!",
-        )
-        print("columnwise_amax matches!")
-
-    print("NVFP4 transpose kernel test PASSED!")
-
+    torch.testing.assert_close(
+        test_tensor._amax_columnwise,
+        reference_columnwise_amax,
+        atol=0,
+        rtol=0,
+        msg="NVFP4 _create_columnwise produced different columnwise amax than reference!",
+    )
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="NVFP4 partial-cast test requires CUDA."
@@ -1174,15 +1115,12 @@ def test_nvfp4_partial_cast_matches_full() -> None:
     reference_data = reference_tensor._rowwise_data.detach().clone()
     reference_scale = reference_tensor._rowwise_scale_inv.detach().clone()
     reference_amax = reference_tensor._amax_rowwise.detach().clone()
-    print(f"[Rank {WORLD_RANK}] reference_data shape: {reference_data.shape}")
-    print(f"[Rank {WORLD_RANK}] reference_scale shape: {reference_scale.shape}")
 
     # Split master weight evenly across ranks
     shard_size = total_elements // WORLD_SIZE
     start_offset = WORLD_RANK * shard_size
     end_offset = start_offset + shard_size
     master_weight_shard = full_master_weight.view(-1)[start_offset:end_offset].clone()
-    print(f"[Rank {WORLD_RANK}] shard: start_offset={start_offset}, end_offset={end_offset}, shard_size={shard_size}")
 
     # Create empty NVFP4 tensor for this rank (full shape, but we'll only fill our shard)
     nvfp4_tensor = quantizer.make_empty(shape, dtype=torch.bfloat16, device=device)
@@ -1216,7 +1154,6 @@ def test_nvfp4_partial_cast_matches_full() -> None:
     
     # Reconstruct the full rowwise data
     gathered_data = torch.cat(gathered_shards, dim=0).view(reference_data.shape)
-    print(f"[Rank {WORLD_RANK}] gathered_data shape: {gathered_data.shape}")
 
     # Compare with reference
     torch.testing.assert_close(
@@ -1226,7 +1163,6 @@ def test_nvfp4_partial_cast_matches_full() -> None:
         rtol=0,
         msg=f"[Rank {WORLD_RANK}] Gathered rowwise data does not match reference!",
     )
-    print(f"[Rank {WORLD_RANK}] rowwise_data matches reference!")
 
     # Also verify scale matches (scale should be identical on all ranks after all-reduce)
     torch.testing.assert_close(
@@ -1236,7 +1172,6 @@ def test_nvfp4_partial_cast_matches_full() -> None:
         rtol=0,
         msg=f"[Rank {WORLD_RANK}] Scale does not match reference!",
     )
-    print(f"[Rank {WORLD_RANK}] scale matches reference!")
 
     # Verify amax matches
     torch.testing.assert_close(
@@ -1246,10 +1181,6 @@ def test_nvfp4_partial_cast_matches_full() -> None:
         rtol=0,
         msg=f"[Rank {WORLD_RANK}] Amax does not match reference!",
     )
-    print(f"[Rank {WORLD_RANK}] amax matches reference!")
-
-    print(f"[Rank {WORLD_RANK}] Multi-GPU NVFP4 partial cast test PASSED!")
-
 
 def test_single_gpu_partial_cast_vs_full():
     """
@@ -1278,11 +1209,6 @@ def test_single_gpu_partial_cast_vs_full():
     ref_scale = ref._rowwise_scale_inv.clone()
     ref_amax = ref._amax_rowwise.clone()
     
-    print(f"Reference:")
-    print(f"  data shape: {ref_data.shape}")
-    print(f"  scale shape: {ref_scale.shape}")
-    print(f"  amax: {ref_amax}")
-    
     # === Test: Use cast_master_weights_to_nvfp4 with offset=0 (full tensor) ===
     # Create empty NVFP4 tensor
     test_tensor = quantizer.make_empty(shape, dtype=torch.bfloat16, device=device)
@@ -1296,7 +1222,6 @@ def test_single_gpu_partial_cast_vs_full():
         dist.init_process_group(backend="nccl", init_method="env://", rank=0, world_size=1)
     mock_group = dist.new_group(ranks=[0])
     
-    # First pass: find mismatch location
     cast_master_weights_to_nvfp4(
         [test_tensor],
         [master_weight.view(-1)],  # Flatten as expected
@@ -1304,101 +1229,17 @@ def test_single_gpu_partial_cast_vs_full():
         mock_group,
     )
     
-    # Check for mismatches and set debug env vars
-    scale_diff = (test_tensor._rowwise_scale_inv != ref_scale)
-    if scale_diff.any():
-        diff_idx = torch.nonzero(scale_diff, as_tuple=True)
-        r, c = diff_idx[0][0].item(), diff_idx[1][0].item()
-        tile_row = r // 16
-        tile_col = c
-        print(f"\n=== Found mismatch at scale[{r},{c}], tile[{tile_row},{tile_col}] ===")
-        print(f"    Running second pass with debug enabled...")
-        
-        # Set env vars for debug
-        os.environ["NVFP4_DEBUG_TILE_ROW"] = str(tile_row)
-        os.environ["NVFP4_DEBUG_TILE_COL"] = str(tile_col)
-        
-        # Reset tensor and run again with debug
-        test_tensor._rowwise_data.zero_()
-        test_tensor._rowwise_scale_inv.zero_()
-        if test_tensor._amax_rowwise is not None:
-            test_tensor._amax_rowwise.zero_()
-        
-        cast_master_weights_to_nvfp4(
-            [test_tensor],
-            [master_weight.view(-1)],
-            [0],
-            mock_group,
-        )
-        
-        # Clear env vars
-        del os.environ["NVFP4_DEBUG_TILE_ROW"]
-        del os.environ["NVFP4_DEBUG_TILE_COL"]
-    
-    print(f"\nTest (cast_master_weights_to_nvfp4 with offset=0):")
-    print(f"  data shape: {test_tensor._rowwise_data.shape}")
-    print(f"  scale shape: {test_tensor._rowwise_scale_inv.shape}")
-    print(f"  amax: {test_tensor._amax_rowwise}")
-    
-    # === Compare ===
-    print(f"\nComparison:")
-    
     # Compare amax
     amax_match = torch.equal(test_tensor._amax_rowwise, ref_amax)
-    print(f"  Amax match: {amax_match}")
-    if not amax_match:
-        print(f"    test: {test_tensor._amax_rowwise}")
-        print(f"    ref:  {ref_amax}")
     
     # Compare scale
     scale_match = torch.equal(test_tensor._rowwise_scale_inv, ref_scale)
-    print(f"  Scale match: {scale_match}")
-    if not scale_match:
-        mismatches = (test_tensor._rowwise_scale_inv != ref_scale).sum().item()
-        total = ref_scale.numel()
-        print(f"    Mismatches: {mismatches}/{total} ({100*mismatches/total:.4f}%)")
-        
-        # Find first mismatch location
-        diff = (test_tensor._rowwise_scale_inv != ref_scale)
-        if diff.any():
-            diff_idx = torch.nonzero(diff, as_tuple=True)
-            r, c = diff_idx[0][0].item(), diff_idx[1][0].item()
-            print(f"\n    === First mismatch at [{r},{c}] ===")
-            print(f"    test scale (uint8): {test_tensor._rowwise_scale_inv[r,c].item()}")
-            print(f"    ref scale (uint8):  {ref_scale[r,c].item()}")
-            
-            # Convert to FP32 to see the actual values
-            test_fp32 = test_tensor._rowwise_scale_inv[r,c].view(torch.float8_e4m3fn).to(torch.float32).item()
-            ref_fp32 = ref_scale[r,c].view(torch.float8_e4m3fn).to(torch.float32).item()
-            print(f"    test scale (FP32): {test_fp32}")
-            print(f"    ref scale (FP32):  {ref_fp32}")
-            
-            # Compute which tile this belongs to
-            tile_row = r // 16
-            tile_col = c
-            print(f"    Tile position: [{tile_row}, {tile_col}]")
-            
-            # Store this for utils.py to print debug info
-            import os
-            os.environ["NVFP4_DEBUG_TILE_ROW"] = str(tile_row)
-            os.environ["NVFP4_DEBUG_TILE_COL"] = str(tile_col)
     
     # Compare data
     data_match = torch.equal(test_tensor._rowwise_data, ref_data)
-    print(f"  Data match: {data_match}")
-    if not data_match:
-        mismatches = (test_tensor._rowwise_data != ref_data).sum().item()
-        total = ref_data.numel()
-        print(f"    Mismatches: {mismatches}/{total} ({100*mismatches/total:.4f}%)")
-    
-    if amax_match and scale_match and data_match:
-        print("\nSUCCESS: cast_master_weights_to_nvfp4 (offset=0) matches quantizer!")
-    else:
-        print("\nFAILURE: Results don't match!")
-
 
 if __name__ == "__main__":
-    #main()
-    test_nvfp4_transpose_kernel()
+    main()
+    #test_nvfp4_transpose_kernel()
     #test_single_gpu_partial_cast_vs_full()
     #test_nvfp4_partial_cast_matches_full()

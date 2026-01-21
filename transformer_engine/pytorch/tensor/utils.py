@@ -246,7 +246,7 @@ def _cast_master_weights_to_fp8_delayed_scaling(
 
     for model_weight, master_weight, start_offset, shard_model_weight_raw in params:
         if not manual_post_all_gather_processing:
-        # Reset transpose cache for all model weights.
+            # Reset transpose cache for all model weights.
             # We cannot create transpose cache here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated currently.
@@ -392,7 +392,7 @@ def _cast_master_weights_to_fp8_current_scaling(
         params, scales
     ):
         if not manual_post_all_gather_processing:
-        # Reset transpose cache for all model weights.
+            # Reset transpose cache for all model weights.
             # We cannot create transpose cache here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated currently.
@@ -523,7 +523,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         params, scales
     ):
         if not manual_post_all_gather_processing:
-            # Reset transpose cache for all model weights.
+            # Clear columnwise data for all model weights.
             # We cannot create columnwise data here because users (like megatron) may want to
             # overlap the all-gather of model weights and forward process, so the model weight is
             # not updated at this moment.
@@ -544,7 +544,6 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
             master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype
         )
 
-# revisit this later
 def _cast_master_weights_to_nvfp4_2d(
     params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):
@@ -713,17 +712,6 @@ def _cast_master_weights_to_nvfp4_2d(
             fused_scale_tile_rows_list.append(tile_rows)
             fused_scale_tile_cols_list.append(tile_col_cnt)
             fused_scale_rows_padded_list.append(rows_padded)
-        else:
-            # Fallback: compute scale and expand without amax copy (rare case)
-            tex.nvfp4_compute_per_block_scale(block_amax, per_block_decode_scale, global_amax_view)
-            tex.nvfp4_expand_scale_to_fp8(
-                per_block_decode_scale,
-                target_scale,
-                tile_rows,
-                tile_col_cnt,
-                rows_padded,
-                block_len,
-            )
 
         # Collect for partial cast kernel (only for layers owned by this rank)
         if master_weight is not None and master_weight.numel() > 0:
