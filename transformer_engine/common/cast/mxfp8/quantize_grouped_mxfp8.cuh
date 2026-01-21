@@ -157,9 +157,9 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
         : "memory");
     *global_tensor_map = shared_tensor_map;
   } else {
-      NVTE_DEVICE_ERROR(
-      "tensormap.replace is architecture-specific. "
-      "Try recompiling with sm_XXXa instead of sm_XXX.");
+    NVTE_DEVICE_ERROR(
+        "tensormap.replace is architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
 }
 
