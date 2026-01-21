@@ -87,6 +87,21 @@ void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wai
 #endif
 }
 
+void nvshmem_get_on_current_stream(torch::Tensor dst, torch::Tensor src, int peer) {
+#ifdef NVTE_ENABLE_NVSHMEM
+  void *dst_ptr = reinterpret_cast<void *>(dst.data_ptr());
+  void *src_ptr = reinterpret_cast<void *>(src.data_ptr());
+  auto nelement = dst.numel() * dst.element_size();
+  at::cuda::CUDAStream cur_stream = at::cuda::getCurrentCUDAStream();
+
+  nvshmemx_getmem_on_stream(dst_ptr, src_ptr, nelement, peer, (cudaStream_t)cur_stream);
+#else
+  NVTE_ERROR(
+      "Internal TE error: nvshmem_get_on_current_stream cannot be initialized with valid PyTorch ",
+      "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
+#endif
+}
+
 torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype) {
 #ifdef NVTE_ENABLE_NVSHMEM
   auto option_gpu =

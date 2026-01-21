@@ -326,6 +326,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::nvshmem_send_on_current_stream,
         "Asynchronously send tensor data to a remote PE using NVSHMEM on the current CUDA stream",
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_get_on_current_stream",
+        &transformer_engine::pytorch::nvshmem_get_on_current_stream,
+        "Asynchronously get tensor data from a remote PE using NVSHMEM on the current CUDA stream",
+        py::call_guard<py::gil_scoped_release>());
   m.def("nvshmem_wait_on_current_stream",
         &transformer_engine::pytorch::nvshmem_wait_on_current_stream,
         "Wait for a signal value to be updated by a remote PE using NVSHMEM on the current CUDA "

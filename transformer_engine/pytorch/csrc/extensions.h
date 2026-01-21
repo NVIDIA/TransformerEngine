@@ -422,6 +422,8 @@ void nvshmem_send_on_current_stream(at::Tensor src, at::Tensor dst, int peer, at
 
 void nvshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_kind);
 
+void nvshmem_get_on_current_stream(at::Tensor dst, at::Tensor src, int peer);
+
 void nvshmem_finalize();
 
 /***************************************************************************************************
