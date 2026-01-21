@@ -339,7 +339,7 @@ def run_dpa_with_cp(
             out.backward(dout_fp8)
         else:
             out.backward(dout)
-    dq, dk, dv, dbias = q.grad, k.grad, v.grad, bias.grad
+    dq, dk, dv, dbias = q.grad, k.grad, v.grad, bias.grad if bias is not None else None
     d_softmax_offset = None
     if config.softmax_type != "vanilla":
         d_softmax_offset = core_attn.softmax_offset.grad
@@ -435,7 +435,7 @@ def run_dpa_with_cp(
             out_.backward(dout_fp8_)
         else:
             out_.backward(dout_)
-    dq_, dk_, dv_, dbias_ = q_.grad, k_.grad, v_.grad, bias_.grad
+    dq_, dk_, dv_, dbias_ = q_.grad, k_.grad, v_.grad, bias_.grad if bias_ is not None else None
     d_softmax_offset_ = None
     if config.softmax_type != "vanilla":
         d_softmax_offset_ = core_attn.softmax_offset.grad.clone()
@@ -445,12 +445,16 @@ def run_dpa_with_cp(
     if fp8_mha:
         tensors_to_deq = [out, out_] if not fp8_bwd else tensors
         for i, tensor in enumerate(tensors_to_deq):
-            tensors_to_deq[i] = tensor.dequantize()
+            # dbias/dbias_ could be None, so skip check for it
+            if tensor is not None:
+                tensors_to_deq[i] = tensor.dequantize()
         if not fp8_bwd:
             tensors[0], tensors[5] = tensors_to_deq
     for tensor in tensors:
-        assert torch.all(~torch.isnan(tensor))
-        assert torch.all(~torch.isinf(tensor))
+        # dbias/dbias_ could be None, so skip check for it
+        if tensor is not None:
+            assert torch.all(~torch.isnan(tensor))
+            assert torch.all(~torch.isinf(tensor))
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############
