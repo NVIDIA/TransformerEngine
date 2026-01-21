@@ -519,56 +519,6 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const& data, std::opti
 
   return grouped_tensor_wrapper;
 }
-// NVTEGroupedTensor make_grouped_tensor(Buffer_Type const& data, std::optional<Buffer_Type> scale_inv, JAXX_Scaling_Mode scaling_mode, size_t num_tensors, NVTEShape const& dataShape) {
-//   // printf("make_grouped_tensor data shape: ");
-//   // for (auto dim : data.dimensions()) {
-//   //   printf("%zu, ", dim);
-//   // }
-//   // printf("\n");
-//   // NVTEShape logical_shape{};
-//   // if (data.dimensions().size() == 1) {
-//   //   // HACK
-//   //   size_t cdim_size = 4096;
-//   //   logical_shape.ndim = 2;
-//   //   logical_shape.data[0] = data.dimensions()[0] / cdim_size;
-//   //   logical_shape.data[1] = cdim_size;
-//   //   printf("NUM TENSORS: %zu\n", num_tensors);
-//   // }
-//   // else {
-//   //   NVTE_CHECK(data.dimensions().size() == 2, "Expected 2D tensor for GEMM operand but received ndim=", data.dimensions().size());
-
-//   //   logical_shape.ndim = 2;
-//   //   logical_shape.data[0] = data.dimensions()[0];
-//   //   logical_shape.data[1] = data.dimensions()[1];
-//   // }
-
-//   NVTEGroupedTensor grouped_tensor = nvte_create_grouped_tensor(get_nvte_scaling_mode(scaling_mode), num_tensors, dataShape);
-
-//   NVTEBasicTensor data_tensor{reinterpret_cast<uint8_t *>(data.untyped_data()), 
-//                                      static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(data.element_type())),
-//                                       dataShape};
-//   nvte_set_grouped_tensor_param(&grouped_tensor, kNVTEGroupedRowwiseData, &data_tensor);
-
-//   if (scale_inv.has_value()) {
-//     NVTEShape logical_scale_shape{};
-//     if (scale_inv->dimensions().size() == 1) {
-//       logical_scale_shape.ndim = 1;
-//       logical_scale_shape.data[0] = scale_inv->dimensions()[0];
-//     } else if (scale_inv->dimensions().size() == 2) {
-//       logical_scale_shape.ndim = 2;
-//       logical_scale_shape.data[0] = scale_inv->dimensions()[0];
-//       logical_scale_shape.data[1] = scale_inv->dimensions()[1];
-//     } else {
-//       NVTE_CHECK(false, "Expected 1D or 2D tensor for GEMM scale_inv but received ndim=", scale_inv->dimensions().size());
-//     }
-//     NVTEBasicTensor scale_inv_tensor{reinterpret_cast<uint8_t *>(scale_inv->untyped_data()), 
-//                                             static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(scale_inv->element_type())),
-//                                              logical_scale_shape};
-//     nvte_set_grouped_tensor_param(&grouped_tensor, kNVTEGroupedRowwiseScaleInv, &scale_inv_tensor);
-//   }
-
-//   return grouped_tensor;
-// }
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
@@ -705,11 +655,11 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                            convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
 
-  printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu\n", num_gemms, m, n, k, group_sizes.dimensions()[0] / 2);
+  printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0] / 2, lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
 
   //// RHS
   NVTEShape rhsShape{.data={k, n}, .ndim=2};
-  if (rhs_is_trans) {
+  if (rhs_is_trans && !is_grouped_dense_wgrad) {
     std::swap(rhsShape.data[0], rhsShape.data[1]);
   }
   if (!is_grouped_dense_wgrad) {
@@ -717,11 +667,18 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     rhsShape.data[0] *= num_gemms;
   }
   auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
-  
+  if (is_grouped_dense_wgrad) {
+    rhs_tensor.set_group_info(group_sizes, group_offsets);
+  }
+
   //// LHS
-  NVTEShape lhsShape{.data={m, k}, .ndim=2};
+  NVTEShape lhsShape{.data={k, m}, .ndim=2};
   if (lhs_is_trans && is_grouped_dense_wgrad) {
     std::swap(lhsShape.data[0], lhsShape.data[1]);
+  }
+  if (is_grouped_dense_wgrad) {
+    // If is_grouped_dense_wgrad, then m already includes num_gemms (G) pre-multiplied in gemm.py, so we don't need to multiply it here.
+    lhsShape.data[0] *= num_gemms;
   }
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
   if (!is_grouped_dense_wgrad) {
@@ -734,7 +691,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     outShape.data[0] *= num_gemms;
   }
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
-  if (is_grouped_dense_wgrad) {
+  if (!is_grouped_dense_wgrad) {
     out_tensor.set_group_info(group_sizes, group_offsets);
   }
 
@@ -746,7 +703,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
 
   // HACK: jberchtold FIXME
-  // cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
+  cudaMemsetAsync(output->untyped_data(), 0xFF, output->size_bytes(), stream);
 
   nvte_grouped_gemm(
     rhs_tensor, rhs_is_trans,
