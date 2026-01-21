@@ -33,9 +33,10 @@ Environment Variables:
 import hashlib
 import os
 import warnings
-from packaging import version
 from typing import Any, Callable, Mapping
 import zlib
+
+from packaging import version
 
 from jax import core
 import jax
@@ -276,7 +277,7 @@ def compile_triton(
 
     # Compile kernel
     cuda_option_kwargs = {}
-    if version.parse(triton.__version__) < version.parse("3.6.0"):
+    if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
         cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
     options = cb.CUDAOptions(
         num_warps=num_warps,
