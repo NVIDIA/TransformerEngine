@@ -1494,7 +1494,7 @@ def make_einsum_cls(quantization_recipe):
         kernel = reorder_rhs_for_grouped_gemm(kernel, (batch_dims[1],), contracting_dims[1])
 
         num_groups = kernel.shape[0]
-        group_size = math.prod(x.shape[:-1]) // num_groups
+        group_size = x.shape[1]
         print(f'{num_groups=}, {group_size=}, {x.shape=}, {kernel.shape=}')
 
         group_sizes = jnp.array([group_size]*num_groups, dtype=jnp.int32)
@@ -1534,7 +1534,7 @@ def make_ragged_dot_cls(quantization_recipe):
           kernel,
           group_sizes=group_sizes,
           contracting_dims=((1,), (1,)),
-          quantizer_set=quantizer_set
+        #   quantizer_set=quantizer_set
         )
 
         return out.reshape(target_out_shape)

@@ -73,6 +73,10 @@ def token_dispatch(
         Permuted probabilities of shape [num_out_tokens], or None if probs was not provided.
     row_id_map : jnp.ndarray
         Row ID map for use in token_combine (shape [num_tokens, num_experts * 2 + 1]).
+
+        [num_tokens, 0:num_experts] = expert indices for each token
+
+        [num_experts] =  max([num_tokens, 0:num_experts], axis=0) + 1
     """
     return _token_dispatch(inp, routing_map, probs, num_out_tokens)
 

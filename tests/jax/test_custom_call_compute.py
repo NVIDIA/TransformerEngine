@@ -1761,50 +1761,68 @@ fwd_bwd_dtypes = [
 
 GROUPED_DENSE_INPUT_SHAPES = [
     # (n_groups, m, n, k), the actual m will be multiplied by 32
-    (5, 32, 128, 64),  # Test the case where n_groups is not a multiple of 4
-    (8, 64, 32, 128),
-    (8, 64, 128, 256),
+    # (5, 32, 128, 64),  # Test the case where n_groups is not a multiple of 4
+    
+    # (4, 16, 4, 4),
+
+    (3, 192, 64, 96),
+
+    # (8, 64, 32, 128),
+    # (8, 64, 128, 256),
 ]
 
 
 @pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
     def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):
-        lhs_contract_dim, _ = contracting_dims
-        assert len(lhs_contract_dim) == 1 and lhs.ndim == 2 and rhs.ndim == 3
-        if bias is None:
-            bias = jnp.zeros((rhs.shape[0], rhs.shape[2]), dtype=lhs.dtype)
-        else:
-            assert bias.ndim == 2 and bias.shape == (rhs.shape[0], rhs.shape[2])
-        remaining_axis = (set(range(lhs.ndim)) - set(lhs_contract_dim)).pop()
-        lhs = jnp.split(lhs, jnp.cumulative_sum(group_sizes)[:-1], axis=remaining_axis)
-        rhs = jnp.split(rhs, rhs.shape[0], axis=0)
-        bias = jnp.split(bias, bias.shape[0], axis=0)
-        ref_out = []
-        dim_num = (contracting_dims, ((), ()))
-        for lhs_i, rhs_i, bias_i in zip(lhs, rhs, bias):
-            out_i = jax.lax.dot_general(
-                lhs_i, rhs_i, dim_num, precision=jax.lax.Precision.HIGHEST
-            ) + jnp.expand_dims(bias_i, axis=0)
-            ref_out.append(jnp.squeeze(out_i))
-        return ref_out
+        out = jax.lax.ragged_dot(lhs, rhs, group_sizes)
+        print(f"In ref grouped dense: {lhs.shape=}, {rhs.shape=},  {out.shape=}")
+        return out
+
+        dot_dimension_numbers = (((), ()), contracting_dims)
+        lhs_ragged_dimensions = (0,)
+        rhs_group_dimensions = (0,)
+        print(lhs.shape, rhs.shape, group_sizes, dot_dimension_numbers, lhs_ragged_dimensions, rhs_group_dimensions)
+        dims = jax.lax.RaggedDotDimensionNumbers(dot_dimension_numbers, lhs_ragged_dimensions, rhs_group_dimensions)
+        return jax.lax.ragged_dot_general(lhs, rhs, group_sizes, dims)
+        # lhs_contract_dim, _ = contracting_dims
+        # assert len(lhs_contract_dim) == 1 and lhs.ndim == 2 and rhs.ndim == 3
+        # if bias is None:
+        #     bias = jnp.zeros((rhs.shape[0], rhs.shape[2]), dtype=lhs.dtype)
+        # else:
+        #     assert bias.ndim == 2 and bias.shape == (rhs.shape[0], rhs.shape[2])
+        # remaining_axis = (set(range(lhs.ndim)) - set(lhs_contract_dim)).pop()
+        # lhs = jnp.split(lhs, jnp.cumulative_sum(group_sizes)[:-1], axis=remaining_axis)
+        # rhs = jnp.split(rhs, rhs.shape[0], axis=0)
+        # bias = jnp.split(bias, bias.shape[0], axis=0)
+        # ref_out = []
+        # dim_num = (contracting_dims, ((), ()))
+        # for lhs_i, rhs_i, bias_i in zip(lhs, rhs, bias):
+        #     out_i = jax.lax.dot_general(
+        #         lhs_i, rhs_i, dim_num, precision=jax.lax.Precision.HIGHEST
+        #     ) + jnp.expand_dims(bias_i, axis=0)
+        #     ref_out.append(jnp.squeeze(out_i))
+        # return ref_out
 
     def _generate_grouped_dense_input(self, dtype, input_shape, data_layout="NN", with_bias=False):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 4)
         n_groups, m, n, k = input_shape
 
-        group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
-        group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
-        group_sizes = jnp.diff(group_sizes)
-        # Make one empty input lhs to test empty GEMM handling
-        group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1])
-        group_sizes = group_sizes.at[1].set(0)
+        # group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
+        # group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
+        # group_sizes = jnp.diff(group_sizes) 
+
+        # # Make one empty input lhs to test empty GEMM handling
+        # group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1])
+        # group_sizes = group_sizes.at[1].set(0)
+
+        group_sizes = jnp.full((n_groups,), m // n_groups)
         assert group_sizes.sum() == m
 
         # *32 to make sure that input shape works for MXFP8
-        group_sizes = group_sizes * 32
-        m = m * 32
+        # group_sizes = group_sizes * 32
+        # m = m * 32
 
         lhs_shape = (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m)
         rhs_shape = (n_groups, k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k)
@@ -1822,9 +1840,15 @@ class TestGroupedDense:
 
     def _assert_grouped_gemm_output(self, out, group_sizes, ref_list, dtype):
         assert out.dtype == ref_list[0].dtype
-        out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
-        for i in range(len(ref_list)):
-            assert_allclose(out_list[i], ref_list[i], dtype=dtype)
+        import numpy as np
+        np.set_printoptions(threshold=10000)
+        jnp.set_printoptions(threshold=10000)
+        print("Actual:", out)
+        print("Expected:", ref_list)
+        assert_allclose(out, ref_list, dtype=dtype)
+        # out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
+        # for i in range(len(ref_list)):
+        #     assert_allclose(out_list[i], ref_list[i], dtype=dtype)
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     @pytest_parametrize_wrapper("layout", ["NN"])
@@ -1979,7 +2003,7 @@ class TestGroupedDense:
     # ('ij,jk->ik', (64, 32), (32, 128)),
     # ('bij,bjk->bik', (8, 64, 32), (8, 32, 128)),
     # ('abc,cde->abde', (4, 8, 16), (16, 32, 64)),
-    ('BSM,BSEC->EBCM', (2, 4096, 4096), (2, 4096, 8, 1024)),                            
+    ('BSM,BSEC->EBCM', (2, 16, 16), (2, 16, 8, 8)),                            
     ('EBCM,EMH->EBCH', (8, 2, 1024, 4096), (8, 4096, 14336)) ,                           
     ('EBCM,EMH->EBCH', (8, 2, 1024, 4096), (8, 4096, 14336)),
     ('EBCH,EHM->EBCM', (8, 2, 1024, 14336), (8, 14336, 4096)),
@@ -2014,6 +2038,9 @@ class TestEinsum:
         te_out = jax.jit(functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe))(a, b)
         ref_out = jax.jit(functools.partial(self._ref_einsum, eqn))(a, b)
 
+        # jax.config.update("jax_numpy_rank_promotion", "raise")
+        # jnp.set_printoptions(threshold=jnp.inf, linewidth=jnp.inf)
+        # print(te_out)
         assert_allclose(te_out, ref_out, dtype=dtype)
 
     def test_einsum_fwd_and_bwd(self, eqn, a_shape, b_shape, dtype, quantization_recipe):

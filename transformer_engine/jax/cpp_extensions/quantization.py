@@ -96,7 +96,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         out_shape = x_aval.shape
-        assert scale_aval is None or scale_aval.dtype == jnp.float32
+        assert scale_aval is None or scale_aval.dtype == jnp.float32, f"scale must be float32 but received {scale_aval}"
         if stochastic_rounding:
             assert ScalingMode(
                 scaling_mode
