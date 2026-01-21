@@ -165,9 +165,10 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
                 f"but got {type(quantizer).__name__}"
             )
 
-        assert isinstance(
-            quantized_tensor, NVFP4TensorStorage
-        ), "[NVTORCH INSPECT ERROR] LogNvfp4TensorStats quantized_tensor must be a NVFP4TensorStorage."
+        assert isinstance(quantized_tensor, NVFP4TensorStorage), (
+            "[NVTORCH INSPECT ERROR] LogNvfp4TensorStats quantized_tensor must be a"
+            " NVFP4TensorStorage."
+        )
 
         for stat in config["stats"]:
             self.check_if_stat_is_supported(stat)
