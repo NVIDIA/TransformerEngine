@@ -141,20 +141,26 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
 
   __shared__ CUtensorMap shared_tensor_map;
   shared_tensor_map = base_tensor_map;  // Copy the base tensor map into shmem
-
-  asm volatile(
-      "{\n\t"
-      ".reg.b64 tensor_map_ptr; \n\t"
-      "mov.b64 tensor_map_ptr, %0; \n\t"
-      "tensormap.replace.tile.global_address.b1024.b64  [tensor_map_ptr], %1; \n\t"
-      "tensormap.replace.tile.global_dim.b1024.b32  [tensor_map_ptr], 1, %2; \n\t"  // DIM Y
-      "tensormap.replace.tile.global_dim.b1024.b32  [tensor_map_ptr], 0, %3; \n\t"  // DIM X
-      "tensormap.replace.tile.global_stride.b1024.b64  [tensor_map_ptr], 0, %4; \n"
-      "}\n" ::"l"(reinterpret_cast<uintptr_t>(&shared_tensor_map)),
-      "l"(global_data_ptr), "r"(static_cast<uint32_t>(global_dim_Y)),
-      "r"(static_cast<uint32_t>(global_dim_X)), "l"(static_cast<uint64_t>(global_stride_bytes))
-      : "memory");
-  *global_tensor_map = shared_tensor_map;
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell) {
+    asm volatile(
+        "{\n\t"
+        ".reg.b64 tensor_map_ptr; \n\t"
+        "mov.b64 tensor_map_ptr, %0; \n\t"
+        "tensormap.replace.tile.global_address.b1024.b64  [tensor_map_ptr], %1; \n\t"
+        "tensormap.replace.tile.global_dim.b1024.b32  [tensor_map_ptr], 1, %2; \n\t"  // DIM Y
+        "tensormap.replace.tile.global_dim.b1024.b32  [tensor_map_ptr], 0, %3; \n\t"  // DIM X
+        "tensormap.replace.tile.global_stride.b1024.b64  [tensor_map_ptr], 0, %4; \n"
+        "}\n" ::"l"(reinterpret_cast<uintptr_t>(&shared_tensor_map)),
+        "l"(global_data_ptr), "r"(static_cast<uint32_t>(global_dim_Y)),
+        "r"(static_cast<uint32_t>(global_dim_X)), "l"(static_cast<uint64_t>(global_stride_bytes))
+        : "memory");
+    *global_tensor_map = shared_tensor_map;
+  } else {
+      NVTE_DEVICE_ERROR(
+      "tensormap.replace is architecture-specific. "
+      "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
 }
 
 template <typename IType, typename OType>
@@ -210,7 +216,11 @@ __global__ void update_tma_descriptors(
 }
 
 __device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tensor_map) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("fence.proxy.tensormap::generic.acquire.cta [%0], 128;" ::"l"(tensor_map));
+#else
+  NVTE_DEVICE_ERROR("fence_acquire_tensormap is only supported on SM 9.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
