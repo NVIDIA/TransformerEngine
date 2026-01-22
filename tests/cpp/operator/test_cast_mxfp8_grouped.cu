@@ -258,6 +258,7 @@ void performTest(const ProcessingMethod processing_method,
     std::uniform_real_distribution<> dis(-2.0, 1.0);
 
     std::vector<InputType> in_data(elts_num);
+    std::vector<InputType> grad_data(elts_num);
 
     std::vector<OutputType> out_data_rowwise_h(rowwise ? elts_num : 0);
     std::vector<OutputType> out_data_colwise_h(colwise ? elts_num : 0);
@@ -271,6 +272,7 @@ void performTest(const ProcessingMethod processing_method,
 
     for (size_t i = 0; i < elts_num; ++i) {
         const float val = dis(gen);
+        grad_data[i] = static_cast<InputType>(val);
         in_data[i] = static_cast<InputType>(val);
     }
 
@@ -297,6 +299,7 @@ void performTest(const ProcessingMethod processing_method,
     const size_t last_dims_size = num_tensors * sizeof(size_t);
     const size_t offsets_size = (num_tensors + 1) * sizeof(size_t);
 
+    InputType* grad_data_d;
     InputType* in_data_d;
     OutputType* out_data_rowwise_d;
     OutputType* out_data_colwise_d;
@@ -306,11 +309,13 @@ void performTest(const ProcessingMethod processing_method,
     size_t* last_dims_d;
     size_t* offsets_d;
 
+    cudaMalloc((void**)&grad_data_d, in_data_size);
     cudaMalloc((void**)&in_data_d, in_data_size);
     cudaMalloc((void**)&first_dims_d, first_dims_size);
     cudaMalloc((void**)&last_dims_d, last_dims_size);
     cudaMalloc((void**)&offsets_d, offsets_size);
 
+    cudaMemcpy(grad_data_d, grad_data.data(), in_data_size, cudaMemcpyHostToDevice);
     cudaMemcpy(in_data_d, in_data.data(), in_data_size, cudaMemcpyHostToDevice);
     cudaMemcpy(first_dims_d, first_dims_h.data(), first_dims_size, cudaMemcpyHostToDevice);
     cudaMemcpy(last_dims_d, last_dims_h.data(), last_dims_size, cudaMemcpyHostToDevice);
@@ -330,26 +335,32 @@ void performTest(const ProcessingMethod processing_method,
     last_dims_shape_.data[0] = num_tensors;
     offsets_shape_.data[0] = num_tensors + 1;
 
+    NVTEGroupedTensor grad_group_tensor = nvte_create_grouped_tensor(NVTE_DELAYED_TENSOR_SCALING, num_tensors, logical_shape_);
     NVTEGroupedTensor in_group_tensor = nvte_create_grouped_tensor(NVTE_DELAYED_TENSOR_SCALING, num_tensors, logical_shape_);
     NVTEGroupedTensor out_group_tensor = nvte_create_grouped_tensor(NVTE_MXFP8_1D_SCALING, num_tensors, logical_shape_);
 
+    NVTEBasicTensor grad_data_tensor = {grad_data_d, static_cast<NVTEDType>(itype), logical_shape_};
     NVTEBasicTensor in_data_tensor = {in_data_d, static_cast<NVTEDType>(itype), logical_shape_};
     nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &in_data_tensor);
+    nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &in_data_tensor);
 
     if ((shape_rep == VARYING_FIRST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
         NVTEBasicTensor first_dims_tensor = {first_dims_d, kNVTEInt64, first_dims_shape_};
+        nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims, &first_dims_tensor);
         nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims, &first_dims_tensor);
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims, &first_dims_tensor);
     }
 
     if ((shape_rep == VARYING_LAST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
         NVTEBasicTensor last_dims_tensor = {last_dims_d, kNVTEInt64, last_dims_shape_};
+        nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims, &last_dims_tensor);
         nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims, &last_dims_tensor);
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims, &last_dims_tensor);
     }
 
     if (shape_rep != SAME_BOTH_DIMS) {
         NVTEBasicTensor offsets_tensor = {offsets_d, kNVTEInt64, offsets_shape_};
+        nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets, &offsets_tensor);
         nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets, &offsets_tensor);
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets, &offsets_tensor);
     }
@@ -378,6 +389,8 @@ void performTest(const ProcessingMethod processing_method,
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseScaleInv, &out_scales_colwise_tensor);
     }
 
+    Tensor output_dbias("output_dbias", std::vector<size_t>{ cols }, itype);
+
     // Reference (CPU)
     for (size_t t = 0; t < num_tensors; ++t) {
         const size_t M = first_dims_h[t];
@@ -388,6 +401,7 @@ void performTest(const ProcessingMethod processing_method,
         const size_t data_offset = offsets_h[t];
         const size_t sfs_offset = data_offset / 32;
 
+        const InputType* const grad_ptr = grad_data.data() + data_offset;
         const InputType* const in_ptr = in_data.data() + data_offset;
         OutputType* const out_data_rowwise_ptr = out_data_rowwise_ref.data() + data_offset;
         OutputType* const out_data_colwise_ptr = out_data_colwise_ref.data() + data_offset;
@@ -395,7 +409,7 @@ void performTest(const ProcessingMethod processing_method,
         fp8e8m0* const out_scales_colwise_ptr = out_scales_colwise_ref.data() + sfs_offset;
 
         compute_ref<InputType, OutputType>(
-            processing_method, OP, rowwise, colwise, in_ptr, /*grad=*/ nullptr,
+            processing_method, OP, rowwise, colwise, in_ptr, grad_ptr,
             out_data_rowwise_ptr, out_data_colwise_ptr,
             out_scales_rowwise_ptr, out_scales_colwise_ptr,
             /*output_dbias=*/ nullptr, M, K,
@@ -404,7 +418,20 @@ void performTest(const ProcessingMethod processing_method,
     }
 
     // GPU
-    nvte_quantize_grouped(in_group_tensor, out_group_tensor, 0);
+    Tensor workspace;
+
+    switch (processing_method) {
+        case ProcessingMethod::CAST_ONLY: {
+            nvte_quantize_grouped(in_group_tensor, out_group_tensor, 0);
+            break;
+        }
+        case ProcessingMethod::CAST_DBIAS: {
+            nvte_quantize_dbias_grouped(grad_group_tensor, out_group_tensor, output_dbias.data(), workspace.data(), 0);
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+            nvte_quantize_dbias_grouped(grad_group_tensor, out_group_tensor, output_dbias.data(), workspace.data(), 0);
+            break;
+        }
+    }
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -444,6 +471,7 @@ void performTest(const ProcessingMethod processing_method,
                                         out_data_colwise_h.data(), rows, cols, false, mismatches_elts);
     }
 
+    cudaFree(grad_data_d);
     cudaFree(in_data_d);
     cudaFree(first_dims_d);
     cudaFree(last_dims_d);

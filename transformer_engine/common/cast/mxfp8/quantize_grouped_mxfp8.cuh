@@ -932,8 +932,11 @@ void quantize_grouped(const GroupedTensor *input, const GroupedTensor *activatio
 
           if constexpr (IS_DBIAS) {
             common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
-          } NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
-  );                                                // NOLINT(*)
+          }
+          
+          NVTE_CHECK_CUDA(cudaGetLastError());
+      );  // NOLINT(*)
+  );      // NOLINT(*)
 }
 
 }  // namespace mxfp8
