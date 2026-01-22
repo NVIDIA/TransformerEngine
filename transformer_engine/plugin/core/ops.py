@@ -13,29 +13,34 @@ logger = get_logger()
 
 class DType(IntEnum):
     kByte = 0
+    kInt16 = 1
     kInt32 = 2
+    kInt64 = 3
     kFloat32 = 4
     kFloat16 = 5
     kBFloat16 = 6
     kFloat8E4M3 = 7
     kFloat8E5M2 = 8
+    kFloat8E8M0 = 9
     kFloat4E2M1 = 10
+    kNumTypes = 11
 
 class Float8BlockScaleTensorFormat(IntEnum):
-    COMPACT = 0
-    GEMM_READY = 1
+    GEMM_READY = 0
+    COMPACT = 1
 
 class NVTE_Activation_Type(IntEnum):
-    NVTE_GELU = 0
-    NVTE_GEGLU = 1
-    NVTE_SILU = 2
-    NVTE_SWIGLU = 3
-    NVTE_RELU = 4
-    NVTE_REGLU = 5
-    NVTE_QGELU = 6
-    NVTE_QGEGLU = 7
-    NVTE_SRELU = 8
-    NVTE_SREGLU = 9
+    GELU = 0
+    GEGLU = 1
+    SILU = 2
+    SWIGLU = 3
+    RELU = 4
+    REGLU = 5
+    QGELU = 6
+    QGEGLU = 7
+    SRELU = 8
+    SREGLU = 9
+    CLAMPED_SWIGLU = 10
 
 class NVTE_Softmax_Type(IntEnum):
     NVTE_VANILLA_SOFTMAX = 0
@@ -78,21 +83,19 @@ class NVTE_Mask_Type(IntEnum):
     NVTE_PADDING_CAUSAL_MASK = 3
     NVTE_CAUSAL_BOTTOM_RIGHT_MASK = 4
     NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK = 5
-    NVTE_ARBITRARY_MASK = 6
 
 class NVTE_Fused_Attn_Backend(IntEnum):
-    NVTE_No_Backend = 0
-    NVTE_F16_max512_seqlen = 1
-    NVTE_F16_arbitrary_seqlen = 2
-    NVTE_FP8 = 3
-    NVTE_FA3 = 4
+    NVTE_No_Backend = -1
+    NVTE_F16_max512_seqlen = 0
+    NVTE_F16_arbitrary_seqlen = 1
+    NVTE_FP8 = 2
 
 class NVTE_QKV_Format(IntEnum):
-    NVTE_BSHD = 0
-    NVTE_SBHD = 1
+    NVTE_SBHD = 0
+    NVTE_BSHD = 1
     NVTE_THD = 2
-    NVTE_SBHD_2BSHD = 3
-    NVTE_BSHD_2SBHD = 4
+    NVTE_BSHD_2SBHD = 3
+    NVTE_SBHD_2BSHD = 4
     NVTE_THD_2BSHD = 5
     NVTE_THD_2SBHD = 6
 
