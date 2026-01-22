@@ -1368,9 +1368,10 @@ class _FusedAttnCPWithAllGatherHelper:
 
     def get_step_config(self) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call to fused attention."""
+        adjusted_mask = self.get_adjusted_mask()
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
-            attn_mask_type=self.get_adjusted_mask(),
+            attn_mask_type=adjusted_mask,
             softmax_type=self.config.softmax_type,
             qkv_layout=self.config.qkv_layout,
             scaling_factor=self.config.scaling_factor,
@@ -1378,7 +1379,7 @@ class _FusedAttnCPWithAllGatherHelper:
             is_training=self.config.is_training,
             max_segments_per_seq=self.config.max_segments_per_seq,
             window_size=self.config.window_size,
-            bottom_right_diagonal=self.config.attn_mask_type.is_bottom_right(),
+            bottom_right_diagonal=adjusted_mask.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
@@ -1387,9 +1388,10 @@ class _FusedAttnCPWithAllGatherHelper:
 
     def get_step_config_for_striped(self, max_seqlen, cp_size) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call (made via a striped AG primitive) to fused attention."""
+        adjusted_mask = self.get_adjusted_mask()
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
-            attn_mask_type=self.get_adjusted_mask(),
+            attn_mask_type=adjusted_mask,
             softmax_type=self.config.softmax_type,
             qkv_layout=self.config.qkv_layout,
             scaling_factor=self.config.scaling_factor,
@@ -1397,7 +1399,7 @@ class _FusedAttnCPWithAllGatherHelper:
             is_training=self.config.is_training,
             max_segments_per_seq=self.get_adjusted_max_segments_per_seq(max_seqlen, cp_size),
             window_size=self.config.window_size,
-            bottom_right_diagonal=self.config.attn_mask_type.is_bottom_right(),
+            bottom_right_diagonal=adjusted_mask.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
@@ -2443,11 +2445,11 @@ class _FusedAttnCPWithP2PHelper:
             is_training=self.config.is_training,
             max_segments_per_seq=self.config.max_segments_per_seq,
             window_size=self.config.window_size,
-            bottom_right_diagonal=self.config.attn_mask_type.is_bottom_right(),
+            bottom_right_diagonal=attn_mask_type.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
-            stripe_size=self.config.stripe_size,
+            stripe_size=self.config.stripe_size, 
         )
 
     def stack_kv(self, k, v):
