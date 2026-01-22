@@ -1463,7 +1463,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     name = "te_grouped_gemm_ffi"
     multiple_results = True
-    impl_static_args = (9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+    impl_static_args = (10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
     inner_primitive = None
     outer_primitive = None
 
@@ -1475,7 +1475,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv_aval,
         bias_aval,
         group_sizes_aval,
-        group_offset_aval,
+        group_offset_lhs_aval,
+        group_offset_out_aval,
         alpha,
         beta,
         *,
@@ -1515,7 +1516,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         Returns:
             A jnp.ndarray containing the result of the grouped GEMM operation
         """
-        del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
+        del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_out_aval
         del K, lhs_is_trans, rhs_is_trans, has_bias, use_async_d2h_group_sizes
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
@@ -1591,7 +1592,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset,
+        group_offset_lhs,
+        group_offset_out,
         alpha,
         beta,
         M,
@@ -1613,7 +1615,8 @@ class GroupedGemmPrimitive(BasePrimitive):
             rhs_scale_inv,
             bias,
             group_sizes,
-            group_offset,
+            group_offset_lhs,
+            group_offset_out,
             alpha,
             beta,
             M=M,
@@ -1982,6 +1985,8 @@ def grouped_gemm(
         rhs: [G, N, K] or [G, K, N] or [G * K, N] or [N, G * K]
     """
 
+    assert group_offset is None, "group_offset is not yet implemented"
+
     # TODO(Phuong): implement the precision
     del precision
 
@@ -2121,14 +2126,15 @@ def grouped_gemm(
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
 
-    if group_offset is None:
-        # Compute group_offset as cumulative sum of group_sizes, starting with 0
-        group_offset = jnp.concatenate([jnp.array([0], dtype=jnp.int32), jnp.cumsum(group_sizes, dtype=jnp.int32)[:-1]])
-        group_offset *= K_lhs # Offset is by number of elements total, not number of rows
+    # Compute group_offset as cumulative sum of group_sizes, starting with 0
+    group_offset = jnp.concatenate([jnp.array([0], dtype=jnp.int32), jnp.cumsum(group_sizes, dtype=jnp.int32)[:-1]])
+    group_offset_lhs = group_offset * K_lhs # Offset is by number of elements total, not number of rows
+    group_offset_out = group_offset * N     # Offset is by number of elements total, not number of rows
 
-    jax.debug.print("group_sizes: {}, group_offset: {}", group_sizes, group_offset)
-    jax.debug.print("M={}, jnp.sum(group_sizes)={}, N={}, K_lhs={}", M, jnp.sum(group_sizes), N, K_lhs)
-    jax.debug.print("lhs_data.size={}, group_offset={}", lhs_data.size, group_offset)
+    # jax.debug.print("group_sizes: {}, group_offset: {}", group_sizes, group_offset)
+    # jax.debug.print("M={}, jnp.sum(group_sizes)={}, N={}, K_lhs={}", M, jnp.sum(group_sizes), N, K_lhs)
+    # jax.debug.print("lhs_data.size={}, group_offset_lhs={}", lhs_data.size, group_offset_lhs)
+    # jax.debug.print("out_data.size=M*N={}, group_offset_out={}", M*N, group_offset_out)
 
     # print(f"{lhs_data.shape=}, {rhs_data.shape=}, {M=}, {N=}, {K_lhs=}")
 
@@ -2136,7 +2142,8 @@ def grouped_gemm(
     # This ensures proper alignment and prevents overflow issues
     zeros = jnp.zeros_like(group_sizes, dtype=jnp.int32)
     group_sizes = jnp.stack([group_sizes, zeros], axis=1).flatten()
-    group_offset = jnp.stack([group_offset, zeros], axis=1).flatten()
+    group_offset_lhs = jnp.stack([group_offset_lhs, zeros], axis=1).flatten()
+    group_offset_out = jnp.stack([group_offset_out, zeros], axis=1).flatten()
 
     num_gemms = group_sizes.shape[0] // 2  # Due to interlaced zeros to support int64
     alpha = jnp.ones((num_gemms,), jnp.float32)
@@ -2148,7 +2155,8 @@ def grouped_gemm(
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset,
+        group_offset_lhs,
+        group_offset_out,
         alpha,
         beta,
         M=M,

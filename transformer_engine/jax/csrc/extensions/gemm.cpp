@@ -522,7 +522,7 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const& data, std::opti
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
-                          Buffer_Type group_sizes, Buffer_Type group_offsets,
+                          Buffer_Type group_sizes, Buffer_Type group_offset_lhs, Buffer_Type group_offset_out,
                           Buffer_Type alpha, Buffer_Type beta,
                           Result_Type output, Result_Type workspace,
                           size_t m, size_t n, size_t k, bool lhs_is_trans,
@@ -658,42 +658,20 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0] / 2, lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
 
   //// RHS
-  NVTEShape rhsShape{.data={k, n}, .ndim=2};
-  if (rhs_is_trans && !is_grouped_dense_wgrad) {
-    std::swap(rhsShape.data[0], rhsShape.data[1]);
-  }
-  if (!is_grouped_dense_wgrad) {
-    // If is_grouped_dense_wgrad, then n already includes num_gemms (G) pre-multiplied in gemm.py, so we don't need to multiply it here.
-    rhsShape.data[0] *= num_gemms;
-  }
+  NVTEShape rhsShape{.data={num_gemms*k, n}, .ndim=2};
+  // rhs_is_trans = true;
   auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
-  // if (is_grouped_dense_wgrad) {
-  //   rhs_tensor.set_group_info(group_sizes, group_offsets);
-  // }
 
   //// LHS
   NVTEShape lhsShape{.data={m, k}, .ndim=2};
-  if (lhs_is_trans && is_grouped_dense_wgrad) {
-    std::swap(lhsShape.data[0], lhsShape.data[1]);
-  }
-  if (is_grouped_dense_wgrad) {
-    // If is_grouped_dense_wgrad, then m already includes num_gemms (G) pre-multiplied in gemm.py, so we don't need to multiply it here.
-    lhsShape.data[0] *= num_gemms;
-  }
+  lhs_is_trans = true;
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  if (!is_grouped_dense_wgrad) {
-    lhs_tensor.set_group_info(group_sizes, group_offsets);
-  }
+  lhs_tensor.set_group_info(group_sizes, group_offset_lhs);
 
   //// OUTPUT
   NVTEShape outShape{.data={m, n}, .ndim=2};
-  if (is_grouped_dense_wgrad) {
-    outShape.data[0] *= num_gemms;
-  }
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
-  if (!is_grouped_dense_wgrad) {
-    out_tensor.set_group_info(group_sizes, group_offsets);
-  }
+  out_tensor.set_group_info(group_sizes, group_offset_out);
 
   printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
          rhsShape.data[0], rhsShape.data[1],
@@ -701,9 +679,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
          outShape.data[0], outShape.data[1]);
 
   printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
-
-  // HACK: jberchtold FIXME
-  // cudaMemsetAsync(output->untyped_data(), 0xFF, output->size_bytes(), stream);
 
   nvte_grouped_gemm(
     rhs_tensor, rhs_is_trans,
@@ -729,7 +704,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
                                   .Arg<Buffer_Type>()      // group_sizes
-                                  .Arg<Buffer_Type>()      // group_offset
+                                  .Arg<Buffer_Type>()      // group_offset_lhs
+                                  .Arg<Buffer_Type>()      // group_offset_out
                                   .Arg<Buffer_Type>()      // alpha
                                   .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output

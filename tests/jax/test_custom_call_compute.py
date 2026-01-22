@@ -1767,8 +1767,9 @@ GROUPED_DENSE_INPUT_SHAPES = [
 
     # (3, 192, 64, 96),
 
-    (8, 64, 32, 128),
-    (8, 64, 128, 256),
+    (8, 16384, 14336, 4096),
+    # (8, 64, 32, 128),
+    # (8, 64, 128, 256),
 ]
 
 # TODO(jberchtold): Support MXFP8 and NVFP4
@@ -1814,11 +1815,11 @@ class TestGroupedDense:
         group_sizes = group_sizes.at[1].set(0)
 
         # *32 to make sure that input shape works for MXFP8
-        group_sizes = group_sizes * 32
-        m = m * 32
+        # group_sizes = group_sizes * 32
+        # m = m * 32
 
         # group_sizes = jnp.full((n_groups,), m // n_groups)
-        # assert group_sizes.sum() == m
+        assert group_sizes.sum() == m
 
         lhs_shape = (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m)
         rhs_shape = (n_groups, k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k)
@@ -1854,19 +1855,19 @@ class TestGroupedDense:
     def _assert_grouped_gemm_output(self, out, group_sizes, ref_list, dtype):
         assert out.dtype == ref_list[0].dtype
         # self._diff_to_image(out, ref_list).save('output_diff.png')
-        # assert_allclose(out, ref_list, dtype=dtype)
+        assert_allclose(out, ref_list, dtype=dtype)
 
-        ref_list = jnp.split(ref_list, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
-        out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
-        print([o.shape for o in out_list])
-        print([r.shape for r in ref_list])
-        for i in range(len(ref_list)):
-            print(f"Asserting output for group {i}, output shape: {out_list[i].shape}, ref shape: {ref_list[i].shape}")
-            assert_allclose(
-                out_list[i], 
-                ref_list[i], 
-                dtype=dtype, #jnp.float8_e4m3fn # HACK: TE impl is close but not precise enough for 16-bit
-            )
+        # ref_list = jnp.split(ref_list, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
+        # out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
+        # print([o.shape for o in out_list])
+        # print([r.shape for r in ref_list])
+        # for i in range(len(ref_list)):
+        #     print(f"Asserting output for group {i}, output shape: {out_list[i].shape}, ref shape: {ref_list[i].shape}")
+        #     assert_allclose(
+        #         out_list[i], 
+        #         ref_list[i], 
+        #         dtype=dtype, #jnp.float8_e4m3fn # HACK: TE impl is close but not precise enough for 16-bit
+        #     )
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     @pytest_parametrize_wrapper("layout", ["NN"])
