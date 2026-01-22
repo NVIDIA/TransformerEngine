@@ -102,8 +102,8 @@ void quantize_grouped_bwd_helper(const NVTEGroupedTensor grad, const NVTEGrouped
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::quantize_grouped<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
-          grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, stream);
+          grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+          stream);
       break;
     }
     default:
