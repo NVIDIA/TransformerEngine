@@ -2449,7 +2449,7 @@ class _FusedAttnCPWithP2PHelper:
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
-            stripe_size=self.config.stripe_size, 
+            stripe_size=self.config.stripe_size,
         )
 
     def stack_kv(self, k, v):
