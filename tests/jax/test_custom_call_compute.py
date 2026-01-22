@@ -1780,7 +1780,7 @@ grouped_gemm_supported_scaling_modes = [
 @pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
     def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):
-        # return jax.lax.ragged_dot(lhs, rhs, group_sizes)
+        return jax.lax.ragged_dot(lhs, rhs, group_sizes)
         lhs_contract_dim, _ = contracting_dims
         assert len(lhs_contract_dim) == 1 and lhs.ndim == 2 and rhs.ndim == 3
         if bias is None:
@@ -1856,7 +1856,7 @@ class TestGroupedDense:
         # self._diff_to_image(out, ref_list).save('output_diff.png')
         # assert_allclose(out, ref_list, dtype=dtype)
 
-        # ref_list = jnp.split(ref_list, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
+        ref_list = jnp.split(ref_list, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         print([o.shape for o in out_list])
         print([r.shape for r in ref_list])
@@ -1865,7 +1865,7 @@ class TestGroupedDense:
             assert_allclose(
                 out_list[i], 
                 ref_list[i], 
-                dtype=jnp.float8_e4m3fn # HACK: TE impl is close but not precise enough for 16-bit
+                dtype=dtype, #jnp.float8_e4m3fn # HACK: TE impl is close but not precise enough for 16-bit
             )
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])

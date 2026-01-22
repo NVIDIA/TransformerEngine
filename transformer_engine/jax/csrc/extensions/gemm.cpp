@@ -502,7 +502,7 @@ void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const& group_sizes,
                                  NVTEDType::kNVTEInt64,
                                  shape};
 
-  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedLastDims, &m_sizes_tensor);
+  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedFirstDims, &m_sizes_tensor);
   nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedTensorOffsets, &m_offsets_tensor);
 }
 
@@ -681,9 +681,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     lhsShape.data[0] *= num_gemms;
   }
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  // if (!is_grouped_dense_wgrad) {
-  //   lhs_tensor.set_group_info(group_sizes, group_offsets);
-  // }
+  if (!is_grouped_dense_wgrad) {
+    lhs_tensor.set_group_info(group_sizes, group_offsets);
+  }
 
   //// OUTPUT
   NVTEShape outShape{.data={m, n}, .ndim=2};
@@ -691,9 +691,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     outShape.data[0] *= num_gemms;
   }
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
-  // if (!is_grouped_dense_wgrad) {
-  //   out_tensor.set_group_info(group_sizes, group_offsets);
-  // }
+  if (!is_grouped_dense_wgrad) {
+    out_tensor.set_group_info(group_sizes, group_offsets);
+  }
 
   printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
          rhsShape.data[0], rhsShape.data[1],
