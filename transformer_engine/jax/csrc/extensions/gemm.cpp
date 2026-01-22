@@ -259,6 +259,10 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                ", out_shape[1]=", out_shape[1]);
 
     // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
+  
+    //      if A contracting dim is innermost dimension, then A is T layout. Wants to be MxK. 
+    //      if B contracting dim is innermost dimension, then B is N layout. It wants to be KxM, then with column-major layout will be N because it doesn't need to be transposed.
+    // TN: A_trans = true, B_trans = false
     nvte_cublas_gemm_v2(rhs_transposed /*transa*/, lhs_transposed /*transb*/, alpha_ptr,
                         rhs_.data() /*A*/, lhs_.data() /*B*/, beta_ptr, out_.data() /*C*/,
                         out_.data() /*D*/, workspace_.data(), config, stream);
@@ -533,9 +537,10 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   TensorWrapper beta_tensor(static_cast<void *>(beta.untyped_data()), std::vector<size_t>{num_gemms},
                            convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
-  // Grouped GEMM currently only supports tensor scaling
-  NVTE_CHECK(is_tensor_scaling,
-             "Grouped GEMM only supports tensor scaling (DELAYED_TENSOR_SCALING or CURRENT_TENSOR_SCALING)");
+  // Grouped GEMM supports NO_SCALING (for BF16/FP16) and tensor scaling (for FP8)
+  const bool is_no_scaling = scaling_mode == JAXX_Scaling_Mode::NO_SCALING;
+  NVTE_CHECK(is_tensor_scaling || is_no_scaling,
+             "Grouped GEMM only supports NO_SCALING, DELAYED_TENSOR_SCALING, or CURRENT_TENSOR_SCALING");
 
   // To make the output compatible with JAX row-major, we swap A and B in cuBLAS GEMM call.
   // JAX: C = LHS @ RHS  =>  cuBLAS: C^T = RHS^T @ LHS^T
