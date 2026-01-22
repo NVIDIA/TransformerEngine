@@ -12,7 +12,6 @@ import torch
 
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.jit import (
@@ -412,6 +411,7 @@ class TransformerLayer(torch.nn.Module):
         self.softmax_type = softmax_type
 
         self.name = name
+        TransformerEngineBaseModule._validate_name(self)
 
         attention_args = (
             hidden_size,
@@ -460,7 +460,7 @@ class TransformerLayer(torch.nn.Module):
             qk_norm_type=qk_norm_type,
             qk_norm_eps=qk_norm_eps,
             qk_norm_before_rope=qk_norm_before_rope,
-            name=name + ".self_attention" if name is not None else None,
+            name=self.name + ".self_attention" if self.name is not None else None,
         )
 
         if layer_type == "decoder":
@@ -477,7 +477,7 @@ class TransformerLayer(torch.nn.Module):
                 qk_norm_type=qk_norm_type,
                 qk_norm_eps=qk_norm_eps,
                 qk_norm_before_rope=qk_norm_before_rope,
-                name=name + ".inter_attention" if name is not None else None,
+                name=self.name + ".inter_attention" if self.name is not None else None,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -513,7 +513,7 @@ class TransformerLayer(torch.nn.Module):
             activation_params=activation_params,
             normalization=normalization,
             device=device,
-            name=name + ".layernorm_mlp" if name is not None else None,
+            name=self.name + ".layernorm_mlp" if self.name is not None else None,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -818,9 +818,6 @@ class TransformerLayer(torch.nn.Module):
             assert all(
                 enc_dec_attn_mask[i].dtype == torch.bool for i in range(len(enc_dec_attn_mask))
             ), "Encoder-decoder attention mask must be boolean tensor(s)"
-
-        if TEDebugState.debug_enabled:
-            TransformerEngineBaseModule._validate_name(self)
 
         # For AMP
         if torch.is_autocast_enabled():

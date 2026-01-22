@@ -2793,7 +2793,7 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
         cu_seqlens,
         max_s,
     ) -> torch.Tensor:
-        with self.prepare_forward(inp, num_gemms=3) as inp:
+        with self.prepare_forward_ctx(inp, num_gemms=3) as inp:
             out = _custom_mha_fp8.apply(
                 inp,
                 self.qkv_weight,
