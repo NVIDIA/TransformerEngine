@@ -729,8 +729,8 @@ def checkpoint(
     if isinstance(function, TransformerEngineBaseModule):
         # If this TE module is FSDP-wrapped, clear its FSDP group information because there's no need
         # to scatter/gather activations that we will recompute anyway.
-        setattr(function, "fsdp_wrapped", False)
-        setattr(function, "fsdp_group", None)
+        function.fast_setattr("fsdp_wrapped", False)
+        function.fast_setattr("fsdp_group", None)
 
     # Otherwise discard unused te.utils.checkpoint.checkpoint() arguments
     # and execute TE's own checkpointing
@@ -2022,7 +2022,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
             )
         root_state = _get_module_fsdp_state(fsdp_root)
         assert root_state is not None, "Root module does not have a valid _FSDPState."
-        setattr(fsdp_root.module, "fsdp_group", root_state.process_group)
+        fsdp_root.module.fast_setattr("fsdp_group", root_state.process_group)
 
     # Iterate through all FSDP-wrapped submodules and inject FSDP information into TE modules
     fsdp_states, fsdp_modules = _get_fsdp_states_with_modules(fsdp_root)
@@ -2033,7 +2033,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
                     "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
                     "Please initialize your model without the te.quantized_model_init(...) context."
                 )
-            setattr(fsdp_module.module, "fsdp_group", state.process_group)
+            fsdp_module.module.fast_setattr("fsdp_group", state.process_group)
 
 
 class FullyShardedDataParallel(FSDP):
