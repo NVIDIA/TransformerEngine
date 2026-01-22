@@ -1041,6 +1041,15 @@ def get_attention_backend(
             )
             use_flash_attention_2 = False
     if use_fused_attention and deterministic:
+        if softmax_type != "vanilla":
+            logger.debug(
+                "Disabling FusedAttention for determinism reasons with softmax_type = %s. "
+                "Sink attention (off-by-one and learnable softmax) requires "
+                "NVTE_ALLOW_NONDETERMINISTIC_ALGO=1",
+                softmax_type,
+            )
+            use_fused_attention = False
+            fused_attention_backend = None
         if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
             logger.debug("Disabling FusedAttention for determinism reasons with FP8")
             use_fused_attention = False
