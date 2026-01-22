@@ -985,6 +985,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   // Allocate output tensors
   std::vector<TensorWrapper> output_cpp_list;
   std::vector<py::object> output_py_list;
+  allocation_method = AllocationMethod::UNFUSED;
   switch (allocation_method) {
     case AllocationMethod::BULK_FP8_BLOCKWISE: {
       // Bulk allocation for FP8 block-scaling tensors
