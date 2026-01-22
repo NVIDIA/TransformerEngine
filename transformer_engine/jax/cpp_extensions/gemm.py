@@ -2162,5 +2162,5 @@ def grouped_gemm(
         is_grouped_dense_wgrad=is_grouped_dense_wgrad,
         use_async_d2h_group_sizes=use_async_d2h_group_sizes,
     )
-    print(f"GroupedGemm: {lhs_data.shape=}, {rhs_data.shape=}, {out.shape=}")
+    print(f"GroupedGemm: {lhs_data.shape=}, {rhs_data.shape=}, {out.shape=}, {M=}, {N=}, {K_lhs=}, {lhs_is_trans=}, {rhs_is_trans=}, {contracting_dims=}")
     return out
