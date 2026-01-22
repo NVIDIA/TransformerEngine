@@ -1143,8 +1143,12 @@ def _run_dot_product_attention(
         bias = None
     if config.attn_bias_type == "post_scale_bias":
         shape = "_".join(config.bias_shape)
-        shape = shape.replace("_1_s", "_1_skv")
+        # For 1hss, 11ss, b1ss, bhss
+        shape_cache = shape
         shape = shape.replace("_s_s", "_sq_skv")
+        if shape==shape_cache:
+            # For 111s
+            shape = shape.replace("_1_s", "_1_skv")
         tensor_shape = [dim_to_num[j] for j in shape.split("_")]
         bias = torch.randn(tensor_shape, dtype=dtype, device="cuda")
 
