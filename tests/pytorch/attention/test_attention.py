@@ -1134,7 +1134,7 @@ def _run_dot_product_attention(
         # For 1hss, 11ss, b1ss, bhss
         shape_cache = shape
         shape = shape.replace("_s_s", "_sq_skv")
-        if shape==shape_cache:
+        if shape == shape_cache:
             # For 111s
             shape = shape.replace("_1_s", "_1_skv")
         tensor_shape = [dim_to_num[j] for j in shape.split("_")]
