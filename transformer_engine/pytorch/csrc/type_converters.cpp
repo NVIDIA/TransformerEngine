@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -55,8 +55,9 @@ TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer
 TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer) {
   auto ret = TensorWrapper(NVTE_MXFP8_1D_SCALING);
 
-  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
-  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  const bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  const bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  const bool with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
 
   NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for MXFP8 Tensor.");
 
@@ -78,6 +79,9 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
                                  getTensorShape(scale_inv));
   }
 
+  // Scale layout
+  ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+
   // Quantizer state
   quantizer->set_quantization_params(&ret);
 
@@ -93,6 +97,7 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
 
   auto ret = TensorWrapper(is_2D_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
 
+  // Row-wise data
   if (rowwise_usage) {
     const at::Tensor &data_rowwise = tensor.attr("_rowwise_data").cast<at::Tensor>();
     const at::Tensor &scale_inv_rowwise = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
@@ -102,6 +107,8 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
     const auto scale_inv_rowwise_shape = getTensorShape(scale_inv_rowwise);
     ret.set_rowwise_scale_inv(scale_inv_rowwise_dptr, DType::kFloat32, scale_inv_rowwise_shape);
   }
+
+  // Column-wise data
   if (columnwise_usage) {
     const at::Tensor &data_colwise = tensor.attr("_columnwise_data").cast<at::Tensor>();
     const at::Tensor &scale_inv_colwise = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
@@ -112,7 +119,10 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
     const auto scale_inv_colwise_shape = getTensorShape(scale_inv_colwise);
     ret.set_columnwise_scale_inv(scale_inv_colwise_dptr, DType::kFloat32, scale_inv_colwise_shape);
   }
+
+  // Quantizer state
   quantizer->set_quantization_params(&ret);
+
   return ret;
 }
 
@@ -121,8 +131,9 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
 
   auto ret = TensorWrapper(NVTE_NVFP4_1D_SCALING);
 
-  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
-  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  const bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  const bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  const bool with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
 
   NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for NVFP4 Tensor.");
 
@@ -149,6 +160,9 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
     ret.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
                             getTensorShape(amax_columnwise));
   }
+
+  // Scale layout
+  ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
 
   // Quantizer state
   quantizer->set_quantization_params(&ret);

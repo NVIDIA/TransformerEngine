@@ -1,0 +1,43 @@
+/* Custom styling for sphinx-tabs */
+
+.sphinx-tabs {
+    margin-bottom: 1rem;
+}
+
+.sphinx-tabs-tab {
+    background-color: #f4f4f4;
+    border: 1px solid #ccc;
+    border-bottom: none;
+    padding: 0.5rem 1rem;
+    margin-right: 0.5rem;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background-color 0.2s;
+}
+
+.sphinx-tabs-tab:hover {
+    background-color: #e0e0e0;
+}
+
+.sphinx-tabs-tab[aria-selected="true"] {
+    background-color: #76b900; /* NVIDIA green */
+    color: white;
+    border-color: #76b900;
+    margin-right: 0.5rem;
+}
+
+.sphinx-tabs-panel {
+    border: 1px solid #ccc;
+    padding: 1rem;
+    background-color: #f9f9f9;
+}
+
+/* Dark mode support for RTD theme */
+.rst-content .sphinx-tabs-tab {
+    color: #333;
+}
+
+.rst-content .sphinx-tabs-tab[aria-selected="true"] {
+    color: white;
+}
+

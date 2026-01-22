@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -292,6 +292,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                     rowwise=True,
                     columnwise=with_columnwise,
                 )
+                grad_output_quantizer.optimize_for_gemm = False
                 dy_local = grad_output_quantizer(dy_local)
         else:
             dy_local = maybe_dequantize(dy_local, dtype)

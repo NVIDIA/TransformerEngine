@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,7 +8,6 @@ import collections
 from typing import Callable, List, Optional, Tuple, Union
 import torch
 
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
@@ -335,6 +334,7 @@ class MultiheadAttention(torch.nn.Module):
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
         self.name = name
+        TransformerEngineBaseModule._validate_name(self)
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -738,9 +738,6 @@ class MultiheadAttention(torch.nn.Module):
         assert (
             core_attention_bias_type in AttnBiasTypes
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
-
-        if TEDebugState.debug_enabled:
-            TransformerEngineBaseModule._validate_name(self)
 
         # =================================================
         # Pre-allocate memory for key-value cache for inference

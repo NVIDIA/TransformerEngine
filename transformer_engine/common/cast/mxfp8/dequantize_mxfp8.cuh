@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -239,6 +239,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
     NVTE_CHECK(is_fp8_dtype(input.columnwise_data.dtype), "Input must have FP8 type.");
   }
 
+  NVTE_CHECK(!input.with_gemm_swizzled_scales, "Input must have scales in compact format.");
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
   NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
 

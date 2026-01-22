@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -676,9 +676,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         # assume attention uses the same fp8_group as GEMMs
         fp8_group = FP8GlobalStateManager.get_fp8_group()
 
-        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
-        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        self.fast_setattr("fp8_parameters", FP8GlobalStateManager.with_fp8_parameters())
+        self.fast_setattr("fp8", FP8GlobalStateManager.is_fp8_enabled())
+        self.fast_setattr("fp8_calibration", FP8GlobalStateManager.is_fp8_calibration())
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
         if self.fp8_parameters or fp8_enabled:
@@ -703,7 +703,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
         else:
             # If fp8 isn't enabled, turn off and return.
-            self.fp8_initialized = False
+            self.fast_setattr("fp8_initialized", False)
             return
 
         if self.fp8_parameters and not self.fp8_initialized:
@@ -721,7 +721,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors(fp8_recipes)
-            self.fp8_initialized = True
+            self.fast_setattr("fp8_initialized", True)
 
             self.fp8_meta["recipe"] = fp8_recipe_dpa
             if fp8_recipe != fp8_recipe_dpa:
@@ -1000,7 +1000,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             cases. It is ignored for other backends and when context parallelism is enabled.
         """
 
-        with self.prepare_forward(
+        with self.prepare_forward_ctx(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
@@ -1145,10 +1145,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if attn_mask_type == "padding_causal":
                     attn_mask_type = attn_mask_type + "_bottom_right"
 
-                self.attention_type = "cross"
-                self.flash_attention.attention_type = self.attention_type
-                self.fused_attention.attention_type = self.attention_type
-                self.unfused_attention.attention_type = self.attention_type
+                if self.attention_type != "cross":
+                    self.fast_setattr("attention_type", "cross")
+                    self.flash_attention.attention_type = self.attention_type
+                    self.fused_attention.attention_type = self.attention_type
+                    self.unfused_attention.attention_type = self.attention_type
 
                 query_layer, key_layer, value_layer = [
                     x.contiguous() if not x.is_contiguous() else x
