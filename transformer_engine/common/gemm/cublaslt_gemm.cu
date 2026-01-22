@@ -531,7 +531,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     } else if (use_fp4) {  // NVFP4 GEMM
 #if CUBLAS_VERSION >= 120800
       NVTE_CHECK(cuda::cublas_version() >= 120800,
-                 "FP4 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cuda::cublas_version());
+                 "FP4 requires cuBLAS 12.8+, but run-time cuBLAS version is ",
+                 cuda::cublas_version());
 
       // Check that scales are in expected format
       NVTE_CHECK(inputA->with_gemm_swizzled_scales,
