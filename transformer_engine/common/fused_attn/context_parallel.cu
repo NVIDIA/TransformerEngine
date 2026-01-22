@@ -303,6 +303,339 @@ __global__ void thd_grad_correction_kernel(dtype *grad, dtype *grad_per_step, in
 }
 
 /***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks.
+ **************************************************************************************************/
+
+__global__ void thd_chunkify_kernel(const int *__restrict__ d_cu_seqlens,
+                                    const int *__restrict__ d_cu_seqlens_padded,
+                                    int *__restrict__ d_out_cu_seqlens,
+                                    int *__restrict__ d_out_cu_seqlens_padded, int batch,
+                                    int output_len, int chunk_size) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= output_len) return;
+  if (i == 0) {
+    d_out_cu_seqlens[0] = 0;
+    d_out_cu_seqlens_padded[0] = 0;
+    return;
+  }
+
+  int pos_id = 0;
+  int seq_len = 0;
+  int pad_len = 0;
+  int seq_start = d_cu_seqlens[batch];
+  int pad_start = d_cu_seqlens_padded[batch];
+  int cur_start = 0;
+  int cur_last = -1;
+  bool found = false;
+
+  for (int j = 0; j < batch; ++j) {
+    cur_start = (j == 0) ? 1 : cur_last + 1;
+
+    int d_cu_seqlens_padded_j = d_cu_seqlens_padded[j];
+    int d_cu_seqlens_padded_j_1 = d_cu_seqlens_padded[j + 1];
+    int d_cu_seqlens_j = d_cu_seqlens[j];
+    int d_cu_seqlens_j_1 = d_cu_seqlens[j + 1];
+
+    int num_chunks =
+        (d_cu_seqlens_padded_j_1 - d_cu_seqlens_padded_j + (chunk_size - 1)) / chunk_size;
+    cur_last = cur_start + num_chunks - 1;
+
+    bool match = (i >= cur_start) && (i <= cur_last);
+    pos_id = match ? (i - cur_start) : pos_id;
+    seq_len = match ? (d_cu_seqlens_j_1 - d_cu_seqlens_j) : seq_len;
+    pad_len = match ? (d_cu_seqlens_padded_j_1 - d_cu_seqlens_padded_j) : pad_len;
+    seq_start = match ? d_cu_seqlens_j : seq_start;
+    pad_start = match ? d_cu_seqlens_padded_j : pad_start;
+    found = match || found;
+  }
+
+  if (!found) {
+    d_out_cu_seqlens[i] = d_cu_seqlens[batch];
+    d_out_cu_seqlens_padded[i] = d_cu_seqlens_padded[batch];
+  } else {
+    int32_t out_seq =
+        ((pos_id > (seq_len / chunk_size)) ? seq_len : chunk_size * pos_id) + seq_start;
+    int32_t out_pad =
+        ((pos_id > (pad_len / chunk_size)) ? pad_len : chunk_size * pos_id) + pad_start;
+
+    d_out_cu_seqlens[i] = out_seq;
+    d_out_cu_seqlens_padded[i] = out_pad;
+  }
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part on diagonal.
+ **************************************************************************************************/
+
+__global__ void thd_chunkify_p2p_kernel(const int *__restrict__ d_cu_seqlens,
+                                        const int *__restrict__ d_cu_seqlens_padded,
+                                        int *__restrict__ d_out_cu_seqlens,
+                                        int *__restrict__ d_out_cu_seqlens_padded, int batch,
+                                        int output_len, int chunk_size, int cp_rank, int cp_size) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= output_len) return;
+  if (i == 0) {
+    d_out_cu_seqlens[0] = 0;
+    d_out_cu_seqlens_padded[0] = 0;
+    return;
+  }
+
+  int pos_id = 0;
+  int seq_len = 0;
+  int total_seq_len = 0;
+  int seq_start_offset = d_cu_seqlens[batch];
+  int pad_start_offset = d_cu_seqlens_padded[batch];
+  int cur_start = 1;
+  int cur_last = 0;
+
+  for (int j = 0; j < batch; ++j) {
+    cur_start = (j == 0) ? 1 : cur_last + 1;
+    int padded_len = d_cu_seqlens_padded[j + 1] - d_cu_seqlens_padded[j];
+    int num_chunks = (padded_len + chunk_size - 1) / chunk_size;
+    cur_last = cur_start + num_chunks + 3;
+    if (i >= cur_start && (i <= cur_last || j == batch - 1)) {
+      pos_id = i - cur_start;
+      seq_len = d_cu_seqlens[j + 1] - d_cu_seqlens[j];
+      total_seq_len = padded_len;
+      seq_start_offset = d_cu_seqlens[j];
+      pad_start_offset = d_cu_seqlens_padded[j];
+      break;
+    }
+  }
+
+  if (total_seq_len == 0) {
+    d_out_cu_seqlens[i] = d_cu_seqlens[batch];
+    d_out_cu_seqlens_padded[i] = d_cu_seqlens_padded[batch];
+    return;
+  }
+
+  int middle = total_seq_len / 2;
+
+  int start_id_1 = (total_seq_len * cp_rank) / 2;
+  int temp = (chunk_size - start_id_1 - 1) % chunk_size;
+  int first_chunk_size_1 = ((temp < 0) ? temp + chunk_size : temp) + 1;
+  first_chunk_size_1 = (first_chunk_size_1 >= middle) ? 0 : first_chunk_size_1;
+  int num_chunks_1 = (middle - first_chunk_size_1 - 1) / chunk_size;
+  int last_chunk_size_1 = middle - num_chunks_1 * chunk_size - first_chunk_size_1;
+  int last_token_id_1 = start_id_1 + middle - 1;
+  int last_chunk_id_1 = last_token_id_1 / chunk_size;
+
+  int start_id_2 = total_seq_len * cp_size - last_token_id_1 - 1;
+  int first_chunk_id_2 = start_id_2 / chunk_size;
+  int temp2 = (chunk_size - start_id_2 - 1) % chunk_size;
+  int first_chunk_size_2 = ((temp2 < 0) ? temp2 + chunk_size : temp2) + 1;
+  int num_chunks_2 = (middle - first_chunk_size_2) / chunk_size;
+
+  bool merge_chunks = (last_chunk_id_1 == first_chunk_id_2);
+  int middle_chunk_1 = merge_chunks ? (last_chunk_size_1 + first_chunk_size_2) : last_chunk_size_1;
+  int middle_chunk_2 = merge_chunks ? 0 : first_chunk_size_2;
+
+  int out_pad_len = 0;
+  if (pos_id == 0) {
+    out_pad_len = first_chunk_size_1;
+  } else if (pos_id <= num_chunks_1 + 1) {
+    out_pad_len = first_chunk_size_1 + num_chunks_1 * chunk_size;
+  } else if (pos_id == num_chunks_1 + 2) {
+    out_pad_len = first_chunk_size_1 + num_chunks_1 * chunk_size + middle_chunk_1;
+  } else if (pos_id == num_chunks_1 + 3) {
+    out_pad_len = first_chunk_size_1 + num_chunks_1 * chunk_size + middle_chunk_1 + middle_chunk_2;
+  } else if (pos_id <= num_chunks_1 + 3 + num_chunks_2) {
+    out_pad_len = first_chunk_size_1 + num_chunks_1 * chunk_size + middle_chunk_1 + middle_chunk_2 +
+                  num_chunks_2 * chunk_size;
+  } else {
+    out_pad_len = total_seq_len;
+  }
+
+  int out_seq_len = (out_pad_len < seq_len) ? out_pad_len : seq_len;
+
+  d_out_cu_seqlens[i] = seq_start_offset + out_seq_len;
+  d_out_cu_seqlens_padded[i] = pad_start_offset + out_pad_len;
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part below diagonal.
+ **************************************************************************************************/
+
+__global__ void thd_seq_tweak_below_diag_kernel(
+    const int *__restrict__ cu_seqlens_q, const int *__restrict__ cu_seqlens_kv_halfs,
+    const int *__restrict__ cu_seqlens_padded, int *__restrict__ q_chunks,
+    int *__restrict__ kv_chunks, int *__restrict__ q_pads, int *__restrict__ kv_pads, int cp_rank_q,
+    int cp_rank_kv, int cp_size, int chunk_size, int batch) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (i == 0) {
+    q_chunks[0] = 0;
+    kv_chunks[0] = 0;
+    q_pads[0] = 0;
+    kv_pads[0] = 0;
+  }
+  __syncthreads();
+
+  if (i >= batch) return;
+
+  // ───────── prefix-sum diffs ────────────────────────────────
+  const int32_t q_start = cu_seqlens_q[i];
+  const int32_t q_end = cu_seqlens_q[i + 1];
+  const int32_t kv_start = cu_seqlens_kv_halfs[i];
+  const int32_t kv_end = cu_seqlens_kv_halfs[i + 1];
+  const int32_t pad_start = cu_seqlens_padded[i];
+  const int32_t pad_end = cu_seqlens_padded[i + 1];
+
+  const int32_t seq_len_q = q_end - q_start;
+  const int32_t seq_len_kv_half = kv_end - kv_start;
+  const int32_t seq_plus_pad = pad_end - pad_start;
+  const int32_t half_seq_len = seq_plus_pad >> 1;
+  const int32_t pad_len_q = seq_plus_pad - seq_len_q;
+  const int32_t pad_len_kv = half_seq_len - seq_len_kv_half;
+
+  // ───────── below-diagonal logic ───────────────────────────
+  const int32_t last_kv_id = (cp_rank_kv + 1) * half_seq_len - 1;
+  const int32_t last_kv_chunk_id = last_kv_id / chunk_size;
+  const int32_t last_kv_chunk_len =
+      min(half_seq_len - (last_kv_chunk_id * chunk_size - cp_rank_kv * half_seq_len), half_seq_len);
+
+  const int32_t first_half_id = (cp_rank_q * half_seq_len) / chunk_size;
+  const int32_t second_half_id = ((2 * cp_size - cp_rank_q - 1) * half_seq_len) / chunk_size;
+
+  const int32_t first_half_len =
+      min(half_seq_len, (first_half_id + 1) * chunk_size - cp_rank_q * half_seq_len);
+
+  const int32_t second_half_len = min(seq_len_q, half_seq_len + (second_half_id + 1) * chunk_size -
+                                                     (2 * cp_size - 1 - cp_rank_q) * half_seq_len);
+
+  const bool take_nothing = (last_kv_chunk_id != first_half_id);
+  const bool take_first_half_q = (!take_nothing) && (last_kv_chunk_id != second_half_id);
+  const bool take_second_half_q = (!take_nothing) && (!take_first_half_q);
+
+  int32_t q_seq_len = 0;
+  if (take_first_half_q)
+    q_seq_len = first_half_len;
+  else if (take_second_half_q)
+    q_seq_len = second_half_len;
+
+  int32_t kv_seq_len = half_seq_len;
+  if (!take_nothing) kv_seq_len = last_kv_chunk_len;
+
+  q_seq_len = min(q_seq_len, max(0, seq_plus_pad - pad_len_q));
+  kv_seq_len = max(0, kv_seq_len - pad_len_kv);
+
+  // ───────── flat output (row-major) ─────────────────────────
+  const int out_base = 3 * i;
+
+  q_chunks[out_base + 0 + 1] = 0;
+  q_chunks[out_base + 1 + 1] = q_seq_len;
+  q_chunks[out_base + 2 + 1] = 0;
+
+  q_pads[out_base + 0 + 1] = pad_start;
+  q_pads[out_base + 1 + 1] = pad_start + q_seq_len;
+  q_pads[out_base + 2 + 1] = pad_start + seq_plus_pad;
+
+  kv_chunks[out_base + 0 + 1] = 0;
+  kv_chunks[out_base + 1 + 1] = kv_seq_len;
+  kv_chunks[out_base + 2 + 1] = 0;
+
+  const int32_t kv_pad_base = pad_start >> 1;
+  kv_pads[out_base + 0 + 1] = kv_pad_base + (half_seq_len - kv_seq_len - pad_len_kv);
+  kv_pads[out_base + 1 + 1] = kv_pad_base + (half_seq_len - pad_len_kv);
+  kv_pads[out_base + 2 + 1] = kv_pad_base + half_seq_len;
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part above diagonal.
+ **************************************************************************************************/
+
+__global__ void thd_seq_tweak_above_diag_kernel(
+    const int *__restrict__ cu_seqlens_q_halfs,  // len = batch+1
+    const int *__restrict__ cu_seqlens_kv,       // len = batch+1
+    const int *__restrict__ cu_seqlens_padded,   // len = batch+1 (full‑len prefix sums)
+    int *__restrict__ q_chunks,                  // len = 3·batch (row‑major)
+    int *__restrict__ kv_chunks,                 // len = 3·batch
+    int *__restrict__ q_pads,                    // len = 3·batch
+    int *__restrict__ kv_pads,                   // len = 3·batch
+    int cp_rank_q, int cp_rank_kv, int cp_size, int chunk_size, int batch) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (i == 0) {
+    q_chunks[0] = 0;
+    kv_chunks[0] = 0;
+    q_pads[0] = 0;
+    kv_pads[0] = 0;
+  }
+  __syncthreads();
+  if (i >= batch) return;
+
+  // ───────── prefix‑sum diffs ───────────────────────────────
+  const int32_t q_start = cu_seqlens_q_halfs[i];
+  const int32_t q_end = cu_seqlens_q_halfs[i + 1];
+  const int32_t kv_start = cu_seqlens_kv[i];
+  const int32_t kv_end = cu_seqlens_kv[i + 1];
+  const int32_t pad_start = cu_seqlens_padded[i];
+  const int32_t pad_end = cu_seqlens_padded[i + 1];
+
+  const int32_t seq_len_q_half = q_end - q_start;
+  const int32_t seq_len_kv = kv_end - kv_start;
+  const int32_t seq_plus_pad = pad_end - pad_start;
+
+  const int32_t half_seq_len = seq_plus_pad >> 1;
+
+  const int32_t pad_len_kv = seq_plus_pad - seq_len_kv;
+
+  // ───────── above‑diagonal  core logic ─────────────────────
+  const int32_t first_q_id = (2 * cp_size - 1 - cp_rank_q) * half_seq_len;
+  const int32_t first_q_chunk_id = first_q_id / chunk_size;
+  const int32_t first_q_chunk_len =
+      min(seq_len_q_half, (first_q_chunk_id + 1) * chunk_size - first_q_id);
+
+  const int32_t first_half_kv_last_el_total_id = ((cp_rank_kv + 1) * half_seq_len) - 1;
+  const int32_t first_half_kv_last_chunk_id = first_half_kv_last_el_total_id / chunk_size;
+
+  const int32_t second_half_kv_last_el_total_id = ((2 * cp_size - cp_rank_kv) * half_seq_len) - 1;
+  const int32_t second_half_kv_last_chunk_id = second_half_kv_last_el_total_id / chunk_size;
+
+  const int32_t first_half_kv_last_el_id_in_chunk = first_half_kv_last_el_total_id % chunk_size;
+  const int32_t first_half_kv_last_chunk_len =
+      min(seq_plus_pad, half_seq_len + first_half_kv_last_el_id_in_chunk + 1);
+
+  const int32_t second_half_kv_last_el_id_in_chunk = second_half_kv_last_el_total_id % chunk_size;
+  const int32_t second_half_kv_last_chunk_len =
+      min(half_seq_len, second_half_kv_last_el_id_in_chunk + 1);
+
+  const bool take_nothing = (first_q_chunk_id != second_half_kv_last_chunk_id);
+  const bool take_second_half_kv =
+      (!take_nothing) && (first_q_chunk_id != first_half_kv_last_chunk_id);
+  const bool take_first_half_kv = (!take_nothing) && (!take_second_half_kv);
+
+  int32_t q_seq_len = take_nothing ? 0 : first_q_chunk_len;
+
+  int32_t kv_seq_len = 0;
+  if (take_second_half_kv)
+    kv_seq_len = second_half_kv_last_chunk_len;
+  else if (take_first_half_kv)
+    kv_seq_len = first_half_kv_last_chunk_len;
+
+  kv_seq_len = max(0, kv_seq_len - pad_len_kv);
+
+  const int out_base = 3 * i;
+
+  q_chunks[out_base + 0 + 1] = 0;
+  q_chunks[out_base + 1 + 1] = q_seq_len;
+  q_chunks[out_base + 2 + 1] = 0;
+
+  const int32_t half_pad_start = pad_start >> 1;
+  q_pads[out_base + 0 + 1] = half_pad_start;
+  q_pads[out_base + 1 + 1] = half_pad_start + q_seq_len;
+  q_pads[out_base + 2 + 1] = half_pad_start + half_seq_len;
+
+  kv_chunks[out_base + 0 + 1] = 0;
+  kv_chunks[out_base + 1 + 1] = kv_seq_len;
+  kv_chunks[out_base + 2 + 1] = 0;
+
+  kv_pads[out_base + 0 + 1] = pad_start + (seq_len_kv - kv_seq_len);
+  kv_pads[out_base + 1 + 1] = pad_start + seq_len_kv;
+  kv_pads[out_base + 2 + 1] = pad_start + seq_plus_pad;
+}
+
+/***************************************************************************************************
  * Support THD format for Context Parallel: Read the half of a THD tensor
  **************************************************************************************************/
 
@@ -678,6 +1011,143 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part on diagonal.
+ **************************************************************************************************/
+
+void thd_chunkify(const Tensor &cu_seqlens, const Tensor &cu_seqlens_padded, Tensor &out_cu_seqlens,
+                  Tensor &out_cu_seqlens_padded, int batch, int output_len, int chunk_size,
+                  cudaStream_t stream) {
+  using namespace transformer_engine;
+  NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens_padded.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens_padded.dtype() == DType::kInt32);
+
+  NVTE_CHECK(cu_seqlens.dim() == 1);
+  NVTE_CHECK(cu_seqlens_padded.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens_padded.dim() == 1);
+
+  const unsigned int block = 256;
+  const unsigned int grid = (output_len + block - 1) / block;
+  thd_chunkify_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+      reinterpret_cast<int *>(cu_seqlens.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens_padded.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_padded.data.dptr), batch, output_len, chunk_size);
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part on diagonal.
+ **************************************************************************************************/
+
+void thd_chunkify_p2p(const Tensor &cu_seqlens, const Tensor &cu_seqlens_padded,
+                      Tensor &out_cu_seqlens, Tensor &out_cu_seqlens_padded, int batch,
+                      int output_len, int chunk_size, int cp_rank, int cp_size,
+                      cudaStream_t stream) {
+  using namespace transformer_engine;
+  NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens_padded.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens_padded.dtype() == DType::kInt32);
+
+  // This tensors should be one dimensional
+  NVTE_CHECK(cu_seqlens.dim() == 1);
+  NVTE_CHECK(cu_seqlens_padded.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens_padded.dim() == 1);
+
+  const unsigned int block = 256;
+  const unsigned int grid = (output_len + block - 1) / block;
+  thd_chunkify_p2p_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+      reinterpret_cast<int *>(cu_seqlens.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens_padded.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_padded.data.dptr), batch, output_len, chunk_size,
+      cp_rank, cp_size);
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part below diagonal.
+ **************************************************************************************************/
+
+void thd_seq_tweak_below_diag(const Tensor &cu_seqlens_q, const Tensor &cu_seqlens_kv_halfs,
+                              const Tensor &cu_seqlens_padded, Tensor &out_cu_seqlens_q,
+                              Tensor &out_cu_seqlens_kv_halfs, Tensor &out_cu_seqlens_q_padded,
+                              Tensor &out_cu_seqlens_kv_halfs_padded, int batch, int output_len,
+                              int chunk_size, int cp_rank_q, int cp_rank_kv, int cp_size,
+                              cudaStream_t stream) {
+  using namespace transformer_engine;
+
+  NVTE_CHECK(cu_seqlens_q.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens_kv_halfs.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens_q.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens_kv_halfs.dtype() == DType::kInt32);
+
+  // This tensors should be one dimensional
+  NVTE_CHECK(cu_seqlens_q.dim() == 1);
+  NVTE_CHECK(cu_seqlens_kv_halfs.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens_q.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens_kv_halfs.dim() == 1);
+
+  const unsigned int block = 256;
+  const unsigned int grid = (output_len + block - 1) / block;
+  thd_seq_tweak_below_diag_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+      reinterpret_cast<int *>(cu_seqlens_q.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens_kv_halfs.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens_padded.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_q.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_kv_halfs.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_q_padded.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_kv_halfs_padded.data.dptr), cp_rank_q, cp_rank_kv,
+      cp_size, chunk_size, batch);
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part above diagonal.
+ **************************************************************************************************/
+
+void thd_seq_tweak_above_diag(const Tensor &cu_seqlens_q_halfs, const Tensor &cu_seqlens_kv,
+                              const Tensor &cu_seqlens_padded, Tensor &out_cu_seqlens_q_halfs,
+                              Tensor &out_cu_seqlens_kv, Tensor &out_cu_seqlens_q_halfs_padded,
+                              Tensor &out_cu_seqlens_kv_padded, int cp_rank_q, int cp_rank_kv,
+                              int cp_size, int batch, int output_len, int chunk_size,
+                              cudaStream_t stream) {
+  using namespace transformer_engine;
+
+  NVTE_CHECK(cu_seqlens_q_halfs.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens_kv.dtype() == DType::kInt32);
+  NVTE_CHECK(cu_seqlens_padded.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens_q_halfs.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens_kv.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens_q_halfs_padded.dtype() == DType::kInt32);
+  NVTE_CHECK(out_cu_seqlens_kv_padded.dtype() == DType::kInt32);
+
+  // This tensors should be one dimensional
+  NVTE_CHECK(cu_seqlens_q_halfs.dim() == 1);
+  NVTE_CHECK(cu_seqlens_kv.dim() == 1);
+  NVTE_CHECK(cu_seqlens_padded.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens_q_halfs.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens_kv.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens_q_halfs_padded.dim() == 1);
+  NVTE_CHECK(out_cu_seqlens_kv_padded.dim() == 1);
+
+  const unsigned int block = 256;
+  const unsigned int grid = (batch + 1 + block - 1) / block;
+  thd_seq_tweak_above_diag_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+      reinterpret_cast<int *>(cu_seqlens_q_halfs.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens_kv.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens_padded.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_q_halfs.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_kv.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_q_halfs_padded.data.dptr),
+      reinterpret_cast<int *>(out_cu_seqlens_kv_padded.data.dptr), cp_rank_q, cp_rank_kv, cp_size,
+      chunk_size, batch);
+  // synchronize
+  cudaStreamSynchronize(stream);
+}
+
 }  // namespace context_parallel
 }  // namespace transformer_engine
 
@@ -749,4 +1219,60 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
   context_parallel::thd_get_partitioned_indices(*convertNVTETensorCheck(cu_seqlens),
                                                 *convertNVTETensorCheck(output), total_tokens,
                                                 world_size, rank, stream);
+}
+
+void nvte_cp_thd_chunkify(const NVTETensor &cu_seqlens, const NVTETensor &cu_seqlens_padded,
+                          NVTETensor out_cu_seqlens, NVTETensor out_cu_seqlens_padded, int batch,
+                          int output_len, int chunk_size, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_thd_chunkify);
+  using namespace transformer_engine;
+
+  context_parallel::thd_chunkify(
+      *convertNVTETensorCheck(cu_seqlens), *convertNVTETensorCheck(cu_seqlens_padded),
+      *convertNVTETensorCheck(out_cu_seqlens), *convertNVTETensorCheck(out_cu_seqlens_padded),
+      batch, output_len, chunk_size, stream);
+}
+
+void nvte_cp_thd_chunkify_p2p(const NVTETensor &cu_seqlens, const NVTETensor &cu_seqlens_padded,
+                              NVTETensor out_cu_seqlens, NVTETensor out_cu_seqlens_padded,
+                              int batch, int output_len, int chunk_size, int cp_rank, int cp_size,
+                              cudaStream_t stream) {
+  NVTE_API_CALL(nvte_thd_chunkify_p2p);
+  using namespace transformer_engine;
+
+  context_parallel::thd_chunkify_p2p(
+      *convertNVTETensorCheck(cu_seqlens), *convertNVTETensorCheck(cu_seqlens_padded),
+      *convertNVTETensorCheck(out_cu_seqlens), *convertNVTETensorCheck(out_cu_seqlens_padded),
+      batch, output_len, chunk_size, cp_rank, cp_size, stream);
+}
+
+void nvte_cp_thd_seq_tweak_below_diag(
+    const NVTETensor &cu_seqlens_q, const NVTETensor &cu_seqlens_kv_halfs,
+    const NVTETensor &cu_seqlens_padded, NVTETensor out_cu_seqlens_q, NVTETensor out_cu_seqlens_kv,
+    NVTETensor out_cu_seqlens_q_padded, NVTETensor out_cu_seqlens_kv_padded, int cp_rank_q,
+    int cp_rank_kv, int cp_size, int batch, int output_len, int chunk_size, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_thd_seq_tweak_below_diag);
+  using namespace transformer_engine;
+  context_parallel::thd_seq_tweak_below_diag(
+      *convertNVTETensorCheck(cu_seqlens_q), *convertNVTETensorCheck(cu_seqlens_kv_halfs),
+      *convertNVTETensorCheck(cu_seqlens_padded), *convertNVTETensorCheck(out_cu_seqlens_q),
+      *convertNVTETensorCheck(out_cu_seqlens_kv), *convertNVTETensorCheck(out_cu_seqlens_q_padded),
+      *convertNVTETensorCheck(out_cu_seqlens_kv_padded), batch, output_len, chunk_size, cp_rank_q,
+      cp_rank_kv, cp_size, stream);
+}
+
+void nvte_cp_thd_seq_tweak_above_diag(
+    const NVTETensor &cu_seqlens_q_halfs, const NVTETensor &cu_seqlens_kv,
+    const NVTETensor &cu_seqlens_padded, NVTETensor out_cu_seqlens_q, NVTETensor out_cu_seqlens_kv,
+    NVTETensor out_cu_seqlens_q_padded, NVTETensor out_cu_seqlens_kv_padded, int cp_rank_q,
+    int cp_rank_kv, int cp_size, int batch, int output_len, int chunk_size, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_thd_seq_tweak_above_diag);
+  using namespace transformer_engine;
+
+  context_parallel::thd_seq_tweak_above_diag(
+      *convertNVTETensorCheck(cu_seqlens_q_halfs), *convertNVTETensorCheck(cu_seqlens_kv),
+      *convertNVTETensorCheck(cu_seqlens_padded), *convertNVTETensorCheck(out_cu_seqlens_q),
+      *convertNVTETensorCheck(out_cu_seqlens_kv), *convertNVTETensorCheck(out_cu_seqlens_q_padded),
+      *convertNVTETensorCheck(out_cu_seqlens_kv_padded), cp_rank_q, cp_rank_kv, cp_size, batch,
+      output_len, chunk_size, stream);
 }

@@ -235,6 +235,8 @@ class AttentionParams:
         Whether support for cuda graph capture is needed or not.
     num_splits : int, default = 1
         The number of kernels to split attention to.
+    chunk_size: int, default = None
+        The size of chunks for chunked attention.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -266,6 +268,7 @@ class AttentionParams:
     return_max_logit: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
+    chunk_size: int = None
 
     def __eq__(self, other):
         """
@@ -342,6 +345,7 @@ def get_attention_backend(
     return_max_logit = attention_params.return_max_logit
     cuda_graph = attention_params.cuda_graph
     num_splits = attention_params.num_splits
+    chunk_size = attention_params.chunk_size
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -788,6 +792,12 @@ def get_attention_backend(
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " attention bias for THD format"
+                )
+                use_flash_attention = False
+            elif qkv_format == "thd" and chunk_size is not None:
+                logger.debug(
+                    "Disabling FlashAttention as it does not support context parallelism with"
+                    " chunked attention for THD format"
                 )
                 use_flash_attention = False
 
@@ -2247,3 +2257,139 @@ def combine_and_dequantize(
         case _:
             raise RuntimeError("Invalid qkv_layout " + qkv_layout)
     return q, k, v
+
+
+def thd_chunkify(
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    chunk_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Perform chunkification of sequences stored in `thd` format when chunked
+    attention is required.
+
+    The function receives `cu_seqlens` and `cu_seqlens_padded`, which encode
+    the cumulative sequence lengths of the original (unpadded) sequences and
+    of the right-padded sequences, respectively.  It returns the corresponding
+    tensors after the sequences have been partitioned into chunks of size
+    `chunk_size`.
+
+    Example
+    -------
+    Given original sequence lengths `[10, 20]` with three padding tokens
+    appended to the second sequence and `chunk_size = 8`, the sequences are
+    split into `[8, 2]` and `[8, 8, 4 (+3 padding)]`.
+
+        cu_seqlens        : [0, 10, 30]  →  [0, 8, 10, 18, 30]
+        cu_seqlens_padded : [0, 10, 33]  →  [0, 8, 10, 18, 33]
+    """
+    if cu_seqlens_padded is None:
+        cu_seqlens_padded = cu_seqlens
+    total_seq_len = cu_seqlens_padded[-1].item()
+    new_cu_seqlens, new_cu_seqlens_padded = tex.thd_chunkify(
+        cu_seqlens, cu_seqlens_padded, total_seq_len, chunk_size
+    )
+
+    return new_cu_seqlens, new_cu_seqlens_padded
+
+
+def thd_chunkify_p2p(
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    chunk_size: int,
+    cp_rank: int,
+    cp_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Utility function used in chunked attention support for thd P2P context parallelism.
+
+    Process cu_seqlens and cu_seqlens_padded for the case when q part on the GPU
+    corresponds to the current pair of the kv part on the GPU - this happens once,
+    at the beginning. In this case returned cu_seqlens will be used both as
+    a cu_seqlens_q and as a cu_seqlens_kv.
+    """
+    total_seq_len = cu_seqlens_padded[-1].item()
+    new_cu_seqlens, new_cu_seqlens_padded = tex.thd_chunkify_p2p(
+        cu_seqlens, cu_seqlens_padded, total_seq_len, chunk_size, cp_rank, cp_size
+    )
+
+    return new_cu_seqlens, new_cu_seqlens_padded
+
+
+def thd_chunkify_p2p_below_diagonal(
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv_halfs: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    cp_rank_q: int,
+    cp_rank_kv: int,
+    cp_size: int,
+    chunk_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Utility function used in chunked attention support for thd P2P context parallelism.
+
+    Process cu_seqlens_q and cu_seqlens_kv_halfs for the case when q part on the GPU
+    has bigger index than the kv part on the GPU.
+    """
+    assert cp_rank_q > cp_rank_kv
+
+    new_seqlens_q, new_seqlens_kv_halfs, new_cu_seqlens_q_padded, new_cu_seqlens_kv_padded = (
+        tex.thd_seq_tweak_below_diag(
+            cu_seqlens_q,
+            cu_seqlens_kv_halfs,
+            cu_seqlens_padded,
+            cp_rank_q,
+            cp_rank_kv,
+            cp_size,
+            chunk_size,
+        )
+    )
+
+    new_cu_seqlens_q = torch.cumsum(new_seqlens_q, dim=0, dtype=torch.int32)
+    new_cu_seqlens_kv_halfs = torch.cumsum(new_seqlens_kv_halfs, dim=0, dtype=torch.int32)
+
+    return (
+        new_cu_seqlens_q,
+        new_cu_seqlens_kv_halfs,
+        new_cu_seqlens_q_padded,
+        new_cu_seqlens_kv_padded,
+    )
+
+
+def thd_chunkify_p2p_above_diagonal(
+    cu_seqlens_q_halfs: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    cp_rank_q: int,
+    cp_rank_kv: int,
+    cp_size: int,
+    chunk_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Utility function used in chunked attention support for thd P2P context parallelism.
+
+    Process cu_seqlens_q_halfs and cu_seqlens_kv for the case when q part on the GPU
+    has smaller index than the kv part on the GPU.
+    """
+    assert cp_rank_q < cp_rank_kv
+
+    new_seqlens_q, new_seqlens_kv, new_cu_seqlens_q_padded, new_cu_seqlens_kv_padded = (
+        tex.thd_seq_tweak_above_diag(
+            cu_seqlens_q_halfs,
+            cu_seqlens_kv,
+            cu_seqlens_padded,
+            cp_rank_q,
+            cp_rank_kv,
+            cp_size,
+            chunk_size,
+        )
+    )
+    new_cu_seqlens_q_halfs = torch.cumsum(new_seqlens_q, dim=0, dtype=torch.int32)
+    new_cu_seqlens_kv = torch.cumsum(new_seqlens_kv, dim=0, dtype=torch.int32)
+
+    return (
+        new_cu_seqlens_q_halfs,
+        new_cu_seqlens_kv,
+        new_cu_seqlens_q_padded,
+        new_cu_seqlens_kv_padded,
+    )

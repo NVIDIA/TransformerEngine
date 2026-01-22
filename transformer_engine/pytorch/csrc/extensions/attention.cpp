@@ -263,15 +263,15 @@ std::vector<py::object> fused_attn_fwd(
   size_t i = 0;
   at::Tensor output_tensor;
   // intermediate softmax tensor, S or M
-  output_tensor =
-      allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
-                    static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
+  output_tensor = allocateSpace(
+      nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
+      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false, true);
   set_tensor_param(i++, output_tensor);
   // fp8 has an additional softmax stats tensor, ZInv; return_max_logit=true has an additional Sum_Exp tensor
   if (return_max_logit || qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
-    output_tensor =
-        allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
-                      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
+    output_tensor = allocateSpace(
+        nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
+        static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false, true);
     set_tensor_param(i++, output_tensor);
   }
   // rng_state
@@ -801,6 +801,155 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
                                       world_size, rank, at::cuda::getCurrentCUDAStream());
 
   return output;
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part on diagonal.
+ **************************************************************************************************/
+
+std::vector<at::Tensor> thd_chunkify(at::Tensor cu_seqlens, at::Tensor cu_seqlens_padded,
+                                     int total_seq_len, int chunk_size) {
+  NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens.dim() == 1);
+  NVTE_CHECK(cu_seqlens.size(0) >= 2);
+  NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens_padded.dim() == 1);
+  NVTE_CHECK(cu_seqlens_padded.size(0) >= 2);
+  NVTE_CHECK(chunk_size > 0);
+
+  int batch = cu_seqlens.size(0) - 1;
+  int output_len = cu_seqlens_padded.size(0) + total_seq_len / chunk_size + 1;
+
+  // Allocate output tensors
+  at::Tensor out_cu_seqlens = at::empty({output_len}, at::CUDA(at::ScalarType::Int));
+  at::Tensor out_cu_seqlens_padded = at::empty({output_len}, at::CUDA(at::ScalarType::Int));
+
+  // Create tensor wrappers
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_cu_seqlens_padded = makeTransformerEngineTensor(cu_seqlens_padded);
+  auto te_out_cu_seqlens = makeTransformerEngineTensor(out_cu_seqlens);
+  auto te_out_cu_seqlens_padded = makeTransformerEngineTensor(out_cu_seqlens_padded);
+
+  nvte_cp_thd_chunkify(te_cu_seqlens.data(), te_cu_seqlens_padded.data(), te_out_cu_seqlens.data(),
+                       te_out_cu_seqlens_padded.data(), batch, output_len, chunk_size,
+                       at::cuda::getCurrentCUDAStream());
+
+  return {out_cu_seqlens, out_cu_seqlens_padded};
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part on diagonal.
+ **************************************************************************************************/
+
+std::vector<at::Tensor> thd_chunkify_p2p(at::Tensor cu_seqlens, at::Tensor cu_seqlens_padded,
+                                         int total_seq_len, int chunk_size, int cp_rank,
+                                         int cp_size) {
+  NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens.dim() == 1);
+  NVTE_CHECK(cu_seqlens.size(0) >= 2);
+  NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
+
+  int batch = cu_seqlens.size(0) - 1;
+  int output_len = 5 * cu_seqlens_padded.size(0) + total_seq_len / chunk_size;
+
+  at::Tensor out_cu_seqlens = at::zeros({output_len}, at::CUDA(at::ScalarType::Int));
+  at::Tensor out_cu_seqlens_padded = at::zeros({output_len}, at::CUDA(at::ScalarType::Int));
+
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_cu_seqlens_padded = makeTransformerEngineTensor(cu_seqlens_padded);
+  auto te_out_cu_seqlens = makeTransformerEngineTensor(out_cu_seqlens);
+  auto te_out_cu_seqlens_padded = makeTransformerEngineTensor(out_cu_seqlens_padded);
+
+  nvte_cp_thd_chunkify_p2p(te_cu_seqlens.data(), te_cu_seqlens_padded.data(),
+                           te_out_cu_seqlens.data(), te_out_cu_seqlens_padded.data(), batch,
+                           output_len, chunk_size, cp_rank, cp_size,
+                           at::cuda::getCurrentCUDAStream());
+
+  return {out_cu_seqlens, out_cu_seqlens_padded};
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part below diagonal.
+ **************************************************************************************************/
+
+std::vector<at::Tensor> thd_seq_tweak_below_diag(at::Tensor cu_seqlens_q,
+                                                 at::Tensor cu_seqlens_kv_halfs,
+                                                 at::Tensor cu_seqlens_padded, int cp_rank_q,
+                                                 int cp_rank_kv, int cp_size, int chunk_size) {
+  NVTE_CHECK(cu_seqlens_q.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens_kv_halfs.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens_q.dim() == 1);
+  NVTE_CHECK(cu_seqlens_kv_halfs.dim() == 1);
+  NVTE_CHECK(cu_seqlens_padded.dim() == 1);
+  NVTE_CHECK(cu_seqlens_q.size(0) >= 2);
+  NVTE_CHECK(cu_seqlens_kv_halfs.size(0) >= 2);
+  NVTE_CHECK(cu_seqlens_padded.size(0) >= 2);
+  NVTE_CHECK(cp_rank_q >= 0 && cp_rank_q < cp_size);
+  NVTE_CHECK(cp_rank_kv >= 0 && cp_rank_kv < cp_size);
+  NVTE_CHECK(cp_size > 0);
+  NVTE_CHECK(chunk_size > 0);
+
+  int batch = cu_seqlens_q.size(0) - 1;
+  int output_len = 3 * batch;
+
+  at::Tensor out_seqlens_q = at::empty({output_len + 1}, at::CUDA(at::ScalarType::Int));
+  at::Tensor out_seqlens_kv = at::empty({output_len + 1}, at::CUDA(at::ScalarType::Int));
+  at::Tensor out_cu_seqlens_q_padded = at::empty({output_len + 1}, at::CUDA(at::ScalarType::Int));
+  at::Tensor out_cu_seqlens_kv_padded = at::empty({output_len + 1}, at::CUDA(at::ScalarType::Int));
+
+  auto te_cu_seqlens_q = makeTransformerEngineTensor(cu_seqlens_q);
+  auto te_cu_seqlens_kv_halfs = makeTransformerEngineTensor(cu_seqlens_kv_halfs);
+  auto te_cu_seqlens_padded = makeTransformerEngineTensor(cu_seqlens_padded);
+  auto te_out_seqlens_q = makeTransformerEngineTensor(out_seqlens_q);
+  auto te_out_seqlens_kv = makeTransformerEngineTensor(out_seqlens_kv);
+  auto te_out_cu_seqlens_q_padded = makeTransformerEngineTensor(out_cu_seqlens_q_padded);
+  auto te_out_cu_seqlens_kv_padded = makeTransformerEngineTensor(out_cu_seqlens_kv_padded);
+
+  nvte_cp_thd_seq_tweak_below_diag(
+      te_cu_seqlens_q.data(), te_cu_seqlens_kv_halfs.data(), te_cu_seqlens_padded.data(),
+      te_out_seqlens_q.data(), te_out_seqlens_kv.data(), te_out_cu_seqlens_q_padded.data(),
+      te_out_cu_seqlens_kv_padded.data(), cp_rank_q, cp_rank_kv, cp_size, batch, output_len,
+      chunk_size, at::cuda::getCurrentCUDAStream());
+
+  return {out_seqlens_q, out_seqlens_kv, out_cu_seqlens_q_padded, out_cu_seqlens_kv_padded};
+}
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Split sequence into chunks for one P2P part above diagonal.
+ **************************************************************************************************/
+
+std::vector<at::Tensor> thd_seq_tweak_above_diag(at::Tensor cu_seqlens_q_halfs,
+                                                 at::Tensor cu_seqlens_kv,
+                                                 at::Tensor cu_seqlens_padded, int cp_rank_q,
+                                                 int cp_rank_kv, int cp_size, int chunk_size) {
+  NVTE_CHECK(cu_seqlens_q_halfs.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens_kv.scalar_type() == at::ScalarType::Int);
+  NVTE_CHECK(cu_seqlens_padded.scalar_type() == at::ScalarType::Int);
+
+  int batch = cu_seqlens_q_halfs.size(0) - 1;
+  int output_len = 3 * batch;
+
+  at::Tensor out_seqlens_q_halfs = at::empty({output_len + 1}, at::CUDA(at::ScalarType::Int));
+  at::Tensor out_seqlens_kv = at::empty({output_len + 1}, at::CUDA(at::ScalarType::Int));
+  at::Tensor out_cu_seqlens_q_padded = at::empty({output_len + 1}, at::CUDA(at::ScalarType::Int));
+  at::Tensor out_cu_seqlens_kv_padded = at::empty({output_len + 1}, at::CUDA(at::ScalarType::Int));
+
+  auto te_cu_seqlens_q_halfs = makeTransformerEngineTensor(cu_seqlens_q_halfs);
+  auto te_cu_seqlens_kv = makeTransformerEngineTensor(cu_seqlens_kv);
+  auto te_cu_seqlens_padded = makeTransformerEngineTensor(cu_seqlens_padded);
+  auto te_out_seqlens_q_halfs = makeTransformerEngineTensor(out_seqlens_q_halfs);
+  auto te_out_seqlens_kv = makeTransformerEngineTensor(out_seqlens_kv);
+  auto te_out_cu_seqlens_q_padded = makeTransformerEngineTensor(out_cu_seqlens_q_padded);
+  auto te_out_cu_seqlens_kv_padded = makeTransformerEngineTensor(out_cu_seqlens_kv_padded);
+
+  nvte_cp_thd_seq_tweak_above_diag(
+      te_cu_seqlens_q_halfs.data(), te_cu_seqlens_kv.data(), te_cu_seqlens_padded.data(),
+      te_out_seqlens_q_halfs.data(), te_out_seqlens_kv.data(), te_out_cu_seqlens_q_padded.data(),
+      te_out_cu_seqlens_kv_padded.data(), cp_rank_q, cp_rank_kv, cp_size, batch, output_len,
+      chunk_size, at::cuda::getCurrentCUDAStream());
+
+  return {out_seqlens_q_halfs, out_seqlens_kv, out_cu_seqlens_q_padded, out_cu_seqlens_kv_padded};
 }
 
 /***************************************************************************************************

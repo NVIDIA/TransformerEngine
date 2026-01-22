@@ -405,6 +405,23 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
 
+std::vector<at::Tensor> thd_chunkify(at::Tensor cu_seqlens, at::Tensor cu_seqlens_padded,
+                                     int total_seq_len, int chunk_size);
+
+std::vector<at::Tensor> thd_chunkify_p2p(at::Tensor cu_seqlens, at::Tensor cu_seqlens_padded,
+                                         int total_seq_len, int chunk_size, int cp_rank,
+                                         int cp_size);
+
+std::vector<at::Tensor> thd_seq_tweak_below_diag(at::Tensor cu_seqlens_q,
+                                                 at::Tensor cu_seqlens_kv_halfs,
+                                                 at::Tensor cu_seqlens_padded, int cp_rank_q,
+                                                 int cp_rank_kv, int cp_size, int chunk_size);
+
+std::vector<at::Tensor> thd_seq_tweak_above_diag(at::Tensor cu_seqlens_q_halfs,
+                                                 at::Tensor cu_seqlens_kv,
+                                                 at::Tensor cu_seqlens_padded, int cp_rank_q,
+                                                 int cp_rank_kv, int cp_size, int chunk_size);
+
 /***************************************************************************************************
  * multi_tensor_* kernels
  **************************************************************************************************/
