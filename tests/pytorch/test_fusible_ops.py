@@ -3165,6 +3165,7 @@ class TestSequentialModules:
         out_shape = in_shape
 
         # Skip invalid configurations
+        with_quantization = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if quantization != "mxfp8":
             pytest.skip("Quantization scheme is not supported")
@@ -3215,12 +3216,12 @@ class TestSequentialModules:
                 t *= 1 / 2
             for t in (x_ref, x_test, dy_ref, dy_test):
                 t -= 0.5
-                t *= 1 / 2
 
         # Reference implementation
         xs = torch.split(x_ref, split_sizes.tolist())
+        probs = torch.split(probs_ref, split_sizes.tolist())
         ys = []
-        for x, fc1_w, fc2_w, prob in zip(xs, fc1_ws_ref, fc2_ws_ref, probs_ref):
+        for x, fc1_w, fc2_w, prob in zip(xs, fc1_ws_ref, fc2_ws_ref, probs):
             x = torch.nn.functional.linear(x, fc1_w)
             x1, x2 = x.chunk(2, dim=-1)
             x = torch.nn.functional.silu(x1) * x2
@@ -3232,7 +3233,7 @@ class TestSequentialModules:
 
         # Construct operations
         recipe = make_recipe(quantization)
-        with te.quantized_model_init(recipe=recipe):
+        with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
             fc1 = te_ops.GroupedLinear(
                 group_size,
                 hidden_size,
@@ -3264,7 +3265,7 @@ class TestSequentialModules:
         del fc1_ws_test, fc2_ws_test
 
         # Fuse ops and perform forward and backward pass
-        with te.autocast(recipe=recipe):
+        with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = module(x_test, split_sizes, probs_test, split_sizes)
         y_test.backward(dy_test)
 
@@ -3284,6 +3285,7 @@ class TestSequentialModules:
         tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
         torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
         torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(probs_test.grad), probs_ref.grad, **tols)
         for group_idx in range(group_size):
             fc1_dw_test = to_cpu(getattr(fc1, f"weight{group_idx}").grad)
             fc1_dw_ref = fc1_ws_ref[group_idx].grad
