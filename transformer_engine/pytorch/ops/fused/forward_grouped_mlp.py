@@ -156,13 +156,15 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_w_data = torch.stack([w._rowwise_data for w in fc1_weights])
         fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
         fc1_w_data = fc1_w_data.reshape(group_size, 2, fc1_weight_shape[0] // 64, 32, fc1_weight_shape[1])
-        fc1_w_data = fc1_w_data.transpose(1, 2).contiguous()  # Interleave for SwiGLU
+        fc1_w_data = fc1_w_data.transpose(1, 2)  # Interleave SwiGLU gate/activation
+        fc1_w_data = fc1_w_data.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_data = fc1_w_data.reshape(group_size, fc1_weight_shape[0], fc1_weight_shape[1])
         fc1_w_data = fc1_w_data.permute(1, 2, 0)
         fc1_w_scales = torch.stack([w._rowwise_scale_inv for w in fc1_weights])
         fc1_w_scales = fc1_w_scales.view(dtype=torch.float8_e8m0fnu)
         fc1_w_scales = fc1_w_scales.reshape(group_size, 2, fc1_weight_shape[0] // 64, 32, fc1_weight_shape[1] // 32)
-        fc1_w_scales = fc1_w_scales.transpose(1, 2).contiguous()  # Interleave for SwiGLU
+        fc1_w_scales = fc1_w_scales.transpose(1, 2)  # Interleave SwiGLU gate/activation
+        fc1_w_scales = fc1_w_scales.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_scales = fc1_w_scales.reshape(group_size, fc1_weight_shape[0] // 128, 4, 32, fc1_weight_shape[1] // 128, 4)
         fc1_w_scales = fc1_w_scales.permute(0, 1, 4, 3, 2, 5).contiguous()  # Convert to swizzled layout
         fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
@@ -199,21 +201,25 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # Extract kernel outputs and construct MXFP8 tensors
         swiglu_in = fc1_kernel_out["c_tensor"]
+        swiglu_in = swiglu_in.permute(2, 0, 1).contiguous()
         swiglu_in = swiglu_in.reshape(in_shape[0], fc1_weight_shape[0] // 64, 2, 32)
-        swiglu_in = swiglu_in.transpose(1, 2).contiguous()  # Remove SwiGLU interleaving
+        swiglu_in = swiglu_in.transpose(1, 2)  # Undo interleaved SwiGLU gate/activation
+        swiglu_in = swiglu_in.flip(1).contiguous()  # Undo swapped SwiGLU gate/activation
         swiglu_in = swiglu_in.reshape(in_shape[0], fc1_weight_shape[0])
         fc2_in_row_data = fc1_kernel_out["d_tensor"]
+        fc2_in_row_data = fc2_in_row_data.permute(2, 0, 1).contiguous()
         fc2_in_row_data = fc2_in_row_data.reshape(in_shape[0], fc2_weight_shape[1]).contiguous()
         fc2_in_row_data = torch.split(fc2_in_row_data, split_sizes_int)
         fc2_in_row_scale = fc1_kernel_out["sfd_row_tensor"]
-        fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 0, 1, 4, 3).contiguous()  # Convert to compact layout
+        fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 1, 0, 4, 3).contiguous()  # Convert to compact layout
         fc2_in_row_scale = fc2_in_row_scale.reshape(in_shape[0], fc2_weight_shape[1] // 32)
         fc2_in_row_scale = torch.split(fc2_in_row_scale, split_sizes_int)
         fc2_in_col_data = fc1_kernel_out["d_col_tensor"]
+        fc2_in_col_data = fc2_in_col_data.permute(2, 0, 1).contiguous()
         fc2_in_col_data = fc2_in_col_data.reshape(in_shape[0], fc2_weight_shape[1]).contiguous()
         fc2_in_col_data = torch.split(fc2_in_col_data, split_sizes_int)
         fc2_in_col_scale = fc1_kernel_out["sfd_col_tensor"]
-        fc2_in_col_scale = fc2_in_col_scale.permute(5, 4, 3, 2, 0, 1).contiguous()  # Convert to compact layout
+        fc2_in_col_scale = fc2_in_col_scale.permute(5, 4, 3, 2, 1, 0).contiguous()  # Convert to compact layout
         fc2_in_col_scale = fc2_in_col_scale.reshape(in_shape[0] // 32, fc2_weight_shape[1])
         fc2_in_col_scale = torch.split(fc2_in_col_scale, [s // 32 for s in split_sizes_int])
 
