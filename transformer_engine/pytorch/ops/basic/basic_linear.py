@@ -270,6 +270,17 @@ class BasicLinear(BasicOperation):
             return 1
         return 0
 
+    def get_quantizer_roles(self, mode: str) -> Optional[list[str]]:
+        if mode == "forward":
+            # BasicLinear owns input and weight quantizers.
+            # Output quantizer is provided by the next op (as its input quantizer).
+            return ["input:linear", "weight:linear"]
+        if mode == "backward":
+            # BasicLinear owns grad_output quantizer.
+            # Grad_input quantizer is provided by the previous op (as its grad_output quantizer).
+            return ["grad_output:linear"]
+        return None
+
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""
 

@@ -1308,6 +1308,19 @@ class Linear(TransformerEngineBaseModule):
                 if name in self.weight_names or name in self.bias_names:
                     param.skip_backward_post_hook = True
 
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[str]]:
+        """Role strings for quantizers used by `Linear`."""
+        if fwd:
+            base = ("input:linear", "weight:linear", "output:linear")
+        else:
+            base = ("grad_output:linear", "grad_input:linear")
+        return [base[i % len(base)] for i in range(num_quantizers)]
+
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)

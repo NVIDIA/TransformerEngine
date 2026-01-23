@@ -732,14 +732,34 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
 
         # Initialize recipe state and quantizers
+        roles = self.get_quantizer_roles(fwd=fwd, num_quantizers=num_fp8_tensors)
+        if roles is not None:
+            assert len(roles) == num_fp8_tensors, (
+                "Recipe roles must match number of quantizers "
+                f"({len(roles)=} vs {num_fp8_tensors=})"
+            )
         recipe_state = RecipeState.create(
             recipe,
             mode=("forward" if fwd else "backward"),
             num_quantizers=num_fp8_tensors,
+            roles=roles,
         )
 
         self.fp8_meta[fp8_meta_tensor_key] = recipe_state
         self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
+
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[str]]:
+        """Return an ordered list of role strings for quantizers.
+
+        The returned list must have length `num_quantizers`. 
+        Returning `None` means "no explicit roles".
+        """
+        return None
 
     def _update_weight_quantizers(self) -> None:
         """Update the quantizers for the weight tensors."""

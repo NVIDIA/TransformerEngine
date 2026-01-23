@@ -724,6 +724,22 @@ class GroupedLinear(TransformerEngineBaseModule):
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
 
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[str]]:
+        """Role strings for quantizers used by `GroupedLinear`.
+
+        For grouped GEMMs we repeat the same pattern for each GEMM in order.
+        """
+        if fwd:
+            base = ("input:grouped_linear", "weight:grouped_linear", "output:grouped_linear")
+        else:
+            base = ("grad_output:grouped_linear", "grad_input:grouped_linear")
+        return [base[i % len(base)] for i in range(num_quantizers)]
+
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
 

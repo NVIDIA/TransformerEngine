@@ -1412,6 +1412,26 @@ class LayerNormLinear(TransformerEngineBaseModule):
         elif recipe.nvfp4():
             self._customize_quantizers_nvfp4(fwd, recipe)
 
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[str]]:
+        """Role strings for quantizers used by `LayerNormLinear`."""
+        if fwd:
+            base = (
+                "input:layernorm_linear",
+                "weight:layernorm_linear",
+                "output:layernorm_linear",
+            )
+        else:
+            base = (
+                "grad_output:layernorm_linear",
+                "grad_input:layernorm_linear",
+            )
+        return [base[i % len(base)] for i in range(num_quantizers)]
+
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(

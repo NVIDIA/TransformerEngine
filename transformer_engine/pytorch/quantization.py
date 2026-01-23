@@ -992,6 +992,7 @@ class RecipeState(abc.ABC):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[list[str]] = None,
     ) -> RecipeState:
         """Factory method to create the state for a quantization recipe
 
@@ -1028,12 +1029,16 @@ class RecipeState(abc.ABC):
             cls = CustomRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
-        return cls(
+        state = cls(
             recipe,
             mode=mode,
             num_quantizers=num_quantizers,
             device=device,
         )
+        # Optional role strings for quantizers, now only used only by CustomRecipe.
+        # TODO(negvet): Make all recipe states take roles in their constructors.
+        state.roles = roles
+        return state
 
     @abc.abstractmethod
     def make_quantizers(self) -> list:
@@ -1383,21 +1388,15 @@ class CustomRecipeState(RecipeState):
         qfactory = self.recipe.qfactory
         out = []
 
-        # TODO(negvet): make_quantizers() should take roles from the operation
-        # Hardcode linear-specific roles for now
         roles: List[str]
-        if self.mode == "forward":
-            roles = [
-                ("linear_input", "linear_weight", "linear_output")[i % 3]
-                for i in range(self.num_quantizers)
-            ]
-        elif self.mode == "backward":
-            roles = [
-                ("linear_grad_output", "linear_grad_input")[i % 2]
-                for i in range(self.num_quantizers)
-            ]
-        else:
-            roles = ["unknown"] * self.num_quantizers
+        if getattr(self, "roles", None) is None:
+            raise ValueError("CustomRecipeState requires roles to be set.")
+        roles = self.roles
+        if len(roles) != self.num_quantizers:
+            raise ValueError(
+                "CustomRecipeState requires roles to match num_quantizers "
+                f"({len(roles)=} vs {self.num_quantizers=})"
+            )
 
         for i in range(self.num_quantizers):
             # Get quantizer from the user defined factory
