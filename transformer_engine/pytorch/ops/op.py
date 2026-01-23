@@ -213,7 +213,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """Return an ordered list of role strings for quantizers.
 
         The returned list must be aligned with the internal quantizer ordering and
-        must have length `num_quantizers(mode)` for supported modes. 
+        must have length `num_quantizers(mode)` for supported modes.
         Returning `None` means "no explicit roles".
         """
         return None
