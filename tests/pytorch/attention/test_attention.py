@@ -1817,11 +1817,11 @@ qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 @pytest.mark.parametrize("RoPE", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
+@pytest.mark.parametrize("deterministic", [True, False])
 def test_mha_fp8_vs_f16(
-    dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, RoPE, is_training, scaling_mode
+    dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, RoPE, is_training, scaling_mode, deterministic
 ):
     """Test MultiHeadAttention module in FP8"""
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
@@ -1850,7 +1850,7 @@ def test_mha_fp8_vs_f16(
         fp8=True,
         fp8_meta=fp8_meta,
         is_training=is_training,
-        deterministic=_deterministic,
+        deterministic=deterministic,
     )
     flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
@@ -1862,7 +1862,7 @@ def test_mha_fp8_vs_f16(
             qkv_dtype=dtype,
             qkv_layout=qkv_format.replace("hd", "h3d"),
             is_training=is_training,
-            deterministic=_deterministic,
+            deterministic=deterministic,
         )
         _, fused_attn_supported_f16, _ = available_backends
         if not fused_attn_supported_f16:
@@ -2063,7 +2063,8 @@ def _run_mha_fp8_vs_f16(
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
-def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
+@pytest.mark.parametrize("deterministic", [True, False])
+def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode, deterministic):
     """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
 
@@ -2078,7 +2079,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     #        config.dropout_p = 0.1
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "1"
 
     # Test backend availability
@@ -2104,7 +2104,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         fp8=True,
         fp8_meta=fp8_meta,
         is_training=is_training,
-        deterministic=_deterministic,
+        deterministic=deterministic,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if flash_attn_supported + fused_attn_supported < 1:
@@ -2115,7 +2115,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
             is_training=is_training,
-            deterministic=_deterministic,
+            deterministic=deterministic,
         )
         _, fused_attn_supported, _ = available_backends
         if not fused_attn_supported:
