@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -342,15 +342,21 @@ class BasicLinear(BasicOperation):
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
 
-        # Input/grad output quantizers use internal tensors
+        # Configure input/grad output tensor
+        # Note: These tensors are only used internally. If there is no
+        # tensor-parallel communication, they are only used for GEMM.
         input_quantizer = self.get_quantizer("forward", 0)
         grad_output_quantizer = self.get_quantizer("backward", 0)
         if input_quantizer is not None:
             input_quantizer.internal = True
+            if not (self.tensor_parallel_mode == "column" and self.sequence_parallel):
+                input_quantizer.optimize_for_gemm = True
         if grad_output_quantizer is not None:
             grad_output_quantizer.internal = True
+            if not (self.tensor_parallel_mode == "row" and self.sequence_parallel):
+                grad_output_quantizer.optimize_for_gemm = True
 
-        # Handle weight quantizer
+        # Configure weight quantizer
         # Note: This function may be called in base class constructor,
         # before any basic linear attrs have been set.
         weight_quantizer = self.get_quantizer("forward", 1)

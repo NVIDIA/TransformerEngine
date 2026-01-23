@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -200,8 +200,16 @@ def _permute_kernel(
     probs_ptr,
     scale_ptr,
     permuted_scale_ptr,
+    pad_offsets_ptr,
+    # Pre-allocated output buffers for JAX input_output_aliases.
+    # These are aliased to output_ptr/permuted_probs_ptr in JAX, so they point to the same memory.
+    # In PyTorch, pass the same tensors as output_ptr/permuted_probs_ptr.
+    output_buf_ptr,  # pylint: disable=unused-argument
+    permuted_probs_buf_ptr,  # pylint: disable=unused-argument
     # sizes
     scale_hidden_dim,
+    num_tokens,  # pylint: disable=unused-argument
+    num_out_tokens,  # pylint: disable=unused-argument
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -224,12 +232,20 @@ def _permute_kernel(
     hidden_size: tl.constexpr,
     PERMUTE_PROBS: tl.constexpr,
     PERMUTE_SCALE: tl.constexpr,
+    FUSION_PAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    # Note: When FUSION_PAD=True, output buffers should be pre-zeroed by the caller
+    # to ensure padding positions contain zeros.
+    # PyTorch: Use torch.zeros() for output buffer allocation
+    # JAX: Pre-zeroed buffers should be passed (when input_output_aliases works)
+    expert_idx = 0
+
     pid_t = tl.program_id(0)
     pid_h = tl.program_id(1)
     cur_off = pid_h * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = cur_off < hidden_size
+
     src_row = pid_t.to(tl.int64)
     input_off = src_row * stride_input_token + cur_off * stride_input_hidden
     inp = tl.load(input_ptr + input_off, mask=mask)
@@ -246,6 +262,15 @@ def _permute_kernel(
         dst_row = tl.load(
             row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert
         ).to(tl.int64)
+        if FUSION_PAD or PERMUTE_PROBS:
+            expert_idx = tl.load(
+                row_id_map_ptr
+                + pid_t * stride_row_id_map_token
+                + (num_experts + idx) * stride_row_id_map_expert
+            )
+        if FUSION_PAD:
+            pad_off = tl.load(pad_offsets_ptr + expert_idx)
+            dst_row = dst_row + pad_off
         output_off = dst_row * stride_output_token + cur_off * stride_output_hidden
         if PERMUTE_SCALE:
             permuted_scale_off = (
@@ -253,11 +278,6 @@ def _permute_kernel(
             )
             tl.store(permuted_scale_ptr + permuted_scale_off, scale, mask=mask_scale)
         if PERMUTE_PROBS:
-            expert_idx = tl.load(
-                row_id_map_ptr
-                + pid_t * stride_row_id_map_token
-                + (num_experts + idx) * stride_row_id_map_expert
-            )
             prob_off = pid_t * stride_probs_token + expert_idx * stride_probs_expert
             prob = tl.load(probs_ptr + prob_off)
             if pid_h == 0:
@@ -297,6 +317,11 @@ def _unpermute_kernel(
     row_id_map_ptr,
     merging_probs_ptr,
     permuted_probs_ptr,
+    pad_offsets_ptr,
+    # Dummy parameters for JAX input_output_aliases compatibility (matches _permute_kernel signature pattern)
+    # These are unused in the unpermute kernel but maintain consistency with the permute kernel.
+    output_buf_ptr,  # pylint: disable=unused-argument
+    unpermuted_probs_buf_ptr,  # pylint: disable=unused-argument
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -318,10 +343,12 @@ def _unpermute_kernel(
     PROBS_LOAD_WIDTH: tl.constexpr,
     WITH_MERGING_PROBS: tl.constexpr,
     PERMUTE_PROBS: tl.constexpr,
+    FUSION_UNPAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     data_type = input_ptr.dtype.element_ty
     compute_type = tl.float32
+    expert_idx = 0
 
     pid_t = tl.program_id(0)
     pid_h = tl.program_id(1)
@@ -348,15 +375,19 @@ def _unpermute_kernel(
         src_row = tl.load(
             row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert
         ).to(tl.int64)
-        input_off = src_row * stride_input_token + current_offset * stride_input_hidden
-        inp = tl.load(input_ptr + input_off, mask=mask)
-        inp = inp.to(compute_type)
-        if WITH_MERGING_PROBS:
+        if FUSION_UNPAD or WITH_MERGING_PROBS:
             expert_idx = tl.load(
                 row_id_map_ptr
                 + pid_t * stride_row_id_map_token
                 + (num_experts + idx) * stride_row_id_map_expert
             )
+        if FUSION_UNPAD:
+            pad_off = tl.load(pad_offsets_ptr + expert_idx)
+            src_row = src_row + pad_off
+        input_off = src_row * stride_input_token + current_offset * stride_input_hidden
+        inp = tl.load(input_ptr + input_off, mask=mask)
+        inp = inp.to(compute_type)
+        if WITH_MERGING_PROBS:
             merging_prob_off = (
                 pid_t * stride_merging_probs_token + expert_idx * stride_merging_probs_expert
             )
@@ -407,6 +438,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
     fwd_input_ptr,
     merging_probs_ptr,
     row_id_map_ptr,
+    pad_offsets_ptr,
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -427,6 +459,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
     num_experts: tl.constexpr,
     hidden_size: tl.constexpr,
     PROBS_LOAD_WIDTH: tl.constexpr,
+    FUSION_UNPAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     data_type = fwd_output_grad_ptr.dtype.element_ty
@@ -450,6 +483,9 @@ def _unpermute_bwd_with_merging_probs_kernel(
             + pid * stride_row_id_map_token
             + (num_experts + idx) * stride_row_id_map_expert
         )
+        if FUSION_UNPAD:
+            pad_off = tl.load(pad_offsets_ptr + expert_idx)
+            dst_row = dst_row + pad_off
         prob_grad_accum = tl.zeros((BLOCK_SIZE,), dtype=compute_type)
         current_start = 0
         while current_start < hidden_size:

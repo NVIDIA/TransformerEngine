@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -65,23 +65,33 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
       NVTE_CHECK(typeToSize(scale_dtype) == 1,
                  "Inverse scale factors need to have an 8-bit data type.");
     }
-    if (!is_nvfp4) {
+    if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
+      // Assume MXFP8 scales are already swizzled
       if (rowwise) {
         input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       } else {
         input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       }
-    } else {  // Swizzle for NVFP4
+      input.set_with_gemm_swizzled_scales(true);
+    } else if (is_nvfp4) {  // Swizzle for NVFP4
       NVTE_CHECK(rowwise, "NVFP4 GEMM expects rowwise for both LHS and RHS");
       input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       // Create tensor to hold swizzled scale factor
       TensorWrapper output(get_nvte_scaling_mode(scaling_mode));
       output.set_rowwise_data(buffer.untyped_data(), input_dtype, input_shape);
       output.set_rowwise_scale_inv(swizzle_scale_ptr, scale_dtype, scale_shape);
+      output.set_with_gemm_swizzled_scales(true);
       // Launch swizzle kernel
       nvte_swizzle_scaling_factors(input.data(), output.data(), stream);
       // Set swizzled scales into the input tensor
       input.set_rowwise_scale_inv(swizzle_scale_ptr, scale_dtype, scale_shape);
+      input.set_with_gemm_swizzled_scales(true);
+    } else {  // Tensor scaling
+      if (rowwise) {
+        input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
+      } else {
+        input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
+      }
     }
   }
 

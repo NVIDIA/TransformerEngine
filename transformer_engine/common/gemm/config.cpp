@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -36,6 +36,12 @@ void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
              static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
              " bytes)");
 
+  // bool size is implementation-dependent, so we explicitly specify
+  // uint8_t in the user-facing API.
+  auto bool_to_uint8 = [](bool in, void *out) {
+    *reinterpret_cast<uint8_t *>(out) = static_cast<uint8_t>(in);
+  };
+
   // Write to buffer
   NVTE_CHECK(config != nullptr, "Invalid NVTEMatmulConfig (got NULL)");
   const auto &config_ = *reinterpret_cast<const transformer_engine::MatmulConfig *>(config);
@@ -47,19 +53,19 @@ void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
       std::memcpy(buf, &config_.dbias_tensor, attr_size);
       break;
     case kNVTEMatmulConfigWithGELUEpilogue:
-      std::memcpy(buf, &config_.with_gelu_epilogue, attr_size);
+      bool_to_uint8(config_.with_gelu_epilogue, buf);
       break;
     case kNVTEMatmulConfigWithDGELUEpilogue:
-      std::memcpy(buf, &config_.with_dgelu_epilogue, attr_size);
+      bool_to_uint8(config_.with_dgelu_epilogue, buf);
       break;
     case kNVTEMatmulConfigEpilogueAuxTensor:
       std::memcpy(buf, &config_.epilogue_aux_tensor, attr_size);
       break;
     case kNVTEMatmulConfigUseSplitAccumulator:
-      std::memcpy(buf, &config_.use_split_accumulator, attr_size);
+      bool_to_uint8(config_.use_split_accumulator, buf);
       break;
     case kNVTEMatmulConfigSMCount:
-      std::memcpy(buf, &config_.sm_count, attr_size);
+      *reinterpret_cast<int32_t *>(buf) = static_cast<int32_t>(config_.sm_count);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEMatmulConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -79,6 +85,12 @@ void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
              " bytes)");
   NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
 
+  // bool size is implementation-dependent, so we explicitly specify
+  // uint8_t in the user-facing API.
+  auto uint8_to_bool = [](const void *in, bool &out) {
+    out = static_cast<bool>(*reinterpret_cast<const uint8_t *>(in));
+  };
+
   // Read from buffer
   NVTE_CHECK(config != nullptr, "Invalid NVTEMatmulConfig (got NULL)");
   auto &config_ = *reinterpret_cast<transformer_engine::MatmulConfig *>(config);
@@ -90,19 +102,19 @@ void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
       std::memcpy(&config_.dbias_tensor, buf, attr_size);
       break;
     case kNVTEMatmulConfigWithGELUEpilogue:
-      std::memcpy(&config_.with_gelu_epilogue, buf, attr_size);
+      uint8_to_bool(buf, config_.with_gelu_epilogue);
       break;
     case kNVTEMatmulConfigWithDGELUEpilogue:
-      std::memcpy(&config_.with_dgelu_epilogue, buf, attr_size);
+      uint8_to_bool(buf, config_.with_dgelu_epilogue);
       break;
     case kNVTEMatmulConfigEpilogueAuxTensor:
       std::memcpy(&config_.epilogue_aux_tensor, buf, attr_size);
       break;
     case kNVTEMatmulConfigUseSplitAccumulator:
-      std::memcpy(&config_.use_split_accumulator, buf, attr_size);
+      uint8_to_bool(buf, config_.use_split_accumulator);
       break;
     case kNVTEMatmulConfigSMCount:
-      std::memcpy(&config_.sm_count, buf, attr_size);
+      config_.sm_count = static_cast<int>(*reinterpret_cast<const int32_t *>(buf));
       break;
     default:
       NVTE_ERROR("Unsupported NVTEMatmulConfigAttribute (got ", static_cast<int>(attr), ")");

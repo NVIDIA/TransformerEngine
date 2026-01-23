@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -150,17 +150,10 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        bool rowwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                Float8BlockScaleTensorFormat::COMPACT);
-        rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
-                                         : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+        rowwise_option = FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        bool columnwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                   Float8BlockScaleTensorFormat::COMPACT);
-        columnwise_option = columnwise_compact
-                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
-                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+        columnwise_option = FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
       }
       quantize_transpose_vector_blockwise(
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
@@ -298,17 +291,10 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        bool rowwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                Float8BlockScaleTensorFormat::COMPACT);
-        rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
-                                         : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+        rowwise_option = FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        bool columnwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                   Float8BlockScaleTensorFormat::COMPACT);
-        columnwise_option = columnwise_compact
-                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
-                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+        columnwise_option = FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
       }
       quantize_transpose_vector_blockwise(
           grad_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
