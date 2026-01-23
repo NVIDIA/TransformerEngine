@@ -205,9 +205,9 @@ void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor act_inpu
  *  \param[out]    workspace        Workspace tensor.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
-void nvte_group_quantize_dbias_dgelu(const NVTEGroupedTensor input, const NVTEGroupedTensor act_input,
-                                     NVTEGroupedTensor output, NVTETensor dbias, NVTETensor workspace,
-                                     cudaStream_t stream);
+void nvte_group_quantize_dbias_dgelu(const NVTEGroupedTensor input,
+                                     const NVTEGroupedTensor act_input, NVTEGroupedTensor output,
+                                     NVTETensor dbias, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes backward of SiLU operation on the input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the SiLU backward along columns.

@@ -27,7 +27,7 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
 }
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                           cudaStream_t stream) {
+                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize);
   using namespace transformer_engine;
 
@@ -70,7 +70,7 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
 }
 
 void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                                 NVTETensor dbias, NVTETensor workspace, cudaStream_t stream) {
+                               NVTETensor dbias, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize_dbias);
   using namespace transformer_engine;
 

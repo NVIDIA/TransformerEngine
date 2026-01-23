@@ -33,9 +33,10 @@ void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor activati
       input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
-void nvte_group_quantize_dbias_dgelu(const NVTEGroupedTensor input, const NVTEGroupedTensor activation_input,
-                                     NVTEGroupedTensor output, NVTETensor dbias, NVTETensor workspace,
-                                     cudaStream_t stream) {
+void nvte_group_quantize_dbias_dgelu(const NVTEGroupedTensor input,
+                                     const NVTEGroupedTensor activation_input,
+                                     NVTEGroupedTensor output, NVTETensor dbias,
+                                     NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize_dbias_dgelu);
   using namespace transformer_engine;
 

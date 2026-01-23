@@ -409,32 +409,32 @@ void performTest(const ProcessingMethod processing_method,
             out_scales_rowwise_ref.data(), out_scales_colwise_ref.data(),
             ref_output_dbias.data(), rows, cols,
             scales_stride_rowwise,
-            scales_stride_colwise, 
+            scales_stride_colwise,
             is_single_tensor);
     } else {
         for (size_t t = 0; t < num_tensors; ++t) {
             const size_t M = first_dims_h[t];
             const size_t K = last_dims_h[t];
-    
+
             const size_t scales_stride_rowwise = K / 32;
             const size_t scales_stride_colwise = K;
             const size_t data_offset = offsets_h[t];
             const size_t sfs_offset = data_offset / 32;
-    
+
             const InputType* const grad_ptr = grad_data.data() + data_offset;
             const InputType* const in_ptr = in_data.data() + data_offset;
             OutputType* const out_data_rowwise_ptr = out_data_rowwise_ref.data() + data_offset;
             OutputType* const out_data_colwise_ptr = out_data_colwise_ref.data() + data_offset;
             fp8e8m0* const out_scales_rowwise_ptr = out_scales_rowwise_ref.data() + sfs_offset;
             fp8e8m0* const out_scales_colwise_ptr = out_scales_colwise_ref.data() + sfs_offset;
-    
+
             compute_ref<InputType, OutputType>(
                 processing_method, OP, rowwise, colwise, in_ptr, grad_ptr,
                 out_data_rowwise_ptr, out_data_colwise_ptr,
                 out_scales_rowwise_ptr, out_scales_colwise_ptr,
                 ref_output_dbias.data(), M, K,
                 scales_stride_rowwise,
-                scales_stride_colwise, 
+                scales_stride_colwise,
                 is_single_tensor);
         }
     }
@@ -600,7 +600,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     const std::vector<size_t> input_config = std::get<3>(GetParam());
     const DType input_type = std::get<4>(GetParam());
     const DType output_type = std::get<5>(GetParam());
-    
+
     const ShapeRepresentation shape_rep = static_cast<ShapeRepresentation>(input_config[0]);
     const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS) || (shape_rep == VARYING_FIRST_DIM);
 

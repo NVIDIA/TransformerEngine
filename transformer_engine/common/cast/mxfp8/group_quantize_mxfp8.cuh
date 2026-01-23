@@ -769,7 +769,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   if (IS_DACT) {
     NVTE_CHECK(activations->has_data(), "Activations tensor must have data.");
     NVTE_CHECK(input->num_tensors == activations->num_tensors,
-              "Number of grad and activations tensors must be same.");
+               "Number of grad and activations tensors must be same.");
     NVTE_CHECK(input->dtype() == activations->dtype(),
                "Grad and activations tensors must have the same type.");
   }
@@ -888,21 +888,21 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
           const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
           auto kernel = group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                      OType, true, true>;
+                                                    OType, true, true>;
           switch (scaling_type) {
             case ScalingType::ROWWISE: {
               kernel = group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                     OType, true, false>;
+                                                   OType, true, false>;
               break;
             }
             case ScalingType::COLWISE: {
               kernel = group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                     OType, false, true>;
+                                                   OType, false, true>;
               break;
             }
             case ScalingType::BIDIMENSIONAL: {
               kernel = group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                     OType, true, true>;
+                                                   OType, true, true>;
               break;
             }
           }
