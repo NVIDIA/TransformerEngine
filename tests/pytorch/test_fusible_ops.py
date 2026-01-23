@@ -2136,6 +2136,84 @@ class TestBasicOps:
         else:
             assert x2_test.grad is None
 
+    @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
+    @pytest.mark.parametrize("gate_interleave_size", (None, 32))
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    @pytest.mark.parametrize("scales_requires_grad", (False, True))
+    def test_scaled_swiglu(
+        self,
+        *,
+        in_shape: Iterable[int],
+        gate_interleave_size: Optional[int],
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+        input_requires_grad: bool,
+        scales_requires_grad: bool,
+    ) -> None:
+        """Multiply two tensors"""
+
+        # Tensor dims
+        out_shape = list(in_shape)
+        out_shape[-1] //= 2
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=input_requires_grad,
+        )
+        scales_ref, scales_test = make_reference_and_test_tensors(
+            in_shape[:-1],
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=scales_requires_grad,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        x = x_ref
+        if gate_interleave_size is not None:
+            x = x.reshape(
+                -1,
+                in_shape[-1] // (2 * gate_interleave_size),
+                2,
+                gate_interleave_size,
+            )
+            x = x.transpose(1, 2)
+            x = x.reshape(in_shape)
+        x1, x2 = x.chunk(2, dim=-1)
+        y = torch.nn.functional.silu(x1) * x2
+        y_ref = scales_ref.unsqueeze(-1) * y
+        if input_requires_grad or scales_requires_grad:
+            y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.ScaledSwiGLU(gate_interleave_size=gate_interleave_size)
+        y_test = op(x_test, scales_test)
+        if input_requires_grad or scales_requires_grad:
+            y_test.backward(dy_test)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        if input_requires_grad:
+            dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        else:
+            assert x_test.grad is None
+        if scales_requires_grad:
+            ds_test = scales_test.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(ds_test, scales_ref.grad, **tols)
+        else:
+            assert scales_test.grad is None
+
 
 class TestFusedOps:
     """Tests for fused operations"""
@@ -3187,7 +3265,7 @@ class TestSequentialModules:
             requires_grad=False,
         )
         probs_ref, probs_test = make_reference_and_test_tensors(
-            (in_shape[0], 1),
+            (in_shape[0],),
             test_dtype=dtype,
             test_device=device,
         )
@@ -3223,9 +3301,12 @@ class TestSequentialModules:
         ys = []
         for x, fc1_w, fc2_w, prob in zip(xs, fc1_ws_ref, fc2_ws_ref, probs):
             x = torch.nn.functional.linear(x, fc1_w)
+            x = x.reshape(-1, 2 * hidden_size // 64, 2, 32)
+            x = x.transpose(1, 2)
+            x = x.reshape(-1, 2 * hidden_size)
             x1, x2 = x.chunk(2, dim=-1)
             x = torch.nn.functional.silu(x1) * x2
-            x = x * prob
+            x = x * prob.unsqueeze(-1)
             x = torch.nn.functional.linear(x, fc2_w)
             ys.append(x)
         y_ref = torch.cat(ys)
@@ -3252,8 +3333,7 @@ class TestSequentialModules:
             )
             module = te_ops.Sequential(
                 fc1,
-                te_ops.SwiGLU(),
-                te_ops.MultiplyExtraInput(),
+                te_ops.ScaledSwiGLU(gate_interleave_size=32),
                 fc2,
             )
 

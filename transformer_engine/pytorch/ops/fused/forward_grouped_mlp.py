@@ -16,7 +16,7 @@ from ...cpp_extensions import general_grouped_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...quantization import FP8GlobalStateManager
 from ...tensor import MXFP8Tensor, Quantizer
-from ..basic import GroupedLinear, MultiplyExtraInput, SwiGLU
+from ..basic import GroupedLinear, ScaledSwiGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import is_quantized_tensor, maybe_dequantize
@@ -28,11 +28,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         self,
         *,
         fc1: GroupedLinear,
-        swiglu: SwiGLU,
-        scale: MultiplyExtraInput,
+        swiglu: ScaledSwiGLU,
         fc2: GroupedLinear,
     ) -> None:
-        super().__init__((fc1, swiglu, scale, fc2))
+        super().__init__((fc1, swiglu, fc2))
 
     def fuser_forward(
         self,
@@ -46,8 +45,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
         # Get basic operations
-        fc1_op, swiglu_op, scale_op, fc2_op = self.basic_ops
-        fc1_ctx, swiglu_ctx, scale_ctx, fc2_ctx = basic_op_ctxs
+        fc1_op, swiglu_op, fc2_op = self.basic_ops
+        fc1_ctx, swiglu_ctx, fc2_ctx = basic_op_ctxs
 
         # Tensor properties
         in_shape = list(input_.size())
@@ -86,7 +85,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # Extract split sizes from extra input
         fc1_split_sizes = basic_op_extra_inputs[0][0]
-        fc2_split_sizes = basic_op_extra_inputs[3][0]
+        fc2_split_sizes = basic_op_extra_inputs[2][0]
         if (
             fc1_split_sizes.size() != fc2_split_sizes.size()
             or fc1_split_sizes.data_ptr() != fc2_split_sizes.data_ptr()
@@ -100,13 +99,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             raise ValueError(f"Expected {group_size} splits, but got {len(split_sizes_int)}.")
 
         # Extract post-scales from extra input
-        scales = basic_op_extra_inputs[2][0]
-        scales_shape = tuple(scales.size())
-        if scales.numel() != scales_shape[0]:
-            raise RuntimeError(
-                f"{self.__class__.__name__} assumes scales are over leading dim, "
-                f"but got shape={scales_shape}."
-            )
+        scales = basic_op_extra_inputs[1][0]
 
         # Extract params
         fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(group_size)]
@@ -155,15 +148,13 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Pack weight tensors
         fc1_w_data = torch.stack([w._rowwise_data for w in fc1_weights])
         fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
-        fc1_w_data = fc1_w_data.view(group_size, 2, fc1_weight_shape[0] // 64, 32, fc1_weight_shape[1])
-        fc1_w_data = fc1_w_data.transpose(1, 2)  # Interleave SwiGLU gate/activation
+        fc1_w_data = fc1_w_data.view(group_size, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1])
         fc1_w_data = fc1_w_data.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_data = fc1_w_data.view(group_size, fc1_weight_shape[0], fc1_weight_shape[1])
         fc1_w_data = fc1_w_data.permute(1, 2, 0)
         fc1_w_scales = torch.stack([w._rowwise_scale_inv for w in fc1_weights])
         fc1_w_scales = fc1_w_scales.view(dtype=torch.float8_e8m0fnu)
-        fc1_w_scales = fc1_w_scales.view(group_size, 2, fc1_weight_shape[0] // 64, 32, fc1_weight_shape[1] // 32)
-        fc1_w_scales = fc1_w_scales.transpose(1, 2)  # Interleave SwiGLU gate/activation
+        fc1_w_scales = fc1_w_scales.view(group_size, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1] // 32)
         fc1_w_scales = fc1_w_scales.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_scales = fc1_w_scales.view(group_size, fc1_weight_shape[0] // 128, 4, 32, fc1_weight_shape[1] // 128, 4)
         fc1_w_scales = fc1_w_scales.permute(0, 1, 4, 3, 2, 5).contiguous()  # Convert to swizzled layout
@@ -203,8 +194,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         swiglu_in = fc1_kernel_out["c_tensor"]
         swiglu_in = swiglu_in.permute(2, 0, 1)
         swiglu_in = swiglu_in.view(in_shape[0], fc1_weight_shape[0] // 64, 2, 32)
-        swiglu_in = swiglu_in.transpose(1, 2)  # Undo interleaved SwiGLU gate/activation
-        swiglu_in = swiglu_in.flip(1)  # Undo swapped SwiGLU gate/activation
+        swiglu_in = swiglu_in.flip(2)  # Undo swapped SwiGLU gate/activation
         swiglu_in = swiglu_in.contiguous().view(in_shape[0], fc1_weight_shape[0])
         fc2_in_row_data = fc1_kernel_out["d_tensor"]
         fc2_in_row_data = fc2_in_row_data.permute(2, 0, 1)
@@ -257,7 +247,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # Save state for backward pass
         if requires_grad:
-            # FC1 state
+            # FC1
             fc1_ctx.save_for_backward(split_sizes, *fc1_xs, *fc1_ws)
             fc1_ctx.with_quantized_compute = True
             fc1_ctx.input_quantizers = fc1_input_quantizers
@@ -268,17 +258,11 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc1_ctx.input_requires_grad = input_requires_grad
             fc1_ctx.weight_requires_grad = weight_requires_grad
 
-            # SwiGLU
-            swiglu_ctx.save_for_backward(swiglu_in)
+            # Scaled SwiGLU
+            swiglu_ctx.save_for_backward(swiglu_in, scales)
+            swiglu_ctx.input_requires_grad = True
+            swiglu_ctx.extra_input_requires_grad = True
             swiglu_ctx.dtype = dtype
-            swiglu_ctx.prev_op_grad_output_quantizer = None
-
-            # Scale
-            scale_ctx.save_for_backward(fc2_out, scales)
-            scale_ctx.input_shape = fc2_out.size()
-            scale_ctx.extra_input_shape = scales_shape
-            scale_ctx.input_requires_grad = True
-            scale_ctx.extra_input_requires_grad = scales.requires_grad
 
             # FC2 state
             fc2_ctx.save_for_backward(split_sizes, *fc2_xs, *fc2_ws)
@@ -291,7 +275,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc2_ctx.input_requires_grad = input_requires_grad
             fc2_ctx.weight_requires_grad = weight_requires_grad
 
-        return fc2_out, [(), (), (), ()]
+        return fc2_out, [(), (), ()]
 
 def fuse_forward_ops(
     ops: list[FusibleOperation],
@@ -323,28 +307,29 @@ def fuse_forward_ops(
 
     # Scan through ops, fusing if possible
     out = []
-    window, ops = ops[:4], ops[4:]
-    while len(window) == 4:
+    window, ops = ops[:3], ops[3:]
+    while len(window) == 3:
 
         # Check if window matches pattern
         matches_pattern = True
         if not (
             isinstance(window[0], GroupedLinear)
-            and isinstance(window[1], SwiGLU)
-            and isinstance(window[2], MultiplyExtraInput)
-            and isinstance(window[3], GroupedLinear)
+            and isinstance(window[1], ScaledSwiGLU)
+            and isinstance(window[2], GroupedLinear)
         ):
             matches_pattern = False
-        elif window[0].has_bias or window[3].has_bias:
+        elif window[0].has_bias or window[2].has_bias:
             matches_pattern = False
-        elif window[0].group_size != window[3].group_size:
+        elif window[0].group_size != window[2].group_size:
             matches_pattern = False
         elif (
             window[0].in_features % 256 != 0
             or window[0].out_features % 256 != 0
-            or window[3].in_features % 256 != 0
-            or window[3].out_features % 256 != 0
+            or window[2].in_features % 256 != 0
+            or window[2].out_features % 256 != 0
         ):
+            matches_pattern = False
+        elif window[1].gate_interleave_size != 32:
             matches_pattern = False
 
         if matches_pattern:
@@ -352,19 +337,18 @@ def fuse_forward_ops(
             op = ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(
                 fc1=window[0],
                 swiglu=window[1],
-                scale=window[2],
-                fc2=window[3],
+                fc2=window[2],
             )
             window = [op]
         else:
             # Shift window if window doesn't match pattern
-            out.extend(window[:-3])
-            window = window[-3:]
+            out.extend(window[:-2])
+            window = window[-2:]
 
         # Adjust window to expected size
-        out.extend(window[:-4])
-        window = window[-4:]
-        while ops and len(window) < 4:
+        out.extend(window[:-3])
+        window = window[-3:]
+        while ops and len(window) < 3:
             window.append(ops[0])
             ops = ops[1:]
 
