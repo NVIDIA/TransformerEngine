@@ -90,9 +90,12 @@ def test_custom_recipe_sanity(module_type):
 
     # Single factory: map roles to quantizers
     def quantizer_factory(role):
-        if role in ("linear_input", "linear_weight", "linear_output"):
+        if ":" not in role:
+            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
+        bucket, _ = role.split(":", 1)
+        if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role in ("linear_grad_output", "linear_grad_input"):
+        if bucket in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -127,9 +130,12 @@ def test_custom_recipe_grouped_linear_sanity():
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     def quantizer_factory(role):
-        if role in ("linear_input", "linear_weight", "linear_output"):
+        if ":" not in role:
+            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
+        bucket, _ = role.split(":", 1)
+        if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role in ("linear_grad_output", "linear_grad_input"):
+        if bucket in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -189,9 +195,12 @@ def test_custom_recipe_matches_current_scaling():
 
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
     def quantizer_factory(role):
-        if role in ("linear_input", "linear_weight", "linear_output"):
+        if ":" not in role:
+            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
+        bucket, _ = role.split(":", 1)
+        if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role in ("linear_grad_output", "linear_grad_input"):
+        if bucket in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -246,9 +255,12 @@ def test_custom_recipe_ops_linear_2_1_layout():
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     def quantizer_factory(role):
-        if role in ("linear_input", "linear_weight", "linear_output"):
+        if ":" not in role:
+            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
+        bucket, _ = role.split(":", 1)
+        if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role in ("linear_grad_output", "linear_grad_input"):
+        if bucket in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -278,19 +290,22 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
 
     # Counters per role
     counts = {
-        "linear_input": 0,
-        "linear_weight": 0,
-        "linear_output": 0,
-        "linear_grad_output": 0,
-        "linear_grad_input": 0,
+        "input:linear": 0,
+        "weight:linear": 0,
+        "output:linear": 0,
+        "grad_output:linear": 0,
+        "grad_input:linear": 0,
     }
 
     def quantizer_factory(role):
         if role in counts:
             counts[role] += 1
-        if role in ("linear_input", "linear_weight", "linear_output"):
+        if ":" not in role:
+            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
+        bucket, _ = role.split(":", 1)
+        if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
-        if role in ("linear_grad_output", "linear_grad_input"):
+        if bucket in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device=torch.device("cuda"))
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
 
@@ -304,11 +319,11 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     loss.backward()
 
     # Single GEMM: forward should request input, weight, output; backward grad_output, grad_input
-    assert counts["linear_input"] == 1
-    assert counts["linear_weight"] == 1
-    assert counts["linear_output"] == 1
-    assert counts["linear_grad_output"] == 1
-    assert counts["linear_grad_input"] == 1
+    assert counts["input:linear"] == 1
+    assert counts["weight:linear"] == 1
+    assert counts["output:linear"] == 1
+    assert counts["grad_output:linear"] == 1
+    assert counts["grad_input:linear"] == 1
 
 
 def test_factories_return_distinct_instances_and_buffers():

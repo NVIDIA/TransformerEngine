@@ -80,31 +80,34 @@ def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bo
     """
 
     def factory(role):
-        if role == "linear_input":
+        if ":" not in role:
+            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
+        bucket, _ = role.split(":", 1)
+        if bucket == "input":
             return quantization_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
                 with_rht=with_rht,
             )
-        elif role == "linear_weight":
+        elif bucket == "weight":
             return quantization_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(16, 16) if with_2d_quantization else (1, 16),
                 pow_2_scales=False,
                 with_rht=False,
             )
-        elif role == "linear_output":
+        elif bucket == "output":
             # Output quantization not used
             return None
-        elif role == "linear_grad_output":
+        elif bucket == "grad_output":
             return quantization_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
                 with_rht=with_rht,
             )
-        elif role == "linear_grad_input":
+        elif bucket == "grad_input":
             # Grad input quantization not used
             return None
         else:
