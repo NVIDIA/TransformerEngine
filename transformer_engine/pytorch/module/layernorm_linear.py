@@ -1158,9 +1158,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
-        name: str = None,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -1179,7 +1179,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.symmetric_ar_type = symmetric_ar_type
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
-        self.name = name
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1508,10 +1507,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             ).is_fp8_ubuf():
                 fp8_grad = True
 
-        with self.prepare_forward(
+        inp = self.prepare_forward(
             inp, allow_non_contiguous=False  # removed .contiguous from inside the layer
-        ) as inp:
+        )
 
+        try:
             # Get concatenated weight and bias tensors
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
@@ -1589,6 +1589,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 non_tensor_args,
             )
+
+        finally:
+            self.end_forward()
 
         if self.return_layernorm_output:
             out, ln_out = out

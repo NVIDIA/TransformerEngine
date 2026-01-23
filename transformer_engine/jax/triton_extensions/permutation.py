@@ -65,8 +65,6 @@ class RowIdMapPass1Primitive(BasePrimitive):
     @staticmethod
     def abstract(routing_map_aval, *, num_tokens, num_experts, block_size):
         """Shape/dtype inference for pass 1."""
-        del block_size  # Only affects grid, not output shape
-
         assert routing_map_aval.shape == (
             num_tokens,
             num_experts,
@@ -75,7 +73,7 @@ class RowIdMapPass1Primitive(BasePrimitive):
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
         workspace_shape = (
             num_experts,
-            triton.cdiv(num_tokens, DEFAULT_BLOCK_SIZE),
+            triton.cdiv(num_tokens, block_size),
         )
 
         return (
@@ -134,9 +132,10 @@ class RowIdMapPass1Primitive(BasePrimitive):
             desc="RowIdMapPass1.row_id_map_sharding",
         )
         # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so it must be sharded on the same axis as tokens
         workspace_sharding = NamedSharding(
             mesh,
-            PartitionSpec(None, None),
+            PartitionSpec(None, routing_map_spec[0]),
             desc="RowIdMapPass1.workspace_sharding",
         )
         return [row_id_map_sharding, workspace_sharding]
@@ -156,9 +155,11 @@ class RowIdMapPass1Primitive(BasePrimitive):
             PartitionSpec(routing_map_spec[0], None),
             desc="RowIdMapPass1.row_id_map_sharding",
         )
+        # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so it must be sharded on the same axis as tokens
         workspace_sharding = NamedSharding(
             mesh,
-            PartitionSpec(None, None),
+            PartitionSpec(None, routing_map_spec[0]),
             desc="RowIdMapPass1.workspace_sharding",
         )
         out_shardings = [row_id_map_sharding, workspace_sharding]
@@ -186,7 +187,8 @@ class RowIdMapPass1Primitive(BasePrimitive):
         # Note: row_id_cols != experts since it's num_experts * 2 + 1
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
         # workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
-        workspace_spec = (f"{prefix}_experts", f"{prefix}_ws_blocks")
+        # Second dim depends on num_tokens, so use same factor to ensure same sharding
+        workspace_spec = (f"{prefix}_experts", f"{prefix}_tokens")
         return SdyShardingRule((input_spec,), (row_id_map_spec, workspace_spec))
 
 
@@ -208,10 +210,9 @@ class RowIdMapPass2Primitive(BasePrimitive):
     def abstract(row_id_map_aval, workspace_aval, *, num_tokens, num_experts, block_size):
         """Shape/dtype inference for pass 2 (in-place operation)."""
         del row_id_map_aval, workspace_aval
-        del block_size
 
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
-        workspace_shape = (num_experts, triton.cdiv(num_tokens, DEFAULT_BLOCK_SIZE))
+        workspace_shape = (num_experts, triton.cdiv(num_tokens, block_size))
 
         return (
             jax.core.ShapedArray(row_id_map_shape, jnp.int32),
@@ -270,9 +271,11 @@ class RowIdMapPass2Primitive(BasePrimitive):
             PartitionSpec(*row_id_map_spec),
             desc="RowIdMapPass2.row_id_map_sharding",
         )
+        # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so it must be sharded on the same axis as tokens
         workspace_sharding = NamedSharding(
             mesh,
-            PartitionSpec(None, None),
+            PartitionSpec(None, row_id_map_spec[0]),
             desc="RowIdMapPass2.workspace_sharding",
         )
         return [row_id_map_sharding, workspace_sharding]
@@ -292,9 +295,11 @@ class RowIdMapPass2Primitive(BasePrimitive):
             PartitionSpec(*row_id_map_spec),
             desc="RowIdMapPass2.row_id_map_sharding",
         )
+        # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so it must be sharded on the same axis as tokens
         workspace_sharding = NamedSharding(
             mesh,
-            PartitionSpec(None, None),
+            PartitionSpec(None, row_id_map_spec[0]),
             desc="RowIdMapPass2.workspace_sharding",
         )
         out_shardings = [row_id_map_sharding, workspace_sharding]
@@ -317,7 +322,9 @@ class RowIdMapPass2Primitive(BasePrimitive):
         del num_tokens, num_experts, block_size, mesh, value_types, result_types
         prefix = "RowIdMapPass2"
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_cols")
-        workspace_spec = (f"{prefix}_ws_experts", f"{prefix}_ws_blocks")
+        # workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so use same factor to ensure same sharding
+        workspace_spec = (f"{prefix}_ws_experts", f"{prefix}_tokens")
         return SdyShardingRule((row_id_map_spec, workspace_spec), (row_id_map_spec, workspace_spec))
 
 

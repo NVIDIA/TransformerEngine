@@ -35,6 +35,12 @@ inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   return cols % alignment_requirement == 0;
 }
 
+__device__ __forceinline__ unsigned char *align_smem_ptr_per_TMA_requirements(unsigned char *p) {
+  size_t addr = reinterpret_cast<size_t>(p);
+  addr = (addr + TMA_SHMEM_ALIGNMENT - 1) & ~(TMA_SHMEM_ALIGNMENT - 1);
+  return reinterpret_cast<unsigned char *>(addr);
+}
+
 namespace kernel {
 
 constexpr size_t THREADS_PER_BLOCK = 256;

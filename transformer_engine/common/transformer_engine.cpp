@@ -454,9 +454,9 @@ class TensorAllocator {
   }
 
   void Free(NVTETensor t) {
-    std::lock_guard<std::mutex> lock(mutex);
     uintptr_t index = reinterpret_cast<uintptr_t>(t);
     if (index == 0) return;
+    std::lock_guard<std::mutex> lock(mutex);
     NVTE_CHECK(index <= memory.size(), "Invalid tensor.");
     free_list.push_back(index);
     // Clean up
@@ -564,9 +564,9 @@ class GroupedTensorAllocator {
   }
 
   void Free(NVTEGroupedTensor t) {
-    std::lock_guard<std::mutex> lock(mutex);
     uintptr_t index = reinterpret_cast<uintptr_t>(t);
     if (index == 0) return;
+    std::lock_guard<std::mutex> lock(mutex);
     NVTE_CHECK(index <= memory.size(), "Invalid grouped tensor.");
     free_list.push_back(index);
     // Clean up
