@@ -1787,7 +1787,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         zero_centered_gamma: bool = False,
         device: Union[torch.device, str] = "cuda",
         ub_overlap_ag: bool = False,
-        name: str = None,
+        name: Optional[str] = None,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,
         ub_bulk_dgrad: bool = False,
@@ -1796,7 +1796,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         checkpoint: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
@@ -1827,7 +1827,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 for use_fp8 in [False, True]
             )
         )
-        self.name = name
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
@@ -2047,8 +2046,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
                 fp8_output = True
 
-        with self.prepare_forward(inp, num_gemms=2) as inp:
+        inp = self.prepare_forward(inp, num_gemms=2)
 
+        try:
             quantizers = (
                 self._get_quantizers(fp8_output, is_grad_enabled)
                 if not debug
@@ -2087,7 +2087,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
             # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
             if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
-                self.bias_gelu_nvfusion = False
+                self.fast_setattr("bias_gelu_nvfusion", False)
 
             if is_grad_enabled:
                 fwd_fn = _LayerNormMLP.apply
@@ -2156,6 +2156,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 non_tensor_args,
             )
+
+        finally:
+            self.end_forward()
 
         if self.return_layernorm_output:
             out, ln_out = out
