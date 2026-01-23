@@ -23,9 +23,13 @@ def current_scaling_ref_quantizer_factory(role):
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
-    if role in ("linear_input", "linear_weight"):
+    if ":" not in role:
+        raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
+    bucket, _ = role.split(":", 1)
+
+    if bucket in ("input", "weight"):
         dtype = torch.float8_e4m3fn
-    elif role in ("linear_output", "linear_grad_output"):
+    elif bucket in ("output", "grad_output"):
         dtype = torch.float8_e5m2
     else:
         return None
