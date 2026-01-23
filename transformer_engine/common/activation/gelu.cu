@@ -33,6 +33,19 @@ void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor activati
       input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
+void nvte_group_quantize_dbias_dgelu(const NVTEGroupedTensor input, const NVTEGroupedTensor activation_input,
+                                     NVTEGroupedTensor output, NVTETensor dbias, NVTETensor workspace,
+                                     cudaStream_t stream) {
+  NVTE_API_CALL(nvte_quantize_dbias_dgelu);
+  using namespace transformer_engine;
+
+  constexpr bool IS_DBIAS = true;
+  constexpr bool IS_DACT = true;
+
+  dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dgelu<fp32, fp32>>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
+}
+
 void nvte_geglu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_geglu);
   using namespace transformer_engine;

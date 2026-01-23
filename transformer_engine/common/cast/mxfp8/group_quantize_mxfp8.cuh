@@ -4,12 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file quantize_grouped_mxfp8.cuh
+/*! \file group_quantize_mxfp8.cuh
  *  \brief CUDA kernels to quantize grouped tensors to MXFP8.
  */
 
-#ifndef TRANSFORMER_ENGINE_QUANTIZE_GROUPED_MXFP8_CUH_
-#define TRANSFORMER_ENGINE_QUANTIZE_GROUPED_MXFP8_CUH_
+#ifndef TRANSFORMER_ENGINE_GROUP_QUANTIZE_MXFP8_CUH_
+#define TRANSFORMER_ENGINE_GROUP_QUANTIZE_MXFP8_CUH_
 
 #include <cuda.h>
 #include <cudaTypedefs.h>
@@ -25,7 +25,7 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
-namespace quantize_grouped_kernel {
+namespace group_quantize_kernel {
 
 constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
 __device__ alignas(128) CUtensorMap g_tensor_maps_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
@@ -226,7 +226,7 @@ __device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tenso
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING>
-__global__ void __launch_bounds__(THREADS_PER_CHUNK) quantize_grouped_mxfp8_kernel(
+__global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input_static,
     const __grid_constant__ CUtensorMap tensor_map_act_input_static,
     const __grid_constant__ CUtensorMap tensor_map_output_rowwise_static,
@@ -724,14 +724,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) quantize_grouped_mxfp8_kern
   destroy_barriers<STAGES>(mbar, leading_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-}  // namespace quantize_grouped_kernel
+}  // namespace group_quantize_kernel
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
-void quantize_grouped(const GroupedTensor *input, const GroupedTensor *activations,
-                      const Tensor *noop, GroupedTensor *output, Tensor *dbias, Tensor *workspace,
-                      cudaStream_t stream) {
-  using namespace quantize_grouped_kernel;
+void group_quantize(const GroupedTensor *input, const GroupedTensor *activations,
+                    const Tensor *noop, GroupedTensor *output, Tensor *dbias, Tensor *workspace,
+                    cudaStream_t stream) {
+  using namespace group_quantize_kernel;
 
   checkCuDriverContext(stream);
 
@@ -765,6 +765,14 @@ void quantize_grouped(const GroupedTensor *input, const GroupedTensor *activatio
              "Number of input and output tensors must be same.");
   NVTE_CHECK(input->has_data(), "Cannot quantize tensor without rowwise data.");
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
+
+  if (IS_DACT) {
+    NVTE_CHECK(activations->has_data(), "Activations tensor must have data.");
+    NVTE_CHECK(input->num_tensors == activations->num_tensors,
+              "Number of grad and activations tensors must be same.");
+    NVTE_CHECK(input->dtype() == activations->dtype(),
+               "Grad and activations tensors must have the same type.");
+  }
 
   const size_t num_tensors = input->num_tensors;
   NVTE_CHECK(
@@ -879,21 +887,21 @@ void quantize_grouped(const GroupedTensor *input, const GroupedTensor *activatio
 
           const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
-          auto kernel = quantize_grouped_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
+          auto kernel = group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
                                                       OType, true, true>;
           switch (scaling_type) {
             case ScalingType::ROWWISE: {
-              kernel = quantize_grouped_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
+              kernel = group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
                                                      OType, true, false>;
               break;
             }
             case ScalingType::COLWISE: {
-              kernel = quantize_grouped_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
+              kernel = group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
                                                      OType, false, true>;
               break;
             }
             case ScalingType::BIDIMENSIONAL: {
-              kernel = quantize_grouped_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
+              kernel = group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
                                                      OType, true, true>;
               break;
             }
@@ -942,4 +950,4 @@ void quantize_grouped(const GroupedTensor *input, const GroupedTensor *activatio
 }  // namespace dispatch
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_QUANTIZE_GROUPED_MXFP8_CUH_
+#endif  // TRANSFORMER_ENGINE_GROUP_QUANTIZE_MXFP8_CUH_

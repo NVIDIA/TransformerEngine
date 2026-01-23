@@ -16,7 +16,6 @@
 #include "../utils.cuh"
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
-#include "dispatch/quantize_grouped.cuh"
 #include "transformer_engine/transpose.h"
 
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
@@ -27,13 +26,13 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
 }
 
-void nvte_quantize_grouped(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                            cudaStream_t stream) {
-  NVTE_API_CALL(nvte_quantize_grouped);
+  NVTE_API_CALL(nvte_group_quantize);
   using namespace transformer_engine;
 
   constexpr bool IS_ACT = false;
-  dispatch::quantize_grouped_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -70,16 +69,16 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
       input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
-void nvte_quantize_dbias_grouped(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                                  NVTETensor dbias, NVTETensor workspace, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_quantize_dbias_grouped);
+  NVTE_API_CALL(nvte_group_quantize_dbias);
   using namespace transformer_engine;
 
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = false;
   constexpr const NVTEGroupedTensor activation_input = nullptr;
 
-  dispatch::quantize_grouped_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
+  dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
       input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 

@@ -58,7 +58,8 @@ void compute_ref(const ProcessingMethod processing_method,
                  const size_t rows,
                  const size_t cols,
                  const size_t scales_stride_rowwise,
-                 const size_t scales_stride_colwise)
+                 const size_t scales_stride_colwise,
+                 const bool is_single_tensor)
 {
     const size_t tile_size_Y = 32;
     const size_t tile_size_X = 32;
@@ -93,18 +94,18 @@ void compute_ref(const ProcessingMethod processing_method,
                     const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
 
                     float elt = static_cast<float>(input[idx]);
-                    // if (processing_method == ProcessingMethod::CAST_DBIAS) {
-                    //     // grad is the input
-                    //     elt = static_cast<float>(grad[idx]);
-                    // }
+                    if (processing_method == ProcessingMethod::CAST_DBIAS) {
+                        // grad is the input
+                        elt = static_cast<float>(grad[idx]);
+                    }
                     if (processing_method != ProcessingMethod::CAST_ONLY
                         && processing_method != ProcessingMethod::CAST_DBIAS) {
                         elt = OP(elt);
                     }
-                    // if (processing_method == ProcessingMethod::CAST_DACT ||
-                    //     processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                    //     elt *= static_cast<float>(grad[idx]);
-                    // }
+                    if (processing_method == ProcessingMethod::CAST_DACT ||
+                        processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
+                        elt *= static_cast<float>(grad[idx]);
+                    }
                     thread_dbias[j] += elt;
 
                     // Numerical truncation: after downcast to InputType (BF16/FP16), upcast it back to FP32
@@ -167,9 +168,12 @@ void compute_ref(const ProcessingMethod processing_method,
             }
         }
     }
-    // for (size_t j = 0; j < cols; ++j) {
-    //     output_dbias[j] = static_cast<InputType>(output_dbias_fp32[j]);
-    // }
+
+    if (is_single_tensor) {
+        for (size_t j = 0; j < cols; ++j) {
+            output_dbias[j] = static_cast<InputType>(output_dbias_fp32[j]);
+        }
+    }
 }
 
 template <typename T>
@@ -252,6 +256,7 @@ void performTest(const ProcessingMethod processing_method,
     const size_t elts_num = rows * cols;
     const size_t sfs_num = (rows * cols) / 32;
 
+    const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS) || (shape_rep == VARYING_FIRST_DIM);
     std::vector<size_t> scales_shape = {sfs_num};
 
     std::mt19937 gen;
@@ -269,6 +274,8 @@ void performTest(const ProcessingMethod processing_method,
     std::vector<OutputType> out_data_colwise_ref(colwise ? elts_num : 0);
     std::vector<fp8e8m0> out_scales_rowwise_ref(rowwise ? sfs_num : 0);
     std::vector<fp8e8m0> out_scales_colwise_ref(colwise ? sfs_num : 0);
+
+    std::vector<InputType> ref_output_dbias(is_single_tensor ? cols : 0);
 
     for (size_t i = 0; i < elts_num; ++i) {
         const float val = dis(gen);
@@ -342,7 +349,7 @@ void performTest(const ProcessingMethod processing_method,
     NVTEBasicTensor grad_data_tensor = {grad_data_d, static_cast<NVTEDType>(itype), logical_shape_};
     NVTEBasicTensor in_data_tensor = {in_data_d, static_cast<NVTEDType>(itype), logical_shape_};
     nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &in_data_tensor);
-    nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &in_data_tensor);
+    nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &grad_data_tensor);
 
     if ((shape_rep == VARYING_FIRST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
         NVTEBasicTensor first_dims_tensor = {first_dims_d, kNVTEInt64, first_dims_shape_};
@@ -392,43 +399,71 @@ void performTest(const ProcessingMethod processing_method,
     Tensor output_dbias("output_dbias", std::vector<size_t>{ cols }, itype);
 
     // Reference (CPU)
-    for (size_t t = 0; t < num_tensors; ++t) {
-        const size_t M = first_dims_h[t];
-        const size_t K = last_dims_h[t];
-
-        const size_t scales_stride_rowwise = K / 32;
-        const size_t scales_stride_colwise = K;
-        const size_t data_offset = offsets_h[t];
-        const size_t sfs_offset = data_offset / 32;
-
-        const InputType* const grad_ptr = grad_data.data() + data_offset;
-        const InputType* const in_ptr = in_data.data() + data_offset;
-        OutputType* const out_data_rowwise_ptr = out_data_rowwise_ref.data() + data_offset;
-        OutputType* const out_data_colwise_ptr = out_data_colwise_ref.data() + data_offset;
-        fp8e8m0* const out_scales_rowwise_ptr = out_scales_rowwise_ref.data() + sfs_offset;
-        fp8e8m0* const out_scales_colwise_ptr = out_scales_colwise_ref.data() + sfs_offset;
+    if (is_single_tensor) {
+        const size_t scales_stride_rowwise = cols / 32;
+        const size_t scales_stride_colwise = cols;
 
         compute_ref<InputType, OutputType>(
-            processing_method, OP, rowwise, colwise, in_ptr, grad_ptr,
-            out_data_rowwise_ptr, out_data_colwise_ptr,
-            out_scales_rowwise_ptr, out_scales_colwise_ptr,
-            /*output_dbias=*/ nullptr, M, K,
+            processing_method, OP, rowwise, colwise, in_data.data(), grad_data.data(),
+            out_data_rowwise_ref.data(), out_data_colwise_ref.data(),
+            out_scales_rowwise_ref.data(), out_scales_colwise_ref.data(),
+            ref_output_dbias.data(), rows, cols,
             scales_stride_rowwise,
-            scales_stride_colwise);
+            scales_stride_colwise, 
+            is_single_tensor);
+    } else {
+        for (size_t t = 0; t < num_tensors; ++t) {
+            const size_t M = first_dims_h[t];
+            const size_t K = last_dims_h[t];
+    
+            const size_t scales_stride_rowwise = K / 32;
+            const size_t scales_stride_colwise = K;
+            const size_t data_offset = offsets_h[t];
+            const size_t sfs_offset = data_offset / 32;
+    
+            const InputType* const grad_ptr = grad_data.data() + data_offset;
+            const InputType* const in_ptr = in_data.data() + data_offset;
+            OutputType* const out_data_rowwise_ptr = out_data_rowwise_ref.data() + data_offset;
+            OutputType* const out_data_colwise_ptr = out_data_colwise_ref.data() + data_offset;
+            fp8e8m0* const out_scales_rowwise_ptr = out_scales_rowwise_ref.data() + sfs_offset;
+            fp8e8m0* const out_scales_colwise_ptr = out_scales_colwise_ref.data() + sfs_offset;
+    
+            compute_ref<InputType, OutputType>(
+                processing_method, OP, rowwise, colwise, in_ptr, grad_ptr,
+                out_data_rowwise_ptr, out_data_colwise_ptr,
+                out_scales_rowwise_ptr, out_scales_colwise_ptr,
+                ref_output_dbias.data(), M, K,
+                scales_stride_rowwise,
+                scales_stride_colwise, 
+                is_single_tensor);
+        }
     }
 
     // GPU
     Tensor workspace;
-
     switch (processing_method) {
         case ProcessingMethod::CAST_ONLY: {
-            nvte_quantize_grouped(in_group_tensor, out_group_tensor, 0);
+            nvte_group_quantize(in_group_tensor, out_group_tensor, 0);
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
-            nvte_quantize_dbias_grouped(grad_group_tensor, out_group_tensor, output_dbias.data(), workspace.data(), 0);
+            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias.data(), workspace.data(), 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-            nvte_quantize_dbias_grouped(grad_group_tensor, out_group_tensor, output_dbias.data(), workspace.data(), 0);
+            nvte_group_quantize_dbias(grad_group_tensor, out_group_tensor, output_dbias.data(), workspace.data(), 0);
+            break;
+        }
+        case ProcessingMethod::CAST_DBIAS_DACT: {
+            auto nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dgelu;
+            // if (OP == &dsilu)       { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dsilu; }
+            // else if (OP == &drelu)  { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_drelu; }
+            // else if (OP == &dqgelu) { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dqgelu; }
+            // else if (OP == &dsrelu) { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dsrelu; }
+
+            nvte_group_quantize_dbias_dact(grad_group_tensor, in_group_tensor, out_group_tensor,
+                                           output_dbias.data(), workspace.data(), 0);
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
+            nvte_group_quantize_dbias_dact(grad_group_tensor, in_group_tensor, out_group_tensor,
+                                           output_dbias.data(), workspace.data(), 0);
             break;
         }
     }
@@ -471,6 +506,19 @@ void performTest(const ProcessingMethod processing_method,
                                         out_data_colwise_h.data(), rows, cols, false, mismatches_elts);
     }
 
+    if (processing_method == ProcessingMethod::CAST_DBIAS
+        || processing_method == ProcessingMethod::CAST_DBIAS_DACT)
+    {
+        auto [atol_dbias, rtol_dbias] = getTolerances(itype);
+        if (itype == DType::kFloat32) {
+            atol_dbias = 1e-4;
+            rtol_dbias *= sqrt(static_cast<double>(rows)) ;
+        } else {
+            rtol_dbias *= 4;
+        }
+        compareResults("output_dbias", output_dbias, ref_output_dbias.data(), true, atol_dbias, rtol_dbias);
+    }
+
     cudaFree(grad_data_d);
     cudaFree(in_data_d);
     cudaFree(first_dims_d);
@@ -488,16 +536,15 @@ void performTest(const ProcessingMethod processing_method,
 
 std::vector<ProcessingMethod> processing_methods = {
     ProcessingMethod::CAST_ONLY,
-    // ProcessingMethod::CAST_DBIAS,
-    // ProcessingMethod::CAST_DBIAS_DACT,
+    ProcessingMethod::CAST_DBIAS,
+    ProcessingMethod::CAST_DBIAS_DACT,
     // ProcessingMethod::CAST_DACT,
     // ProcessingMethod::CAST_ACT,
 };
 
-// Only GeLU activation tests are supported
 std::vector<ActivationKind> activation_kinds = {
     ActivationKind::Identity,
-    // ActivationKind::GeLU,
+    ActivationKind::GeLU,
     // ActivationKind::SiLU,
     // ActivationKind::ReLU,
     // ActivationKind::QGeLU,
@@ -553,8 +600,10 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     const std::vector<size_t> input_config = std::get<3>(GetParam());
     const DType input_type = std::get<4>(GetParam());
     const DType output_type = std::get<5>(GetParam());
-
+    
     const ShapeRepresentation shape_rep = static_cast<ShapeRepresentation>(input_config[0]);
+    const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS) || (shape_rep == VARYING_FIRST_DIM);
+
     const size_t num_tensors = input_config[1];
     const std::vector<size_t> logical_shape = {input_config[2], input_config[3]};
     std::vector<size_t> first_dims(num_tensors);
@@ -589,6 +638,11 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
             GTEST_SKIP();
         }
     }
+    // Skips DBias tests if last dimension of tensors variates
+    if ((processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT)
+        && !is_single_tensor) {
+        GTEST_SKIP();
+    }
 
     // Skips non Act tests if the Activation type is not an identity
     if ((processing_method == ProcessingMethod::CAST_ONLY || processing_method == ProcessingMethod::CAST_DBIAS)
@@ -611,6 +665,25 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     }
 
     auto OP = &identity;
+
+    if (processing_method == ProcessingMethod::CAST_ACT) {
+        switch (activation) {
+            case ActivationKind::GeLU: OP = &gelu; break;
+            // case ActivationKind::SiLU: OP = &silu; break;
+            // case ActivationKind::ReLU: OP = &relu; break;
+            // case ActivationKind::QGeLU: OP = &qgelu; break;
+            // case ActivationKind::SReLU: OP = &srelu; break;
+        }
+    } else if (processing_method == ProcessingMethod::CAST_DACT
+               || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
+        switch (activation) {
+            case ActivationKind::GeLU: OP = &dgelu; break;
+            // case ActivationKind::SiLU: OP = &dsilu; break;
+            // case ActivationKind::ReLU: OP = &drelu; break;
+            // case ActivationKind::QGeLU: OP = &dqgelu; break;
+            // case ActivationKind::SReLU: OP = &dsrelu; break;
+        }
+    }
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
@@ -657,9 +730,7 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
         const ProcessingMethod method = std::get<0>(info.param);
         std::string name = to_string(method);
-        if (method != ProcessingMethod::CAST_ONLY && method != ProcessingMethod::CAST_DBIAS) {
-            name += "X" + to_string(std::get<1>(info.param));
-        }
+        name += "X" + to_string(std::get<1>(info.param));
 
         switch (std::get<2>(info.param)) {
             case ScalingDirection::ROWWISE: name += "_ROWWISE"; break;
