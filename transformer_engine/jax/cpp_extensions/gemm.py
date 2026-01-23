@@ -2128,8 +2128,13 @@ def grouped_gemm(
 
     # Compute group_offset as cumulative sum of group_sizes, starting with 0
     group_offset = jnp.concatenate([jnp.array([0], dtype=jnp.int32), jnp.cumsum(group_sizes, dtype=jnp.int32)[:-1]])
-    group_offset_lhs = group_offset * K_lhs # Offset is by number of elements total, not number of rows
-    group_offset_out = group_offset * N     # Offset is by number of elements total, not number of rows
+    if is_grouped_dense_wgrad:
+        group_offset_lhs = group_offset * M # Offset is by number of elements total, not number of rows
+        # HACK: this is really the rhs in this case
+        group_offset_out = group_offset * N # Offset is by number of elements total, not number of rows
+    else:  
+        group_offset_lhs = group_offset * K_lhs # Offset is by number of elements total, not number of rows
+        group_offset_out = group_offset * N     # Offset is by number of elements total, not number of rows
 
     # jax.debug.print("group_sizes: {}, group_offset: {}", group_sizes, group_offset)
     # jax.debug.print("M={}, jnp.sum(group_sizes)={}, N={}, K_lhs={}", M, jnp.sum(group_sizes), N, K_lhs)

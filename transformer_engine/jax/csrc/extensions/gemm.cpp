@@ -657,6 +657,46 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   // printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0] / 2, lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
 
+  if (is_grouped_dense_wgrad) {
+    //// RHS
+    NVTEShape rhsShape{.data={k, n}, .ndim=2};
+    // rhs_is_trans = true;
+    auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
+    rhs_tensor.set_group_info(group_sizes, group_offset_out);
+
+    //// LHS
+    NVTEShape lhsShape{.data={m, k}, .ndim=2};
+    lhs_is_trans = false;
+    auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
+    lhs_tensor.set_group_info(group_sizes, group_offset_lhs);
+
+    //// OUTPUT
+    NVTEShape outShape{.data={num_gemms*m, n}, .ndim=2};
+    auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
+
+    // printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
+    //        rhsShape.data[0], rhsShape.data[1],
+    //        lhsShape.data[0], lhsShape.data[1],
+    //        outShape.data[0], outShape.data[1]);
+
+    // printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
+
+    nvte_grouped_gemm(
+      rhs_tensor, rhs_is_trans,
+      lhs_tensor, lhs_is_trans,
+      nullptr,
+      out_tensor,
+      alpha_tensor.data(),
+      beta_tensor.data(),
+      workspace_setup.data(),
+      workspace_cublas.data(),
+      nullptr,  // config (use defaults)
+      stream);
+    return ffi_with_cuda_error_check();
+  }
+
+  // Nominal case for FWD or DGRAD
+
   //// RHS
   NVTEShape rhsShape{.data={num_gemms*k, n}, .ndim=2};
   // rhs_is_trans = true;
