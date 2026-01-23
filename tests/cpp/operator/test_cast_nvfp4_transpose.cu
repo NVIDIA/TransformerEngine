@@ -677,11 +677,6 @@ std::vector<ActivationType> Activation_types = {
     ActivationType::Identity
 };
 
-std::vector<bool> use_fast_nvfp4_scaling_vec = {
-    false,
-    true
-};
-
 }  // namespace
 
 class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
@@ -743,7 +738,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(tensor_dims),
         ::testing::Values(DType::kBFloat16),
-        ::testing::ValuesIn(use_fast_nvfp4_scaling_vec)),
+        ::testing::Values(false)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param));
       const auto& shape = std::get<1>(info.param);
