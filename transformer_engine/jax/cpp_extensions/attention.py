@@ -70,6 +70,7 @@ __all__ = [
         "is_training",
         "max_segments_per_seq",
         "window_size",
+        "bottom_right_diagonal",
         "context_parallel_load_balanced",
         "cp_axis",
         "cp_striped_window_size",
@@ -91,6 +92,7 @@ class _FusedAttnConfig:
     is_training: bool
     max_segments_per_seq: int
     window_size: Tuple[int, int]
+    bottom_right_diagonal: bool
     context_parallel_load_balanced: bool
     cp_axis: str
     cp_striped_window_size: Tuple[int, int]  # Only for CP + Ring P2P + THD + SWA
@@ -371,6 +373,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
+        bottom_right_diagonal = config.attn_mask_type in [
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
         # prepare for the active fused-attn backend
         input_batch = reduce(operator.mul, batch_shape)
@@ -395,6 +402,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.max_segments_per_seq,
             config.window_size[0],
             config.window_size[1],
+            bottom_right_diagonal,
         )
         wkspace_aval = q_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
@@ -503,6 +511,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
             window_size_left=window_size_left,
             window_size_right=window_size_right,
+            bottom_right_diagonal=config.bottom_right_diagonal,
             softmax_type=int(config.softmax_type.value),
         )
 
@@ -813,6 +822,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             config.max_segments_per_seq,
             config.window_size[0],
             config.window_size[1],
+            config.bottom_right_diagonal,
         )
 
         dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
@@ -948,6 +958,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
             window_size_left=window_size_left,
             window_size_right=window_size_right,
+            bottom_right_diagonal=config.bottom_right_diagonal,
             softmax_type=int(config.softmax_type.value),
         )
 
@@ -1357,9 +1368,10 @@ class _FusedAttnCPWithAllGatherHelper:
 
     def get_step_config(self) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call to fused attention."""
+        adjusted_mask = self.get_adjusted_mask()
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
-            attn_mask_type=self.get_adjusted_mask(),
+            attn_mask_type=adjusted_mask,
             softmax_type=self.config.softmax_type,
             qkv_layout=self.config.qkv_layout,
             scaling_factor=self.config.scaling_factor,
@@ -1367,6 +1379,7 @@ class _FusedAttnCPWithAllGatherHelper:
             is_training=self.config.is_training,
             max_segments_per_seq=self.config.max_segments_per_seq,
             window_size=self.config.window_size,
+            bottom_right_diagonal=adjusted_mask.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
@@ -1375,9 +1388,10 @@ class _FusedAttnCPWithAllGatherHelper:
 
     def get_step_config_for_striped(self, max_seqlen, cp_size) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call (made via a striped AG primitive) to fused attention."""
+        adjusted_mask = self.get_adjusted_mask()
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
-            attn_mask_type=self.get_adjusted_mask(),
+            attn_mask_type=adjusted_mask,
             softmax_type=self.config.softmax_type,
             qkv_layout=self.config.qkv_layout,
             scaling_factor=self.config.scaling_factor,
@@ -1385,6 +1399,7 @@ class _FusedAttnCPWithAllGatherHelper:
             is_training=self.config.is_training,
             max_segments_per_seq=self.get_adjusted_max_segments_per_seq(max_seqlen, cp_size),
             window_size=self.config.window_size,
+            bottom_right_diagonal=adjusted_mask.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
@@ -2430,6 +2445,7 @@ class _FusedAttnCPWithP2PHelper:
             is_training=self.config.is_training,
             max_segments_per_seq=self.config.max_segments_per_seq,
             window_size=self.config.window_size,
+            bottom_right_diagonal=attn_mask_type.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
@@ -3418,6 +3434,7 @@ def fused_attn_fwd(
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=(-1, -1) if window_size is None else window_size,
+        bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
@@ -3590,6 +3607,7 @@ def fused_attn_bwd(
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=(-1, -1) if window_size is None else window_size,
+        bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
