@@ -433,15 +433,15 @@ JAXX_GroupedTensorWrapper::JAXX_GroupedTensorWrapper(JAXX_Scaling_Mode scaling_m
 
 void JAXX_GroupedTensorWrapper::set_rowwise(Buffer_Type const& data,
                                             std::optional<Buffer_Type> const& scale_inv) {
-  printf("set_rowwise data shape: XLA buffer shape: ");
-  for (auto dim : data.dimensions()) {
-    printf("%zu, ", dim);
-  }
-  printf("NVTEShape: ");
-  for (int i = 0; i < m_data_shape.ndim; ++i) {
-    printf("%d, ", m_data_shape.data[i]);
-  }
-  printf("\n");
+  // printf("set_rowwise data shape: XLA buffer shape: ");
+  // for (auto dim : data.dimensions()) {
+  //   printf("%zu, ", dim);
+  // }
+  // printf("NVTEShape: ");
+  // for (int i = 0; i < m_data_shape.ndim; ++i) {
+  //   printf("%d, ", m_data_shape.data[i]);
+  // }
+  // printf("\n");
   NVTEDType data_dtype = static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(data.element_type()));
   m_data_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(data.untyped_data()), data_dtype,
                                   m_data_shape};
@@ -655,7 +655,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                            convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
 
-  printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0] / 2, lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
+  // printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0] / 2, lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
 
   //// RHS
   NVTEShape rhsShape{.data={num_gemms*k, n}, .ndim=2};
@@ -673,12 +673,12 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
   out_tensor.set_group_info(group_sizes, group_offset_out);
 
-  printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
-         rhsShape.data[0], rhsShape.data[1],
-         lhsShape.data[0], lhsShape.data[1],
-         outShape.data[0], outShape.data[1]);
+  // printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
+  //        rhsShape.data[0], rhsShape.data[1],
+  //        lhsShape.data[0], lhsShape.data[1],
+  //        outShape.data[0], outShape.data[1]);
 
-  printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
+  // printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
 
   nvte_grouped_gemm(
     rhs_tensor, rhs_is_trans,
