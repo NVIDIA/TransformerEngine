@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 from collections.abc import Iterable
+import itertools
 from typing import Any, Optional
 
 import torch
@@ -264,6 +265,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             use_bias=False,
             single_output=True,
         )
+
+        # Prepare input tensors for backward pass
+        for x in itertools.chain(fc1_xs, fc2_xs):
+            x.update_usage(rowwise_usage=False, columnwise_usage=True)
 
         # Save state for backward pass
         if requires_grad:

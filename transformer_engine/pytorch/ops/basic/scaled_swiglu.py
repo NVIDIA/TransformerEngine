@@ -110,6 +110,9 @@ class ScaledSwiGLU(BasicOperation):
     ]:
         ctx = basic_op_ctxs[0]
         input_, scales = ctx.saved_tensors
+        input_ = maybe_dequantize(input_, ctx.dtype)
+        if scales is not None:
+            scales = maybe_dequantize(scales, ctx.dtype)
         grad_output = maybe_dequantize(grad_output, ctx.dtype)
 
         # Remove gate interleaving if needed
