@@ -1952,7 +1952,7 @@ class TestBasicOps:
         # Split sizes
         split_sizes = [split_alignment * i for i in range(group_size)]
         random.shuffle(split_sizes)
-        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device="cpu")
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape
@@ -3236,7 +3236,7 @@ class TestSequentialModules:
         # Split sizes
         split_sizes = [split_alignment * i for i in range(group_size)]
         random.shuffle(split_sizes)
-        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device="cpu")
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
 
         # Make input shape
         in_shape = (split_sizes.sum().item(), hidden_size)

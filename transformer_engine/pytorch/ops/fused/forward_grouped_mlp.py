@@ -94,9 +94,16 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 f"{self.__class__.__name__} got different split points for FC1 and FC2."
             )
         split_sizes = fc1_split_sizes
-        split_sizes_int = [int(s) for s in split_sizes.tolist()]
-        if len(split_sizes_int) != group_size:
-            raise ValueError(f"Expected {group_size} splits, but got {len(split_sizes_int)}.")
+        split_sizes_cpu = [int(s) for s in split_sizes.tolist()]
+        if len(split_sizes_cpu) != group_size:
+            raise ValueError(f"Expected {group_size} splits, but got {len(split_sizes_cpu)}.")
+        split_sizes = split_sizes.to(dtype=torch.int, device=device)
+        split_points = torch.zeros(
+            split_sizes.numel() + 1,
+            dtype=torch.int,
+            device=device,
+        )
+        torch.cumsum(split_sizes, 0, out=split_points[1:])
 
         # Extract post-scales from extra input
         scales = basic_op_extra_inputs[1][0]
@@ -127,7 +134,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         for quantizer in fc1_input_quantizers:
             quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             quantizer.optimize_for_gemm = True
-        fc1_xs = tex.split_quantize(fc1_x, split_sizes_int, fc1_input_quantizers)
+        fc1_xs = tex.split_quantize(fc1_x, split_sizes_cpu, fc1_input_quantizers)
 
         # Pack data tensors
         fc1_x_data = torch.cat([x._rowwise_data for x in fc1_xs])
@@ -161,13 +168,26 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
         # Kernel tile logic
-        tile_idx_to_expert_idx = []
-        cta_tile_m = 256  ### TODO ?
-        for group_idx in range(group_size):
-            num_tiles = split_sizes_int[group_idx] // cta_tile_m
-            tile_idx_to_expert_idx.extend([group_idx] * num_tiles)
-        num_non_exiting_tiles = torch.tensor([len(tile_idx_to_expert_idx)], device=device, dtype=torch.int32)
-        tile_idx_to_expert_idx = torch.tensor(tile_idx_to_expert_idx, device=device, dtype=torch.int32)
+        mma_tiler_mn = (256, 256)
+        tile_points = torch.arange(
+            0,
+            in_shape[0],
+            mma_tiler_mn[0],
+            dtype=torch.int,
+            device=device,
+        )
+        tile_idx_to_expert_idx = torch.searchsorted(
+            split_points[1:],
+            tile_points,
+            out_int32=True,
+            side="right",
+        )
+        num_non_exiting_tiles = torch.full(
+            (1,),
+            in_shape[0] // mma_tiler_mn[0],
+            dtype=torch.int,
+            device=device,
+        )
 
         # Fused kernel for FC1 + SwiGLU + post-scale
         fc1_kernel_out = grouped_gemm_swiglu_wrapper_sm100(
@@ -178,19 +198,19 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             tile_idx_to_expert_idx,
             num_non_exiting_tiles,
             torch.ones(group_size, dtype=dtype, device=device),  # alpha_tensor
-            split_sizes_int,
             torch.ones(1, dtype=dtype, device=device),  # norm_const_tensor
             scales.detach().reshape(-1, 1, 1),
+            split_points,
             acc_dtype=torch.float32,
             c_dtype=torch.bfloat16,
             d_dtype=torch.float8_e4m3fn,
             cd_major="n",
+            mma_tiler_mn=mma_tiler_mn,
             cluster_shape_mn=(2, 1),
             sf_vec_size=32,
-            sf_dtype=torch.float8_e8m0fnu,
         )
 
-        # Extract kernel outputs and construct MXFP8 tensors
+        # Unpack kernel outputs
         swiglu_in = fc1_kernel_out["c_tensor"]
         swiglu_in = swiglu_in.permute(2, 0, 1)
         swiglu_in = swiglu_in.view(in_shape[0], fc1_weight_shape[0] // 64, 2, 32)
@@ -199,25 +219,25 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2_in_row_data = fc1_kernel_out["d_tensor"]
         fc2_in_row_data = fc2_in_row_data.permute(2, 0, 1)
         fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1])
-        fc2_in_row_data = torch.split(fc2_in_row_data.contiguous(), split_sizes_int)
+        fc2_in_row_data = torch.split(fc2_in_row_data.contiguous(), split_sizes_cpu)
         fc2_in_row_scale = fc1_kernel_out["sfd_row_tensor"]
         fc2_in_row_scale = fc2_in_row_scale.permute(5, 2, 4, 0, 1, 3)
         fc2_in_row_scale = fc2_in_row_scale.view(in_shape[0], fc2_weight_shape[1] // 32)
-        fc2_in_row_scale = torch.split(fc2_in_row_scale.contiguous(), split_sizes_int)
+        fc2_in_row_scale = torch.split(fc2_in_row_scale.contiguous(), split_sizes_cpu)
         fc2_in_col_data = fc1_kernel_out["d_col_tensor"]
         fc2_in_col_data = fc2_in_col_data.permute(2, 0, 1)
         fc2_in_col_data = fc2_in_col_data.view(in_shape[0], fc2_weight_shape[1])
-        fc2_in_col_data = torch.split(fc2_in_col_data.contiguous(), split_sizes_int)
+        fc2_in_col_data = torch.split(fc2_in_col_data.contiguous(), split_sizes_cpu)
         fc2_in_col_scale = fc1_kernel_out["sfd_col_tensor"]
         fc2_in_col_scale = fc2_in_col_scale.permute(5, 2, 4, 0, 1, 3)
-        fc2_in_col_scale = torch.split(fc2_in_col_scale, [s // 128 for s in split_sizes_int], dim=2)
+        fc2_in_col_scale = torch.split(fc2_in_col_scale, [s // 128 for s in split_sizes_cpu], dim=2)
         fc2_in_col_scale = [s.contiguous().view(-1, fc2_weight_shape[1]) for s in fc2_in_col_scale]
 
         # Construct MXFP8 tensors for FC2
         fc2_xs = []
         for group_idx in range(group_size):
             x = MXFP8Tensor(
-                shape=(split_sizes_int[group_idx], fc2_weight_shape[1]),
+                shape=(split_sizes_cpu[group_idx], fc2_weight_shape[1]),
                 dtype=dtype,
                 fp8_dtype=tex.DType.kFloat8E4M3,
                 rowwise_data=fc2_in_row_data[group_idx],
@@ -239,7 +259,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             [fc2_out],
             [None] * group_size,  # quantization_params
             dtype,
-            m_splits=split_sizes_int,
+            m_splits=split_sizes_cpu,
             bias=[None] * group_size,
             use_bias=False,
             single_output=True,
