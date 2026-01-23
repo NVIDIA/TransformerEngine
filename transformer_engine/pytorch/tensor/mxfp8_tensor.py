@@ -54,6 +54,7 @@ class MXFP8Quantizer(Quantizer):
             columnwise=self.columnwise_usage,
         )
         quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
 
         return quantizer
 
@@ -156,6 +157,7 @@ class MXFP8Quantizer(Quantizer):
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
             requires_grad=requires_grad,
+            with_gemm_swizzled_scales=self.optimize_for_gemm,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -222,6 +224,7 @@ class MXFP8Quantizer(Quantizer):
             columnwise_scale_inv=None,
             fp8_dtype=fp8_dtype,
             quantizer=self,
+            with_gemm_swizzled_scales=False,
         )
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
@@ -231,6 +234,10 @@ class MXFP8Quantizer(Quantizer):
         return self.create_tensor_from_data(data, scale_inv, fake_dtype=torch.float32)
 
     def onnx_dequantize(self, tensor: Union[MXFP8TensorStorage, MXFP8Tensor]) -> torch.Tensor:
+        if tensor._with_gemm_swizzled_scales:
+            raise NotImplementedError(
+                "ONNX MXFP8 dequantization is only supported with scales in compact format."
+            )
         return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
@@ -272,9 +279,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         columnwise_scale_inv: Optional[torch.Tensor],
         fp8_dtype: TE_DType,
         quantizer: Optional[Quantizer],
+        with_gemm_swizzled_scales: bool,
         **kwargs,
     ):
-        instance = super().__new__(
+        return super().__new__(
             cls,
             rowwise_data,
             rowwise_scale_inv,
@@ -282,10 +290,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             columnwise_scale_inv,
             fp8_dtype,
             quantizer,
+            with_gemm_swizzled_scales,
             *args,
             **kwargs,
         )
-        return instance
 
     def __repr__(self, *, tensor_contents=None):
         return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize(dtype=self.dtype)})"
@@ -377,39 +385,44 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
-        # View op
         if func == aten.view.default:
             tensor = args[0]
-            data = tensor._rowwise_data
-            out_data = data.__torch_dispatch__(
-                func,
-                types,
-                [data] + list(args[1:]),
-                kwargs,
-            )
-            out_shape = out_data.size()
+            shape = args[1]
+            if len(shape) < 2 or shape[-1] != tensor.size(-1):
+                raise ValueError(
+                    f"Attempted to make view with size={tuple(shape)} "
+                    f"from MXFP8 tensor with shape={tuple(tensor.size())}."
+                )
+            rowwise_data_view = None
+            columnwise_data_view = None
+            if tensor._rowwise_data is not None:
+                rowwise_data_view = tensor._rowwise_data.view(shape)
+            if tensor._columnwise_data is not None:
+                columnwise_data_view = tensor._columnwise_data.view(shape)
             return MXFP8Tensor(
-                shape=out_shape,
+                shape=shape,
                 dtype=tensor.dtype,
-                rowwise_data=out_data,
+                rowwise_data=rowwise_data_view,
                 rowwise_scale_inv=tensor._rowwise_scale_inv,
-                columnwise_data=tensor._columnwise_data,
+                columnwise_data=columnwise_data_view,
                 columnwise_scale_inv=tensor._columnwise_scale_inv,
                 quantizer=tensor._quantizer,
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
+                with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
             )
 
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
             if isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor):
-                # Booleans to check if src has all the usages that dst needs to respect dst quantizer usages.
-                # If not, default to base class behavior.
-                rowwise_matches = src._rowwise_data is not None or dst._rowwise_data is None
-                columnwise_matches = (
-                    src._columnwise_data is not None or dst._columnwise_data is None
-                )
-                if rowwise_matches and columnwise_matches:
+                if src._rowwise_data is None and dst._rowwise_data is not None:
+                    pass
+                elif src._columnwise_data is None and dst._columnwise_data is not None:
+                    pass
+                elif src._with_gemm_swizzled_scales != dst._with_gemm_swizzled_scales:
+                    pass
+                else:
+                    # src and dst match, so we can directly copy data
                     if dst._rowwise_data is not None:
                         dst._rowwise_data.copy_(src._rowwise_data.detach(), *args[2:], **kwargs)
                         dst._rowwise_scale_inv.copy_(
@@ -424,26 +437,25 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                         )
                     return dst
 
-        # FSDP2 related functions.
         if func == aten.split.Tensor:
-            # This is called if entire model is initialized on CUDA device and
-            # then splitted. Finally the shard needed by the process is used
-            # and other splitted shards are discarded.
+            # With FSDP2, this is called if entire model is
+            # initialized on CUDA device and then splitted. Finally
+            # the shard needed by the process is used and other
+            # splitted shards are discarded.
+            tensor = args[0]
+            split_size = args[1]
             if "dim" in kwargs:
                 dim_to_split = kwargs["dim"]
             else:
                 dim_to_split = args[2] if len(args) > 2 else 0
-            tensor = args[0]
-            split_size = args[1]
-            dim0_size = tensor.size(0)
-            dimlast_size = math.prod(tensor.shape[1:])
+
+            # Fall back to high-precision if split is non-trivial
             if (
-                dim0_size % split_size != 0
-                or dim_to_split != 0
+                dim_to_split != 0
+                or tensor.size(0) % split_size != 0
                 or split_size % MXFP8_BLOCK_SCALING_SIZE != 0
-                or dimlast_size % MXFP8_BLOCK_SCALING_SIZE != 0
+                or tensor._with_gemm_swizzled_scales
             ):
-                # Handle splitting by dequantizing and splitting the hp tensor
                 return super().__torch_dispatch__(func, types, args, kwargs)
 
             out_data = []
@@ -503,28 +515,26 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     quantizer=tensor._quantizer,
                     requires_grad=False,
                     fp8_dtype=tensor._fp8_dtype,
+                    with_gemm_swizzled_scales=False,
                 )
                 for splitted_tensor_data in zip(*out_data)
             ]
+
         if func == torch.ops.aten.as_strided.default:
             # Applied on unsharded param in FSDP2. In our case, this should be a no-op
             # This is needed for the case where some MXFP8 shards need padding i.e dimension 0
             # of the unsharded param is not a multiple of the world size. If that is the case,
             # we down the dequantization route and weights are allgathered in high precision.
             # If weight doesnt need padding, this is just a no-op.
+            tensor = args[0]
             shape = args[1]
             strides = args[2]
-            tensor = args[0]
             if (
-                len(shape) != 2
-                or len(strides) != 2
-                or strides[1] != 1
-                or shape[0] != tensor.shape[0]
-                or shape[1] != tensor.shape[1]
+                len(shape) == len(strides) == 2
+                and tuple(strides) == (shape[-1], 1)
+                and tuple(shape) == tuple(tensor.size())
             ):
-                return super().__torch_dispatch__(func, types, args, kwargs)
-
-            return MXFP8Tensor.make_like(tensor)
+                return MXFP8Tensor.make_like(tensor)
 
         if func == aten.slice.Tensor:
             # FSDP2 needed function.
@@ -532,19 +542,12 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             # of the unsharded param is not a multiple of the world size. If that is the case,
             # we down the dequantization route and weights are allgathered in high precision instead.
             # If sharded weight doesnt have padding, this is just a no-op.
+            tensor = args[0]
             dim = args[1]
             start = args[2]
             length = args[3]
-            tensor = args[0]
-            if (
-                dim != 0
-                or length != tensor.shape[0]
-                or start != 0
-                or length % MXFP8_BLOCK_SCALING_SIZE != 0
-                or start % MXFP8_BLOCK_SCALING_SIZE != 0
-            ):
-                return super().__torch_dispatch__(func, types, args, kwargs)
-            return MXFP8Tensor.make_like(tensor)
+            if start == 0 and length == tensor.size(dim):
+                return MXFP8Tensor.make_like(tensor)
 
         if func == aten.new_zeros.default:
             rowwise_data = None
@@ -601,7 +604,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 quantizer=tensor._quantizer,
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
+                with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
             )
+
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
 
@@ -627,19 +632,24 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         # pylint: disable=unused-argument
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
 
+        # Get FSDP state
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+
         # Remove padding from scale inverses before allgather
         # Rowwise scale_inv should be divisible by [128,4], columnwise by [4, 128]
         rowwise_scale_inv = self._rowwise_scale_inv
         columnwise_scale_inv = self._columnwise_scale_inv
         shape = self.shape
+        if self._with_gemm_swizzled_scales:
+            raise NotImplementedError(
+                "FSDP2 is only supported for MXFP8Tensors with compact scales"
+            )
         if rowwise_scale_inv is not None:
             # Remove padding from rowwise scale_inv
             flattened_in_shape0 = math.prod(shape[:-1])
             if rowwise_scale_inv.size(0) != flattened_in_shape0:
                 rowwise_scale_inv = rowwise_scale_inv[:flattened_in_shape0]
-
         if columnwise_scale_inv is not None:
             # Remove padding from columnwise scale_inv
             flattened_in_shape0 = math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE
@@ -724,7 +734,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             out._columnwise_data = columnwise_data
             out._columnwise_scale_inv = columnwise_scale_inv
         else:
-            # We ll be here when post all gather is called the first time.
+            # We'll be here when post all gather is called the first time.
             # MXFP8Tensor constructor makes a copy of the quantizer to
             # save as its own quantizer. For the consequent iterations,
             # the same quantizer is used. Copy is needed in the first iteration,
@@ -739,6 +749,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 dtype=param_dtype,
                 shape=(rowwise_data.shape if rowwise_data is not None else columnwise_data.shape),
                 quantizer=self._quantizer,
+                with_gemm_swizzled_scales=False,
             )
         out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
         return out, all_gather_outputs
@@ -754,6 +765,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         dtype: torch.dtype,
         shape: torch.shape,
         quantizer: Optional[Quantizer] = None,
+        with_gemm_swizzled_scales: bool = False,
     ) -> MXFP8Tensor:
         """Build MXFP8Tensor, for use in __reduce__
 
@@ -770,6 +782,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             dtype=dtype,
             shape=shape,
             quantizer=quantizer,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
@@ -785,6 +798,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 self.dtype,
                 self.shape,
                 self._quantizer,
+                self._with_gemm_swizzled_scales,
             ),
         )
 
@@ -806,7 +820,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         if not devices_match(new_device, tensor.device):
             tensor = tensor.to(device=new_device)
 
-        # Just copy FP8 data if other tensor is MXFP8Tensor
+        # Just copy data if other tensor is MXFP8Tensor
         if isinstance(tensor, MXFP8Tensor):
             if (  # pylint: disable=too-many-boolean-expressions
                 self.size() != tensor.size()
@@ -834,6 +848,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             self._fp8_dtype = tensor._fp8_dtype
             self._rowwise_scale_inv = tensor._rowwise_scale_inv
             self._columnwise_scale_inv = tensor._columnwise_scale_inv
+            self._with_gemm_swizzled_scales = tensor._with_gemm_swizzled_scales
             return
 
         # Quantize to FP8
@@ -905,6 +920,7 @@ class _ViewFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             fp8_dtype=tensor._fp8_dtype,
             quantizer=tensor._quantizer,
+            with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
         )
 
     @staticmethod
@@ -931,6 +947,7 @@ class _ViewFunc(torch.autograd.Function):
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
+                with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -991,6 +1008,7 @@ class _ReshapeFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             fp8_dtype=tensor._fp8_dtype,
             quantizer=tensor._quantizer,
+            with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
         )
 
     @staticmethod
@@ -1016,6 +1034,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
+                with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None
         return grad.view(ctx.shape), None

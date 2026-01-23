@@ -110,7 +110,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   OType *output_rowwise_minus_offset = output_rowwise - start_offset;
   OType *output_colwise_minus_offset = output_colwise - start_offset;
   int warp_idx = threadIdx.x / 32;
-  int lane_idx = threadIdx.x % 32;
+  // int lane_idx = threadIdx.x % 32;
   int c = blockIdx.x * kColsPerTile + threadIdx.x;
   int r = blockIdx.y * kRowsPerTile;
 

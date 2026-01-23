@@ -13,6 +13,7 @@
 
 #include <cuda_runtime_api.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,13 +64,14 @@ struct NVTEBasicTensor {
  *  \brief Indicates the kind of the tensor parameter to set/get.
  */
 enum NVTETensorParam {
-  kNVTERowwiseData = 0,        /*!< Data usable in rowwise manner */
-  kNVTEColumnwiseData = 1,     /*!< Data usable in columnwise manner */
-  kNVTEScale = 2,              /*!< Scale tensor */
-  kNVTEAmax = 3,               /*!< Amax tensor */
-  kNVTERowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
-  kNVTEColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
-  kNVTEColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
+  kNVTERowwiseData = 0,            /*!< Data usable in rowwise manner */
+  kNVTEColumnwiseData = 1,         /*!< Data usable in columnwise manner */
+  kNVTEScale = 2,                  /*!< Scale tensor */
+  kNVTEAmax = 3,                   /*!< Amax tensor */
+  kNVTERowwiseScaleInv = 4,        /*!< Scale inverse tensor for decoding Rowwise Data */
+  kNVTEColumnwiseScaleInv = 5,     /*!< Scale inverse tensor for decoding Columnwise Data */
+  kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
+  kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
   kNVTENumTensorParams
 };
 
@@ -267,6 +269,8 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
 
 /*! \brief Set a parameter of the tensor.
  *
+ *  \warning Deprecated in favor of nvte_set_tensor_param_v2.
+ *
  *  \param[in/out] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
  *  \param[in] param The value to be set.
@@ -276,10 +280,36 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
 
 /*! \brief Get a value of the parameter of the tensor.
  *
+ *  \warning Deprecated in favor of nvte_set_tensor_param_v2.
+ *
  *  \param[in] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
  */
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name);
+
+/*! \brief Set a tensor parameter.
+ *
+ *  \param[in/out] tensor        Tensor.
+ *  \param[in]     param         Tensor parameter type.
+ *  \param[in]     buf           Memory address to read parameter value.
+ *  \param[in]     size_in_bytes Size of buf.
+ */
+void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const void *buf,
+                              size_t size_in_bytes);
+
+/*! \brief Query a tensor parameter.
+ *
+ *  \param[in]  tensor        Tensor.
+ *  \param[in]  param         Tensor parameter type.
+ *  \param[out] buf           Memory address to write parameter value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
+ */
+void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, void *buf,
+                              size_t size_in_bytes, size_t *size_written);
 
 /*! \brief Get the granularity of scaling of this tensor.
  *
@@ -326,12 +356,7 @@ enum NVTEQuantizationConfigAttribute {
    conditional early even when captured in a static CUDA graph.
   */
   kNVTEQuantizationConfigNoopTensor = 2,
-  /*! Data format for an FP8 block-scaled tensor
-   *
-   *  This is not the right design since the tensor format is a
-   *  property of the tensor, not the quantization. This enum will
-   *  likely be refactored away in the future.
-   */
+  /*! \warning Deprecated */
   kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
   /*! RNG state (NVTETensor with 2 elements - seed and offset */
   kNVTEQuantizationConfigRNGState = 4,
@@ -355,14 +380,14 @@ NVTEQuantizationConfig nvte_create_quantization_config();
 
 /*! \brief Query an option in quantization config.
  *
- *  \param[in] config Quantization config.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to write option value. Ignored if
- *                  NULL.
- *  \param[in] size_in_bytes Size of buf.
- *  \param[out] size_written Number of bytes that have been written to
- *                           buf. If buf is NULL, then the number of
- *                           bytes that would have been written.
+ *  \param[in]  config        Quantization config.
+ *  \param[in]  attr          Option type.
+ *  \param[out] buf           Memory address to write option value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
  */
 void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, void *buf,
@@ -370,10 +395,10 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 
 /*! \brief Set an option in quantization config.
  *
- *  \param[in] config Quantization config.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to read option value.
- *  \param[in] size_in_bytes Size of buf.
+ *  \param[in/out] config        Quantization config.
+ *  \param[in]     attr          Option type.
+ *  \param[in]     buf           Memory address to read option value.
+ *  \param[in]     size_in_bytes Size of buf.
  */
 void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, const void *buf,
@@ -589,20 +614,20 @@ class TensorWrapper {
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING) {
     tensor_ = nvte_create_tensor(scaling_mode);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(dtype), shape};
-    nvte_set_tensor_param(&tensor_, kNVTERowwiseData, &data);
+    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseData, &data, sizeof(data));
     NVTEBasicTensor amax = {amax_dptr, kNVTEFloat32,
                             amax_dptr != nullptr ? defaultShape : emptyShape};
-    nvte_set_tensor_param(&tensor_, kNVTEAmax, &amax);
+    nvte_set_tensor_param_v2(tensor_, kNVTEAmax, &amax, sizeof(amax));
     NVTEBasicTensor scale = {scale_dptr, kNVTEFloat32,
                              scale_dptr != nullptr ? defaultShape : emptyShape};
-    nvte_set_tensor_param(&tensor_, kNVTEScale, &scale);
+    nvte_set_tensor_param_v2(tensor_, kNVTEScale, &scale, sizeof(scale));
     if (scale_inv_dptr == nullptr && scale_inv_shape.ndim == defaultShape.ndim &&
         scale_inv_shape.ndim == 1 && scale_inv_shape.data[0] == defaultShape.data[0]) {
       // Scale-inv pointer has not been provided and shape matches default
       scale_inv_shape = emptyShape;
     }
     NVTEBasicTensor scale_inv = {scale_inv_dptr, kNVTEFloat32, scale_inv_shape};
-    nvte_set_tensor_param(&tensor_, kNVTERowwiseScaleInv, &scale_inv);
+    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseScaleInv, &scale_inv, sizeof(scale_inv));
   }
 
   /*! \brief Constructs new TensorWrapper.
@@ -673,7 +698,7 @@ class TensorWrapper {
                                const ShapeType &shape) noexcept {
     NVTEShape nvte_shape = this->convertShape(shape);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(type), nvte_shape};
-    nvte_set_tensor_param(&tensor_, param, &data);
+    nvte_set_tensor_param_v2(tensor_, param, &data, sizeof(data));
     return *this;
   }
 
@@ -712,10 +737,17 @@ class TensorWrapper {
     return set_parameter(kNVTEColumnwiseAmax, dptr, type, shape);
   }
 
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
+    const auto val = static_cast<uint8_t>(with_gemm_swizzled_scales);
+    nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val));
+  }
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
-    return nvte_get_tensor_param(tensor_, param);
+    NVTEBasicTensor ret;
+    nvte_get_tensor_param_v2(tensor_, param, &ret, sizeof(ret), nullptr);
+    return ret;
   }
 
   NVTEBasicTensor get_rowwise_data() const noexcept { return get_parameter(kNVTERowwiseData); }
@@ -738,6 +770,12 @@ class TensorWrapper {
 
   NVTEBasicTensor get_columnwise_amax() const noexcept {
     return get_parameter(kNVTEColumnwiseAmax);
+  }
+
+  bool get_with_gemm_swizzled_scales() const {
+    uint8_t val = 0;
+    nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
   }
 
   /*! \brief Get an underlying NVTETensor.
@@ -1172,8 +1210,9 @@ class QuantizationConfigWrapper {
 
   /*! \brief Set whether to force power of 2 scales */
   void set_force_pow_2_scales(bool force_pow_2_scales) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales,
-                                           &force_pow_2_scales, sizeof(bool));
+    const auto val = static_cast<uint8_t>(force_pow_2_scales);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales, &val,
+                                           sizeof(val));
   }
 
   /*! \brief Set small value to add to amax */
@@ -1188,12 +1227,8 @@ class QuantizationConfigWrapper {
                                            sizeof(NVTETensor));
   }
 
-  /*! \brief Set FP8 block-scaled tensor format */
-  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {
-    nvte_set_quantization_config_attribute(config_,
-                                           kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
-                                           &format, sizeof(Float8BlockScaleTensorFormat));
-  }
+  /*! \warning Deprecated */
+  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {}
 
   /*! \brief Set stochastic rounding state */
   void set_rng_state(NVTETensor rng_state) {
@@ -1203,20 +1238,23 @@ class QuantizationConfigWrapper {
 
   /*! \brief Set whether to use 2D block scaling for NVFP4 */
   void set_nvfp4_2d_quantization(bool nvfp4_2d_quantization) {
+    const auto val = static_cast<uint8_t>(nvfp4_2d_quantization);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP42DQuantization,
-                                           &nvfp4_2d_quantization, sizeof(bool));
+                                           &val, sizeof(val));
   }
 
   /*! \brief Set whether to use stochastic rounding */
   void set_stochastic_rounding(bool stochastic_rounding) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
-                                           &stochastic_rounding, sizeof(bool));
+    const auto val = static_cast<uint8_t>(stochastic_rounding);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding, &val,
+                                           sizeof(val));
   }
 
   /*! \brief Set whether to enable fast math operations */
   void set_use_fast_math(bool use_fast_math) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath,
-                                           &use_fast_math, sizeof(bool));
+    const auto val = static_cast<uint8_t>(use_fast_math);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
+                                           sizeof(val));
   }
 
  private:
