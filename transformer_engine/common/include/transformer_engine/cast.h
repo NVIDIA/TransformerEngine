@@ -186,7 +186,7 @@ void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor act_inpu
                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream);
 
-/*! \brief Computes backward of GeLU operation on the gropued input, then casts to FP8/MXFP8.
+/*! \brief Computes backward of GeLU operation on the grouped input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the GeLU backward along columns.
  *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -232,7 +232,7 @@ void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor act_inpu
                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream);
 
-/*! \brief Computes backward of SiLU operation on the gropued input, then casts to FP8/MXFP8.
+/*! \brief Computes backward of SiLU operation on the grouped input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the SiLU backward along columns.
  *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -278,7 +278,7 @@ void nvte_quantize_dbias_drelu(const NVTETensor input, const NVTETensor act_inpu
                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream);
 
-/*! \brief Computes backward of ReLU operation on the gropued input, then casts to FP8/MXFP8.
+/*! \brief Computes backward of ReLU operation on the grouped input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the ReLU backward along columns.
  *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -324,7 +324,7 @@ void nvte_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor act_inp
                                 NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                 cudaStream_t stream);
 
-/*! \brief Computes backward of Quick GeLU operation on the gropued input, then casts to FP8/MXFP8.
+/*! \brief Computes backward of Quick GeLU operation on the grouped input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the Quick GeLU backward along columns.
  *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -370,7 +370,7 @@ void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor act_inp
                                 NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                 cudaStream_t stream);
 
-/*! \brief Computes backward of Squared ReLU operation on the gropued input, then casts to FP8/MXFP8.
+/*! \brief Computes backward of Squared ReLU operation on the grouped input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the Squared ReLU backward along columns.
  *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
