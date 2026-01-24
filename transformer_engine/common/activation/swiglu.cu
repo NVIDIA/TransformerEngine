@@ -17,8 +17,8 @@ void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
   NVTE_API_CALL(nvte_group_silu);
   using namespace transformer_engine;
   constexpr bool IS_ACT = true;
-  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, silu<fp32, fp32>>(
-      input, output, nullptr, stream);
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, silu<fp32, fp32>>(input, output, nullptr,
+                                                                       stream);
 }
 
 void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output,

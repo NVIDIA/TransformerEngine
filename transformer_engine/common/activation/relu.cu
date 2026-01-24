@@ -17,8 +17,8 @@ void nvte_group_relu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cu
   NVTE_API_CALL(nvte_group_relu);
   using namespace transformer_engine;
   constexpr bool IS_ACT = true;
-  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, relu<fp32, fp32>>(
-      input, output, nullptr, stream);
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, relu<fp32, fp32>>(input, output, nullptr,
+                                                                       stream);
 }
 
 void nvte_drelu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
@@ -90,12 +90,13 @@ void nvte_srelu(const NVTETensor input, NVTETensor output, cudaStream_t stream) 
   act_fn<fp32, Empty, srelu<fp32, fp32>>(input, output, stream);
 }
 
-void nvte_group_srelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream) {
+void nvte_group_srelu(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                      cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_srelu);
   using namespace transformer_engine;
   constexpr bool IS_ACT = true;
-  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, srelu<fp32, fp32>>(
-      input, output, nullptr, stream);
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, srelu<fp32, fp32>>(input, output, nullptr,
+                                                                        stream);
 }
 
 void nvte_dsrelu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
@@ -106,7 +107,7 @@ void nvte_dsrelu(const NVTETensor grad, const NVTETensor input, NVTETensor outpu
 }
 
 void nvte_group_dsrelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
-                      NVTEGroupedTensor output, cudaStream_t stream) {
+                       NVTEGroupedTensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_dsrelu);
   using namespace transformer_engine;
   NVTETensor dbias = nullptr;
