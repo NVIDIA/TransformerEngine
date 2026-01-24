@@ -417,7 +417,8 @@ public:
   ~JAXX_GroupedTensorWrapper() = default;
 
   void set_rowwise(Buffer_Type const& data, std::optional<Buffer_Type> const& scale_inv);
-  void set_group_info(Buffer_Type const& group_sizes, Buffer_Type const& group_offsets);
+  void set_group_info(Buffer_Type const& group_sizes, Buffer_Type const& group_offsets, 
+                      NVTEGroupedTensorParam group_sizes_param_name);
 
   operator NVTEGroupedTensor() const { return m_grouped_tensor; }
   NVTEGroupedTensor const& get_grouped_tensor() const;
@@ -481,24 +482,25 @@ void JAXX_GroupedTensorWrapper::set_rowwise(Buffer_Type const& data,
 }
 
 void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const& group_sizes,
-                                               Buffer_Type const& group_offsets) {
+                                               Buffer_Type const& group_offsets,
+                                               NVTEGroupedTensorParam group_sizes_param_name) {
   NVTEDType sizes_dtype =
       static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(group_sizes.element_type()));
   NVTEDType offsets_dtype =
       static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(group_offsets.element_type()));
 
-  NVTE_CHECK(sizes_dtype == NVTEDType::kNVTEInt32,
-             "group_sizes must be of type int32.");
-  NVTE_CHECK(offsets_dtype == NVTEDType::kNVTEInt32,
-             "group_offsets must be of type int32.");
+  NVTE_CHECK(sizes_dtype == NVTEDType::kNVTEInt64,
+             "group_sizes must be of type int64.");
+  NVTE_CHECK(offsets_dtype == NVTEDType::kNVTEInt64,
+             "group_offsets must be of type int64.");
 
   // JAX only supports int32 but cuBLAS requires int64 so we pack two int32 into one int64
-  size_t num_tensors = group_sizes.dimensions()[0] / 2;
+  size_t num_tensors = group_sizes.dimensions()[0];
   NVTE_CHECK(group_sizes.dimensions().size() == 1,
              "group_sizes must be a 1D tensor with length equal to the number of tensors.");
   NVTE_CHECK(group_offsets.dimensions().size() == 1,
              "group_offsets must be a 1D tensor with length equal to the number of tensors.");
-  NVTE_CHECK(group_offsets.dimensions()[0] == 2 * num_tensors,
+  NVTE_CHECK(group_offsets.dimensions()[0] == num_tensors,
              "group_sizes and group_offsets must have the same number of elements.");
 
   NVTEShape shape{};
@@ -512,7 +514,7 @@ void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const& group_sizes,
                                  NVTEDType::kNVTEInt64,
                                  shape};
 
-  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedFirstDims, &m_sizes_tensor);
+  nvte_set_grouped_tensor_param(&m_grouped_tensor, group_sizes_param_name, &m_sizes_tensor);
   nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedTensorOffsets, &m_offsets_tensor);
 }
 
@@ -567,7 +569,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
 
   NVTE_CHECK(group_sizes.dimensions().size() == 1);
-  size_t num_gemms = group_sizes.dimensions()[0] / 2; // JAX only supports int32 but cuBLAS requires int64 so we pack two int32 into one int64
+  size_t num_gemms = group_sizes.dimensions()[0];
 
   // It is weird that TE/Common GEMM only use colwise for MXFP8
   const bool is_fp8_gemm = is_fp8_dtype(lhs_dtype);
@@ -672,13 +674,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     NVTEShape rhsShape{.data={k, n}, .ndim=2};
     // rhs_is_trans = true;
     auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
-    rhs_tensor.set_group_info(group_sizes, group_offset_out);
+    rhs_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims);
 
     //// LHS
     NVTEShape lhsShape{.data={m, k}, .ndim=2};
     lhs_is_trans = false;
     auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-    lhs_tensor.set_group_info(group_sizes, group_offset_lhs);
+    lhs_tensor.set_group_info(group_sizes, group_offset_lhs, kNVTEGroupedLastDims);
 
     //// OUTPUT
     NVTEShape outShape{.data={num_gemms*m, n}, .ndim=2};
@@ -690,6 +692,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     //        outShape.data[0], outShape.data[1]);
 
     // printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
+
+    cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
     nvte_grouped_gemm(
       rhs_tensor, rhs_is_trans,
@@ -716,12 +720,12 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   NVTEShape lhsShape{.data={m, k}, .ndim=2};
   lhs_is_trans = true;
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  lhs_tensor.set_group_info(group_sizes, group_offset_lhs);
+  lhs_tensor.set_group_info(group_sizes, group_offset_lhs, kNVTEGroupedFirstDims);
 
   //// OUTPUT
   NVTEShape outShape{.data={m, n}, .ndim=2};
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
-  out_tensor.set_group_info(group_sizes, group_offset_out);
+  out_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims);
 
   // printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
   //        rhsShape.data[0], rhsShape.data[1],

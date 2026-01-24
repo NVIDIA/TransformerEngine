@@ -1768,6 +1768,7 @@ GROUPED_DENSE_INPUT_SHAPES = [
     # (3, 192, 64, 96),
 
     (8, 16384, 14336, 4096),
+    # (8, 16384, 16384, 4096),
     # (8, 64, 32, 128),
     # (8, 64, 128, 256),
 ]
@@ -1806,6 +1807,7 @@ class TestGroupedDense:
         subkeys = jax.random.split(key, 4)
         n_groups, m, n, k = input_shape
 
+        m //= 32
         group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
         group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
         group_sizes = jnp.diff(group_sizes) 
@@ -1815,8 +1817,8 @@ class TestGroupedDense:
         group_sizes = group_sizes.at[1].set(0)
 
         # *32 to make sure that input shape works for MXFP8
-        # group_sizes = group_sizes * 32
-        # m = m * 32
+        group_sizes = group_sizes * 32
+        m = m * 32
 
         # group_sizes = jnp.full((n_groups,), m // n_groups)
         assert group_sizes.sum() == m
@@ -1836,27 +1838,45 @@ class TestGroupedDense:
 
         return lhs, rhs, group_sizes, contracting_dims, bias
 
-    def _diff_to_image(self, a, b):
+    def _tensor_to_image(self, tensor, value_range=None):
         import numpy as np
         from PIL import Image
-        # Convert to numpy and compute diff
-        a_np = np.array(a)
-        b_np = np.array(b)
-        diff = np.abs(a_np - b_np)
-
-        # Normalize diff to 0-255 range for visualization
-        diff_normalized = (diff - diff.min()) / (diff.max() - diff.min() + 1e-8) * 255
-        diff_uint8 = diff_normalized.astype(np.uint8)
-
-        # Create heatmap image
-        img = Image.fromarray(diff_uint8, mode='L')
+        # Convert to numpy
+        tensor_np = jnp.array(tensor, dtype=jnp.float32)
+        
+        # Replace NaNs with a large value for visualization
+        tensor_np = jnp.where(jnp.isnan(tensor_np), 5000, tensor_np)
+        
+        # Determine normalization range
+        if value_range is None:
+            min_val = tensor_np.min()
+            max_val = tensor_np.max()
+        else:
+            min_val, max_val = value_range
+        
+        # Normalize to 0-255 range for visualization
+        range_val = max_val - min_val + 1e-8
+        normalized = jnp.clip((tensor_np - min_val) / range_val * 255, 0, 255)
+        
+        # Downsample by averaging 4x4 blocks
+        h, w = normalized.shape
+        new_h, new_w = h // 4, w // 4
+        normalized = normalized[:new_h*4, :new_w*4]  # Trim to multiple of 4
+        normalized = normalized.reshape(new_h, 4, new_w, 4).mean(axis=(1, 3))
+        normalized = np.array(normalized)
+        normalized_uint8 = normalized.astype(np.uint8)
+        
+        # Create grayscale image
+        img = Image.fromarray(normalized_uint8, mode='L')
         return img
 
-    def _assert_grouped_gemm_output(self, out, group_sizes, ref_list, dtype):
-        assert out.dtype == ref_list[0].dtype
-        # self._diff_to_image(out, ref_list).save('output_diff.png')
-        assert_allclose(out, ref_list, dtype=dtype)
-
+    def _assert_grouped_gemm_output(self, out, group_sizes, ref, dtype):
+        assert out.dtype == ref.dtype
+        print(f"Group sizes [{jnp.sum(group_sizes)}]: {group_sizes}")
+        self._tensor_to_image(out, value_range=(jnp.min(ref), jnp.max(ref))).save('output_te.png')
+        self._tensor_to_image(ref, value_range=(jnp.min(ref), jnp.max(ref))).save('output_ref.png')
+        self._tensor_to_image(jnp.abs(out.astype(jnp.float32) - ref.astype(jnp.float32)), value_range=(jnp.min(ref), jnp.max(ref))).save('output_diff.png')
+        assert_allclose(out, ref, dtype=dtype)
         # ref_list = jnp.split(ref_list, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         # out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         # print([o.shape for o in out_list])
