@@ -5,18 +5,19 @@
 """Fused operation for forward GEMM + scale + add."""
 
 from __future__ import annotations
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+import functools
 import itertools
 from typing import Any, Optional
 
 import torch
-from cudnn import grouped_gemm_swiglu_wrapper_sm100  ### TODO Check if available
 
 import transformer_engine_torch as tex
 from ...cpp_extensions import general_grouped_gemm
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...module._common import noop_cat
 from ...quantization import FP8GlobalStateManager
 from ...tensor import MXFP8Tensor, Quantizer
+from ...utils import get_device_compute_capability
 from ..basic import GroupedLinear, ScaledSwiGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
@@ -24,6 +25,32 @@ from .._common import is_quantized_tensor, maybe_dequantize
 
 
 class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
+    """Fused op for MXFP8 GroupedLinear + ScaledSwiGLU + GroupedLinear
+
+    Uses experimental CuTe DSL kernel.
+
+    """
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_swiglu_kernel(cls) -> Callable:
+        """Fused kernel for grouped GEMM, SwiGLU, and post-multiplication."""
+        from cudnn import grouped_gemm_swiglu_wrapper_sm100
+        return grouped_gemm_swiglu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def is_supported(cls) -> bool:
+        """Whether this fused operation is supported on the current system."""
+        if get_device_compute_capability() < (10, 0):
+            # Kernel requires SM100+
+            return False
+        try:
+            # Make sure kernel is available
+            cls.grouped_gemm_swiglu_kernel()
+        except ImportError:
+            return False
+        return True
 
     def __init__(
         self,
@@ -138,10 +165,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_xs = tex.split_quantize(fc1_x, split_sizes_cpu, fc1_input_quantizers)
 
         # Pack data tensors
-        fc1_x_data = torch.cat([x._rowwise_data for x in fc1_xs])
+        fc1_x_data = noop_cat([x._rowwise_data for x in fc1_xs])
         fc1_x_data = fc1_x_data.view(dtype=torch.float8_e4m3fn)
         fc1_x_data = fc1_x_data.unsqueeze(0).permute(1, 2, 0)
-        fc1_x_scales = torch.cat([x._rowwise_scale_inv for x in fc1_xs])
+        fc1_x_scales = noop_cat([x._rowwise_scale_inv for x in fc1_xs])
         fc1_x_scales = fc1_x_scales.view(dtype=torch.float8_e8m0fnu)
         fc1_x_scales = fc1_x_scales.view(
             1,
@@ -191,7 +218,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         )
 
         # Fused kernel for FC1 + SwiGLU + post-scale
-        fc1_kernel_out = grouped_gemm_swiglu_wrapper_sm100(
+        fc1_kernel_out = self.grouped_gemm_swiglu_kernel()(
             fc1_x_data,
             fc1_w_data,
             fc1_x_scales,
@@ -302,6 +329,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         return fc2_out, [(), (), ()]
 
+
 def fuse_forward_ops(
     ops: list[FusibleOperation],
     *,
@@ -323,6 +351,10 @@ def fuse_forward_ops(
         Updated forward pass operations
 
     """
+
+    # Return immediately if fused kernel is not supported
+    if not ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+        return ops
 
     # Check if recipe is supported
     if recipe is None:
@@ -380,3 +412,8 @@ def fuse_forward_ops(
     # Return list of ops
     out.extend(window)
     return out
+
+
+# Register fusion if available
+if ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+    register_forward_fusion(fuse_forward_ops, prepend=True)

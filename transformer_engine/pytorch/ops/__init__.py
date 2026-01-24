@@ -13,5 +13,4 @@ from .fuser import register_backward_fusion, register_forward_fusion
 from .linear import Linear
 from .op import BasicOperation, FusedOperation, FusibleOperation
 from .sequential import Sequential
-
-import transformer_engine.pytorch.ops.fused
+from . import fused

@@ -3221,17 +3221,19 @@ class TestSequentialModules:
             torch.testing.assert_close(to_cpu(ffn1.bias.grad), b1_ref.grad, **tols)
             torch.testing.assert_close(to_cpu(ffn2.bias.grad), b2_ref.grad, **tols)
 
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_grouped_mlp(
         self,
         *,
-        dtype: torch.dtype = torch.bfloat16,
-        quantization: Optional[str] = "mxfp8",
+        dtype: torch.dtype,
+        quantization: Optional[str],
         device: torch.device = "cuda",
         group_size: int = 4,
         hidden_size: int = 256,
         split_alignment: int = 256,
     ) -> None:
-        """GroupedLinear + SwiGLU + GroupedLinear"""
+        """GroupedLinear + ScaledSwiGLU + GroupedLinear"""
 
         # Split sizes
         split_sizes = [split_alignment * i for i in range(group_size)]
@@ -3245,10 +3247,6 @@ class TestSequentialModules:
         # Skip invalid configurations
         with_quantization = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
-        if quantization != "mxfp8":
-            pytest.skip("Quantization scheme is not supported")
-        if dtype != torch.bfloat16:
-            pytest.skip("Non-quantized dtype must be BF16")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -3294,6 +3292,7 @@ class TestSequentialModules:
                 t *= 1 / 2
             for t in (x_ref, x_test, dy_ref, dy_test):
                 t -= 0.5
+                t *= 1 / 2
 
         # Reference implementation
         xs = torch.split(x_ref, split_sizes.tolist())
@@ -3349,9 +3348,18 @@ class TestSequentialModules:
             y_test = module(x_test, split_sizes, probs_test, split_sizes)
         y_test.backward(dy_test)
 
-        # Check that forward operations have been fused
-        forward_ops = module._module_groups[0]._forward_ops
-        assert len(forward_ops) == 1
+        # Check for expected fusions
+        if (
+            te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported()
+            and quantization == "mxfp8"
+            and dtype == torch.bfloat16
+        ):
+            forward_ops = module._module_groups[0]._forward_ops
+            assert len(forward_ops) == 1
+            assert isinstance(
+                forward_ops[0][0],
+                te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+            )
 
         def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
             """Convert to FP64 CPU tensor"""
@@ -3361,8 +3369,12 @@ class TestSequentialModules:
             out = out.requires_grad_(requires_grad=tensor.requires_grad)
             return out
 
+        # Loose tols for sanity checking
+        tols = {"rtol": 0.25, "atol": 0.5}
+        if quantization == "nvfp4":
+            tols = {"rtol": 0.5, "atol": 1}
+
         # Check values
-        tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
         torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
         torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
         torch.testing.assert_close(to_cpu(probs_test.grad), probs_ref.grad, **tols)
