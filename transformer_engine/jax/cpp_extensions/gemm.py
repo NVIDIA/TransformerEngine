@@ -1544,7 +1544,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
         out_shape = (M, N)
         if is_grouped_dense_wgrad:
-            num_tensors = group_sizes_aval.size // 2 # packed int32 -> logical int64 shape
+            num_tensors = group_sizes_aval.size
             out_shape = (num_tensors, M, N)
         out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
         return (out_aval, workspace_aval)
@@ -2126,12 +2126,13 @@ def grouped_gemm(
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
 
+    group_sizes = group_sizes.astype(jnp.int64)
     # Compute group_offset as cumulative sum of group_sizes, starting with 0
-    group_offset = jnp.concatenate([jnp.array([0], dtype=jnp.int32), jnp.cumsum(group_sizes, dtype=jnp.int32)[:-1]])
+    group_offset = jnp.concatenate([jnp.array([0], dtype=jnp.int64), jnp.cumsum(group_sizes, dtype=jnp.int64)[:-1]])
     if is_grouped_dense_wgrad:
         group_offset_lhs = group_offset * M # Offset is by number of elements total, not number of rows
-        # HACK: this is really the rhs in this case
-        group_offset_out = group_offset * N # Offset is by number of elements total, not number of rows
+        # HACK: this _out is really the rhs in this case
+        group_offset_out = group_offset * 1 # Offset is by number of elements total, not number of rows
     else:  
         group_offset_lhs = group_offset * K_lhs # Offset is by number of elements total, not number of rows
         group_offset_out = group_offset * N     # Offset is by number of elements total, not number of rows
@@ -2143,14 +2144,7 @@ def grouped_gemm(
 
     # print(f"{lhs_data.shape=}, {rhs_data.shape=}, {M=}, {N=}, {K_lhs=}")
 
-    # Interlace zeros with group_sizes to upcast packed int32s to int64
-    # This ensures proper alignment and prevents overflow issues
-    zeros = jnp.zeros_like(group_sizes, dtype=jnp.int32)
-    group_sizes = jnp.stack([group_sizes, zeros], axis=1).flatten()
-    group_offset_lhs = jnp.stack([group_offset_lhs, zeros], axis=1).flatten()
-    group_offset_out = jnp.stack([group_offset_out, zeros], axis=1).flatten()
-
-    num_gemms = group_sizes.shape[0] // 2  # Due to interlaced zeros to support int64
+    num_gemms = group_sizes.shape[0]  # Due to interlaced zeros to support int64
     alpha = jnp.ones((num_gemms,), jnp.float32)
     beta = jnp.zeros((num_gemms,), jnp.float32)
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(

@@ -494,7 +494,6 @@ void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const& group_sizes,
   NVTE_CHECK(offsets_dtype == NVTEDType::kNVTEInt64,
              "group_offsets must be of type int64.");
 
-  // JAX only supports int32 but cuBLAS requires int64 so we pack two int32 into one int64
   size_t num_tensors = group_sizes.dimensions()[0];
   NVTE_CHECK(group_sizes.dimensions().size() == 1,
              "group_sizes must be a 1D tensor with length equal to the number of tensors.");
@@ -692,8 +691,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     //        outShape.data[0], outShape.data[1]);
 
     // printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
-
-    cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
     nvte_grouped_gemm(
       rhs_tensor, rhs_is_trans,

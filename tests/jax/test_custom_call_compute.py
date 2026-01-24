@@ -1967,76 +1967,76 @@ class TestGroupedDense:
         )
         return jnp.sum(jnp.asarray(out)) / jnp.sqrt(x.size)
 
-    # @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
-    # def test_grouped_dense_grad_fp16(self, dtype, input_shape):
-    #     x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
-    #         dtype,
-    #         input_shape,
-    #         with_bias=False,
-    #     )
+    @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
+    def test_grouped_dense_grad_fp16(self, dtype, input_shape):
+        x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
+            dtype,
+            input_shape,
+            with_bias=False,
+        )
 
-    #     value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
-    #     # jitting the grouped_dense
-    #     value_n_grad_prim_func = jit(
-    #         value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
-    #     )
+        value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
+        # jitting the grouped_dense
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
-    #     ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
-    #         x, kernel, bias, group_sizes, contracting_dims
-    #     )
-    #     prim_out_sum, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
-    #         x, kernel, bias, group_sizes, contracting_dims
-    #     )
+        ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
+            x, kernel, bias, group_sizes, contracting_dims
+        )
+        prim_out_sum, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
+            x, kernel, bias, group_sizes, contracting_dims
+        )
 
-    #     assert_allclose(prim_out_sum, ref_out_sum, dtype=dtype)
-    #     assert_allclose(prim_dgrad, ref_dgrad, dtype=dtype)
-    #     assert_allclose(prim_wgrad, ref_wgrad, dtype=dtype)
-    #     # assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
+        assert_allclose(prim_out_sum, ref_out_sum, dtype=dtype)
+        assert_allclose(prim_dgrad, ref_dgrad, dtype=dtype)
+        assert_allclose(prim_wgrad, ref_wgrad, dtype=dtype)
+        # assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
 
-    # @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-    # @pytest.mark.parametrize(
-    #     "fwd_bwd_dtype",
-    #     [(jnp.float8_e4m3fn, jnp.float8_e4m3fn), (jnp.float8_e4m3fn, jnp.float8_e5m2)],
-    # )
-    # @pytest_parametrize_wrapper("scaling_mode", grouped_gemm_supported_scaling_modes)
-    # def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
-    #     fwd_dtype, bwd_dtype = fwd_bwd_dtype
-    #     dtype = jnp.bfloat16
-    #     x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
-    #         dtype,
-    #         input_shape,
-    #         with_bias=False,
-    #     )
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
+    @pytest.mark.parametrize(
+        "fwd_bwd_dtype",
+        [(jnp.float8_e4m3fn, jnp.float8_e4m3fn), (jnp.float8_e4m3fn, jnp.float8_e5m2)],
+    )
+    @pytest_parametrize_wrapper("scaling_mode", grouped_gemm_supported_scaling_modes)
+    def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
+        fwd_dtype, bwd_dtype = fwd_bwd_dtype
+        dtype = jnp.bfloat16
+        x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
+            dtype,
+            input_shape,
+            with_bias=False,
+        )
 
-    #     quantizer_set = QuantizerFactory.create_set(
-    #         scaling_mode=scaling_mode,
-    #         fwd_dtype=fwd_dtype,
-    #         bwd_dtype=bwd_dtype,
-    #         is_2x2x=True,
-    #         n_groups=group_sizes.size,
-    #     )
-    #     value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
+        quantizer_set = QuantizerFactory.create_set(
+            scaling_mode=scaling_mode,
+            fwd_dtype=fwd_dtype,
+            bwd_dtype=bwd_dtype,
+            is_2x2x=True,
+            n_groups=group_sizes.size,
+        )
+        value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
 
-    #     # jitting the grouped_dense
-    #     value_n_grad_prim_func = jit(
-    #         value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
-    #     )
+        # jitting the grouped_dense
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
-    #     ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
-    #         x,
-    #         kernel,
-    #         bias,
-    #         group_sizes,
-    #         contracting_dims,
-    #     )
-    #     prim_out_sum, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
-    #         x, kernel, bias, group_sizes, contracting_dims, quantizer_set=quantizer_set
-    #     )
+        ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
+            x,
+            kernel,
+            bias,
+            group_sizes,
+            contracting_dims,
+        )
+        prim_out_sum, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
+            x, kernel, bias, group_sizes, contracting_dims, quantizer_set=quantizer_set
+        )
 
-    #     assert_allclose(prim_out_sum, ref_out_sum, dtype=fwd_dtype)
-    #     assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
-    #     assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
-    #     # assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
+        assert_allclose(prim_out_sum, ref_out_sum, dtype=fwd_dtype)
+        assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
+        assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
+        # assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
 
 @pytest_parametrize_wrapper('eqn,a_shape,b_shape', [
     # ('ij,jk->ik', (64, 32), (32, 128)),

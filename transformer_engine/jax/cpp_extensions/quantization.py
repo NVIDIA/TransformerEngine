@@ -1245,7 +1245,7 @@ def grouped_quantize(
     ) = GroupedQuantizePrimitive.outer_primitive.bind(
         x,
         scale,
-        group_sizes,
+        group_sizes.astype(jnp.int32),
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
         q_layout=q_layout,
