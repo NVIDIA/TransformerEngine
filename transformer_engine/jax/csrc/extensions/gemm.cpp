@@ -666,7 +666,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                            convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
 
-  // printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0] / 2, lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
+  printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0], lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
 
   if (is_grouped_dense_wgrad) {
     //// RHS
@@ -677,7 +677,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
     //// LHS
     NVTEShape lhsShape{.data={m, k}, .ndim=2};
-    lhs_is_trans = false;
+    lhs_is_trans = true;
     auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
     lhs_tensor.set_group_info(group_sizes, group_offset_lhs, kNVTEGroupedLastDims);
 
@@ -691,6 +691,10 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     //        outShape.data[0], outShape.data[1]);
 
     // printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
+
+    // Output needs to be zeroed in case any group sizes have size zero, meaning the expert weight isn't used in the fwd, meaning the corresponding output gradient should be zero. But using the grouped GEMM, the output buffer contains uninitialized data.
+    // TODO(jberchtold): make this memset smaller by only zeroing the expert weights that correspond to groups with size zero.
+    cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
     nvte_grouped_gemm(
       rhs_tensor, rhs_is_trans,
