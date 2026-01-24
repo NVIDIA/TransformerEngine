@@ -14,8 +14,6 @@ from .activation import (
     SReLU,
     SReGLU,
     SiLU,
-    SwiGLU,
-    ClampedSwiGLU,
 )
 from .add_extra_input import AddExtraInput
 from .all_gather import AllGather
@@ -34,4 +32,4 @@ from .quantize import Quantize
 from .reduce_scatter import ReduceScatter
 from .reshape import Reshape
 from .rmsnorm import RMSNorm
-from .scaled_swiglu import ScaledSwiGLU
+from .swiglu import ClampedSwiGLU, ScaledSwiGLU, SwiGLU

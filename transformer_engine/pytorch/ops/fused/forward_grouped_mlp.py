@@ -26,7 +26,7 @@ from .._common import is_quantized_tensor, maybe_dequantize
 class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     """Fused op for MXFP8 GroupedLinear + ScaledSwiGLU + GroupedLinear
 
-    Uses experimental CuTe DSL kernel.
+    Uses experimental CuTe DSL kernel from cuDNN front-end.
 
     """
 
@@ -59,6 +59,37 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2: GroupedLinear,
     ) -> None:
         super().__init__((fc1, swiglu, fc2))
+
+        # Check for unsupported configurations
+        if not self.is_supported():
+            self.grouped_gemm_swiglu_kernel()  # Try triggering import error
+            raise RuntimeError(
+                f"{self.__class__.__name__} is not supported on this system."
+            )
+        if fc1.in_features % 256 != 0 or fc1.in_features % 256 != 0:
+            raise ValueError(
+                f"Unsupported dims for FC1 (group_size={fc1.group_size}, "
+                f"in_features={fc1.in_features}, out_features={fc1.out_features})."
+            )
+        if fc2.in_features % 256 != 0 or fc2.in_features % 256 != 0:
+            raise ValueError(
+                f"Unsupported dims for FC2 (group_size={fc2.group_size}, "
+                f"in_features={fc2.in_features}, out_features={fc2.out_features})."
+            )
+        if fc1.out_features != 2 * fc2.in_features or fc1.group_size != fc2.group_size:
+            raise ValueError(
+                f"FC1 (group_size={fc1.group_size}, in_features={fc1.in_features}, "
+                f"out_features={fc1.out_features}) "
+                f"and FC2 (group_size={fc2.group_size}, in_features={fc2.in_features}, "
+                f"out_features={fc2.out_features}) do not match."
+            )
+        if fc1.has_bias or fc2.has_bias:
+            raise ValueError("Fused kernel does not support bias.")
+        if swiglu.glu_interleave_size != 32:
+            raise ValueError(
+                "Fused kernel requires 32-wide GLU interleaving, "
+                "but got glu_interleave_size={swiglu.glu_interleave_size}."
+            )
 
     def fuser_forward(
         self,
@@ -385,7 +416,7 @@ def fuse_forward_ops(
             or window[2].out_features % 256 != 0
         ):
             matches_pattern = False
-        elif window[1].gate_interleave_size != 32:
+        elif window[1].glu_interleave_size != 32:
             matches_pattern = False
 
         if matches_pattern:
