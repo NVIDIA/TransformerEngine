@@ -35,6 +35,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     def grouped_gemm_swiglu_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, SwiGLU, and post-multiplication."""
         from cudnn import grouped_gemm_swiglu_wrapper_sm100
+
         return grouped_gemm_swiglu_wrapper_sm100
 
     @classmethod
@@ -63,9 +64,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Check for unsupported configurations
         if not self.is_supported():
             self.grouped_gemm_swiglu_kernel()  # Try triggering import error
-            raise RuntimeError(
-                f"{self.__class__.__name__} is not supported on this system."
-            )
+            raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         if fc1.in_features % 256 != 0 or fc1.in_features % 256 != 0:
             raise ValueError(
                 f"Unsupported dims for FC1 (group_size={fc1.group_size}, "
@@ -121,9 +120,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Check which grads are required
         requires_grad = any(ctx.requires_grad for ctx in basic_op_ctxs)
         input_requires_grad = requires_grad
-        weight_requires_grad = (
-            requires_grad
-            and (fc1_op.weight0.requires_grad or fc2_op.weight0.requires_grad)
+        weight_requires_grad = requires_grad and (
+            fc1_op.weight0.requires_grad or fc2_op.weight0.requires_grad
         )
 
         # Quantizers
@@ -213,16 +211,24 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Pack weight tensors
         fc1_w_data = torch.stack([w._rowwise_data for w in fc1_weights])
         fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
-        fc1_w_data = fc1_w_data.view(group_size, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1])
+        fc1_w_data = fc1_w_data.view(
+            group_size, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1]
+        )
         fc1_w_data = fc1_w_data.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_data = fc1_w_data.view(group_size, fc1_weight_shape[0], fc1_weight_shape[1])
         fc1_w_data = fc1_w_data.permute(1, 2, 0)
         fc1_w_scales = torch.stack([w._rowwise_scale_inv for w in fc1_weights])
         fc1_w_scales = fc1_w_scales.view(dtype=torch.float8_e8m0fnu)
-        fc1_w_scales = fc1_w_scales.view(group_size, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1] // 32)
+        fc1_w_scales = fc1_w_scales.view(
+            group_size, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1] // 32
+        )
         fc1_w_scales = fc1_w_scales.flip(2).contiguous()  # Swap SwiGLU gate/activation
-        fc1_w_scales = fc1_w_scales.view(group_size, fc1_weight_shape[0] // 128, 4, 32, fc1_weight_shape[1] // 128, 4)
-        fc1_w_scales = fc1_w_scales.permute(0, 1, 4, 3, 2, 5).contiguous()  # Convert to swizzled layout
+        fc1_w_scales = fc1_w_scales.view(
+            group_size, fc1_weight_shape[0] // 128, 4, 32, fc1_weight_shape[1] // 128, 4
+        )
+        fc1_w_scales = fc1_w_scales.permute(
+            0, 1, 4, 3, 2, 5
+        ).contiguous()  # Convert to swizzled layout
         fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
         # Kernel tile logic

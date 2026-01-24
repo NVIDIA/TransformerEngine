@@ -52,10 +52,7 @@ class SwiGLU(BasicOperation):
     """
 
     def __init__(
-        self,
-        *,
-        cache_quantized_input: bool = False,
-        glu_interleave_size: Optional[int] = None
+        self, *, cache_quantized_input: bool = False, glu_interleave_size: Optional[int] = None
     ):
         super().__init__()
         self.cache_quantized_input: bool = cache_quantized_input
