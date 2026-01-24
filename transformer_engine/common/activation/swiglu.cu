@@ -13,11 +13,33 @@ void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   act_fn<fp32, Empty, silu<fp32, fp32>>(input, output, stream);
 }
 
+void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_silu);
+  using namespace transformer_engine;
+  constexpr bool IS_ACT = true;
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, silu<fp32, fp32>>(
+      input, output, nullptr, stream);
+}
+
 void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                 cudaStream_t stream) {
   NVTE_API_CALL(nvte_dsilu);
   using namespace transformer_engine;
   dact_fn<fp32, Empty, dsilu<fp32, fp32>>(grad, input, output, stream);
+}
+
+void nvte_group_dsilu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                      NVTEGroupedTensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_dsilu);
+  using namespace transformer_engine;
+  NVTETensor dbias = nullptr;
+  NVTETensor workspace = nullptr;
+
+  constexpr bool IS_DBIAS = false;
+  constexpr bool IS_DACT = true;
+
+  dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dsilu<fp32, fp32>>(
+      grad, input, output, dbias, workspace, nullptr, stream);
 }
 
 void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor activation_input,
@@ -30,6 +52,20 @@ void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor activati
   constexpr bool IS_DACT = true;
 
   dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dsilu<fp32, fp32>>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
+}
+
+void nvte_group_quantize_dbias_dsilu(const NVTEGroupedTensor input,
+                                     const NVTEGroupedTensor activation_input,
+                                     NVTEGroupedTensor output, NVTETensor dbias,
+                                     NVTETensor workspace, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_quantize_dbias_dsilu);
+  using namespace transformer_engine;
+
+  constexpr bool IS_DBIAS = true;
+  constexpr bool IS_DACT = true;
+
+  dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dsilu<fp32, fp32>>(
       input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 

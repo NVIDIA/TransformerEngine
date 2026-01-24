@@ -454,16 +454,34 @@ void performTest(const ProcessingMethod processing_method,
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
             auto nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dgelu;
-            // if (OP == &dsilu)       { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dsilu; }
-            // else if (OP == &drelu)  { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_drelu; }
-            // else if (OP == &dqgelu) { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dqgelu; }
-            // else if (OP == &dsrelu) { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dsrelu; }
+            if (OP == &dsilu)       { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dsilu; }
+            else if (OP == &drelu)  { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_drelu; }
+            else if (OP == &dqgelu) { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dqgelu; }
+            else if (OP == &dsrelu) { nvte_group_quantize_dbias_dact = &nvte_group_quantize_dbias_dsrelu; }
 
             nvte_group_quantize_dbias_dact(grad_group_tensor, in_group_tensor, out_group_tensor,
                                            output_dbias.data(), workspace.data(), 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
             nvte_group_quantize_dbias_dact(grad_group_tensor, in_group_tensor, out_group_tensor,
                                            output_dbias.data(), workspace.data(), 0);
+            break;
+        }
+        case ProcessingMethod::CAST_ACT: {
+            auto nvte_group_act = &nvte_group_gelu;
+            if (OP == &silu)       { nvte_group_act = &nvte_group_silu; }
+            else if (OP == &relu)  { nvte_group_act = &nvte_group_relu; }
+            else if (OP == &qgelu) { nvte_group_act = &nvte_group_qgelu; }
+            else if (OP == &srelu) { nvte_group_act = &nvte_group_srelu; }
+            nvte_group_act(in_group_tensor, out_group_tensor, 0);
+            break;
+        }
+        case ProcessingMethod::CAST_DACT: {
+            auto nvte_group_dact = &nvte_group_dgelu;
+            if (OP == &dsilu)       { nvte_group_dact = &nvte_group_dsilu; }
+            else if (OP == &drelu)  { nvte_group_dact = &nvte_group_drelu; }
+            else if (OP == &dqgelu) { nvte_group_dact = &nvte_group_dqgelu; }
+            else if (OP == &dsrelu) { nvte_group_dact = &nvte_group_dsrelu; }
+            nvte_group_dact(grad_group_tensor, in_group_tensor, out_group_tensor, 0);
             break;
         }
     }
@@ -538,8 +556,8 @@ std::vector<ProcessingMethod> processing_methods = {
     ProcessingMethod::CAST_ONLY,
     ProcessingMethod::CAST_DBIAS,
     ProcessingMethod::CAST_DBIAS_DACT,
-    // ProcessingMethod::CAST_DACT,
-    // ProcessingMethod::CAST_ACT,
+    ProcessingMethod::CAST_DACT,
+    ProcessingMethod::CAST_ACT,
 };
 
 std::vector<ActivationKind> activation_kinds = {
@@ -669,19 +687,19 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     if (processing_method == ProcessingMethod::CAST_ACT) {
         switch (activation) {
             case ActivationKind::GeLU: OP = &gelu; break;
-            // case ActivationKind::SiLU: OP = &silu; break;
-            // case ActivationKind::ReLU: OP = &relu; break;
-            // case ActivationKind::QGeLU: OP = &qgelu; break;
-            // case ActivationKind::SReLU: OP = &srelu; break;
+            case ActivationKind::SiLU: OP = &silu; break;
+            case ActivationKind::ReLU: OP = &relu; break;
+            case ActivationKind::QGeLU: OP = &qgelu; break;
+            case ActivationKind::SReLU: OP = &srelu; break;
         }
     } else if (processing_method == ProcessingMethod::CAST_DACT
                || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         switch (activation) {
             case ActivationKind::GeLU: OP = &dgelu; break;
-            // case ActivationKind::SiLU: OP = &dsilu; break;
-            // case ActivationKind::ReLU: OP = &drelu; break;
-            // case ActivationKind::QGeLU: OP = &dqgelu; break;
-            // case ActivationKind::SReLU: OP = &dsrelu; break;
+            case ActivationKind::SiLU: OP = &dsilu; break;
+            case ActivationKind::ReLU: OP = &drelu; break;
+            case ActivationKind::QGeLU: OP = &dqgelu; break;
+            case ActivationKind::SReLU: OP = &dsrelu; break;
         }
     }
 
@@ -733,13 +751,13 @@ INSTANTIATE_TEST_SUITE_P(
         name += "X" + to_string(std::get<1>(info.param));
 
         switch (std::get<2>(info.param)) {
-            case ScalingDirection::ROWWISE: name += "_ROWWISE"; break;
-            case ScalingDirection::COLWISE: name += "_COLWISE"; break;
-            case ScalingDirection::BOTH:    name += "_BOTH"; break;
+            case ScalingDirection::ROWWISE: name += "_ROWWISE_"; break;
+            case ScalingDirection::COLWISE: name += "_COLWISE_"; break;
+            case ScalingDirection::BOTH:    name += "_BIDIMENSIONAL_"; break;
         }
 
         const std::vector<size_t> input = std::get<3>(info.param);
-        name += "_Shape_";
+
         switch(static_cast<ShapeRepresentation>(input[0])) {
             case ShapeRepresentation::SAME_BOTH_DIMS:       name += "SAME_BOTH_DIMS"; break;
             case ShapeRepresentation::VARYING_FIRST_DIM:    name += "VARYING_FIRST_DIM"; break;
@@ -749,7 +767,7 @@ INSTANTIATE_TEST_SUITE_P(
 
         name += "_N_" + std::to_string(input[1]);
 
-        name += "_Shape_" +
+        name += "_SHAPE_" +
                 std::to_string(input[2]) +
                 "X" + std::to_string(input[3]);
 

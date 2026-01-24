@@ -176,7 +176,7 @@ __global__ void update_tma_descriptors(
     const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
     const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, const bool rowwise, const bool colwise,
-    const bool compute_activations) {
+    const bool compute_dactivations) {
   const bool leading_thread = (threadIdx.x == 0);
   const size_t tensor_id = blockIdx.x;
 
@@ -192,7 +192,7 @@ __global__ void update_tma_descriptors(
       modify_base_tensor_map<IType>(base_tensor_map_input, &g_tensor_maps_input[tensor_id],
                                     global_data_ptr, rows, cols);
     }
-    if (compute_activations) {
+    if (compute_dactivations) {
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(act_input_data_ptr + offset_elts);
       modify_base_tensor_map<IType>(base_tensor_map_act_input, &g_tensor_maps_act_input[tensor_id],
@@ -912,8 +912,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
             const IType *const input_dptr = reinterpret_cast<const IType *>(input->data.dptr);
 
             const IType *const act_input_dptr =
-                (IS_DACT || IS_ACT) ? reinterpret_cast<const IType *>(activations->data.dptr)
-                                    : nullptr;
+                IS_DACT ? reinterpret_cast<const IType *>(activations->data.dptr) : nullptr;
 
             OType *const output_rowwise_dptr =
                 use_rowwise_scaling ? reinterpret_cast<OType *>(output->data.dptr) : nullptr;
@@ -926,7 +925,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                 tensor_map_output_colwise, input_dptr, act_input_dptr, output_rowwise_dptr,
                 output_colwise_dptr, shape_rep, num_tensors, first_logical_dim, last_logical_dim,
                 offsets_ptr, first_dims_ptr, last_dims_ptr, use_rowwise_scaling,
-                use_colwise_scaling, IS_ACT);
+                use_colwise_scaling, IS_DACT);
           }
 
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
