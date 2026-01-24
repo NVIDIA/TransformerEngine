@@ -155,7 +155,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     if (is_fp8_dtype(ret.Atype)) {
       // Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
       // NVTE_CHECK(ret.lda % 16 == 0,
-                //  "Leading dimension requirement on A for FP8 GEMM. Caller must pad.");
+      //  "Leading dimension requirement on A for FP8 GEMM. Caller must pad.");
     }
   } else if (nvfp4) {
     // NVFP4 GEMM. Either the pure NVFP4 recipe or the FWD pass of the Hybrid NVFP4/MXFP8 recipe.
@@ -495,7 +495,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     } else if (mxfp8_gemm) {
 #if CUBLAS_VERSION >= 120800
       NVTE_CHECK(cuda::cublas_version() >= 120800,
-                 "MXFP8 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cuda::cublas_version());
+                 "MXFP8 requires cuBLAS 12.8+, but run-time cuBLAS version is ",
+                 cuda::cublas_version());
 
       // Check that scales are in expected format
       NVTE_CHECK(inputA->with_gemm_swizzled_scales,
@@ -530,7 +531,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     } else if (use_fp4) {  // NVFP4 GEMM
 #if CUBLAS_VERSION >= 120800
       NVTE_CHECK(cuda::cublas_version() >= 120800,
-                 "FP4 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cuda::cublas_version());
+                 "FP4 requires cuBLAS 12.8+, but run-time cuBLAS version is ",
+                 cuda::cublas_version());
 
       // Check that scales are in expected format
       NVTE_CHECK(inputA->with_gemm_swizzled_scales,

@@ -96,7 +96,9 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         out_shape = x_aval.shape
-        assert scale_aval is None or scale_aval.dtype == jnp.float32, f"scale must be float32 but received {scale_aval}"
+        assert (
+            scale_aval is None or scale_aval.dtype == jnp.float32
+        ), f"scale must be float32 but received {scale_aval}"
         if stochastic_rounding:
             assert ScalingMode(
                 scaling_mode
@@ -368,10 +370,12 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             batch_dims,
             output_bdims=(
                 batch_dims[0],  # out
-                batch_dims[0],  # colwise_out (probably need to transpose according if scaling mode does it)
+                batch_dims[
+                    0
+                ],  # colwise_out (probably need to transpose according if scaling mode does it)
                 0,  # scale_inv
                 0,  # colwise_scale_inv
-                0, # updated_amax
+                0,  # updated_amax
                 0,  # dbias
             ),
             static_kwargs={

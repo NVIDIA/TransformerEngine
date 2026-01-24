@@ -400,12 +400,11 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   size_t total_rowwise_sinv_size = 0;
   size_t total_colwise_sinv_size = 0;
 
-
   // TODO(jberchtold): This is a temporary fix to zero out the output buffers to prevent NaNs in output when this buffer is over-allocated and the groups do not fill the whole buffer. Though these NaNs should be ignored in the downstream GEMM, so more debugging is needed to see why they cause issues.
-  size_t used_output_size = (sum_group_sizes*non_group_m) * n * output_dtype_bytes;
-  cudaMemsetAsync(outputs->untyped_data() + used_output_size, 0, outputs->size_bytes() - used_output_size, stream);
+  size_t used_output_size = (sum_group_sizes * non_group_m) * n * output_dtype_bytes;
+  cudaMemsetAsync(outputs->untyped_data() + used_output_size, 0,
+                  outputs->size_bytes() - used_output_size, stream);
 
-  
   for (size_t i = 0; i < num_groups; i++) {
     size_t m_i = dim_list_host[i] * non_group_m;
     // Skip for zero-size input + shiff the scale ptr

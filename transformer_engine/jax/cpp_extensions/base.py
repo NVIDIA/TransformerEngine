@@ -216,7 +216,8 @@ class BasePrimitive(metaclass=ABCMeta):
                 elif arg.shape[bdim] != batch_size:
                     raise ValueError(
                         "All batched arguments must have the same batch size. "
-                        f"Got sizes {[arg.shape[bdim] for arg, bdim in zip(batched_args, batch_dims) if bdim is not None]}. "
+                        "Got sizes"
+                        f" {[arg.shape[bdim] for arg, bdim in zip(batched_args, batch_dims) if bdim is not None]}. "
                         f"Got batched_args={[arg.shape for arg, bdim in zip(batched_args, batch_dims) if bdim is not None]}."
                     )
         assert batch_dim is not None and batch_size is not None, "Invalid batching config!"
@@ -255,7 +256,8 @@ class BasePrimitive(metaclass=ABCMeta):
         # Stack each output along the batch dimension
         if output_bdims is not None:
             stacked_results = tuple(
-                jnp.stack(list(out_list), axis=out_bdim) for out_list, out_bdim in zip(transposed, output_bdims)
+                jnp.stack(list(out_list), axis=out_bdim)
+                for out_list, out_bdim in zip(transposed, output_bdims)
             )
         else:
             stacked_results = tuple(
