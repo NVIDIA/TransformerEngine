@@ -1819,7 +1819,15 @@ qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
 @pytest.mark.parametrize("deterministic", [True, False])
 def test_mha_fp8_vs_f16(
-    dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, RoPE, is_training, scaling_mode, deterministic
+    dtype,
+    model,
+    qkv_format,
+    input_layernorm,
+    fp8_dpa_bwd,
+    RoPE,
+    is_training,
+    scaling_mode,
+    deterministic,
 ):
     """Test MultiHeadAttention module in FP8"""
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
@@ -2064,7 +2072,9 @@ def _run_mha_fp8_vs_f16(
 @pytest.mark.parametrize("is_training", [True, False])
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
 @pytest.mark.parametrize("deterministic", [True, False])
-def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode, deterministic):
+def test_dpa_fp8_vs_f16(
+    dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode, deterministic
+):
     """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
 
