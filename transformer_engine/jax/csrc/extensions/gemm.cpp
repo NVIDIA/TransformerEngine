@@ -418,9 +418,7 @@ public:
 
   void set_rowwise(Buffer_Type const& data, std::optional<Buffer_Type> const& scale_inv);
   void set_group_info(Buffer_Type const& group_sizes, Buffer_Type const& group_offsets, 
-                      NVTEGroupedTensorParam group_sizes_param_name,
-                      size_t offset_stride,
-                      TensorWrapper const& offset_scratch_int64);
+                      NVTEGroupedTensorParam group_sizes_param_name);
 
   operator NVTEGroupedTensor() const { return m_grouped_tensor; }
   NVTEGroupedTensor const& get_grouped_tensor() const;
@@ -485,19 +483,18 @@ void JAXX_GroupedTensorWrapper::set_rowwise(Buffer_Type const& data,
 
 void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const& group_sizes,
                                                Buffer_Type const& group_offsets,
-                                               NVTEGroupedTensorParam group_sizes_param_name,
-                                               size_t offset_stride,
-                                               TensorWrapper const& offset_scratch_int64) {
+                                               NVTEGroupedTensorParam group_sizes_param_name) {
   NVTEDType sizes_dtype =
       static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(group_sizes.element_type()));
   NVTEDType offsets_dtype =
       static_cast<NVTEDType>(convert_ffi_datatype_to_te_dtype(group_offsets.element_type()));
 
-  NVTE_CHECK(sizes_dtype == NVTEDType::kNVTEInt32,
-             "group_sizes must be of type int32.");
-  NVTE_CHECK(offsets_dtype == NVTEDType::kNVTEInt32,
-             "group_offsets must be of type int32.");
+  NVTE_CHECK(sizes_dtype == NVTEDType::kNVTEInt64,
+             "group_sizes must be of type int64.");
+  NVTE_CHECK(offsets_dtype == NVTEDType::kNVTEInt64,
+             "group_offsets must be of type int64.");
 
+  // JAX only supports int32 but cuBLAS requires int64 so we pack two int32 into one int64
   size_t num_tensors = group_sizes.dimensions()[0];
   NVTE_CHECK(group_sizes.dimensions().size() == 1,
              "group_sizes must be a 1D tensor with length equal to the number of tensors.");
@@ -516,9 +513,6 @@ void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const& group_sizes,
   m_offsets_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(group_offsets.untyped_data()),
                                  NVTEDType::kNVTEInt64,
                                  shape};
-
-  nvte_make_group_offsets_int64(offset_stride, &m_offsets_tensor, offset_scratch_int64.data(),
-                                 stream);
 
   nvte_set_grouped_tensor_param(&m_grouped_tensor, group_sizes_param_name, &m_sizes_tensor);
   nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedTensorOffsets, &m_offsets_tensor);
@@ -540,7 +534,7 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const& data, std::opti
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
-                          Buffer_Type group_sizes, Buffer_Type group_offset,
+                          Buffer_Type group_sizes, Buffer_Type group_offset_lhs, Buffer_Type group_offset_out,
                           Buffer_Type alpha, Buffer_Type beta,
                           Result_Type output, Result_Type workspace,
                           size_t m, size_t n, size_t k, bool lhs_is_trans,
@@ -680,17 +674,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     NVTEShape rhsShape{.data={k, n}, .ndim=2};
     // rhs_is_trans = true;
     auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
-    TensorWrapper group_offsets_rhs(workspace_ptr + workspace_setup_size + workspace_size,
-                                 std::vector<size_t>{num_gemms}, DType::kInt64);
-    rhs_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims, n, group_offsets_rhs);
+    rhs_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims);
 
     //// LHS
     NVTEShape lhsShape{.data={m, k}, .ndim=2};
     lhs_is_trans = false;
     auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-    TensorWrapper group_offsets_lhs(workspace_ptr + workspace_setup_size + workspace_size + sizeof(int64_t) * num_gemms,
-                                 std::vector<size_t>{num_gemms}, DType::kInt64);
-    lhs_tensor.set_group_info(group_sizes, group_offset, kNVTEGroupedLastDims, k, group_offsets_lhs);
+    lhs_tensor.set_group_info(group_sizes, group_offset_lhs, kNVTEGroupedLastDims);
 
     //// OUTPUT
     NVTEShape outShape{.data={num_gemms*m, n}, .ndim=2};
@@ -730,16 +720,12 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   NVTEShape lhsShape{.data={m, k}, .ndim=2};
   lhs_is_trans = true;
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  TensorWrapper group_offsets_lhs(workspace_ptr + workspace_setup_size + workspace_size,
-                                 std::vector<size_t>{num_gemms}, DType::kInt64);
-  lhs_tensor.set_group_info(group_sizes, group_offset, kNVTEGroupedFirstDims, k, group_offsets_lhs);
+  lhs_tensor.set_group_info(group_sizes, group_offset_lhs, kNVTEGroupedFirstDims);
 
   //// OUTPUT
   NVTEShape outShape{.data={m, n}, .ndim=2};
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING, num_gemms, outShape);
-  TensorWrapper group_offsets_out(workspace_ptr + workspace_setup_size + workspace_size + sizeof(int64_t) * num_gemms,
-                                 std::vector<size_t>{num_gemms}, DType::kInt64);
-  out_tensor.set_group_info(group_sizes, group_offset, kNVTEGroupedFirstDims, n, group_offsets_out);
+  out_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims);
 
   // printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
   //        rhsShape.data[0], rhsShape.data[1],
@@ -772,7 +758,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
                                   .Arg<Buffer_Type>()      // group_sizes
-                                  .Arg<Buffer_Type>()      // group_offset
+                                  .Arg<Buffer_Type>()      // group_offset_lhs
+                                  .Arg<Buffer_Type>()      // group_offset_out
                                   .Arg<Buffer_Type>()      // alpha
                                   .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output
