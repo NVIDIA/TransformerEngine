@@ -614,7 +614,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         save_original_input: bool = False,
         name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.num_gemms = num_gemms
@@ -633,7 +633,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         ), "GroupedLinear doesn't support Userbuffer overlap."
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
-        self.name = name
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute)
 
@@ -789,7 +788,8 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         is_grad_enabled = torch.is_grad_enabled()
 
-        with self.prepare_forward(inp, num_gemms=self.num_gemms) as inp:
+        inp = self.prepare_forward(inp, num_gemms=self.num_gemms)
+        try:
             weight_tensors = self._get_weight_tensors()
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
@@ -843,6 +843,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                 debug,
             )
             out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
+
+        finally:
+            self.end_forward()
 
         if self.return_bias:
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]

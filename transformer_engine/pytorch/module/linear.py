@@ -428,8 +428,8 @@ class _Linear(torch.autograd.Function):
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
 
-            if cpu_offloading:
                 mark_not_offload(weight, weightmat, bias)
+
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
@@ -1098,7 +1098,7 @@ class Linear(TransformerEngineBaseModule):
         save_original_input: bool = False,
         name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -1111,7 +1111,6 @@ class Linear(TransformerEngineBaseModule):
         self.rng_tracker_name = rng_tracker_name
         self.symmetric_ar_type = symmetric_ar_type
         self.save_original_input = save_original_input
-        self.name = name
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
@@ -1395,11 +1394,8 @@ class Linear(TransformerEngineBaseModule):
             ).is_fp8_ubuf():
                 fp8_grad = True
 
-        with self.prepare_forward(
-            inp,
-            allow_non_contiguous=isinstance(inp, QuantizedTensor),
-        ) as inp:
-
+        inp = self.prepare_forward(inp, allow_non_contiguous=isinstance(inp, QuantizedTensor))
+        try:
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
             quantizers = (
@@ -1470,6 +1466,8 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None,
                 non_tensor_args,
             )
+        finally:
+            self.end_forward()
         if self.gemm_bias_unfused_add:
             out = out + cast_if_needed(bias_tensor, self.activation_dtype)
 
