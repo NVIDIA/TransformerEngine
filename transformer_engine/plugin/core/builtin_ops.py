@@ -64,3 +64,10 @@ def register_builtins(registry: OpRegistry) -> None:
         # Metax may not be available, this is expected
         pass
 
+    # Register KUNLUNXIN (VENDOR) implementations
+    try:
+        from .backends.vendor.kunlunxin.register_ops import register_builtins as register_kunlunxin
+        register_kunlunxin(registry)
+    except Exception as e:
+        # KunLunXin may not be available, this is expected
+        pass
