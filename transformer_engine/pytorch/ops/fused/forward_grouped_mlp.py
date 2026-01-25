@@ -14,7 +14,7 @@ import torch
 
 import transformer_engine_torch as tex
 from ...cpp_extensions import general_grouped_gemm
-from ...quantization import FP8GlobalStateManager
+from ...quantization import Recipe
 from ...tensor import MXFP8Tensor, Quantizer
 from ...utils import get_device_compute_capability
 from ..basic import GroupedLinear, ScaledSwiGLU
@@ -34,7 +34,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_swiglu_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, SwiGLU, and post-multiplication."""
-        from cudnn import grouped_gemm_swiglu_wrapper_sm100
+        from cudnn import grouped_gemm_swiglu_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_swiglu_wrapper_sm100
 
@@ -102,7 +102,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
         # Get basic operations
-        fc1_op, swiglu_op, fc2_op = self.basic_ops
+        fc1_op, _, fc2_op = self.basic_ops
         fc1_ctx, swiglu_ctx, fc2_ctx = basic_op_ctxs
 
         # Tensor properties
@@ -173,13 +173,11 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2_ws = []
         for w, quantizer in zip(fc1_weights, fc1_weight_quantizers):
             if not is_quantized_tensor(w):
-                quantizer = weight_quantizers[group_idx]
                 quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                 w = quantizer(w)
             fc1_ws.append(w)
         for w, quantizer in zip(fc2_weights, fc2_weight_quantizers):
             if not is_quantized_tensor(w):
-                quantizer = weight_quantizers[group_idx]
                 quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                 w = quantizer(w)
             fc2_ws.append(w)
