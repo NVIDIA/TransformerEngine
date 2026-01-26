@@ -79,7 +79,7 @@ __device__ __forceinline__ size_t get_current_tensor_id(
     const size_t rows_per_tensor = first_logical_dim / num_tensors;
     return current_row / rows_per_tensor;
   } else {
-    size_t low = 0;
+    size_t low = 1;
     size_t hi = num_tensors;  // [low, hi]
 
     while (low < hi) {
@@ -267,7 +267,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
   // grouped tensor can be treated as continuous tensor for MXFP8
   const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
-  const size_t offset_within_tensor = block_global_offset - tensor_base;
 
   const CUtensorMap &tensor_map_input =
       is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[tensor_id];
@@ -320,8 +319,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
   const size_t thread_offset_Y_rowwise = tid_Y_rowwise;
   const size_t thread_offset_X_rowwise = tid_X_rowwise * SCALE_DIM_X;
-  const size_t thread_offset_Y_colwise = tid_Y_colwise;
-  const size_t thread_offset_X_colwise = tid_X_colwise;
 
   const size_t scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
   const size_t scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
@@ -740,7 +737,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   NVTE_CHECK(use_rowwise_scaling || use_colwise_scaling,
              "Either rowwise or columnwise output data need to be allocated.");
 
-  ScalingType scaling_type;
+  ScalingType scaling_type = ScalingType::BIDIMENSIONAL;
   if (use_rowwise_scaling && (!use_colwise_scaling)) {
     scaling_type = ScalingType::ROWWISE;
   } else if ((!use_rowwise_scaling) && use_colwise_scaling) {
@@ -749,7 +746,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     scaling_type = ScalingType::BIDIMENSIONAL;
   }
 
-  ShapeRepresentation shape_rep;
+  ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
   if (output->all_same_shape()) {
     shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
   } else if (output->all_same_first_dim()) {
