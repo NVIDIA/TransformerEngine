@@ -36,8 +36,10 @@ struct ArchSpecific {
                     "Compiled for the generic architecture, while utilizing arch-specific "
                     "features. Please compile for smXXXa architecture instead of smXXX "
                     "architecture.");
-#endif
       return true;
+#else
+      return ArchSpecific == CurrentArch;
+#endif
     } else {
       return false;
     }
@@ -56,8 +58,10 @@ struct FamilySpecific {
                     "Compiled for the generic architecture, while utilizing family-specific "
                     "features. Please compile for smXXXf architecture instead of smXXX "
                     "architecture.");
-#endif
       return true;
+#else
+      return FamilySpecific == CurrentArch;
+#endif
     } else {
       return false;
     }
