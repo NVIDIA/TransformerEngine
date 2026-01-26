@@ -402,9 +402,6 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     noop_tensor = convertNVTETensorCheck(quant_config_cpp.noop_tensor);
   }
 
-  NVTE_CHECK(output_tensor->has_data() || output_tensor->has_columnwise_data(),
-             "Either rowwise or columnwise output data need to be allocated.");
-
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
@@ -444,9 +441,6 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
   if (quant_config_cpp.noop_tensor != nullptr) {
     noop_tensor = convertNVTETensorCheck(quant_config_cpp.noop_tensor);
   }
-
-  NVTE_CHECK(output_tensor->has_data() || output_tensor->has_columnwise_data(),
-             "Either rowwise or columnwise output data need to be allocated.");
 
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {

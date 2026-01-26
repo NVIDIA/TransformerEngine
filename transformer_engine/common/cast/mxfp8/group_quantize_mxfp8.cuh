@@ -101,7 +101,7 @@ __device__ __forceinline__ size_t get_tensor_rows_num(
     const int64_t *const __restrict__ first_dims_ptr, const size_t num_tensors) {
   size_t rows_num = 0;
   switch (shape_rep) {
-    case ShapeRepresentation::SAME_BOTH_DIMS:  // rows_num = first_logical_dim / num_tensors; break;
+    case ShapeRepresentation::SAME_BOTH_DIMS:
     case ShapeRepresentation::VARYING_LAST_DIM:
       rows_num = first_logical_dim;
       break;
@@ -737,6 +737,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
   const bool use_rowwise_scaling = output->has_data();
   const bool use_colwise_scaling = output->has_columnwise_data();
+  NVTE_CHECK(use_rowwise_scaling || use_colwise_scaling,
+             "Either rowwise or columnwise output data need to be allocated.");
 
   ScalingType scaling_type;
   if (use_rowwise_scaling && (!use_colwise_scaling)) {
@@ -868,7 +870,9 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
             create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data,
                                  first_logical_dim, last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X,
                                  last_logical_dim, 0, output_type_bit_size);
-          } constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
+          }
+
+          constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
           constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
           constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
           constexpr size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
