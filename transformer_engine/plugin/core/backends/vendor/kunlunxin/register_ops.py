@@ -35,6 +35,9 @@ def register_builtins(registry) -> None:
 
     # Create a backend instance to access the methods
     backend = KunLunXinBackend()
+    
+    if not backend.is_available():
+        return
 
     # Bind is_available to all methods
     is_avail = backend.is_available
