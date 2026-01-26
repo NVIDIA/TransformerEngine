@@ -852,7 +852,9 @@ def _make_graphed_callables(
 
         return functionalized
 
-    def make_graphed_attribute_functions(graph_idx, te_modules):
+    def make_graphed_attribute_functions(graph_idx):
+        # Get te modules for current graph
+        te_modules = visited_te_modules.get(graph_idx, set())
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
@@ -950,7 +952,7 @@ def _make_graphed_callables(
         else:
             ret.append(graphed)
 
-        backward_dw_func, reset_func = make_graphed_attribute_functions(i, te_modules)
+        backward_dw_func, reset_func = make_graphed_attribute_functions(i)
         setattr(ret[-1], "backward_dw", backward_dw_func)
         setattr(ret[-1], "reset", reset_func)
 
