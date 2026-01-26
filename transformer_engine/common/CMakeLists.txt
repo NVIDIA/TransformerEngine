@@ -36,15 +36,14 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   endif()
 endif()
 
-# Process CMAKE_CUDA_ARCHITECTURES to separate generic and specific architectures
-set(NVTE_GENERIC_ARCHS)
+# Process CMAKE_CUDA_ARCHITECTURES to identify specific architectures
 set(NVTE_SPECIFIC_ARCHS)
+set(NVTE_CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES})
 
 # Check for architecture 100
-list(FIND CMAKE_CUDA_ARCHITECTURES "100" arch_100_index)
+list(FIND NVTE_CUDA_ARCHITECTURES "100" arch_100_index)
 if(NOT arch_100_index EQUAL -1)
-  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "100")
-  list(APPEND NVTE_GENERIC_ARCHS "100")
+  list(REMOVE_ITEM NVTE_CUDA_ARCHITECTURES "100")
   list(APPEND NVTE_SPECIFIC_ARCHS "100a")
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
     list(APPEND NVTE_SPECIFIC_ARCHS "103a")
@@ -52,32 +51,58 @@ if(NOT arch_100_index EQUAL -1)
 endif()
 
 # Check for architecture 101 (if we see this we are in toolkit <= 12.9)
-list(FIND CMAKE_CUDA_ARCHITECTURES "101" arch_101_index)
+list(FIND NVTE_CUDA_ARCHITECTURES "101" arch_101_index)
 if(NOT arch_101_index EQUAL -1)
-  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "101")
-  list(APPEND NVTE_GENERIC_ARCHS "101")
+  list(REMOVE_ITEM NVTE_CUDA_ARCHITECTURES "101")
   list(APPEND NVTE_SPECIFIC_ARCHS "101a")
 endif()
 
 # Check for architecture 110 (if we see this we are in toolkit >= 13.0)
-list(FIND CMAKE_CUDA_ARCHITECTURES "110" arch_110_index)
+list(FIND NVTE_CUDA_ARCHITECTURES "110" arch_110_index)
 if(NOT arch_110_index EQUAL -1)
-  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "110")
-  list(APPEND NVTE_GENERIC_ARCHS "110")
+  list(REMOVE_ITEM NVTE_CUDA_ARCHITECTURES "110")
   list(APPEND NVTE_SPECIFIC_ARCHS "110f")
 endif()
 
 # Check for architecture 120
-list(FIND CMAKE_CUDA_ARCHITECTURES "120" arch_120_index)
+list(FIND NVTE_CUDA_ARCHITECTURES "120" arch_120_index)
 if(NOT arch_120_index EQUAL -1)
-  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "120")
-  list(APPEND NVTE_GENERIC_ARCHS "120")
+  list(REMOVE_ITEM NVTE_CUDA_ARCHITECTURES "120")
   if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
     list(APPEND NVTE_SPECIFIC_ARCHS "120f")
   else()
     list(APPEND NVTE_SPECIFIC_ARCHS "120a")
   endif()
 endif()
+
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.0.2)
+  list(APPEND NVTE_CUDA_ARCHITECTURES ${NVTE_SPECIFIC_ARCHS})
+  list(REMOVE_DUPLICATES NVTE_CUDA_ARCHITECTURES)
+  set(CMAKE_CUDA_ARCHITECTURES ${NVTE_CUDA_ARCHITECTURES})
+  set(NVTE_SPECIFIC_ARCHS_TO_BUILD)
+else()
+  set(NVTE_SPECIFIC_ARCHS_TO_BUILD ${NVTE_SPECIFIC_ARCHS})
+  if(NVTE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES ${NVTE_CUDA_ARCHITECTURES})
+  else()
+    message(WARNING
+            "CMAKE_CUDA_ARCHITECTURES is empty after replacing arch-specific targets. "
+            "Please upgrade to CMake 4.0.2+ for native 'a'/'f' architecture support. "
+            "Falling back to sm_75 to avoid configuration errors.")
+    set(CMAKE_CUDA_ARCHITECTURES 75)
+  endif()
+endif()
+
+# Detect whether any arch-specific targets are present
+set(NVTE_ARCH_SPECIFIC_TARGETS FALSE)
+if(NVTE_SPECIFIC_ARCHS_TO_BUILD)
+  set(NVTE_ARCH_SPECIFIC_TARGETS TRUE)
+endif()
+foreach(arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
+  if(arch MATCHES "^[0-9]+[af]$")
+    set(NVTE_ARCH_SPECIFIC_TARGETS TRUE)
+  endif()
+endforeach()
 
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
@@ -187,27 +212,13 @@ list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_s
                                        ${transformer_engine_cuda_sources}
                                        ${transformer_engine_cpp_sources})
 
-# Set compile options for CUDA sources with generic architectures
-foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
-  set(arch_compile_options)
-  foreach(arch IN LISTS NVTE_GENERIC_ARCHS)
-    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
-  endforeach()
-
-  if(arch_compile_options)
-    set_property(
-      SOURCE ${cuda_source}
-      APPEND
-      PROPERTY
-      COMPILE_OPTIONS ${arch_compile_options}
-    )
-  endif()
-endforeach()
-
 # Set compile options for CUDA sources with specific architectures
-foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
+set(transformer_engine_cuda_all_sources
+    ${transformer_engine_cuda_sources}
+    ${transformer_engine_cuda_arch_specific_sources})
+foreach(cuda_source IN LISTS transformer_engine_cuda_all_sources)
   set(arch_compile_options)
-  foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS)
+  foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS_TO_BUILD)
     list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
   endforeach()
 
@@ -220,6 +231,17 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
     )
   endif()
 endforeach()
+
+if(NVTE_ARCH_SPECIFIC_TARGETS)
+  foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
+    set_property(
+      SOURCE ${cuda_source}
+      APPEND
+      PROPERTY
+      COMPILE_DEFINITIONS NVTE_HAS_ARCH_SPECIFIC_TARGETS=1
+    )
+  endforeach()
+endif()
 
 if (NVTE_WITH_CUBLASMP)
 list(APPEND transformer_engine_SOURCES
