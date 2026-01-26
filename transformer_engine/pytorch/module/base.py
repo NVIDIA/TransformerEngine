@@ -1526,18 +1526,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
             del wgrad
             del bgrad
-            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-                wgrad_accumulation_and_reduce_hook()
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
 
-    def get_backward_dw_params(self):
+    def _trigger_wgrad_accumulation_and_reduce_hooks(self):
         """
-        Get the parameters for the backward weight gradient computation.
+        Trigger the wgrad accumulation and reduce hooks.
         """
-        params = []
-        params.append(noop_cat(self._get_weight_tensors()))
-        if self.use_bias:
-            params.append(noop_cat([getattr(self, name) for name in self.bias_names]))
-        return params
+        for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+            wgrad_accumulation_and_reduce_hook()
 
     def is_debug_iter(self) -> bool:
         """
