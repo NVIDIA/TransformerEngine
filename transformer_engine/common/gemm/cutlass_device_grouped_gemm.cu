@@ -50,7 +50,7 @@ __global__ void setGroupedGemmArguments(int num_experts, const int64_t *gemm_m_p
                                         StrideA *stride_A_list, LayoutSFA *layout_SFA_list,
                                         StrideB *stride_B_list, LayoutSFB *layout_SFB_list,
                                         ElementD **ptr_D_list, StrideD *stride_D_list) {
-  int m_offset = 0;
+  uint64_t m_offset = 0;
   if (threadIdx.x == 0 && blockIdx.x == 0) {
     for (int expert_id = 0; expert_id < num_experts; expert_id++) {
       int gemm_m = int(gemm_m_per_expert[expert_id]);
@@ -463,7 +463,7 @@ __global__ void setGroupedGemmWgradArguments(
     ElementD **ptr_D_list, StrideD *stride_D_list, ElementC **ptr_C_list,
     ElementAccumulator **beta_ptr_list, ElementAccumulator *beta_zero, ElementAccumulator *beta_one,
     WgradAccumulatePolicy accumulate_policy) {
-  int k_offset = 0;
+  uint64_t k_offset = 0;
   if (threadIdx.x == 0 && blockIdx.x == 0) {
     *beta_zero = 0;
     *beta_one = 1;
@@ -521,13 +521,13 @@ __global__ void setGroupedGemmWgradArguments(
   // Parallel zero-fill for experts with gemm_k == 0 when not accumulating into D
   int tid = threadIdx.x + blockIdx.x * blockDim.x;
   int stride = blockDim.x * gridDim.x;
-  int total_elems = gemm_m * gemm_n;
+  uint64_t total_elems = gemm_m * gemm_n;
 
   // Try 16-byte vectorized stores when alignment permits, fallback to scalar otherwise
   constexpr int bytes_per_vec = 16;
   constexpr int elem_size = int(sizeof(ElementD));
   constexpr int elems_per_vec = bytes_per_vec / elem_size;  // 8 for bf16
-  int total_vec = total_elems / elems_per_vec;
+  uint64_t total_vec = total_elems / elems_per_vec;
 
 #pragma unroll
   for (int expert_id = 0; expert_id < num_experts; ++expert_id) {
@@ -547,16 +547,16 @@ __global__ void setGroupedGemmWgradArguments(
       int4 *vec_ptr = reinterpret_cast<int4 *>(d_ptr);
 
 #pragma unroll
-      for (int j = tid; j < total_vec; j += stride) {
+      for (uint64_t j = tid; j < total_vec; j += stride) {
         vec_ptr[j] = zero4;
       }
 #pragma unroll
-      for (int k = total_vec * elems_per_vec + tid; k < total_elems; k += stride) {
+      for (uint64_t k = total_vec * elems_per_vec + tid; k < total_elems; k += stride) {
         d_ptr[k] = ElementD(0);
       }
     } else {
 #pragma unroll
-      for (int i = tid; i < total_elems; i += stride) {
+      for (uint64_t i = tid; i < total_elems; i += stride) {
         d_ptr[i] = ElementD(0);
       }
     }
