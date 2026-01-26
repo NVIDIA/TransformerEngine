@@ -861,7 +861,10 @@ def _make_graphed_callables(
 
                 # Trigger the grad accumulation hook for wgrad graphs.
                 for module in te_modules:
-                    if isinstance(module, TransformerEngineBaseModule) and module.need_backward_dw():
+                    if (
+                        isinstance(module, TransformerEngineBaseModule)
+                        and module.need_backward_dw()
+                    ):
                         module._trigger_wgrad_accumulation_and_reduce_hooks()
 
         # Attach reset as an attribute to the graphed callable.
