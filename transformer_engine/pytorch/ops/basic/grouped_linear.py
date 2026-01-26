@@ -40,8 +40,8 @@ class GroupedLinear(BasicOperation):
     dimension, applying a separate ``torch.nn.Linear`` to each split,
     and concatenating along the first dimension.
 
-    Paramters
-    ---------
+    Parameters
+    ----------
     group_size : int
         Number of linear transformations.
     in_features : int
@@ -416,7 +416,6 @@ class GroupedLinear(BasicOperation):
             if not with_quantized_compute:
                 w = maybe_dequantize(w, dtype)
             elif with_quantized_compute and not is_quantized_tensor(w):
-                quantizer = weight_quantizers[group_idx]
                 quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
                 w = quantizer(w)
             ws.append(w)

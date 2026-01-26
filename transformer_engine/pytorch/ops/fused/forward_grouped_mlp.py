@@ -65,12 +65,12 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if not self.is_supported():
             self.grouped_gemm_swiglu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
-        if fc1.in_features % 256 != 0 or fc1.in_features % 256 != 0:
+        if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
             raise ValueError(
                 f"Unsupported dims for FC1 (group_size={fc1.group_size}, "
                 f"in_features={fc1.in_features}, out_features={fc1.out_features})."
             )
-        if fc2.in_features % 256 != 0 or fc2.in_features % 256 != 0:
+        if fc2.in_features % 256 != 0 or fc2.out_features % 256 != 0:
             raise ValueError(
                 f"Unsupported dims for FC2 (group_size={fc2.group_size}, "
                 f"in_features={fc2.in_features}, out_features={fc2.out_features})."
