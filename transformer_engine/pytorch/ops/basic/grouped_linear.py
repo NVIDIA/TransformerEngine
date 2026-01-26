@@ -317,11 +317,11 @@ class GroupedLinear(BasicOperation):
             weight_quantizer = self.get_quantizer("forward", 2 * group_idx + 1)
             if weight_quantizer is None:
                 pass
-            elif is_quantized_tensor(getattr(self, "weight", None)):
+            elif is_quantized_tensor(getattr(self, f"weight{group_idx}", None)):
                 # Make sure weight param has correct quantizer
                 weight_quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 weight_quantizer.internal = False
-                self.weight.update_quantizer(weight_quantizer.copy())
+                getattr(self, f"weight{group_idx}").update_quantizer(weight_quantizer.copy())
             else:
                 # Use internal tensors if quantized weights will not be
                 # exposed externally
