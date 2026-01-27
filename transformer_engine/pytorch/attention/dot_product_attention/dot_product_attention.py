@@ -11,6 +11,7 @@ import warnings
 import logging
 
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 import transformer_engine_torch as tex
@@ -1234,6 +1235,21 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                 )
 
+            thd_qkv_format = q_format == "thd" and kv_format == "thd"
+            orig_v_dim = None
+            pad_v_for_thd = False
+            if (
+                thd_qkv_format
+                and not isinstance(value_layer, Float8Tensor)
+                and head_dim_qk != head_dim_v
+            ):
+                orig_v_dim = value_layer.shape[-1]
+                if orig_v_dim < head_dim_qk:
+                    # Pad V so THD attention can run when Q/V head dims differ.
+                    value_layer = F.pad(value_layer, (0, head_dim_qk - orig_v_dim))
+                    head_dim_v = value_layer.shape[-1]
+                    pad_v_for_thd = True
+
             # adjust max_seqlen and cu_seqlens for CP
             cp_size = 1
             if isinstance(self.cp_group, dist_group_type):
@@ -1440,6 +1456,35 @@ class DotProductAttention(TransformerEngineBaseModule):
                 else None
             )
 
+            def _trim_thd_output(attn_out):
+                if not pad_v_for_thd:
+                    return attn_out
+
+                def _trim_data(data):
+                    if data.ndim == 2:
+                        data = data.reshape(data.shape[0], num_attention_heads, head_dim_v)
+                        data = data[..., :orig_v_dim]
+                        return data.reshape(data.shape[0], -1)
+                    if data.ndim == 3:
+                        return data[..., :orig_v_dim]
+                    return data
+
+                def _trim_tensor(out):
+                    if out is None:
+                        return out
+                    if isinstance(out, Float8Tensor):
+                        out_data = _trim_data(out._data)
+                        return Float8Tensor.make_like(out, data=out_data, shape=out_data.shape)
+                    return _trim_data(out)
+
+                if isinstance(attn_out, tuple):
+                    return (_trim_tensor(attn_out[0]),) + attn_out[1:]
+                if isinstance(attn_out, list):
+                    if attn_out:
+                        attn_out[0] = _trim_tensor(attn_out[0])
+                    return attn_out
+                return _trim_tensor(attn_out)
+
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
@@ -1449,7 +1494,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
-                return self.flash_attention(
+                attn_out = self.flash_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -1474,6 +1519,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_output=fp8_output,
                     num_splits=num_splits,
                 )
+                return _trim_thd_output(attn_out)
 
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
@@ -1490,7 +1536,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         bottom_right_alignment=bottom_right_diagonal,
                     )
                 if checkpoint_core_attention:
-                    return self._checkpointed_attention_forward(
+                    attn_out = self._checkpointed_attention_forward(
                         self.fused_attention,
                         query_layer,
                         key_layer,
@@ -1522,7 +1568,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         softmax_offset=softmax_offset,
                         fp8_output=fp8_output,
                     )
-                return self.fused_attention(
+                    return _trim_thd_output(attn_out)
+                attn_out = self.fused_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -1553,13 +1600,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                     softmax_offset=softmax_offset,
                     fp8_output=fp8_output,
                 )
+                return _trim_thd_output(attn_out)
 
             if use_unfused_attention:
                 allow_emulation = (
                     os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
                 )
                 if checkpoint_core_attention:
-                    return self._checkpointed_attention_forward(
+                    attn_out = self._checkpointed_attention_forward(
                         self.unfused_attention,
                         _alibi_cache,
                         query_layer,
@@ -1584,7 +1632,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         quantizers=self.quantizers,
                         fp8_output=fp8_output,
                     )
-                return self.unfused_attention(
+                    return _trim_thd_output(attn_out)
+                attn_out = self.unfused_attention(
                     _alibi_cache,
                     query_layer,
                     key_layer,
@@ -1608,4 +1657,5 @@ class DotProductAttention(TransformerEngineBaseModule):
                     quantizers=self.quantizers,
                     fp8_output=fp8_output,
                 )
+                return _trim_thd_output(attn_out)
             return None
