@@ -213,8 +213,12 @@ class FP8EmulationFunc(torch.autograd.Function):
         ONNX-compatible forward for FP8 emulation using operations with defined ONNX translations.
         """
         # pylint: disable=unused-argument
+        is_qkv_quantizer = quantizer_name == "QKV_quantizer"
+        assert isinstance(
+            quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+        ), "ONNX FP8 emulation path supports only Float8 quantizers."
 
-        if quantizer_name == "QKV_quantizer":
+        if is_qkv_quantizer:
             # Flatten + concatenate + quantize + split. Equivalent to combine_and_quantize Case 3.
             orig_dtype = tensor1.dtype
             shapes = [tensor1.shape, tensor2.shape, tensor3.shape]

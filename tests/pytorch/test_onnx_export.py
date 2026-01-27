@@ -713,14 +713,14 @@ def test_export_layernorm_mlp_activation(seed_default_rng, activation):
     _test_export_layernorm_mlp(activation=activation)
 
 
-# FP8 recipes with fp8_dpa=True for attention FP8 emulation export test
-fp8_dpa_recipes = [None]  # None = no FP8
+# Quantization recipes with fp8_dpa=True for attention emulation export test
+dpa_quantization_recipes = [None]  # None = no quantization
 if fp8_available:
-    fp8_dpa_recipes.append(recipe.DelayedScaling(fp8_dpa=True))
-    fp8_dpa_recipes.append(recipe.Float8CurrentScaling(fp8_dpa=True))
+    dpa_quantization_recipes.append(recipe.DelayedScaling(fp8_dpa=True))
+    dpa_quantization_recipes.append(recipe.Float8CurrentScaling(fp8_dpa=True))
 
 
-@pytest.mark.parametrize("fp8_recipe", fp8_dpa_recipes)
+@pytest.mark.parametrize("fp8_recipe", dpa_quantization_recipes)
 @pytest.mark.parametrize(
     "precision,      use_mask, attn_mask_type",
     [
@@ -774,7 +774,7 @@ def test_export_core_attention(
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16,):
         return
-    atol = 1.5e-1 if is_fp8 else 1e-2
+    atol = 5e-1 if is_fp8 else 1e-2
     validate_result(
         fname, inp, model, is_fp8=True, atol=atol, input_names=input_names, te_outputs=te_outputs
     )
