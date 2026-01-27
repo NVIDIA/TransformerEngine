@@ -664,6 +664,9 @@ def _grouped_dense_bwd_rule(
     dbias = tex.grouped_dbias(grad, group_sizes) if use_bias else None
     dkernel_amax = None
 
+    # HACK
+    dgrad = jnp.zeros_like(dgrad)
+    wgrad = jnp.zeros_like(wgrad)
     return dgrad, wgrad, group_sizes_grad, dbias, dkernel_amax, quantizer_set
 
 

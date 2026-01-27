@@ -1782,6 +1782,11 @@ grouped_gemm_supported_scaling_modes = [
 @pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
     def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):
+        lhs_cdims, rhs_cdims = contracting_dims
+        if lhs_cdims == (0,):
+            lhs = jnp.transpose(lhs, (1, 0))
+        if rhs_cdims == (2,):
+            rhs = jnp.transpose(rhs, (0, 2, 1))
         return jax.lax.ragged_dot(lhs, rhs, group_sizes)
         lhs_contract_dim, _ = contracting_dims
         assert len(lhs_contract_dim) == 1 and lhs.ndim == 2 and rhs.ndim == 3
@@ -1803,38 +1808,51 @@ class TestGroupedDense:
         return ref_out
 
     def _generate_grouped_dense_input(self, dtype, input_shape, data_layout="NN", with_bias=False):
-        key = jax.random.PRNGKey(0)
-        subkeys = jax.random.split(key, 4)
-        n_groups, m, n, k = input_shape
+        # key = jax.random.PRNGKey(0)
+        # subkeys = jax.random.split(key, 4)
+        # n_groups, m, n, k = input_shape
 
-        m //= 32
-        group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
-        group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
-        group_sizes = jnp.diff(group_sizes) 
+        # m //= 32
+        # group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
+        # group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
+        # group_sizes = jnp.diff(group_sizes) 
 
-        # Make one empty input lhs to test empty GEMM handling
-        group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1])
-        group_sizes = group_sizes.at[1].set(0)
+        # # Make one empty input lhs to test empty GEMM handling
+        # group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1])
+        # group_sizes = group_sizes.at[1].set(0)
 
-        # *32 to make sure that input shape works for MXFP8
-        group_sizes = group_sizes * 32
-        m = m * 32
+        # # *32 to make sure that input shape works for MXFP8
+        # group_sizes = group_sizes * 32
+        # m = m * 32
 
-        # group_sizes = jnp.full((n_groups,), m // n_groups)
-        assert group_sizes.sum() == m
+        # # group_sizes = jnp.full((n_groups,), m // n_groups)
+        # assert group_sizes.sum() == m
 
-        lhs_shape = (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m)
-        rhs_shape = (n_groups, k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k)
-        bias_shape = (n_groups, n)
+        # lhs_shape = (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m)
+        # rhs_shape = (n_groups, k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k)
+        # bias_shape = (n_groups, n)
 
-        lhs = jax.random.uniform(subkeys[1], lhs_shape, dtype=dtype) / jnp.sqrt(k)
-        rhs = jax.random.uniform(subkeys[2], rhs_shape, dtype=dtype) / jnp.sqrt(k)
-        # rhs = jnp.concatenate([i/n_groups*jnp.identity(k, dtype=dtype).reshape(1, k, k) for i in range(n_groups)], axis=0)
-        bias = jax.random.uniform(subkeys[3], bias_shape, dtype=dtype) if with_bias else None
+        # lhs = jax.random.uniform(subkeys[1], lhs_shape, dtype=dtype) / jnp.sqrt(k)
+        # rhs = jax.random.uniform(subkeys[2], rhs_shape, dtype=dtype) / jnp.sqrt(k)
+        # # rhs = jnp.concatenate([i/n_groups*jnp.identity(k, dtype=dtype).reshape(1, k, k) for i in range(n_groups)], axis=0)
+        # bias = jax.random.uniform(subkeys[3], bias_shape, dtype=dtype) if with_bias else None
+
+        def load_tensor(name: str):
+            import numpy as np
+            tensor = np.load(f'/mnt/jberchtold/polyphe-lustre-home/maxtext/gemm_{name}.npy')
+            return jnp.array(tensor)
+
+        lhs = load_tensor('lhs').astype(dtype)
+        rhs = load_tensor('rhs').astype(dtype)
+        bias = None
+        group_sizes = load_tensor('group_sizes').astype(jnp.int32)
 
         lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
         rhs_contracting_dim = (1,) if data_layout[1] == "N" else (2,)
         contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
+
+        print(f'{lhs.shape=}, {rhs.shape=}, {group_sizes=}, {contracting_dims=}')
+        # import pdb; pdb.set_trace()
 
         return lhs, rhs, group_sizes, contracting_dims, bias
 
@@ -1873,10 +1891,14 @@ class TestGroupedDense:
     def _assert_grouped_gemm_output(self, out, group_sizes, ref, dtype):
         assert out.dtype == ref.dtype
         print(f"Group sizes [{jnp.sum(group_sizes)}]: {group_sizes}")
-        # self._tensor_to_image(out, value_range=(jnp.min(ref), jnp.max(ref))).save('output_te.png')
-        # self._tensor_to_image(ref, value_range=(jnp.min(ref), jnp.max(ref))).save('output_ref.png')
-        # self._tensor_to_image(jnp.abs(out.astype(jnp.float32) - ref.astype(jnp.float32)), value_range=(jnp.min(ref), jnp.max(ref))).save('output_diff.png')
-        assert_allclose(out, ref, dtype=dtype)
+        self._tensor_to_image(out, value_range=(jnp.min(ref), jnp.max(ref))).save('output_te.png')
+        self._tensor_to_image(ref, value_range=(jnp.min(ref), jnp.max(ref))).save('output_ref.png')
+        self._tensor_to_image(
+            jnp.abs(out.astype(jnp.float32) - ref.astype(jnp.float32)),
+            value_range=(jnp.min(ref), jnp.max(ref))
+            # value_range=(0, 0.5)
+        ).save('output_diff.png')
+        assert_allclose(out, ref, dtype=jnp.float32)
         # ref_list = jnp.split(ref_list, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         # out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         # print([o.shape for o in out_list])
@@ -1890,7 +1912,7 @@ class TestGroupedDense:
         #     )
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
-    @pytest_parametrize_wrapper("layout", ["NN"])
+    @pytest_parametrize_wrapper("layout", ["NT"])
     def test_grouped_gemm_fp16(self, dtype, input_shape, layout):
         lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
             dtype, input_shape, layout
@@ -2005,10 +2027,8 @@ class TestGroupedDense:
         assert_allclose(prim_out_sum, ref_out_sum, dtype=dtype)
         assert_allclose(prim_dgrad, ref_dgrad, atol=0.015, rtol=0.75)
 
-        # THE wgrad mismatch here is expected, the mismatch is always 1/n_groups because 1 of the groups is set to have 0 size, meaning the corresponding weight gradient is undefined (tho I should probably be setting it to zero manually)
-
-        write_images(
-            prim_wgrad.reshape((prim_wgrad.size//prim_wgrad.shape[-1], prim_wgrad.shape[-1])), ref_wgrad.reshape((ref_wgrad.size//ref_wgrad.shape[-1], ref_wgrad.shape[-1])))
+        # write_images(
+        #     prim_wgrad.reshape((prim_wgrad.size//prim_wgrad.shape[-1], prim_wgrad.shape[-1])), ref_wgrad.reshape((ref_wgrad.size//ref_wgrad.shape[-1], ref_wgrad.shape[-1])))
         assert_allclose(prim_wgrad, ref_wgrad, dtype=dtype)
         # assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
 

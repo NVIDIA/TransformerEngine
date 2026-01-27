@@ -2169,5 +2169,38 @@ def grouped_gemm(
         is_grouped_dense_wgrad=is_grouped_dense_wgrad,
         use_async_d2h_group_sizes=use_async_d2h_group_sizes,
     )
-    # print(f"GroupedGemm: {lhs_data.shape=}, {rhs_data.shape=}, {out.shape=}, {M=}, {N=}, {K_lhs=}, {lhs_is_trans=}, {rhs_is_trans=}, {contracting_dims=}")
+    if not is_grouped_dense_wgrad:
+        def my_callback(lhs, rhs, group_sizes, out):
+            if contracting_dims != ((1,), (2,)):
+                return
+            import numpy as np
+            lhs = np.array(lhs.astype(jnp.float32))
+            rhs = np.array(rhs.astype(jnp.float32))
+            group_sizes = np.array(group_sizes, dtype=group_sizes.dtype)
+            out = np.array(out.astype(jnp.float32))
+
+            lhs_is_nan = np.isnan(lhs).any()
+            rhs_is_nan = np.isnan(rhs).any()
+            out_is_nan = np.isnan(out).any()
+            inputs_are_nan = lhs_is_nan or rhs_is_nan
+            if inputs_are_nan or not out_is_nan:
+                return
+            print("GroupedGemm NAN detected! cdims:", contracting_dims)
+            np.save('gemm_lhs.npy', lhs)
+            np.save('gemm_rhs.npy', rhs)
+            np.save('gemm_group_sizes.npy', group_sizes)
+            return
+
+        # jax.debug.callback(my_callback,
+            # lhs, rhs, group_sizes, out,
+            # ordered=True, partitioned=True)
+
+        # jax.debug.print("group_sizes: {}, lhs=[amax={}, mean={}, stddev={}], rhs=[amax={}, mean={}, stddev={}], out=[amax={}, mean={}, stddev={}]",
+        #     group_sizes,
+        #     jnp.max(jnp.abs(lhs_data)), jnp.mean(lhs_data), jnp.std(lhs_data),
+        #     jnp.max(jnp.abs(rhs_data)), jnp.mean(rhs_data), jnp.std(rhs_data),
+        #     jnp.max(jnp.abs(out)), jnp.mean(out), jnp.std(out),
+        # )
+        # jax.debug.print("group_sizes: {}, out_shape: {}", group_sizes, out.shape)
+    # print(f"GroupedGemm: {group_sizes.shape=}, {lhs_data.shape=}, {rhs_data.shape=}, {out.shape=}, {M=}, {N=}, {K_lhs=}, {lhs_is_trans=}, {rhs_is_trans=}, {contracting_dims=}")
     return out
