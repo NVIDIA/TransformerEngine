@@ -81,8 +81,8 @@ def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bo
 
     def factory(role):
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
-        bucket, _ = role.split(":", 1)
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
+        _, bucket = role.split(":", 1)
         if bucket == "input":
             return quantization_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,

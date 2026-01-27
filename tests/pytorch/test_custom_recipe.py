@@ -91,8 +91,8 @@ def test_custom_recipe_sanity(module_type):
     # Single factory: map roles to quantizers
     def quantizer_factory(role):
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
-        bucket, _ = role.split(":", 1)
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
+        _, bucket = role.split(":", 1)
         if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if bucket in ("grad_output", "grad_input"):
@@ -131,8 +131,8 @@ def test_custom_recipe_grouped_linear_sanity():
 
     def quantizer_factory(role):
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
-        bucket, _ = role.split(":", 1)
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
+        _, bucket = role.split(":", 1)
         if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if bucket in ("grad_output", "grad_input"):
@@ -196,8 +196,8 @@ def test_custom_recipe_matches_current_scaling():
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
     def quantizer_factory(role):
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
-        bucket, _ = role.split(":", 1)
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
+        _, bucket = role.split(":", 1)
         if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if bucket in ("grad_output", "grad_input"):
@@ -256,8 +256,8 @@ def test_custom_recipe_ops_linear_2_1_layout():
 
     def quantizer_factory(role):
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
-        bucket, _ = role.split(":", 1)
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
+        _, bucket = role.split(":", 1)
         if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if bucket in ("grad_output", "grad_input"):
@@ -290,19 +290,19 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
 
     # Counters per role
     counts = {
-        "input:linear": 0,
-        "weight:linear": 0,
-        "output:linear": 0,
-        "grad_output:linear": 0,
-        "grad_input:linear": 0,
+        "linear:input": 0,
+        "linear:weight": 0,
+        "linear:output": 0,
+        "linear:grad_output": 0,
+        "linear:grad_input": 0,
     }
 
     def quantizer_factory(role):
         if role in counts:
             counts[role] += 1
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
-        bucket, _ = role.split(":", 1)
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
+        _, bucket = role.split(":", 1)
         if bucket in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
         if bucket in ("grad_output", "grad_input"):
@@ -319,11 +319,11 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     loss.backward()
 
     # Single GEMM: forward should request input, weight, output; backward grad_output, grad_input
-    assert counts["input:linear"] == 1
-    assert counts["weight:linear"] == 1
-    assert counts["output:linear"] == 1
-    assert counts["grad_output:linear"] == 1
-    assert counts["grad_input:linear"] == 1
+    assert counts["linear:input"] == 1
+    assert counts["linear:weight"] == 1
+    assert counts["linear:output"] == 1
+    assert counts["linear:grad_output"] == 1
+    assert counts["linear:grad_input"] == 1
 
 
 def test_factories_return_distinct_instances_and_buffers():

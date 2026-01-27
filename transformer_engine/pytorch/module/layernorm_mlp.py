@@ -1976,9 +1976,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
     ) -> Optional[List[str]]:
         """Role strings for quantizers used by `LayerNormMLP`."""
         if fwd:
-            base = ("input:layernorm_mlp", "weight:layernorm_mlp", "output:layernorm_mlp")
+            base = ("layernorm_mlp:input", "layernorm_mlp:weight", "layernorm_mlp:output")
         else:
-            base = ("grad_output:layernorm_mlp", "grad_input:layernorm_mlp")
+            base = ("layernorm_mlp:grad_output", "layernorm_mlp:grad_input")
         return [base[i % len(base)] for i in range(num_quantizers)]
 
     def reset_layer_norm_parameters(self) -> None:

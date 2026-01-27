@@ -1421,14 +1421,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
         """Role strings for quantizers used by `LayerNormLinear`."""
         if fwd:
             base = (
-                "input:layernorm_linear",
-                "weight:layernorm_linear",
-                "output:layernorm_linear",
+                "layernorm_linear:input",
+                "layernorm_linear:weight",
+                "layernorm_linear:output",
             )
         else:
             base = (
-                "grad_output:layernorm_linear",
-                "grad_input:layernorm_linear",
+                "layernorm_linear:grad_output",
+                "layernorm_linear:grad_input",
             )
         return [base[i % len(base)] for i in range(num_quantizers)]
 

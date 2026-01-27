@@ -735,9 +735,9 @@ class GroupedLinear(TransformerEngineBaseModule):
         For grouped GEMMs we repeat the same pattern for each GEMM in order.
         """
         if fwd:
-            base = ("input:grouped_linear", "weight:grouped_linear", "output:grouped_linear")
+            base = ("grouped_linear:input", "grouped_linear:weight", "grouped_linear:output")
         else:
-            base = ("grad_output:grouped_linear", "grad_input:grouped_linear")
+            base = ("grouped_linear:grad_output", "grouped_linear:grad_input")
         return [base[i % len(base)] for i in range(num_quantizers)]
 
     def reset_parameters(self, defer_init=False):

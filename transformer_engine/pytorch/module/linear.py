@@ -1316,9 +1316,9 @@ class Linear(TransformerEngineBaseModule):
     ) -> Optional[List[str]]:
         """Role strings for quantizers used by `Linear`."""
         if fwd:
-            base = ("input:linear", "weight:linear", "output:linear")
+            base = ("linear:input", "linear:weight", "linear:output")
         else:
-            base = ("grad_output:linear", "grad_input:linear")
+            base = ("linear:grad_output", "linear:grad_input")
         return [base[i % len(base)] for i in range(num_quantizers)]
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:

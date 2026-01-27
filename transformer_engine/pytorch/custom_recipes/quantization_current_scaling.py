@@ -24,8 +24,8 @@ def current_scaling_ref_quantizer_factory(role):
             output = model(input)
     """
     if ":" not in role:
-        raise ValueError(f"Invalid role: {role}, expected format: '<bucket>:<scope>'")
-    bucket, _ = role.split(":", 1)
+        raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
+    _, bucket = role.split(":", 1)
 
     if bucket in ("input", "weight"):
         dtype = torch.float8_e4m3fn

@@ -274,11 +274,11 @@ class BasicLinear(BasicOperation):
         if mode == "forward":
             # BasicLinear owns input and weight quantizers.
             # Output quantizer is provided by the next op (as its input quantizer).
-            return ["input:linear", "weight:linear"]
+            return ["linear:input", "linear:weight"]
         if mode == "backward":
             # BasicLinear owns grad_output quantizer.
             # Grad_input quantizer is provided by the previous op (as its grad_output quantizer).
-            return ["grad_output:linear"]
+            return ["linear:grad_output"]
         return None
 
     def reset_parameters(self) -> None:
