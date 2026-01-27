@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -68,7 +68,7 @@ if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
 fp8_recipes.append(None)
 
-supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "clamped_swiglu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 

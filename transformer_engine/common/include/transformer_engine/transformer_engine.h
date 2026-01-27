@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -13,6 +13,7 @@
 
 #include <cuda_runtime_api.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,8 +52,11 @@ struct NVTEShape {
  *  It does not own the memory it points to.
  */
 struct NVTEBasicTensor {
+  /*! Pointer to data buffer. */
   void *data_ptr;
+  /*! Data type. */
   NVTEDType dtype;
+  /*! Tensor shape. */
   NVTEShape shape;
 };
 
@@ -60,13 +64,14 @@ struct NVTEBasicTensor {
  *  \brief Indicates the kind of the tensor parameter to set/get.
  */
 enum NVTETensorParam {
-  kNVTERowwiseData = 0,        /*!< Data usable in rowwise manner */
-  kNVTEColumnwiseData = 1,     /*!< Data usable in columnwise manner */
-  kNVTEScale = 2,              /*!< Scale tensor */
-  kNVTEAmax = 3,               /*!< Amax tensor */
-  kNVTERowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
-  kNVTEColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
-  kNVTEColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
+  kNVTERowwiseData = 0,            /*!< Data usable in rowwise manner */
+  kNVTEColumnwiseData = 1,         /*!< Data usable in columnwise manner */
+  kNVTEScale = 2,                  /*!< Scale tensor */
+  kNVTEAmax = 3,                   /*!< Amax tensor */
+  kNVTERowwiseScaleInv = 4,        /*!< Scale inverse tensor for decoding Rowwise Data */
+  kNVTEColumnwiseScaleInv = 5,     /*!< Scale inverse tensor for decoding Columnwise Data */
+  kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
+  kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
   kNVTENumTensorParams
 };
 
@@ -142,8 +147,9 @@ void *nvte_tensor_columnwise_data(const NVTETensor tensor);
 
 /*! \brief Construct a shape from an array of dimension sizes.
  *
- *  \param[data] Pointer to start of shape array.
- *  \param[data] Number of dimensions (must be <= 14)
+ *  \param[data] Pointer to start of shape array. If NULL, the shape
+ *               will be filled with zeros.
+ *  \param[ndim] Number of dimensions (must be <= 14)
  *
  *  \return A shape. The shape will own its own copy of the data.
  */
@@ -176,7 +182,7 @@ size_t nvte_tensor_ndims(const NVTETensor tensor);
 /*! \brief Get the size of a specific tensor dimension.
  *
  *  \param[in] tensor Tensor.
- *  \param[in] size_t Dimension index.
+ *  \param[in] dim    Dimension index.
  *
  *  \return Size of the tensor at the specified dimension.
  */
@@ -257,12 +263,13 @@ NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor);
 /*! \brief Reset tensor value to zero.
  *
  *  \param[in] tensor Tensor.
- *
- *  \return A scale_inv shape of the input tensor.
+ *  \param[in] stream CUDA stream to use for the operation.
  */
 void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
 
 /*! \brief Set a parameter of the tensor.
+ *
+ *  \warning Deprecated in favor of nvte_set_tensor_param_v2.
  *
  *  \param[in/out] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
@@ -273,10 +280,36 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
 
 /*! \brief Get a value of the parameter of the tensor.
  *
+ *  \warning Deprecated in favor of nvte_set_tensor_param_v2.
+ *
  *  \param[in] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
  */
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name);
+
+/*! \brief Set a tensor parameter.
+ *
+ *  \param[in/out] tensor        Tensor.
+ *  \param[in]     param         Tensor parameter type.
+ *  \param[in]     buf           Memory address to read parameter value.
+ *  \param[in]     size_in_bytes Size of buf.
+ */
+void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const void *buf,
+                              size_t size_in_bytes);
+
+/*! \brief Query a tensor parameter.
+ *
+ *  \param[in]  tensor        Tensor.
+ *  \param[in]  param         Tensor parameter type.
+ *  \param[out] buf           Memory address to write parameter value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
+ */
+void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, void *buf,
+                              size_t size_in_bytes, size_t *size_written);
 
 /*! \brief Get the granularity of scaling of this tensor.
  *
@@ -323,12 +356,7 @@ enum NVTEQuantizationConfigAttribute {
    conditional early even when captured in a static CUDA graph.
   */
   kNVTEQuantizationConfigNoopTensor = 2,
-  /*! Data format for an FP8 block-scaled tensor
-   *
-   *  This is not the right design since the tensor format is a
-   *  property of the tensor, not the quantization. This enum will
-   *  likely be refactored away in the future.
-   */
+  /*! \warning Deprecated */
   kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
   /*! RNG state (NVTETensor with 2 elements - seed and offset */
   kNVTEQuantizationConfigRNGState = 4,
@@ -336,6 +364,12 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigNVFP42DQuantization = 5,
   /*! Whether to enable stochastic rounding */
   kNVTEQuantizationConfigStochasticRounding = 6,
+  /*! Whether to enable fast math operations with reduced accuracy.
+   *
+   *  Optimizations are kernel-specific and they may be applied
+   *  inconsistently between kernels.
+   */
+  kNVTEQuantizationConfigUseFastMath = 7,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -346,14 +380,14 @@ NVTEQuantizationConfig nvte_create_quantization_config();
 
 /*! \brief Query an option in quantization config.
  *
- *  \param[in] config Quantization config.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to write option value. Ignored if
- *                  NULL.
- *  \param[in] size_in_bytes Size of buf.
- *  \param[out] size_written Number of bytes that have been written to
- *                           buf. If buf is NULL, then the number of
- *                           bytes that would have been written.
+ *  \param[in]  config        Quantization config.
+ *  \param[in]  attr          Option type.
+ *  \param[out] buf           Memory address to write option value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
  */
 void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, void *buf,
@@ -361,10 +395,10 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 
 /*! \brief Set an option in quantization config.
  *
- *  \param[in] config Quantization config.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to read option value.
- *  \param[in] size_in_bytes Size of buf.
+ *  \param[in/out] config        Quantization config.
+ *  \param[in]     attr          Option type.
+ *  \param[in]     buf           Memory address to read option value.
+ *  \param[in]     size_in_bytes Size of buf.
  */
 void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, const void *buf,
@@ -392,6 +426,114 @@ int nvte_is_non_tn_fp8_gemm_supported();
  *  This function calls a fill kernel for small sizes and calls cudaMemsetAsync for larger sizes.
 */
 void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
+
+/*! \brief TE Grouped Tensor type
+ *
+ * NVTEGroupedTensor is a collection of tensors with potentially different shapes
+ * but the same dtype and scaling mode. It does not own the memory it points to.
+ */
+typedef void *NVTEGroupedTensor;
+
+/*! \enum NVTEGroupedTensorParam
+ *  \brief Indicates the kind of the grouped tensor parameter to set/get.
+ */
+enum NVTEGroupedTensorParam {
+  kNVTEGroupedRowwiseData = 0,        /*!< Data usable in rowwise manner */
+  kNVTEGroupedColumnwiseData = 1,     /*!< Data usable in columnwise manner */
+  kNVTEGroupedScale = 2,              /*!< Scale tensor */
+  kNVTEGroupedAmax = 3,               /*!< Amax tensor */
+  kNVTEGroupedRowwiseScaleInv = 4,    /*!< Scale inverse tensor for decoding Rowwise Data */
+  kNVTEGroupedColumnwiseScaleInv = 5, /*!< Scale inverse tensor for decoding Columnwise Data */
+  kNVTEGroupedColumnwiseAmax = 6,     /*!< Columnwise Amax tensor */
+  kNVTEGroupedFirstDims = 7, /*!< First dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedLastDims = 8,  /*!< Last dimension sizes (device pointer to int64_t array) */
+  kNVTEGroupedTensorOffsets =
+      9, /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
+  kNVTENumGroupedTensorParams
+};
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Create a new TE grouped tensor.
+ *
+ * Create a new TE grouped tensor. Before use its parameters need to be set.
+ * TE grouped tensors are just wrappers on top of raw data and do not
+ * own memory.
+ *
+ *  \param[in] scaling_mode    Scaling mode of the grouped tensor.
+ *  \param[in] num_tensors     Number of tensors in the group (must be > 0).
+ *  \param[in] logical_shape   Logical 2D shape of the grouped data.
+ *
+ *  \return A new TE grouped tensor.
+ */
+NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
+                                             NVTEShape logical_shape);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Destroy a TE grouped tensor.
+ *
+ * Since the TE grouped tensor does not own memory, the underlying
+ * data is not freed during this operation.
+ *
+ *  \param[in] tensor Grouped tensor to be destroyed.
+ */
+void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Set a parameter of the grouped tensor.
+ *
+ *  \param[in/out] tensor Grouped tensor.
+ *  \param[in] param_name The parameter to be set.
+ *  \param[in] param The value to be set (NVTEBasicTensor).
+ */
+void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
+                                   const NVTEBasicTensor *param);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get a value of the parameter of the grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *  \param[in] param_name The parameter to be queried.
+ *
+ *  \return NVTEBasicTensor containing the parameter data.
+ */
+NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
+                                              NVTEGroupedTensorParam param_name);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get the number of tensors in a grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return Number of tensors in the group.
+ */
+size_t nvte_grouped_tensor_num_tensors(const NVTEGroupedTensor tensor);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get a grouped tensor's data type.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return A data type of the grouped tensor.
+ */
+NVTEDType nvte_grouped_tensor_type(const NVTEGroupedTensor tensor);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get a scaling mode of the grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return Scaling mode of the grouped tensor.
+ */
+NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Get the logical shape of a grouped tensor.
+ *
+ *  \param[in] tensor Grouped tensor.
+ *
+ *  \return Logical 2D shape.
+ */
+NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -424,7 +566,7 @@ enum class DType {
 /*! \brief Check if TE datatype is FP8
  *
  * Return true if TE datatype is FP8
- *  \param[in] DType      TE Datatype of interest
+ *  \param[in] t      TE Datatype of interest
  */
 inline bool is_fp8_dtype(const DType t) {
   return t == DType::kFloat8E4M3 || t == DType::kFloat8E5M2;
@@ -433,14 +575,14 @@ inline bool is_fp8_dtype(const DType t) {
 /*! \brief Check if TE datatype is FP4
  *
  * Return true if TE datatype is FP4
- *  \param[in] DType      TE Datatype of interest
+ *  \param[in] t      TE Datatype of interest
  */
 inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
 
 /*! \brief Check if TE datatype is high precision (FP32, FP16, BF16)
  *
  * Return true if TE datatype is high precision
- *  \param[in] DType      TE Datatype of interest
+ *  \param[in] t      TE Datatype of interest
  */
 inline bool is_high_precision_dtype(const DType t) {
   return t == DType::kFloat32 || t == DType::kBFloat16 || t == DType::kFloat16;
@@ -464,20 +606,28 @@ class TensorWrapper {
    *  \param[in] scale_dptr      Pointer to the scale value.
    *  \param[in] scale_inv_shape Shape of scale_inv
    *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
+   *  \param[in] scaling_mode    Tensor data format.
    */
   TensorWrapper(void *dptr, const NVTEShape &shape, const DType dtype, float *amax_dptr = nullptr,
                 float *scale_dptr = nullptr, float *scale_inv_dptr = nullptr,
-                const NVTEShape scale_inv_shape = defaultShape,
+                NVTEShape scale_inv_shape = defaultShape,
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING) {
     tensor_ = nvte_create_tensor(scaling_mode);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(dtype), shape};
-    nvte_set_tensor_param(&tensor_, kNVTERowwiseData, &data);
-    NVTEBasicTensor amax = {amax_dptr, kNVTEFloat32, defaultShape};
-    nvte_set_tensor_param(&tensor_, kNVTEAmax, &amax);
-    NVTEBasicTensor scale = {scale_dptr, kNVTEFloat32, defaultShape};
-    nvte_set_tensor_param(&tensor_, kNVTEScale, &scale);
+    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseData, &data, sizeof(data));
+    NVTEBasicTensor amax = {amax_dptr, kNVTEFloat32,
+                            amax_dptr != nullptr ? defaultShape : emptyShape};
+    nvte_set_tensor_param_v2(tensor_, kNVTEAmax, &amax, sizeof(amax));
+    NVTEBasicTensor scale = {scale_dptr, kNVTEFloat32,
+                             scale_dptr != nullptr ? defaultShape : emptyShape};
+    nvte_set_tensor_param_v2(tensor_, kNVTEScale, &scale, sizeof(scale));
+    if (scale_inv_dptr == nullptr && scale_inv_shape.ndim == defaultShape.ndim &&
+        scale_inv_shape.ndim == 1 && scale_inv_shape.data[0] == defaultShape.data[0]) {
+      // Scale-inv pointer has not been provided and shape matches default
+      scale_inv_shape = emptyShape;
+    }
     NVTEBasicTensor scale_inv = {scale_inv_dptr, kNVTEFloat32, scale_inv_shape};
-    nvte_set_tensor_param(&tensor_, kNVTERowwiseScaleInv, &scale_inv);
+    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseScaleInv, &scale_inv, sizeof(scale_inv));
   }
 
   /*! \brief Constructs new TensorWrapper.
@@ -493,6 +643,7 @@ class TensorWrapper {
    *  \param[in] scale_dptr      Pointer to the scale value.
    *  \param[in] scale_inv_shape Shape of scale_inv
    *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
+   *  \param[in] scaling_mode    Tensor data format.
    */
   TensorWrapper(void *dptr, const std::vector<size_t> &shape, const DType dtype,
                 float *amax_dptr = nullptr, float *scale_dptr = nullptr,
@@ -547,7 +698,7 @@ class TensorWrapper {
                                const ShapeType &shape) noexcept {
     NVTEShape nvte_shape = this->convertShape(shape);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(type), nvte_shape};
-    nvte_set_tensor_param(&tensor_, param, &data);
+    nvte_set_tensor_param_v2(tensor_, param, &data, sizeof(data));
     return *this;
   }
 
@@ -586,10 +737,17 @@ class TensorWrapper {
     return set_parameter(kNVTEColumnwiseAmax, dptr, type, shape);
   }
 
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
+    const auto val = static_cast<uint8_t>(with_gemm_swizzled_scales);
+    nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val));
+  }
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
-    return nvte_get_tensor_param(tensor_, param);
+    NVTEBasicTensor ret;
+    nvte_get_tensor_param_v2(tensor_, param, &ret, sizeof(ret), nullptr);
+    return ret;
   }
 
   NVTEBasicTensor get_rowwise_data() const noexcept { return get_parameter(kNVTERowwiseData); }
@@ -614,6 +772,12 @@ class TensorWrapper {
     return get_parameter(kNVTEColumnwiseAmax);
   }
 
+  bool get_with_gemm_swizzled_scales() const {
+    uint8_t val = 0;
+    nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+
   /*! \brief Get an underlying NVTETensor.
    *
    *  \return NVTETensor held by this TensorWrapper.
@@ -626,7 +790,7 @@ class TensorWrapper {
    */
   const NVTEShape shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_shape(nullptr, 0);
+      return emptyShape;
     }
     return nvte_tensor_shape(tensor_);
   }
@@ -637,14 +801,14 @@ class TensorWrapper {
    */
   const NVTEShape columnwise_shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_shape(nullptr, 0);
+      return emptyShape;
     }
     return nvte_tensor_columnwise_shape(tensor_);
   }
 
   /*! \brief Get the size of this TensorWrapper in the given dimension.
    *
-   *  \param[in] size_t Dimension index.
+   *  \param[in] dim Dimension index.
    *
    *  \return Size of this TensorWrapper in given dimension.
    */
@@ -761,7 +925,7 @@ class TensorWrapper {
    */
   const NVTEShape scale_inv_shape() const noexcept {
     if (tensor_ == nullptr) {
-      return nvte_make_shape(nullptr, 0);
+      return emptyShape;
     }
     return nvte_tensor_scale_inv_shape(tensor_);
   }
@@ -780,6 +944,7 @@ class TensorWrapper {
   static constexpr size_t defaultData = 1;
   static constexpr NVTEShape defaultShape = {
       {defaultData, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
+  static constexpr NVTEShape emptyShape = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
 
  private:
   NVTEShape convertShape(const NVTEShape &s) { return s; }
@@ -792,15 +957,8 @@ class TensorWrapper {
   NVTETensor tensor_ = nullptr;
 };
 
-/*! \enum Float8BlockScaleTensorFormat
- *  \brief Data format for an FP8 block-scaled tensor
- */
-enum class Float8BlockScaleTensorFormat {
-  /*! FP8 data is transposed if needed and scales are swizzled */
-  GEMM_READY = 0,
-  /*! FP8 data is untransposed and scales are not swizzled or padded */
-  COMPACT = 1
-};
+/*! \warning Deprecated */
+enum class Float8BlockScaleTensorFormat { GEMM_READY = 0, COMPACT = 1, INVALID };
 
 /*! \struct QuantizationConfigWrapper
  *  \brief C++ wrapper for NVTEQuantizationConfigWrapper.
@@ -812,9 +970,11 @@ class QuantizationConfigWrapper {
   QuantizationConfigWrapper(const QuantizationConfigWrapper &) = delete;
   QuantizationConfigWrapper &operator=(const QuantizationConfigWrapper &) = delete;
 
+  /*! \brief Move constructor. */
   QuantizationConfigWrapper(QuantizationConfigWrapper &&other) : config_{other.config_} {
     other.config_ = nullptr;
   }
+  /*! \brief Move-assignment operator. */
   QuantizationConfigWrapper &operator=(QuantizationConfigWrapper &&other) {
     if (config_ != nullptr) {
       nvte_destroy_quantization_config(config_);
@@ -839,8 +999,9 @@ class QuantizationConfigWrapper {
 
   /*! \brief Set whether to force power of 2 scales */
   void set_force_pow_2_scales(bool force_pow_2_scales) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales,
-                                           &force_pow_2_scales, sizeof(bool));
+    const auto val = static_cast<uint8_t>(force_pow_2_scales);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales, &val,
+                                           sizeof(val));
   }
 
   /*! \brief Set small value to add to amax */
@@ -855,12 +1016,8 @@ class QuantizationConfigWrapper {
                                            sizeof(NVTETensor));
   }
 
-  /*! \brief Set FP8 block-scaled tensor format */
-  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {
-    nvte_set_quantization_config_attribute(config_,
-                                           kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
-                                           &format, sizeof(Float8BlockScaleTensorFormat));
-  }
+  /*! \warning Deprecated */
+  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {}
 
   /*! \brief Set stochastic rounding state */
   void set_rng_state(NVTETensor rng_state) {
@@ -870,14 +1027,23 @@ class QuantizationConfigWrapper {
 
   /*! \brief Set whether to use 2D block scaling for NVFP4 */
   void set_nvfp4_2d_quantization(bool nvfp4_2d_quantization) {
+    const auto val = static_cast<uint8_t>(nvfp4_2d_quantization);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP42DQuantization,
-                                           &nvfp4_2d_quantization, sizeof(bool));
+                                           &val, sizeof(val));
   }
 
   /*! \brief Set whether to use stochastic rounding */
   void set_stochastic_rounding(bool stochastic_rounding) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding,
-                                           &stochastic_rounding, sizeof(bool));
+    const auto val = static_cast<uint8_t>(stochastic_rounding);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding, &val,
+                                           sizeof(val));
+  }
+
+  /*! \brief Set whether to enable fast math operations */
+  void set_use_fast_math(bool use_fast_math) {
+    const auto val = static_cast<uint8_t>(use_fast_math);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
+                                           sizeof(val));
   }
 
  private:

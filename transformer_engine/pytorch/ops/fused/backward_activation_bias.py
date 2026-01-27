@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -53,8 +53,8 @@ class BackwardActivationBias(FusedOperation):
     ]:
 
         # Get basic operation contexts
-        activation_op_ctx = basic_op_ctxs[0]
-        bias_op_ctx = basic_op_ctxs[1]
+        bias_op_ctx = basic_op_ctxs[0]
+        activation_op_ctx = basic_op_ctxs[1]
 
         # Saved tensors from forward pass
         (act_input,) = activation_op_ctx.saved_tensors
@@ -79,68 +79,59 @@ class BackwardActivationBias(FusedOperation):
         # Clear activation input tensor
         clear_tensor_data(act_input)
 
-        return dx, [(), (db,)], [(), ()]
+        return dx, [(db,), ()], [(), ()]
 
+    @staticmethod
+    def fuse_backward_ops(
+        ops: list[FusibleOperation],
+        *,
+        recipe: Optional[Recipe] = None,
+        **unused,  # pylint: disable=unused-argument
+    ) -> list[FusibleOperation]:
+        """Apply operation fusion for backward pass.
 
-def fuse_backward_activation_bias(
-    ops: list[tuple[FusibleOperation, list[int]]],
-    recipe: Optional[Recipe],
-) -> list[tuple[FusibleOperation, list[int]]]:
-    """Fused backward dact + dbias + quantize
+        Parameters
+        ----------
+        ops : list of FusibleOperation
+            Backward pass operations.
+        recipe : Recipe, optional
+            Quantization recipe.
 
-    Parameters
-    ----------
-    ops: list of tuples
-        Backward pass operations and the indices of the corresponding
-        basic operations.
-    recipe: Recipe, optional
-        Used quantization recipe
+        Returns
+        -------
+        ops : list of FusibleOperation
+            Updated backward pass operations
 
-    Returns
-    -------
-    ops: list of tuples
-        Updated backward pass operations
+        """
 
-    """
+        # Check if recipe supports bias activation fusion
+        if recipe is None:
+            return ops
 
-    # Check if recipe supports bias activation fusion
-    if recipe is None:
-        return ops
+        # Scan through ops, fusing if possible
+        out = []
+        window, ops = ops[:3], ops[3:]
+        while len(window) == 3:
+            if (
+                isinstance(window[2], _fusible_activations)
+                and isinstance(window[1], Bias)
+                and window[0].get_grad_output_quantizer() is not None
+            ):
+                # Construct fused op if window matches pattern
+                op = BackwardActivationBias(bias=window[1], activation=window[2])
+                window = [window[0], op]
+            else:
+                # Shift window if window doesn't match pattern
+                out.extend(window[:-2])
+                window = window[-2:]
 
-    # Scan through ops, fusing if possible
-    out = []
-    window = []
-    while len(ops) >= 3:
+            # Adjust window to expected size
+            out.extend(window[:-3])
+            window = window[-3:]
+            while ops and len(window) < 3:
+                window.append(ops[0])
+                ops = ops[1:]
+
+        # Return list of ops
         out.extend(window)
-
-        # Check if first op is a supported activation
-        window, ops = ops[:1], ops[1:]
-        op, _ = window[0]
-        if not isinstance(op, _fusible_activations):
-            continue
-
-        # Check if second op is bias
-        op, _ = ops[0]
-        if not isinstance(op, Bias):
-            continue
-
-        # Check if third op has a grad input quantizer
-        op, _ = ops[1]
-        if not op.num_quantizers("backward") > 0:
-            continue
-
-        window.extend(ops[:1])
-        ops = ops[1:]
-
-        # Replace window with fused op
-        op = BackwardActivationBias(
-            activation=window[0][0],
-            bias=window[1][0],
-        )
-        basic_op_idxs = [basic_op_idxs[0] for _, basic_op_idxs in window]
-        window = [(op, basic_op_idxs)]
-
-    # Return list of ops
-    out.extend(window)
-    out.extend(ops)
-    return out
+        return out

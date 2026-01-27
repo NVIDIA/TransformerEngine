@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -284,6 +284,10 @@ class Tensor {
 
   void set_tensor_amax_nullptr(){
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
+  }
+
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
+    tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }
 
   void to_cpu() const;

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -14,8 +14,10 @@
 #include "../util/rtc.h"
 #include "../util/string.h"
 #include "../utils.cuh"
+#include "./transpose.h"
 
 namespace transformer_engine {
+namespace detail {
 
 namespace {
 
@@ -203,7 +205,8 @@ void transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cudaStr
 
   NVTE_CHECK(input.data.dptr != nullptr, "Input is not allocated.");
   NVTE_CHECK(output.data.dptr != nullptr, "Output is not allocated.");
-  NVTE_CHECK(input.data.dtype == output.data.dtype, "Input and output type must match.");
+  NVTE_CHECK(input.data.dtype == output.data.dtype, "Input (dtype=", to_string(input.data.dtype),
+             ") and output (dtype=", to_string(output.data.dtype), ") do not match.");
 
   if (noop.data.dptr != nullptr) {
     NVTE_CHECK(noop.numel() == 1, "Expected 1 element, ", "but found ", noop.numel(), ".");
@@ -283,19 +286,20 @@ void transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cudaStr
       });  // NOLINT(*)
 }
 
+}  // namespace detail
 }  // namespace transformer_engine
 
 void nvte_transpose(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_transpose);
   using namespace transformer_engine;
   auto noop = Tensor();
-  transpose(*convertNVTETensorCheck(input), noop, convertNVTETensor(output), stream);
+  detail::transpose(*convertNVTETensorCheck(input), noop, convertNVTETensor(output), stream);
 }
 
 void nvte_transpose_with_noop(const NVTETensor input, const NVTETensor noop, NVTETensor output,
                               cudaStream_t stream) {
   NVTE_API_CALL(nvte_transpose_with_noop);
   using namespace transformer_engine;
-  transpose(*convertNVTETensorCheck(input), *convertNVTETensorCheck(noop),
-            convertNVTETensor(output), stream);
+  detail::transpose(*convertNVTETensorCheck(input), *convertNVTETensorCheck(noop),
+                    convertNVTETensor(output), stream);
 }

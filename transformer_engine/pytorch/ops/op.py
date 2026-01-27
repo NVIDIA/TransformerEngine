@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -188,9 +188,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Objects for quantization
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
-        with_fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_fp8_parameters else None
-        self.reset_recipe_state(recipe=recipe)
 
     @property
     def is_fused_op(self) -> bool:
@@ -687,7 +684,7 @@ class FusedOperation(FusibleOperation):
 
     Parameters
     ----------
-    basic_ops: iterable of FusibleOperation
+    basic_ops : iterable of FusibleOperation
         Basic ops that are interchangeable with this op
 
     """

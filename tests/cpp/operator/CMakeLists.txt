@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -31,12 +31,6 @@ add_executable(test_operator
                test_swizzle.cu
                test_swap_first_dims.cu
                ../test_common.cu)
-
-# Add profiling and debug flags for CUDA compilation
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")                   # Generate line info for device code  
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -g")                          # Add debug symbols for host code
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --ptxas-options=-v")          # Add info about registers usage
-# Note: Using -lineinfo instead of -G to avoid conflicts and get line mapping
 
 # Find required packages
 find_package(OpenMP REQUIRED)

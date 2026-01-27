@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -241,13 +241,9 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
     cuda_root = Path(nvidia.__file__).parent
     return [
-        cuda_root / "cuda_nvcc" / "include",
-        cuda_root / "cublas" / "include",
-        cuda_root / "cuda_runtime" / "include",
-        cuda_root / "cudnn" / "include",
-        cuda_root / "cuda_cccl" / "include",
-        cuda_root / "nvtx" / "include",
-        cuda_root / "cuda_nvrtc" / "include",
+        subdir / "include"
+        for subdir in cuda_root.iterdir()
+        if subdir.is_dir() and (subdir / "include").is_dir()
     ]
 
 
@@ -257,11 +253,9 @@ def cuda_archs() -> str:
     if archs is None:
         version = cuda_version()
         if version >= (13, 0):
-            archs = "75;80;89;90;100;100a;103a;120"
-        elif version >= (12, 9):
-            archs = "70;80;89;90;100;100a;103a;120"
+            archs = "75;80;89;90;100;120"
         elif version >= (12, 8):
-            archs = "70;80;89;90;100;100a;120"
+            archs = "70;80;89;90;100;120"
         else:
             archs = "70;80;89;90"
     return archs

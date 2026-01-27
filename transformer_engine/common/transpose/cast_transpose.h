@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -36,7 +36,7 @@ enum class FP8BlockwiseRowwiseOption {
   NONE,
   // Rowwise data, scales in GEMM format
   ROWWISE_GEMM_READY,
-  // Rowwise data, scales in compact format, needs extra processing (padding, transposing) before GEMM
+  // Deprecated
   ROWWISE_COMPACT
 };
 
@@ -50,8 +50,7 @@ enum class FP8BlockwiseColumnwiseOption {
   // On Hopper sm90, GEMM_READY means that columnwise quantization also fuses transpose op
   // On higher sm versions with TN,NT,NN fp8 gemm, GEMM_READY doesn't fuse transpose
   COLUMNWISE_GEMM_READY,
-  // Columnwise data in original shape
-  // Scales in compact format, needs extra processing (padding, transposing) before GEMM
+  // Deprecated
   COLUMNWISE_COMPACT
 };
 

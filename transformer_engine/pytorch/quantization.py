@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -26,8 +26,8 @@ from transformer_engine.common.recipe import (
     NVFP4BlockScaling,
     CustomRecipe,
 )
-
 from .constants import dist_group_type
+
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
 
@@ -40,6 +40,7 @@ __all__ = [
     "is_fp8_block_scaling_available",
     "is_nvfp4_available",
     "get_default_recipe",
+    "get_align_size_for_quantization",
 ]
 
 
@@ -112,6 +113,15 @@ def get_default_fp8_recipe() -> Recipe:
 def get_default_recipe() -> Recipe:
     """Returns the default training recipe based on available device."""
     return get_default_fp8_recipe()
+
+
+def get_align_size_for_quantization(recipe: Recipe) -> int:
+    """Get the alignment size for quantization."""
+    if recipe.mxfp8():
+        return 32
+    if recipe.nvfp4():
+        return 128
+    return 16
 
 
 def get_fp8_torch_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> torch.dtype:
@@ -668,7 +678,7 @@ def fp8_model_init(
     .. warning::
 
        fp8_model_init is deprecated and will be removed in a future release. Use
-       quantized_model_init(enabled=..., recipe=..., preserve_high_precision_init_val=...) instead.
+       ``quantized_model_init(enabled=..., recipe=..., preserve_high_precision_init_val=...)`` instead.
 
     """
 
@@ -713,7 +723,7 @@ def quantized_model_init(
 
     Parameters
     ----------
-    enabled: bool, default = `True`
+    enabled : bool, default = True
              when enabled, Transformer Engine modules created inside this `quantized_model_init`
              region will hold only quantized copies of its parameters, as opposed to the default
              behavior where both higher precision and quantized copies are present. Setting this
@@ -724,9 +734,9 @@ def quantized_model_init(
                precision copies of weights are already present in the optimizer.
              * inference, where only the quantized copies of the parameters are used.
              * LoRA-like fine-tuning, where the main parameters of the model do not change.
-    recipe: transformer_engine.common.recipe.Recipe, default = `None`
+    recipe : transformer_engine.common.recipe.Recipe, default = None
             Recipe used to create the parameters. If left to None, it uses the default recipe.
-    preserve_high_precision_init_val: bool, default = `False`
+    preserve_high_precision_init_val : bool, default = False
              when enabled, store the high precision tensor used to initialize quantized parameters
              in CPU memory, and add two function attributes named `get_high_precision_init_val()`
              and `clear_high_precision_init_val()` to quantized parameters to get/clear this high
@@ -763,8 +773,8 @@ def fp8_autocast(
     """
     .. warning::
 
-       fp8_autocast is deprecated and will be removed in a future release.
-       Use autocast(enabled=..., calibrating=..., recipe=..., group=..., _graph=...) instead.
+       ``fp8_autocast`` is deprecated and will be removed in a future release.
+       Use ``autocast(enabled=..., calibrating=..., recipe=..., group=..., _graph=...)`` instead.
 
     """
 
@@ -818,16 +828,16 @@ def autocast(
 
     Parameters
     ----------
-    enabled: bool, default = `True`
+    enabled : bool, default = True
              whether or not to enable low precision quantization (FP8/FP4).
-    calibrating: bool, default = `False`
+    calibrating : bool, default = False
                  calibration mode allows collecting statistics such as amax and scale
                  data of quantized tensors even when executing without quantization enabled.
                  This is useful for saving an inference ready checkpoint while training
                  using a higher precision.
-    recipe: recipe.Recipe, default = `None`
+    recipe : recipe.Recipe, default = None
             recipe used for low precision quantization.
-    amax_reduction_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
+    amax_reduction_group : torch._C._distributed_c10d.ProcessGroup, default = None
                           distributed group over which amaxes for the quantized tensors
                           are reduced at the end of each training step.
     """

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -57,24 +57,24 @@ NVTEMatmulConfig nvte_create_matmul_config();
 
 /*! \brief Query an option in matrix multiplication configuration.
  *
- *  \param[in] config Matrix multiplication configuration.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to write option value. Ignored if
- *                  NULL.
- *  \param[in] size_in_bytes Size of buf.
- *  \param[out] size_written Number of bytes that have been written to
- *                           buf. If buf is NULL, then the number of
- *                           bytes that would have been written.
+ *  \param[in]  config        Matrix multiplication configuration.
+ *  \param[in]  attr          Option type.
+ *  \param[out] buf           Memory address to write option value to.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
  */
 void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
                                       void *buf, size_t size_in_bytes, size_t *size_written);
 
 /*! \brief Set an option in matrix multiplication configuration.
  *
- *  \param[in] config Matrix multiplication configuration.
- *  \param[in] attr Option type.
- *  \param[out] buf Memory address to read option value.
- *  \param[in] size_in_bytes Size of buf.
+ *  \param[in/out] config        Matrix multiplication configuration.
+ *  \param[in]     attr          Option type.
+ *  \param[in]     buf           Memory address to read option value from.
+ *  \param[in]     size_in_bytes Size of buf.
  */
 void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
                                       const void *buf, size_t size_in_bytes);
@@ -255,9 +255,11 @@ class MatmulConfigWrapper {
   MatmulConfigWrapper(const MatmulConfigWrapper &) = delete;
   MatmulConfigWrapper &operator=(const MatmulConfigWrapper &) = delete;
 
+  /*! \brief Move constructor. */
   MatmulConfigWrapper(MatmulConfigWrapper &&other) : config_{other.config_} {
     other.config_ = nullptr;
   }
+  /*! \brief Move-assignment operator. */
   MatmulConfigWrapper &operator=(MatmulConfigWrapper &&other) {
     if (config_ != nullptr) {
       nvte_destroy_matmul_config(config_);
@@ -294,14 +296,15 @@ class MatmulConfigWrapper {
 
   /*! \brief Set whether to compute GELU in GEMM epilogue. */
   void set_with_gelu_epilogue(bool with_gelu_epilogue) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithGELUEpilogue,
-                                     &with_gelu_epilogue, sizeof(bool));
+    const auto val = static_cast<uint8_t>(with_gelu_epilogue);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithGELUEpilogue, &val, sizeof(val));
   }
 
   /*! \brief Set whether to compute GELU backward in GEMM epilogue. */
   void set_with_dgelu_epilogue(bool with_dgelu_epilogue) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithDGELUEpilogue,
-                                     &with_dgelu_epilogue, sizeof(bool));
+    const auto val = static_cast<uint8_t>(with_dgelu_epilogue);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithDGELUEpilogue, &val,
+                                     sizeof(val));
   }
 
   /*! \brief Set auxilliary tensor for GEMM epilogue. */
@@ -312,13 +315,15 @@ class MatmulConfigWrapper {
 
   /*! \brief Set whether to use split accumulator for FP8 GEMM. */
   void set_use_split_accumulator(bool use_split_accumulator) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigUseSplitAccumulator,
-                                     &use_split_accumulator, sizeof(bool));
+    const auto val = static_cast<uint8_t>(use_split_accumulator);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigUseSplitAccumulator, &val,
+                                     sizeof(val));
   }
 
   /*! \brief Set number of streaming multiprocessors to use in GEMM kernel. */
   void set_sm_count(int sm_count) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigSMCount, &sm_count, sizeof(int));
+    const auto val = static_cast<int32_t>(sm_count);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigSMCount, &val, sizeof(val));
   }
 
  private:

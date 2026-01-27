@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -492,7 +492,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
   }
 
   NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
-  const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
+  const size_t row_length = input.shape.size() > 0 ? input.shape.back() : 1;
   size_t num_rows = 1;
   for (size_t i = 0; (i < input.shape.size() - 1) && (input.shape.size() > 0); ++i) {
     num_rows *= input.shape.at(i);
@@ -511,12 +511,14 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
   const float* noop_ptr = reinterpret_cast<const float*>(noop_tensor.dptr);
 
   if (return_transpose) {
-    NVTE_CHECK(output_t.shape.size() == input.shape.size(),
-               "output_t must have same number of dimensions as input.");
+    NVTE_CHECK(output_t.shape.size() == input.shape.size(), "input (shape=", input.shape,
+               ") and output_t (shape=", output_t.shape, ") have incompatible dims.");
     if (output_t.shape.size() > 0) {
-      NVTE_CHECK(output_t.shape[0] == row_length, "Wrong dimension 0 of output_t.");
+      NVTE_CHECK(output_t.shape.front() == input.shape.back(), "input (shape=", input.shape,
+                 ") and output_t (shape=", output_t.shape, ") have incompatible dims.");
       for (size_t i = 1; i < output_t.shape.size(); ++i) {
-        NVTE_CHECK(output_t.shape.at(i) == input.shape.at(i - 1), "Wrong dimension in output_t");
+        NVTE_CHECK(output_t.shape[i] == input.shape[i - 1], "input (shape=", input.shape,
+                   ") and output_t (shape=", output_t.shape, ") have incompatible dims.");
       }
     }
     NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same type.");

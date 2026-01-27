@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -198,8 +198,6 @@ void populate_cast_transpose_dbias_workspace_config(const Tensor &cast_output, /
         workspace->data.dtype);
     const size_t required_size =
         get_buffer_size_bytes(num_rows_partial_dbias, row_length, DType::kFloat32);
-    NVTE_CHECK(!workspace->data.shape.empty(), "Invalid workspace dims (expected (",
-               num_rows_partial_dbias, ",", row_length, "), found ())");
     NVTE_CHECK(workspace_size >= required_size, "Invalid workspace (expected dims=(",
                num_rows_partial_dbias, ",", row_length, "), dtype=", to_string(DType::kFloat32),
                "; found dims=", workspace->data.shape,

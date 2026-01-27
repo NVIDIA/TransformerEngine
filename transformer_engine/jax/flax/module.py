@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -6,7 +6,8 @@ Wrapper module for Transformer related layers with FP8 support.
 """
 from functools import reduce
 import operator
-from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union, NewType
+from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union, NewType, Optional
+import warnings
 
 import numpy as np
 import jax.numpy as jnp
@@ -23,8 +24,9 @@ from ..layernorm import layernorm
 from ..layernorm_dense import layernorm_dense
 from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
-from ..softmax import softmax, SoftmaxType
+from ..softmax import softmax, SoftmaxFusionType
 from ..sharding import with_sharding_constraint_by_logical_axes
+from ..attention import AttnSoftmaxType
 from ..cpp_extensions import (
     is_softmax_kernel_available,
     jax_scaled_softmax,
@@ -33,10 +35,11 @@ from ..cpp_extensions import (
 )
 from ..quantize import (
     QuantizerFactory,
-    get_quantize_config,
+    get_global_quantize_recipe,
     QuantizeMetaSet,
     TensorSource,
     get_quantize_config_with_recipe,
+    noop_quantizer_set,
 )
 
 PRNGKey = Any
@@ -170,15 +173,20 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
     ----------
     scale_factor : float, default = 1.0
         Scalar for the input to softmax.
-    softmax_type : SoftmaxType, default = SoftmaxType.SCALED
+    softmax_fusion_type : SoftmaxFusionType, default = SoftmaxFusionType.SCALED
+        Indicate the type of softmax.
+    softmax_type : AttnSoftmaxType, default = AttnSoftmaxType.VANILLA_SOFTMAX
         Indicate the type of softmax.
     """
 
     scale_factor: float = 1.0
-    softmax_type: SoftmaxType = SoftmaxType.SCALED
+    softmax_fusion_type: SoftmaxFusionType = SoftmaxFusionType.SCALED
+    softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     @nn.compact
-    def __call__(self, inputs: Array, mask: Array = None, bias: Array = None) -> jnp.ndarray:
+    def __call__(
+        self, inputs: Array, mask: Array = None, bias: Array = None, softmax_offset: Array = None
+    ) -> jnp.ndarray:
         batch = inputs.shape[0]
         heads = inputs.shape[1]
         q_seqlen = inputs.shape[2]
@@ -186,33 +194,52 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         input_dtype = inputs.dtype
         logits = inputs
 
+        if softmax_offset is not None:
+            assert self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX
+        if self.softmax_type == AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
+            softmax_offset = 0.0
+
         # use primitives
         if is_softmax_kernel_available(
-            self.softmax_type, batch, heads, q_seqlen, k_seqlen, input_dtype
+            self.softmax_fusion_type,
+            self.softmax_type,
+            batch,
+            heads,
+            q_seqlen,
+            k_seqlen,
+            input_dtype,
         ):
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
 
             mask_ = mask
-            if self.softmax_type is not SoftmaxType.SCALED_MASKED:
+            if self.softmax_fusion_type is not SoftmaxFusionType.SCALED_MASKED:
                 mask_ = None
 
-            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type)
+            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_fusion_type)
         # use default jax based implementation
         else:
+            warnings.warn(
+                "Using unfused JAX softmax implementation instead of TE fused primitives. ",
+                UserWarning,
+                stacklevel=2,
+            )
+
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
 
-            if self.softmax_type is SoftmaxType.SCALED:
-                outputs = jax_scaled_softmax(logits, self.scale_factor)
-            elif self.softmax_type is SoftmaxType.SCALED_MASKED:
-                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor)
-            elif self.softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
-                outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor)
+            if self.softmax_fusion_type is SoftmaxFusionType.SCALED:
+                outputs = jax_scaled_softmax(logits, self.scale_factor, softmax_offset)
+            elif self.softmax_fusion_type is SoftmaxFusionType.SCALED_MASKED:
+                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor, softmax_offset)
+            elif self.softmax_fusion_type is SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED:
+                outputs = jax_scaled_upper_triang_masked_softmax(
+                    logits, self.scale_factor, softmax_offset
+                )
             else:
                 raise ValueError(
-                    f"Unsupported softmax type: {self.softmax_type}. softmax_type must be [SCALED,"
-                    " SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
+                    f"Unsupported softmax fusion: {self.softmax_fusion_type}. softmax_fusion_type"
+                    " must be [SCALED, SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
                 )
         assert input_dtype == outputs.dtype
         return outputs
@@ -252,26 +279,26 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
     zero_centered_gamma : bool, default = False
-        If set to `True`, the LayerNorm formula changes to
+        If set to ``True``, the LayerNorm formula changes to
 
         .. math::
-            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} \cdot
             (1 + \gamma) + \beta
 
-        This parameter is only applicable for 'layernorm'.
-        The default of `scale_init` will also be changed. See `scale_init`.
+        This parameter is only applicable for ``'layernorm'``.
+        The default of ``scale_init`` will also be changed. See ``scale_init``.
     scale_init : Initializer, default = None
         Used for initializing scale factors :math:`\gamma`.
-        If `None` is provided, scale_init is set according to the value of zero_centered_gamma.
-        If zero_centered_gamma is set to `True`, then scale_init is `flax.linen.initializers.zeros`.
-        Otherwise, scale_init is `flax.linen.initializers.ones`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        If ``None`` is provided, scale_init is set according to the value of zero_centered_gamma.
+        If zero_centered_gamma is set to ``True``, then scale_init is ``flax.linen.initializers.zeros``.
+        Otherwise, scale_init is ``flax.linen.initializers.ones``.
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh.
     bias_init : Initializer, default = flax.linen.initializers.zeros
         Used for initializing shift factors :math:`\beta`,
         only used when :attr:`layernorm_type='layernorm'`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     bias_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the shift factors :math:`\beta` with a corresponding mesh.
         only used when :attr:`layernorm_type='layernorm'`.
@@ -345,22 +372,26 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
     """
 
     def generate_quantizer_set(
-        self, postfix: str = "", variable_collection: str = None, fp8_recipe=None
+        self,
+        postfix: str = "",
+        variable_collection: str = None,
+        quantization_checkpoint_name: Optional[str] = None,
+        fp8_recipe=None,
     ):
         """
         Generate a set of FP8 meta for a GEMM.
         """
 
+        if fp8_recipe is None:
+            fp8_recipe = get_global_quantize_recipe()
+
+        quantize_config = get_quantize_config_with_recipe(fp8_recipe)
+
         collection_name = (
             variable_collection
             if variable_collection is not None
-            else get_quantize_config().COLLECTION_NAME
+            else quantize_config.COLLECTION_NAME
         )
-
-        if fp8_recipe is None:
-            quantize_config = get_quantize_config()
-        else:
-            quantize_config = get_quantize_config_with_recipe(fp8_recipe)
 
         x_meta = quantize_config.get_quantize_flax_meta(
             self, collection_name, postfix, TensorSource.X, "x"
@@ -375,7 +406,9 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         quantize_meta_set = QuantizeMetaSet(x=x_meta, kernel=kernel_meta, grad=grad_meta)
 
         quantizer_set = QuantizerFactory.create_set(
-            fp8_recipe=fp8_recipe, quantize_meta_set=quantize_meta_set
+            fp8_recipe=fp8_recipe,
+            quantize_meta_set=quantize_meta_set,
+            checkpoint_name=quantization_checkpoint_name,
         )
         return quantizer_set
 
@@ -391,15 +424,15 @@ class DenseGeneral(TransformerEngineBase):
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
         Used for initializing weights.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     kernel_axes : Tuple[str, ...], default = ()
         The name of axes used to shard the weights with a corresponding mesh.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting.
-        If set to False, the layer will not learn an additive bias.
+        If set to ``False``, the layer will not learn an additive bias.
     bias_init: Initializer, default = flax.linen.initializers.zeros
         Used for initializing bias, only used when :attr:`use_bias=True`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     bias_axes: Tuple[str, ...], default = ()
         The name of axes used to shard bias with a corresponding mesh,
         only used when :attr:`use_bias=True`.
@@ -410,12 +443,12 @@ class DenseGeneral(TransformerEngineBase):
         :attr:`enable_low_rank_adaptation=True`
     low_rank_adaptation_alpha: float, default = None
         The alpha for computing the scaling factor of LoRA output.
-        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
+        :math:`\frac{alpha}{rank} \cdot lora\_output`. ``None`` means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
     input_axes: Tuple[str, ...], default = None
         Indicate the logical axes of sharding constraint to the input, like
-        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        ``(BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)``. Default is ``None``, which means not to insert
         sharding constraint.
 
     Optimization parameters
@@ -424,6 +457,8 @@ class DenseGeneral(TransformerEngineBase):
         The data type used to allocate the initial parameters.
     transpose_batch_sequence: bool, default = False
         Indicate whether to transpose the batch and sequence dimensions of the input tensor.
+    quantization_checkpoint_name: Optional[str], default = None
+        The name for checkpointing quantizations.
     """
 
     features: Union[Iterable[int], int]
@@ -439,6 +474,7 @@ class DenseGeneral(TransformerEngineBase):
     dtype: DType = jnp.float32
     input_axes: Tuple[str, ...] = ()
     transpose_batch_sequence: bool = False
+    quantization_checkpoint_name: Optional[str] = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -483,7 +519,11 @@ class DenseGeneral(TransformerEngineBase):
             self.dtype,
         )
 
-        if not get_quantize_config().is_fp8_enabled():
+        quantizer_set = self.generate_quantizer_set(
+            quantization_checkpoint_name=self.quantization_checkpoint_name
+        )
+
+        if quantizer_set == noop_quantizer_set:
             kernel = kernel.astype(input_dtype)
 
         if self.use_bias:
@@ -496,7 +536,6 @@ class DenseGeneral(TransformerEngineBase):
         else:
             bias = None
 
-        quantizer_set = self.generate_quantizer_set()
         contract_ind = tuple(range(0, len(axis)))
         y = dense(
             inputs,
@@ -558,48 +597,48 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     epsilon : float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
     zero_centered_gamma : bool, default = False
-        If set to `True`, the LayerNorm formula changes to
+        If set to ``True``, the LayerNorm formula changes to
 
         .. math::
-            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} \cdot
             (1 + \gamma) + \beta
 
-        This parameter is only applicable for 'layernorm'.
-        The default of `scale_init` will also be changed. See `scale_init`
+        This parameter is only applicable for ``'layernorm'``.
+        The default of ``scale_init`` will also be changed. See ``scale_init``
     scale_init : Initializer, default = None
         Used for initializing scale factors :math:`\gamma`.
-        If `None` is provided, scale_init is set according to the value of zero_centered_gamma.
-        If zero_centered_gamma is set to `True`, then scale_init is `flax.linen.initializers.zeros`.
-        Otherwise, scale_init is `flax.linen.initializers.ones`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        If ``None`` is provided, scale_init is set according to the value of zero_centered_gamma.
+        If zero_centered_gamma is set to ``True``, then scale_init is ``flax.linen.initializers.zeros``.
+        Otherwise, scale_init is ``flax.linen.initializers.ones``.
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
         only used when :attr:`enable_layernorm=True`.
     ln_bias_init: Initializer, default = flax.linen.initializers.zeros
         Used for initializing shift factors :math:`\beta`,
         only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     ln_bias_axes: Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the shift factors :math:`\beta` with a corresponding mesh.
         It is only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
         Used for initializing weights.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     kernel_axes : Tuple[str, ...], default = ()
         The name of axes used to shard the weights with a corresponding mesh.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting.
-        If set to False, the layer will not learn an additive bias.
+        If set to ``False``, the layer will not learn an additive bias.
     bias_init: Initializer, default = flax.linen.initializers.zeros
         Used for initializing bias, only used when :attr:`use_bias=True`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     bias_axes: Tuple[str, ...], default = ()
         The name of axes used to shard bias with a corresponding mesh,
         only used when :attr:`use_bias=True`.
-    return_layernorm_output: bool, default = True
+    return_layernorm_output: bool, default = False
         Indicate whether to return the output of layer normalization.
-        If set False, return None as the second tensor in outputs.
+        If set ``False``, return ``None`` as the second tensor in outputs.
     enable_low_rank_adaptation: bool, default = False
         Indicate whether to enable low rank adaptation for each dense layer.
     low_rank_adaptation_dim: int, default = 32
@@ -607,16 +646,16 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         :attr:`enable_low_rank_adaptation=True`
     low_rank_adaptation_alpha: float, default = None
         The alpha for computing the scaling factor of LoRA output.
-        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
+        :math:`\frac{alpha}{rank} \cdot lora\_output`. ``None`` means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
     layernorm_input_axes: Tuple[str, ...], default = None
         Indicate the logical axes of sharding constraint to the input of layernorm, like
-        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        ``(BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)``. Default is ``None``, which means not to insert
         sharding constraint.
     dot_input_axes: Tuple[str, ...], default = None
         Indicate the logical axes of sharding constraint to the input of dot, like
-        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        ``(BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)``. Default is ``None``, which means not to insert
         sharding constraint.
 
     Optimization parameters
@@ -628,6 +667,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         value or None. When None is set, then no scaling is applied.
     transpose_batch_sequence: bool, default = False
         Indicate whether to transpose the batch and sequence dimensions of the input tensor.
+    quantization_checkpoint_name: Optional[str], default = None
+        The name for checkpointing quantizations.
     """
 
     features: Union[Iterable[int], int]
@@ -644,7 +685,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     use_bias: bool = False
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ()
-    return_layernorm_output: bool = True
+    return_layernorm_output: bool = False
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
     low_rank_adaptation_alpha: float = None
@@ -654,6 +695,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     dot_input_axes: Tuple[str, ...] = None
     depth_scaling: float = None
     transpose_batch_sequence: bool = False
+    quantization_checkpoint_name: Optional[str] = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -693,10 +735,12 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         input_dtype = inputs.dtype
         ln_output = None
 
-        quantizer_set = self.generate_quantizer_set()
+        quantizer_set = self.generate_quantizer_set(
+            quantization_checkpoint_name=self.quantization_checkpoint_name
+        )
 
         fuse_layernorm = (
-            get_quantize_config().is_fp8_enabled()
+            quantizer_set != noop_quantizer_set
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -747,7 +791,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             kernel_shape,
             self.dtype,
         )
-        if not get_quantize_config().is_fp8_enabled():
+        if quantizer_set == noop_quantizer_set:
             kernel = kernel.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
@@ -843,34 +887,34 @@ class LayerNormMLP(TransformerEngineBase):
     epsilon : float, default = 1e-6
         A value added to the denominator of layer normalization for numerical stability.
     zero_centered_gamma : bool, default = False
-        If set to `True`, the LayerNorm formula changes to
+        If set to ``True``, the LayerNorm formula changes to
 
         .. math::
-            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} *
+            y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \epsilon}} \cdot
             (1 + \gamma) + \beta
 
-        This parameter is only applicable for 'layernorm'.
-        The default of `scale_init` will also be changed. See `scale_init`.
+        This parameter is only applicable for ``'layernorm'``.
+        The default of ``scale_init`` will also be changed. See ``scale_init``.
     scale_init : Initializer, default = None
         Used for initializing scale factors :math:`\gamma`.
-        If `None` is provided, scale_init is set according to the value of zero_centered_gamma.
-        If zero_centered_gamma is set to `True`, then scale_init is `flax.linen.initializers.zeros`.
-        Otherwise, scale_init is `flax.linen.initializers.ones`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        If ``None`` is provided, scale_init is set according to the value of zero_centered_gamma.
+        If zero_centered_gamma is set to ``True``, then scale_init is ``flax.linen.initializers.zeros``.
+        Otherwise, scale_init is ``flax.linen.initializers.ones``.
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     scale_axes : Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the scale factors :math:`\gamma` with a corresponding mesh,
         only used when :attr:`enable_layernorm=True`.
     ln_bias_init: Initializer, default = flax.linen.initializers.zeros
         Used for initializing shift factors :math:`\beta`,
         only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     ln_bias_axes: Tuple[str, ...], default = ('embed', )
         The name of axes used to shard the shift factors :math:`\beta` with a corresponding mesh.
         Only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
         Used for initializing the weights of both dense layer transformations.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     kernel_axes_1 : Tuple[str, ...], default = ('embed', 'act', 'mlp')
         The name of axes used to shard the weights with a corresponding mesh for
         the weight of the first dense layer transformation.
@@ -879,10 +923,10 @@ class LayerNormMLP(TransformerEngineBase):
         the weight of the second dense layer transformation.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting.
-        If set to False, the layer will not learn an additive bias.
+        If set to ``False``, the layer will not learn an additive bias.
     bias_init: Initializer, default = flax.linen.initializers.zeros
         Used for initializing bias, only used when :attr:`use_bias=True`.
-        It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
+        It should be a callable object with three arguments ``(jax.random.PRNGKey, shape, dtype)``.
     bias_axes_1: Tuple[str, ...], default = ('mlp',)
         The name of axes used to shard bias with a corresponding mesh  for
         the weight of the first dense layer transformation.
@@ -891,10 +935,10 @@ class LayerNormMLP(TransformerEngineBase):
         The name of axes used to shard bias with a corresponding mesh  for
         the weight of the second dense layer transformation.
         Only used when :attr:`use_bias=True`.
-    return_layernorm_output: bool, default = True
+    return_layernorm_output: bool, default = False
         Indicate whether to return the output of layer normalization.
-        If set False, return None as the second tensor in outputs.
-    activations: Sequence[Union[str, Callable]], default = ('relu',)
+        If set ``False``, return ``None`` as the second tensor in outputs.
+    activations: Sequence[Union[str, Callable]], default = ('gelu',)
         The sequence of activation functions to apply after the first dense layer transformation.
         Each activation has its own transformation layer.
     activation_params: dict, default = None
@@ -903,7 +947,7 @@ class LayerNormMLP(TransformerEngineBase):
         need additional parameters.
     intermediate_dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
-    intermediate_dropout_rate: float, default = 0.1
+    intermediate_dropout_rate: float, default = 0.0
         Dropout probability for the dropout op after the :attr:`activations`.
     intermediate_hidden_dropout_dims: Sequence[int], default = ()
         Dimensions that will share the same dropout mask for hidden
@@ -914,20 +958,20 @@ class LayerNormMLP(TransformerEngineBase):
         :attr:`enable_low_rank_adaptation=True`.
     low_rank_adaptation_alpha: float, default = None
         The alpha for computing the scaling factor of LoRA output.
-        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
+        :math:`\frac{alpha}{rank} \cdot lora\_output`. ``None`` means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
     layernorm_input_axes: Tuple[str, ...], default = None
         Indicate the logical axes of sharding constraint to the input of layernorm, like
-        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        ``(BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)``. Default is ``None``, which means not to insert
         sharding constraint.
     dot_1_input_axes: Tuple[str, ...], default = None
         Indicate the logical axes of sharding constraint to the input of 1st dot, like
-        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        ``(BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)``. Default is ``None``, which means not to insert
         sharding constraint.
     dot_2_input_axes: Tuple[str, ...], default = None
         Indicate the logical axes of sharding constraint to the input of 2nd dot, like
-        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        ``(BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)``. Default is ``None``, which means not to insert
         sharding constraint.
     ffn1_ckpt_name: str = "ffn1"
         Checkpoint name for the output of the first fully-connected layer in the MLP block.
@@ -941,6 +985,8 @@ class LayerNormMLP(TransformerEngineBase):
         The data type used to allocate the initial parameters.
     transpose_batch_sequence: bool, default = False
         Indicate whether to transpose the batch and sequence dimensions of the input tensor.
+    quantization_checkpoint_name: Optional[str], default = None
+        The name for checkpointing quantizations.
     """
 
     intermediate_dim: int = 2048
@@ -959,11 +1005,11 @@ class LayerNormMLP(TransformerEngineBase):
     bias_init: Initializer = nn.initializers.zeros
     bias_axes_1: Tuple[str, ...] = ("act", "mlp")
     bias_axes_2: Tuple[str, ...] = ("embed",)
-    return_layernorm_output: bool = True
-    activations: Sequence[Union[str, Callable]] = ("relu",)
+    return_layernorm_output: bool = False
+    activations: Sequence[Union[str, Callable]] = ("gelu",)
     activation_params: dict = None
     intermediate_dropout_rng_name: str = "dropout"
-    intermediate_dropout_rate: float = 0.1
+    intermediate_dropout_rate: float = 0.0
     intermediate_hidden_dropout_dims: Sequence[int] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
@@ -976,6 +1022,7 @@ class LayerNormMLP(TransformerEngineBase):
     ffn1_ckpt_name: str = "ffn1"
     ffn2_ckpt_name: str = "ffn2"
     transpose_batch_sequence: bool = False
+    quantization_checkpoint_name: Optional[str] = None
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -1010,8 +1057,12 @@ class LayerNormMLP(TransformerEngineBase):
         """
         assert self.axis == -1, "Only support axis == -1 at this moment"
 
-        ffn1_quantizer_set = self.generate_quantizer_set("_0")
-        ffn2_quantizer_set = self.generate_quantizer_set("_1")
+        ffn1_quantizer_set = self.generate_quantizer_set(
+            "_0", quantization_checkpoint_name=self.quantization_checkpoint_name
+        )
+        ffn2_quantizer_set = self.generate_quantizer_set(
+            "_1", quantization_checkpoint_name=self.quantization_checkpoint_name
+        )
 
         input_dtype = inputs.dtype
         ln_output = None
@@ -1019,7 +1070,7 @@ class LayerNormMLP(TransformerEngineBase):
         # TODO(Phuong): use fuse_layernorm for high-precision
         # when NoOpQuantizer and Tensor are implemented
         fuse_layernorm = (
-            get_quantize_config().is_fp8_enabled()
+            ffn1_quantizer_set != noop_quantizer_set
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -1105,7 +1156,7 @@ class LayerNormMLP(TransformerEngineBase):
             self.dtype,
         )
 
-        if not get_quantize_config().is_fp8_enabled():
+        if ffn1_quantizer_set == noop_quantizer_set:
             kernel_1 = kernel_1.astype(input_dtype)
 
         hidden_size = inputs.shape[-1]
@@ -1117,7 +1168,7 @@ class LayerNormMLP(TransformerEngineBase):
             kernel_2_shape,
             self.dtype,
         )
-        if not get_quantize_config().is_fp8_enabled():
+        if ffn2_quantizer_set == noop_quantizer_set:
             kernel_2 = kernel_2.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
@@ -1303,3 +1354,87 @@ class LayerNormMLP(TransformerEngineBase):
 
         assert out.dtype == input_dtype
         return out, ln_output  # Output, layer_norm_output
+
+
+def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str] = None):
+    """Wraps the given function `f` to support TransformerEngine quantization.
+
+    This method does a couple things:
+
+    1. Wraps the given function in a Flax linen module. This module does not store any Flax parameters
+    but can store Flax variables for quantizers if required by the recipe.
+
+    2. When the wrapper is called, it provides an additional argument to the given function `f`, 'generate_quantizer_set' as the first argument. 'generate_quantizer_set' is a function that can be called to generate a TransformerEngine/JAX quantizer set object used in TransformerEngine/JAX APIs. 'generate_quantizer_set' will generate quantizers based on the recipe of this TransformerEngineQuantizer object.
+
+    Args:
+      f: The function to wrap. The first argument must be 'generate_quantizer_set'.
+      name: The name of this wrapped operation. If unspecified, will use `f.__name__`.
+
+    Returns:
+      A Flax linen module that wraps the given function.
+    """
+
+    import transformer_engine.jax as te
+
+    class TEWrapper(te.flax.module.TransformerEngineBase):
+        """Wrapper Flax module for TransformerEngine quantization support."""
+
+        def generate_quantizer_set(self, postfix: str = ""):
+            OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
+            return super().generate_quantizer_set(
+                postfix=postfix,
+                variable_collection=OVERWRITE_WITH_GRADIENT,
+                fp8_recipe=quantization_recipe,
+            )
+
+        @nn.compact
+        def __call__(self, *args, **kwargs):
+            return f(self.generate_quantizer_set, *args, **kwargs)
+
+    TEWrapper.__name__ = f"TEWrapper_{name if name else f.__name__}"
+
+    return TEWrapper
+
+
+def make_dot_general_cls(quantization_recipe):
+    """Creates a Flax module class that performs a dot_general operation with the arguments x and kernel using the given quantization recipe.
+
+    This is intended for usage when you already have model parameters initialized and sharded for the kernel weights and you want to replace the GEMM implementation with TE's quantized GEMM using a given recipe.
+
+    For example,
+    ```
+        te_dot_general_cls = make_dot_general_cls(DelayedScaling())
+        dense = nn.Dense(..., dot_general=te_dot_general_cls())
+    ```
+
+    If you would like a drop-in replacement for nn.Dense that manages the model weights itself, please use TE's DenseGeneral module.
+
+    Args:
+        quantization_recipe: The quantization recipe to use for the dot_general operation.
+    Returns:
+        A Flax module class that performs a dot_general operation with the given quantization recipe.
+    """
+    import transformer_engine.jax as te
+    from transformer_engine.common.recipe import NVFP4BlockScaling
+
+    def te_dot_general(generate_quantizer_set, x, kernel, dims, **kwargs):
+        """Performs a dot_general operation using TransformerEngine with quantization."""
+        del kwargs  # Unused
+        contracting_dims, batch_dims = dims
+        assert batch_dims == ((), ()), "Batch dimensions must be empty for TransformerEngine dot."
+
+        quantizer_set = generate_quantizer_set()
+
+        if isinstance(quantization_recipe, NVFP4BlockScaling):
+            # NVFP4 RHT requires inputs to be in bfloat16
+            x = x.astype(jnp.bfloat16)
+            kernel = kernel.astype(jnp.bfloat16)
+
+        return te.dense.dense(
+            x,
+            kernel,
+            contracting_dims=contracting_dims,
+            quantizer_set=quantizer_set,
+        )
+
+    return wrap_function_in_te_state_module(te_dot_general, quantization_recipe, "dot_general")

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -7,7 +7,7 @@ import subprocess
 import sys
 import pathlib
 import logging
-
+import copy
 import pytest
 import torch
 from transformer_engine.pytorch import (
@@ -73,7 +73,7 @@ dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_1_0", "cp_2_1", "cp_3_2", "cp_3_3"]
+    configs = ["cp_1_0", "cp_1_2", "cp_2_1", "cp_3_2", "cp_3_3"]
     model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
@@ -96,12 +96,16 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
-    if cp_comm_type == "all_gather" and qkv_format == "thd":
-        pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
         pytest.skip("CP implementation with KV all-gather does not support bias yet!")
-    if "a2a" in cp_comm_type and qkv_format == "thd":
-        pytest.skip("CP implementation with QKVO A2A does not support THD format yet!")
+    if qkv_format == "thd":
+        if cp_comm_type == "all_gather":
+            pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip(
+                "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
+                " yet!"
+            )
     if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
         pytest.skip("CP implementation with QKVO A2A does not support bias yet!")
     if "a2a" in cp_comm_type and (config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0):
@@ -137,13 +141,13 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
 model_configs_fused_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
-    "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
+    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", return_max_logit=True),  # MHA
+    "cp_1_1": ModelConfig(2, 4096, 12, 128, return_max_logit=True),  # MHA
     "cp_1_2": ModelConfig(
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),  # MHA
     "cp_1_3": ModelConfig(2, 4096, 12, 128, attn_bias_type="post_scale_bias"),  # MHA
-    "cp_1_4": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
+    "cp_1_4": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 512)),  # MHA
     "cp_2_0": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal"),  # GQA
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(
@@ -159,7 +163,7 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, num_gqa_groups=2, attn_bias_type="post_scale_bias"
     ),  # GQA
     "cp_2_4": ModelConfig(
-        2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 0)
+        2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 512)
     ),  # GQA
     "cp_3_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", head_dim_v=64),  # MLA
     "cp_3_1": ModelConfig(2, 4096, 12, 128, head_dim_v=64),  # MLA
@@ -183,7 +187,16 @@ dtypes = ["bf16", "fp16", "fp8"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_1_0", "cp_2_0", "cp_2_2", "cp_3_2", "cp_4_2"]
+    configs = [
+        "cp_1_0",
+        "cp_1_1",
+        "cp_1_4",
+        "cp_2_0",
+        "cp_2_2",
+        "cp_2_4",
+        "cp_3_2",
+        "cp_4_2",
+    ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
     qkv_formats = ["sbhd", "thd"]
@@ -224,10 +237,14 @@ def test_cp_with_fused_attention(
 
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
-    if qkv_format == "thd" and cp_comm_type == "all_gather":
-        pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
-    if qkv_format == "thd" and "a2a" in cp_comm_type:
-        pytest.skip("CP implementation with QKVO A2A does not support THD format yet!")
+    if qkv_format == "thd":
+        if cp_comm_type == "all_gather":
+            pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip(
+                "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
+                " yet!"
+            )
     if dtype == "fp8" and cp_comm_type == "all_gather":
         pytest.skip(
             "CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
@@ -275,12 +292,25 @@ def test_cp_with_fused_attention(
         pytest.skip(
             "CP implementation only supports cp_comm_type=a2a for non-vanilla softmax types!"
         )
-    if config.softmax_type != "vanilla" and qkv_format == "thd":
+    if (
+        get_cudnn_version() < (9, 18, 0)
+        and config.softmax_type != "vanilla"
+        and qkv_format == "thd"
+    ):
         pytest.skip(
-            "CP implementation does not support qkv_format=thd for non-vanilla softmax types!"
+            "Unless cudnn version >= 9.18.0, CP implementation does not support qkv_format=thd for"
+            " non-vanilla softmax types!"
         )
 
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
+
+    if qkv_format == "thd":
+        config = copy.deepcopy(config)
+        if "causal" in config.attn_mask_type:
+            config.attn_mask_type = "padding_causal"
+        else:
+            config.attn_mask_type = "padding"
+
     fp8_meta = {}
     fp8_meta["recipe"] = None
     fp8_meta["local_recipes"] = []

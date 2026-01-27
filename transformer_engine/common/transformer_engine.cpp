@@ -1,17 +1,21 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <transformer_engine/transformer_engine.h>
 
+#include <algorithm>
 #include <atomic>
 #include <climits>
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "common.h"
 #include "common/util/cuda_runtime.h"
@@ -77,7 +81,7 @@ std::string to_string(const NVTEScalingMode &mode) {
 }
 
 void CheckNoopTensor(const Tensor &t, const std::string &name) {
-  if (t.data.dptr != nullptr) {
+  if (t.data.has_data()) {
     NVTE_CHECK(t.numel() == 1, "Expected 1 element for ", name, " noop, but found ", t.numel(),
                ".");
     NVTE_CHECK(t.data.dtype == DType::kFloat32, "Found wrong dtype for ", name,
@@ -88,15 +92,30 @@ void CheckNoopTensor(const Tensor &t, const std::string &name) {
 void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   NVTE_CHECK(t.scaling_mode != NVTE_INVALID_SCALING, "Invalid scaling mode!");
   if (is_tensor_scaling(t.scaling_mode)) {
-    // per-tensor scaling
-    if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.numel() == 1, "Tensor \"", name,
-                 "\" has invalid scale_inv shape (expected (1), got ", t.scale_inv.shape, ")");
-    }
-    if (t.has_columnwise_data()) {
-      NVTE_CHECK(t.columnwise_scale_inv.numel() == 1, "Tensor \"", name,
-                 "\" has invalid columnwise_scale_inv shape (expected (1), got ",
-                 t.columnwise_scale_inv.shape, ")");
+    if (is_fp8_dtype(t.dtype())) {
+      // FP8 tensor with tensor scaling
+      if (t.has_data()) {
+        NVTE_CHECK(t.scale_inv.numel() == 1, "Tensor \"", name,
+                   "\" has invalid scale_inv shape (expected 1 entry, got ", t.scale_inv.shape,
+                   ")");
+      }
+      if (t.has_columnwise_data()) {
+        NVTE_CHECK(t.columnwise_scale_inv.numel() == 1, "Tensor \"", name,
+                   "\" has invalid columnwise_scale_inv shape (expected 1 entry, got ",
+                   t.columnwise_scale_inv.shape, ")");
+      }
+    } else {
+      // High-precision tensor
+      if (t.has_data()) {
+        NVTE_CHECK(t.scale_inv.numel() == 0, "Tensor \"", name,
+                   "\" has invalid scale_inv shape (expected 0 entries, got ", t.scale_inv.shape,
+                   ")");
+      }
+      if (t.has_columnwise_data()) {
+        NVTE_CHECK(t.columnwise_scale_inv.numel() == 0, "Tensor \"", name,
+                   "\" has invalid columnwise_scale_inv shape (expected 0 entries, got ",
+                   t.columnwise_scale_inv.shape, ")");
+      }
     }
   } else {
     if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
@@ -159,7 +178,7 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv
     if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.dptr != nullptr, "FP8 scaling factor input ", name,
+      NVTE_CHECK(t.scale_inv.has_data(), "FP8 scaling factor input ", name,
                  "_scale_inverse must be allocated");
       NVTE_CHECK(t.scale_inv.dtype == DType::kFloat32 || t.scale_inv.dtype == DType::kFloat8E8M0,
                  "FP8 scaling factor input ", name,
@@ -168,7 +187,7 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
                  to_string(t.scale_inv.dtype), ")");
     }
     if (t.has_columnwise_data()) {
-      NVTE_CHECK(t.columnwise_scale_inv.dptr != nullptr, "FP8 scaling factor input ", name,
+      NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP8 scaling factor input ", name,
                  "_columnwise_scale_inverse must be allocated");
       NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat32 ||
                      t.columnwise_scale_inv.dtype == DType::kFloat8E8M0,
@@ -181,7 +200,7 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
     // TODO(ksivaman): Fix this to check for amaxes and other details.
     // For now only needed for swizzle.
     if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.dptr != nullptr, "FP4 scaling factor input ", name,
+      NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor input ", name,
                  "_scale_inverse must be allocated");
       NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor input ", name,
                  "_scale_inverse has invalid dtype "
@@ -189,7 +208,7 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
                  to_string(t.scale_inv.dtype), ")");
     }
     if (t.has_columnwise_data()) {
-      NVTE_CHECK(t.columnwise_scale_inv.dptr != nullptr, "FP4 scaling factor input ", name,
+      NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor input ", name,
                  "_columnwise_scale_inverse must be allocated");
       NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3, "FP8 scaling factor input ",
                  name,
@@ -198,11 +217,10 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
   } else {
-    NVTE_CHECK(t.scale.dptr == nullptr, "Scale is not supported for non-FP8 input ", name);
-    NVTE_CHECK(t.amax.dptr == nullptr, "Amax is not supported for non-FP8 input ", name);
-    NVTE_CHECK(t.scale_inv.dptr == nullptr, "Scale_inv is not supported for non-FP8 input ", name);
-    NVTE_CHECK(t.columnwise_scale_inv.dptr == nullptr,
-               "Scale_inv is not supported for non-FP8 input ", name);
+    NVTE_CHECK(!t.scale.has_data(), "Scale is not supported for non-FP8 input ", name);
+    NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv is not supported for non-FP8 input ", name);
+    NVTE_CHECK(!t.columnwise_scale_inv.has_data(), "Scale_inv is not supported for non-FP8 input ",
+               name);
   }
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input ", name, " is not allocated!");
 
@@ -213,14 +231,14 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 output needs to have scale, scale_inv and (if delayed scaling) amax
-    if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING && t.amax.dptr != nullptr) {
+    if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING && t.amax.has_data()) {
       NVTE_CHECK(t.amax.dtype == DType::kFloat32, "Invalid amax dtype (expected ",
                  to_string(DType::kFloat32), ", got ", to_string(t.amax.dtype), ")");
-      NVTE_CHECK(product(t.amax.shape) == 1, "Invalid shape of amax in output ", name,
+      NVTE_CHECK(t.amax.numel() == 1, "Invalid shape of amax in output ", name,
                  " (expected 1 entry, got shape=", t.amax.shape, ")");
     }
     if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.dptr != nullptr, "FP8 scaling factor output ", name,
+      NVTE_CHECK(t.scale_inv.has_data(), "FP8 scaling factor output ", name,
                  "_scale_inverse must be allocated");
       NVTE_CHECK(t.scale_inv.dtype == DType::kFloat32 || t.scale_inv.dtype == DType::kFloat8E8M0,
                  "FP8 scaling factor output ", name,
@@ -229,7 +247,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
                  to_string(t.scale_inv.dtype), ")");
     }
     if (t.has_columnwise_data()) {
-      NVTE_CHECK(t.columnwise_scale_inv.dptr != nullptr, "FP8 scaling factor output ", name,
+      NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP8 scaling factor output ", name,
                  "_columnwise_scale_inverse must be allocated");
       NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat32 ||
                      t.columnwise_scale_inv.dtype == DType::kFloat8E8M0,
@@ -241,7 +259,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   } else if (is_fp4_dtype(type)) {
     // FP4 output needs to have the scale_inv
     if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.dptr != nullptr, "FP4 scaling factor output ", name,
+      NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_scale_inverse must be allocated");
       NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ", name,
                  "_scale_inverse has invalid dtype "
@@ -249,7 +267,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
                  to_string(t.scale_inv.dtype), ")");
     }
     if (t.has_columnwise_data()) {
-      NVTE_CHECK(t.columnwise_scale_inv.dptr != nullptr, "FP4 scaling factor output ", name,
+      NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_columnwise_scale_inverse must be allocated");
       NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ",
                  name,
@@ -258,12 +276,10 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
   } else {
-    NVTE_CHECK(t.scale.dptr == nullptr, "Scale is not supported for non-FP8 output ", name);
-    // Unfused quant with level 2 nvfp4 scaling will produce high precision tensors with amax.
-    // NVTE_CHECK(t.amax.dptr == nullptr, "Amax is not supported for non-FP8 output ", name);
-    NVTE_CHECK(t.scale_inv.dptr == nullptr, "Scale_inv is not supported for non-FP8 output ", name);
-    NVTE_CHECK(t.columnwise_scale_inv.dptr == nullptr,
-               "Scale_inv is not supported for non-FP8 input ", name);
+    NVTE_CHECK(!t.scale.has_data(), "Scale is not supported for non-FP8 output ", name);
+    NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv is not supported for non-FP8 output ", name);
+    NVTE_CHECK(!t.columnwise_scale_inv.has_data(), "Scale_inv is not supported for non-FP8 input ",
+               name);
   }
 
   if (!allow_empty) {
@@ -271,6 +287,128 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   }
 
   CheckScaleTensorShape(t, name);
+}
+
+void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &name) {
+  NVTE_CHECK(t.num_tensors > 0, "Grouped tensor ", name, " has no tensors!");
+
+  // Helper lambda to validate shape arrays
+  // All three arrays are OPTIONAL:
+  // - first_dims: empty if all tensors have same first dimension
+  // - last_dims: empty if all tensors have same last dimension
+  // - tensor_offsets: empty if all tensors have same shape (offsets are predictable)
+  auto check_shape_array = [&](const SimpleTensor &arr, const char *arr_name) {
+    if (arr.has_data()) {
+      NVTE_CHECK(arr.shape.size() == 1, "Grouped tensor ", name, " ", arr_name, " must be 1D");
+      NVTE_CHECK(arr.dtype == DType::kInt64, "Grouped tensor ", name, " ", arr_name,
+                 " must have dtype Int64");
+      NVTE_CHECK(arr.shape[0] == t.num_tensors, "Grouped tensor ", name, " ", arr_name, " size (",
+                 arr.shape[0], ") must equal num_tensors (", t.num_tensors, ")");
+    }
+  };
+
+  // Validate shape arrays (all optional)
+  check_shape_array(t.first_dims, "first_dims");
+  check_shape_array(t.last_dims, "last_dims");
+  check_shape_array(t.tensor_offsets, "tensor_offsets");
+
+  // tensor_offsets is required if any dimension varies
+  // (i.e., required unless all_same_shape())
+  if (!t.all_same_shape()) {
+    NVTE_CHECK(
+        t.tensor_offsets.dptr != nullptr, "Grouped tensor ", name,
+        " must have tensor_offsets when any dimension varies (first_dims or last_dims is set)");
+  }
+
+  // Validate logical_shape
+  NVTE_CHECK(t.logical_shape.ndim == 2, "Grouped tensor ", name, " logical_shape must be 2D");
+  NVTE_CHECK(t.logical_shape.data[0] > 0 && t.logical_shape.data[1] > 0, "Grouped tensor ", name,
+             " logical_shape must have positive dimensions");
+
+  // Validate all data fields are 1D (flattened)
+  if (t.has_data()) {
+    NVTE_CHECK(t.data.shape.size() == 1, "Grouped tensor ", name, " data must be 1D");
+  }
+  if (t.has_columnwise_data()) {
+    NVTE_CHECK(t.columnwise_data.shape.size() == 1, "Grouped tensor ", name,
+               " columnwise_data must be 1D");
+  }
+
+  // Validate data size matches logical_shape
+  size_t expected_numel = t.logical_shape.data[0] * t.logical_shape.data[1];
+  if (t.has_data()) {
+    NVTE_CHECK(t.data.numel() == expected_numel, "Grouped tensor ", name, " data size (",
+               t.data.numel(), ") must match logical_shape size (", expected_numel, ")");
+  }
+  if (t.has_columnwise_data()) {
+    NVTE_CHECK(t.columnwise_data.numel() == expected_numel, "Grouped tensor ", name,
+               " columnwise_data size (", t.columnwise_data.numel(),
+               ") must match logical_shape size (", expected_numel, ")");
+  }
+}
+
+// Helper function to check scale_inv for both input and output
+static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name, bool is_output) {
+  const char *tensor_type = is_output ? "output" : "input";
+
+  // Helper to check scale_inv for both rowwise and columnwise layouts
+  auto check_scales = [&](DType expected_dtype) {
+    if (t.has_data()) {
+      NVTE_CHECK(t.scale_inv.has_data(), tensor_type, " ", name,
+                 " rowwise scale_inv must be allocated");
+      NVTE_CHECK(t.scale_inv.dtype == expected_dtype, tensor_type, " ", name,
+                 " rowwise scale_inv has invalid dtype (expected ", to_string(expected_dtype),
+                 ", got ", to_string(t.scale_inv.dtype), ")");
+    }
+    if (t.has_columnwise_data()) {
+      NVTE_CHECK(t.columnwise_scale_inv.has_data(), tensor_type, " ", name,
+                 " columnwise scale_inv must be allocated");
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == expected_dtype, tensor_type, " ", name,
+                 " columnwise scale_inv has invalid dtype (expected ", to_string(expected_dtype),
+                 ", got ", to_string(t.columnwise_scale_inv.dtype), ")");
+    }
+  };
+
+  // Determine expected dtype based on data type and scaling mode
+  if (is_fp8_dtype(t.dtype()) && is_tensor_scaling(t.scaling_mode)) {
+    check_scales(DType::kFloat32);
+  } else if (is_mxfp8_scaling(t.scaling_mode)) {
+    check_scales(DType::kFloat8E8M0);
+  } else if (is_nvfp4_scaling(t.scaling_mode)) {
+    check_scales(DType::kFloat8E4M3);
+  } else {
+    // Non-quantized types should not have scale/scale_inv
+    NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv not supported for non-quantized ", tensor_type,
+               " ", name);
+    NVTE_CHECK(!t.columnwise_scale_inv.has_data(), "Scale_inv not supported for non-quantized ",
+               tensor_type, " ", name);
+  }
+}
+
+void CheckInputGroupedTensor(const GroupedTensor &t, const std::string &name) {
+  NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input grouped tensor ", name,
+             " not allocated");
+  CheckGroupedScaleInv(t, name, false);
+  CheckGroupedTensorShapeArrays(t, name);
+}
+
+void CheckOutputGroupedTensor(const GroupedTensor &t, const std::string &name, bool allow_empty) {
+  if (!allow_empty) {
+    NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output grouped tensor ", name,
+               " not allocated");
+  }
+
+  // Only perform dtype-specific validation if data is allocated
+  if (t.has_data() || t.has_columnwise_data()) {
+    // Amax validation for delayed scaling
+    if (is_fp8_dtype(t.dtype()) && t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      NVTE_CHECK(t.amax.has_data(), "Output ", name, " amax must be allocated");
+      NVTE_CHECK(t.amax.dtype == DType::kFloat32, "Output ", name, " amax must be Float32");
+    }
+    CheckGroupedScaleInv(t, name, true);
+  }
+
+  CheckGroupedTensorShapeArrays(t, name);
 }
 
 class TensorAllocator {
@@ -316,9 +454,9 @@ class TensorAllocator {
   }
 
   void Free(NVTETensor t) {
-    std::lock_guard<std::mutex> lock(mutex);
     uintptr_t index = reinterpret_cast<uintptr_t>(t);
     if (index == 0) return;
+    std::lock_guard<std::mutex> lock(mutex);
     NVTE_CHECK(index <= memory.size(), "Invalid tensor.");
     free_list.push_back(index);
     // Clean up
@@ -387,6 +525,89 @@ Tensor *convertNVTETensorCheck(const NVTETensor t) {
   return ptr;
 }
 
+// GroupedTensor allocator - similar pattern to TensorAllocator
+class GroupedTensorAllocator {
+ public:
+  static GroupedTensorAllocator &instance() {
+    static GroupedTensorAllocator allocator;
+    return allocator;
+  }
+
+  ~GroupedTensorAllocator() {}
+
+  NVTEGroupedTensor Allocate(NVTEScalingMode mode, size_t num_tensors, NVTEShape logical_shape) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!free_list.empty()) {
+      uintptr_t index = free_list.back();
+      NVTEGroupedTensor ret = reinterpret_cast<NVTEGroupedTensor>(index);
+      free_list.pop_back();
+      // 1-based indexing - fully reinitialize the tensor to avoid stale data
+      memory[index - 1].scaling_mode = mode;
+      memory[index - 1].num_tensors = num_tensors;
+      memory[index - 1].logical_shape = logical_shape;
+      memory[index - 1].nvte_tensor = ret;
+      return ret;
+    }
+    if (memory.size() < memory.capacity()) {
+      memory.emplace_back(mode, num_tensors);
+      GroupedTensor &t = memory.back();
+      size = memory.size();
+      // 1-based indexing
+      uintptr_t index = memory.size();
+      t.logical_shape = logical_shape;
+      t.nvte_tensor = reinterpret_cast<NVTEGroupedTensor>(index);
+      return reinterpret_cast<NVTEGroupedTensor>(index);
+    }
+    NVTE_ERROR(
+        "Cannot allocate a new NVTEGroupedTensor. Maximum number of grouped tensors reached: ",
+        MAX_GROUPED_TENSOR_NUM, ". There is probably a memory leak in your application.");
+  }
+
+  void Free(NVTEGroupedTensor t) {
+    uintptr_t index = reinterpret_cast<uintptr_t>(t);
+    if (index == 0) return;
+    std::lock_guard<std::mutex> lock(mutex);
+    NVTE_CHECK(index <= memory.size(), "Invalid grouped tensor.");
+    free_list.push_back(index);
+    // Clean up
+    memory[index - 1].clear();
+  }
+
+  GroupedTensor *convertNVTEGroupedTensor(NVTEGroupedTensor t) {
+    uintptr_t index = reinterpret_cast<uintptr_t>(t);
+    // 1-based indexing to enable 0-initialization of NVTEGroupedTensor
+    // to be invalid tensor
+    static_assert(nullptr == 0);
+    if (index != 0 && index <= size) {
+      return &(memory[index - 1]);
+    }
+    return nullptr;
+  }
+
+ private:
+  GroupedTensorAllocator() {
+    std::lock_guard<std::mutex> lock(mutex);
+    memory.reserve(MAX_GROUPED_TENSOR_NUM);
+  }
+
+  std::mutex mutex;
+  std::atomic<size_t> size;
+  // Allocate at most 20 MB for grouped tensors
+  const size_t MAX_GROUPED_TENSOR_NUM = 20 * 1024 * 1024 / sizeof(GroupedTensor);
+  std::vector<uintptr_t> free_list;
+  std::vector<GroupedTensor> memory;
+};
+
+GroupedTensor *convertNVTEGroupedTensor(const NVTEGroupedTensor t) {
+  return GroupedTensorAllocator::instance().convertNVTEGroupedTensor(t);
+}
+
+GroupedTensor *convertNVTEGroupedTensorCheck(const NVTEGroupedTensor t) {
+  GroupedTensor *ptr = GroupedTensorAllocator::instance().convertNVTEGroupedTensor(t);
+  NVTE_CHECK(ptr != nullptr, "Invalid grouped tensor.");
+  return ptr;
+}
+
 }  // namespace transformer_engine
 
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
@@ -417,7 +638,11 @@ NVTEShape nvte_make_shape(const size_t *data, size_t ndim) {
   NVTE_CHECK(ndim <= sizeof(ret.data) / sizeof(ret.data[0]),
              "Too many dims for NVTEShape (requested: ", ndim,
              ", max: ", sizeof(ret.data) / sizeof(ret.data[0]), ")");
-  std::copy(data, data + ndim, ret.data);
+  if (data == nullptr) {
+    std::fill(ret.data, ret.data + ndim, 0);
+  } else {
+    std::copy(data, data + ndim, ret.data);
+  }
   ret.ndim = ndim;
   return ret;
 }
@@ -524,7 +749,7 @@ void *nvte_tensor_columnwise_scale_inv(const NVTETensor tensor) {
 NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    return nvte_make_shape(nullptr, 0);
+    return nvte_make_shape(nullptr, 1);
   }
   return nvte_make_shape(t->scale_inv.shape.data(), t->scale_inv.shape.size());
 }
@@ -557,13 +782,14 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
       t->columnwise_amax = *param;
       break;
     default:
-      NVTE_ERROR("Unknown tensor parameter!");
+      NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param_name),
+                 "). Consider using nvte_set_tensor_param_v2 instead.");
   }
 }
 
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name) {
   if (tensor == nullptr) {
-    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 0)};
+    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 1)};
   }
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   switch (param_name) {
@@ -582,7 +808,148 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
     case kNVTEColumnwiseAmax:
       return t.columnwise_amax;
     default:
-      NVTE_ERROR("Unknown tensor parameter!");
+      NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param_name),
+                 "). Consider using nvte_set_tensor_param_v2 instead.");
+  }
+}
+
+void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const void *buf,
+                              size_t size_in_bytes) {
+  // Check attribute and buffer
+  NVTE_CHECK(param < kNVTENumTensorParams, "Invalid NVTETensorParam (got ", static_cast<int>(param),
+             ")");
+  NVTE_CHECK(tensor != nullptr, "Tensor pointer can't be NULL.");
+  auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
+  const auto &attr_size = transformer_engine::Tensor::attr_sizes[param];
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for tensor parameter "
+             "(parameter ",
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
+  NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
+
+  // Read from buffer
+  switch (param) {
+    case kNVTERowwiseData: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.data = *basic_tensor;
+      break;
+    }
+    case kNVTEColumnwiseData: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_data = *basic_tensor;
+      break;
+    }
+    case kNVTEScale: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.scale = *basic_tensor;
+      break;
+    }
+    case kNVTEAmax: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.amax = *basic_tensor;
+      break;
+    }
+    case kNVTERowwiseScaleInv: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.scale_inv = *basic_tensor;
+      break;
+    }
+    case kNVTEColumnwiseScaleInv: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_scale_inv = *basic_tensor;
+      break;
+    }
+    case kNVTEColumnwiseAmax: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_amax = *basic_tensor;
+      break;
+    }
+    case kNVTEWithGEMMSwizzledScales:
+      t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+    default:
+      NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
+  }
+}
+
+void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, void *buf,
+                              size_t size_in_bytes, size_t *size_written) {
+  using namespace transformer_engine;
+
+  // Check param
+  NVTE_CHECK(param < kNVTENumTensorParams, "Invalid NVTETensorParam (got ", static_cast<int>(param),
+             ")");
+
+  // Write attribute size if provided
+  const auto &attr_size = Tensor::attr_sizes[param];
+  if (size_written != nullptr) {
+    *size_written = attr_size;
+  }
+
+  // Return immediately if buffer is not provided
+  if (buf == nullptr) {
+    return;
+  }
+
+  // Check buffer size
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for tensor parameter "
+             "(parameter ",
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
+
+  // Get C++ tensor
+  const Tensor *t = convertNVTETensor(tensor);
+  std::optional<Tensor> dummy;
+  if (t == nullptr) {
+    // Make dummy tensor if provided tensor is invalid
+    dummy.emplace();
+    t = &(*dummy);
+  }
+
+  // Write to buffer
+  switch (param) {
+    case kNVTERowwiseData: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->data);
+      break;
+    }
+    case kNVTEColumnwiseData: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_data);
+      break;
+    }
+    case kNVTEScale: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->scale);
+      break;
+    }
+    case kNVTEAmax: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->amax);
+      break;
+    }
+    case kNVTERowwiseScaleInv: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->scale_inv);
+      break;
+    }
+    case kNVTEColumnwiseScaleInv: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_scale_inv);
+      break;
+    }
+    case kNVTEColumnwiseAmax: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_amax);
+      break;
+    }
+    case kNVTEWithGEMMSwizzledScales:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
+      break;
+    default:
+      NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
 }
 
@@ -608,14 +975,21 @@ void nvte_tensor_pack_destroy(NVTETensorPack *pack) {
 void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   if (tensor == nullptr) return;
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
+
   // Zero out tensor data if allocated
   if (t.data.dptr != nullptr) {
-    const size_t size_in_bytes = nvte_tensor_size_bytes(tensor);
-    NVTE_CHECK_CUDA(cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream));
+    const auto size = t.data.buffer_size_bytes();
+    if (size > 0) {
+      NVTE_CHECK_CUDA(cudaMemsetAsync(t.data.dptr, 0, size, stream));
+    }
   }
-  // Set amax to 0 if allocated
+
+  // Zero out amax if allocated
   if (t.amax.dptr != nullptr) {
-    NVTE_CHECK_CUDA(cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream));
+    const auto size = t.amax.buffer_size_bytes();
+    if (size > 0) {
+      NVTE_CHECK_CUDA(cudaMemsetAsync(t.amax.dptr, 0, size, stream));
+    }
   }
 }
 
@@ -626,12 +1000,15 @@ NVTEQuantizationConfig nvte_create_quantization_config() {
 void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, void *buf,
                                             size_t size_in_bytes, size_t *size_written) {
+  using namespace transformer_engine;
+
   // Write attribute size
   NVTE_CHECK(attr < kNVTEQuantizationConfigNumAttributes,
              "Invalid NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
-  NVTE_CHECK(size_written != nullptr, "Invalid size_written (got NULL)");
-  const auto &attr_size = transformer_engine::QuantizationConfig::attr_sizes[attr];
-  *size_written = attr_size;
+  const auto &attr_size = QuantizationConfig::attr_sizes[attr];
+  if (size_written != nullptr) {
+    *size_written = attr_size;
+  }
 
   // Return immediately if buffer is not provided
   if (buf == nullptr) {
@@ -645,12 +1022,18 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
              static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
              " bytes)");
 
+  // bool size is implementation-dependent, so we explicitly specify
+  // uint8_t in the user-facing API.
+  auto bool_to_uint8 = [](bool in, void *out) {
+    *reinterpret_cast<uint8_t *>(out) = static_cast<uint8_t>(in);
+  };
+
   // Write to buffer
   NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
-  const auto &config_ = *reinterpret_cast<const transformer_engine::QuantizationConfig *>(config);
+  const auto &config_ = *reinterpret_cast<const QuantizationConfig *>(config);
   switch (attr) {
     case kNVTEQuantizationConfigForcePow2Scales:
-      std::memcpy(buf, &config_.force_pow_2_scales, attr_size);
+      bool_to_uint8(config_.force_pow_2_scales, buf);
       break;
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(buf, &config_.amax_epsilon, attr_size);
@@ -658,8 +1041,23 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigNoopTensor:
       std::memcpy(buf, &config_.noop_tensor, attr_size);
       break;
-    case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
-      std::memcpy(buf, &config_.float8_block_scale_tensor_format, attr_size);
+    case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat: {
+      // Deprecated
+      const auto invalid = Float8BlockScaleTensorFormat::INVALID;
+      std::memcpy(buf, &invalid, attr_size);
+      break;
+    }
+    case kNVTEQuantizationConfigRNGState:
+      std::memcpy(buf, &config_.rng_state, attr_size);
+      break;
+    case kNVTEQuantizationConfigNVFP42DQuantization:
+      bool_to_uint8(config_.nvfp4_2d_quantization, buf);
+      break;
+    case kNVTEQuantizationConfigStochasticRounding:
+      bool_to_uint8(config_.stochastic_rounding, buf);
+      break;
+    case kNVTEQuantizationConfigUseFastMath:
+      bool_to_uint8(config_.use_fast_math, buf);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -669,10 +1067,12 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
                                             NVTEQuantizationConfigAttribute attr, const void *buf,
                                             size_t size_in_bytes) {
+  using namespace transformer_engine;
+
   // Check attribute and buffer
   NVTE_CHECK(attr < kNVTEQuantizationConfigNumAttributes,
              "Invalid NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
-  const auto &attr_size = transformer_engine::QuantizationConfig::attr_sizes[attr];
+  const auto &attr_size = QuantizationConfig::attr_sizes[attr];
   NVTE_CHECK(size_in_bytes >= attr_size,
              "Buffer is too small for quantization config attribute "
              "(attribute ",
@@ -680,12 +1080,18 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
              " bytes)");
   NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
 
+  // bool size is implementation-dependent, so we explicitly specify
+  // uint8_t in the user-facing API.
+  auto uint8_to_bool = [](const void *in, bool &out) {
+    out = static_cast<bool>(*reinterpret_cast<const uint8_t *>(in));
+  };
+
   // Read from buffer
   NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
-  auto &config_ = *reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
+  auto &config_ = *reinterpret_cast<QuantizationConfig *>(config);
   switch (attr) {
     case kNVTEQuantizationConfigForcePow2Scales:
-      std::memcpy(&config_.force_pow_2_scales, buf, attr_size);
+      uint8_to_bool(buf, config_.force_pow_2_scales);
       break;
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(&config_.amax_epsilon, buf, attr_size);
@@ -694,16 +1100,19 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       std::memcpy(&config_.noop_tensor, buf, attr_size);
       break;
     case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
-      std::memcpy(&config_.float8_block_scale_tensor_format, buf, attr_size);
+      // Deprecated
       break;
     case kNVTEQuantizationConfigRNGState:
       std::memcpy(&config_.rng_state, buf, attr_size);
       break;
     case kNVTEQuantizationConfigNVFP42DQuantization:
-      std::memcpy(&config_.nvfp4_2d_quantization, buf, attr_size);
+      uint8_to_bool(buf, config_.nvfp4_2d_quantization);
       break;
     case kNVTEQuantizationConfigStochasticRounding:
-      std::memcpy(&config_.stochastic_rounding, buf, attr_size);
+      uint8_to_bool(buf, config_.stochastic_rounding);
+      break;
+    case kNVTEQuantizationConfigUseFastMath:
+      uint8_to_bool(buf, config_.use_fast_math);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -717,11 +1126,145 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
 }
 
 int nvte_is_non_tn_fp8_gemm_supported() {
-  int deviceComputeCapability =
-      transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+  int num_devices = transformer_engine::cuda::num_devices();
+  static std::vector<int> cache(num_devices, -1);
+  static std::vector<std::once_flag> flags(num_devices);
+  int device_id = transformer_engine::cuda::current_device();
+  std::call_once(flags[device_id], [&]() {
+    int deviceComputeCapability = transformer_engine::cuda::sm_arch(device_id);
+    // Note: this is temporary restriction and should be lifted in the future.
+    // (remove the note once it's done.)
+    cache[device_id] = (deviceComputeCapability >= 100 && deviceComputeCapability < 120) ||
+                       deviceComputeCapability >= 130;
+  });
+  return cache[device_id];
+}
 
-  // Note: this is temporary restriction and should be lifted in the future.
-  // (remove the note once it's done.)
-  return (deviceComputeCapability >= 100 && deviceComputeCapability < 120) ||
-         deviceComputeCapability >= 130;
+// Grouped Tensor C API implementations
+NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_t num_tensors,
+                                             NVTEShape logical_shape) {
+  NVTE_CHECK(num_tensors > 0, "Number of tensors must be greater than 0");
+  NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
+  NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,
+             "Logical shape must have positive dimensions");
+  NVTEGroupedTensor ret = transformer_engine::GroupedTensorAllocator::instance().Allocate(
+      scaling_mode, num_tensors, logical_shape);
+  return ret;
+}
+
+void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor) {
+  transformer_engine::GroupedTensorAllocator::instance().Free(tensor);
+}
+
+void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
+                                   const NVTEBasicTensor *param) {
+  NVTE_CHECK(tensor != nullptr, "Grouped tensor pointer can't be NULL.");
+  auto *t = transformer_engine::convertNVTEGroupedTensor(*tensor);
+  NVTE_CHECK(t != nullptr, "Grouped tensor is not allocated.");
+  NVTE_CHECK(param != nullptr, "Grouped tensor param can't be NULL.");
+
+  switch (param_name) {
+    case kNVTEGroupedRowwiseData:
+      t->data = *param;
+      break;
+    case kNVTEGroupedColumnwiseData:
+      t->columnwise_data = *param;
+      break;
+    case kNVTEGroupedScale:
+      t->scale = *param;
+      break;
+    case kNVTEGroupedAmax:
+      t->amax = *param;
+      break;
+    case kNVTEGroupedRowwiseScaleInv:
+      t->scale_inv = *param;
+      break;
+    case kNVTEGroupedColumnwiseScaleInv:
+      t->columnwise_scale_inv = *param;
+      break;
+    case kNVTEGroupedColumnwiseAmax:
+      t->columnwise_amax = *param;
+      break;
+    case kNVTEGroupedFirstDims:
+      t->first_dims = *param;
+      // Validate it's Int64
+      NVTE_CHECK(t->first_dims.dtype == transformer_engine::DType::kInt64,
+                 "first_dims must have dtype Int64");
+      break;
+    case kNVTEGroupedLastDims:
+      t->last_dims = *param;
+      // Validate it's Int64
+      NVTE_CHECK(t->last_dims.dtype == transformer_engine::DType::kInt64,
+                 "last_dims must have dtype Int64");
+      break;
+    case kNVTEGroupedTensorOffsets:
+      t->tensor_offsets = *param;
+      // Validate it's Int64
+      NVTE_CHECK(t->tensor_offsets.dtype == transformer_engine::DType::kInt64,
+                 "tensor_offsets must have dtype Int64");
+      break;
+    default:
+      NVTE_ERROR("Unknown grouped tensor parameter!");
+  }
+}
+
+NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
+                                              NVTEGroupedTensorParam param_name) {
+  if (tensor == nullptr) {
+    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 1)};
+  }
+  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+
+  switch (param_name) {
+    case kNVTEGroupedRowwiseData:
+      return t.data;
+    case kNVTEGroupedColumnwiseData:
+      return t.columnwise_data;
+    case kNVTEGroupedScale:
+      return t.scale;
+    case kNVTEGroupedAmax:
+      return t.amax;
+    case kNVTEGroupedRowwiseScaleInv:
+      return t.scale_inv;
+    case kNVTEGroupedColumnwiseScaleInv:
+      return t.columnwise_scale_inv;
+    case kNVTEGroupedColumnwiseAmax:
+      return t.columnwise_amax;
+    case kNVTEGroupedFirstDims:
+      return t.first_dims;
+    case kNVTEGroupedLastDims:
+      return t.last_dims;
+    case kNVTEGroupedTensorOffsets:
+      return t.tensor_offsets;
+    default:
+      NVTE_ERROR("Unknown grouped tensor parameter!");
+  }
+}
+
+size_t nvte_grouped_tensor_num_tensors(const NVTEGroupedTensor tensor) {
+  auto *t = transformer_engine::convertNVTEGroupedTensor(tensor);
+  if (t == nullptr) return 0;
+  return t->num_tensors;
+}
+
+NVTEDType nvte_grouped_tensor_type(const NVTEGroupedTensor tensor) {
+  auto *t = transformer_engine::convertNVTEGroupedTensor(tensor);
+  if (t == nullptr) return kNVTEFloat32;
+  return static_cast<NVTEDType>(t->dtype());
+}
+
+NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor) {
+  if (tensor == nullptr) {
+    return NVTE_DELAYED_TENSOR_SCALING;
+  }
+  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+  return t.scaling_mode;
+}
+
+NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor) {
+  if (tensor == nullptr) {
+    return nvte_make_shape(nullptr, 1);
+  }
+  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+  return t.logical_shape;
 }

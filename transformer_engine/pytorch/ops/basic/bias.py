@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -22,16 +22,16 @@ class Bias(BasicOperation):
 
     Parameters
     ----------
-    size: int
+    size : int
         Inner dimension of input tensor
-    device: torch.device, default = default CUDA device
+    device : torch.device, default = default CUDA device
         Tensor device
-    dtype: torch.dtype, default = default dtype
+    dtype : torch.dtype, default = default dtype
         Tensor datatype
-    tensor_parallel: bool, default = `False`
+    tensor_parallel : bool, default = `False`
         Whether to distribute input tensor and bias tensors along
         inner dimension
-    tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
+    tensor_parallel_group : torch.distributed.ProcessGroup, default = world group
         Process group for tensor parallelism
 
     """

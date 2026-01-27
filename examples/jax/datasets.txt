@@ -1,0 +1,3 @@
+# Datasets used by TE encoder tests. Pull these to pre-emptively cache datasets
+ylecun/mnist
+nyu-mll/glue
