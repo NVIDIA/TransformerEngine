@@ -91,11 +91,11 @@ def test_custom_recipe_sanity(module_type):
     # Single factory: map roles to quantizers
     def quantizer_factory(role):
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
-        _, bucket = role.split(":", 1)
-        if bucket in ("input", "weight", "output"):
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<tensor>'")
+        _, tensor_type = role.split(":", 1)
+        if tensor_type in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if bucket in ("grad_output", "grad_input"):
+        if tensor_type in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -131,11 +131,11 @@ def test_custom_recipe_grouped_linear_sanity():
 
     def quantizer_factory(role):
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
-        _, bucket = role.split(":", 1)
-        if bucket in ("input", "weight", "output"):
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<tensor>'")
+        _, tensor_type = role.split(":", 1)
+        if tensor_type in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if bucket in ("grad_output", "grad_input"):
+        if tensor_type in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -196,11 +196,11 @@ def test_custom_recipe_matches_current_scaling():
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
     def quantizer_factory(role):
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
-        _, bucket = role.split(":", 1)
-        if bucket in ("input", "weight", "output"):
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<tensor>'")
+        _, tensor_type = role.split(":", 1)
+        if tensor_type in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if bucket in ("grad_output", "grad_input"):
+        if tensor_type in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -256,11 +256,11 @@ def test_custom_recipe_ops_linear_2_1_layout():
 
     def quantizer_factory(role):
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
-        _, bucket = role.split(":", 1)
-        if bucket in ("input", "weight", "output"):
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<tensor>'")
+        _, tensor_type = role.split(":", 1)
+        if tensor_type in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if bucket in ("grad_output", "grad_input"):
+        if tensor_type in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -301,11 +301,11 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
         if role in counts:
             counts[role] += 1
         if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
-        _, bucket = role.split(":", 1)
-        if bucket in ("input", "weight", "output"):
+            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<tensor>'")
+        _, tensor_type = role.split(":", 1)
+        if tensor_type in ("input", "weight", "output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
-        if bucket in ("grad_output", "grad_input"):
+        if tensor_type in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device=torch.device("cuda"))
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
 

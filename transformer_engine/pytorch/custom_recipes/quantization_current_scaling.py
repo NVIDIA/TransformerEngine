@@ -24,12 +24,12 @@ def current_scaling_ref_quantizer_factory(role):
             output = model(input)
     """
     if ":" not in role:
-        raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<bucket>'")
-    _, bucket = role.split(":", 1)
+        raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<tensor>'")
+    _, tensor_type = role.split(":", 1)
 
-    if bucket in ("input", "weight"):
+    if tensor_type in ("input", "weight"):
         dtype = torch.float8_e4m3fn
-    elif bucket in ("output", "grad_output"):
+    elif tensor_type in ("output", "grad_output"):
         dtype = torch.float8_e5m2
     else:
         return None
