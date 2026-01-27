@@ -289,7 +289,11 @@ if (NVTE_WITH_CUBLASMP)
                  PATHS ${CUBLASMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
-  target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB})
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+  target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
   message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
 endif()
 
