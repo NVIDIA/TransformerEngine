@@ -86,12 +86,14 @@ class CommOverlapCore {
  public:
   CommOverlapCore() {}  // dummy constructor for exposing type to Python
 
+  // Constructor for Userbuffers backend
   CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
                   int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
                   int num_splits, int num_max_streams, int comm_cga_size, int gemm_priority,
                   int comm_priority, int num_comm_sm, bool set_sm_margin, bool use_ce,
                   bool atomic_gemm);
 
+  // Constructor for cuBLASMp backend
   CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm, bool is_p2p,
                   bool atomic_gemm);
 
@@ -193,6 +195,7 @@ class CommOverlapBase : public CommOverlapCore {
  public:
   CommOverlapBase() {}  // dummy constructor for exposing type to Python
 
+  // Constructor for Userbuffers backend
   CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                   int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                   ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits = 3,
@@ -201,6 +204,7 @@ class CommOverlapBase : public CommOverlapCore {
                   bool set_sm_margin = true, bool atomic_gemm = false,
                   bool rs_overlap_first_gemm = false);
 
+  // Constructor for cuBLASMp backend
   CommOverlapBase(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 16,
                   bool atomic_gemm = false)
       : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, false, atomic_gemm) {}
@@ -277,6 +281,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
  public:
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python
 
+  // Constructor for Userbuffers backend
   CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                      int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
@@ -285,6 +290,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
                      bool atomic_gemm = false, bool aggregate = false);
 
+  // Constructor for cuBLASMp backend
   CommOverlapP2PBase(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 1,
                      bool atomic_gemm = false)
       : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, true, atomic_gemm) {}

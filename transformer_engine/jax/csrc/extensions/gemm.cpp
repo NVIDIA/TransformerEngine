@@ -279,7 +279,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
     NVTE_CHECK(!fuse_bias || bias_size == out_shape[1], "bias_size=", bias_size,
                ", out_shape[1]=", out_shape[1]);
     auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(
-        buffer_shape, buffer_dtype, collective_op, use_cublasmp);
+        buffer_shape, buffer_dtype, collective_op);
     if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       auto ubuf_out_ = TensorWrapper(executor->get_ubuf_dptr(), buffer_shape, out_dtype);
       // Prepare the auxiliary buffer for the reduce-scattered GEMM output

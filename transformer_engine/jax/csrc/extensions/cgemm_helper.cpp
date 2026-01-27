@@ -141,7 +141,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   // Bootstrap UB/cuBlasMp via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
   auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(
-      buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER, collective_gemm_with_cublasmp);
+      buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -151,7 +151,7 @@ void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_proc
   auto &config = CgemmConfig::get(false);
   config.init(num_max_streams, gemm_priority, comm_priority, num_comm_sm, use_ce, aggregate_ag);
   auto &handler = CommunicatorHandler::get(false);
-  handler.init(num_total_devices, num_devices_per_process, process_id, tp_size, use_cublasmp);
+  handler.init(num_total_devices, num_devices_per_process, process_id, tp_size);
   collective_gemm_with_cublasmp = use_cublasmp;
 }
 

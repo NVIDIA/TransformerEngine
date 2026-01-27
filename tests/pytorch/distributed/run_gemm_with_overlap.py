@@ -344,6 +344,7 @@ def _main(opts):
                 helper,
                 tp_rank,
                 tp_size,
+                num_comm_sm=3,
                 atomic_gemm=opts.atomic,
             )
         )
@@ -361,6 +362,7 @@ def _main(opts):
                 helper,
                 tp_rank,
                 tp_size,
+                num_comm_sm=16,
                 atomic_gemm=opts.atomic,
             )
         )
@@ -381,7 +383,7 @@ def _main(opts):
                     atomic_gemm=True,
                 )
                 if not opts.use_cublasmp
-                else tex.CommOverlapP2P(helper, tp_rank, tp_size, atomic_gemm=True)
+                else tex.CommOverlapP2P(helper, tp_rank, tp_size, num_comm_sm=16, atomic_gemm=True)
             )
             if opts.atomic_rs_p2p
             else (
@@ -393,7 +395,7 @@ def _main(opts):
                     atomic_gemm=True,
                 )
                 if not opts.use_cublasmp
-                else tex.CommOverlap(helper, tp_rank, tp_size, atomic_gemm=True)
+                else tex.CommOverlap(helper, tp_rank, tp_size, num_comm_sm=3, atomic_gemm=True)
             )
         )
 

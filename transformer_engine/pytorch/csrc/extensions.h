@@ -529,11 +529,12 @@ class CommOverlapHelper : torch::CustomClassHolder {
   void ub_barrier(ExtComm comm);
 
   int64_t get_nccl_comm_ptr(std::string comm_name) {
-#ifdef USE_C10_NCCL
+#ifdef USE_C10D_NCCL
     NVTE_CHECK(backend_is_nccl,
                "Comm+GEMM overlap with cuBLASMp backend requires a tensor-parallel process ",
                "group with NCCL backend.");
     c10d::ProcessGroupNCCL *nccl_pg = reinterpret_cast<c10d::ProcessGroupNCCL *>(pgs[comm_name]);
+    NVTE_WARN("Got NCCL Comm Ptr for comm_name \"", comm_name, "\": ", nccl_pg->getCommPtr());
     return nccl_pg->getCommPtr();
 #else
     NVTE_ERROR("Internal TE Error: CommOverlapHelper::get_nccl_comm_ptr() is an internal API that ",
@@ -577,7 +578,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
                  bool aggregate = false);
 
-  CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size, int num_comm_sm = 16,
+  CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size, int num_comm_sm = 3,
                  bool atomic_gemm = false)
       : CommOverlapP2PBase(helper->get_nccl_comm_ptr("intra"), tp_rank, tp_size, num_comm_sm,
                            atomic_gemm) {}

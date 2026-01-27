@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <transformer_engine/comm_gemm.h>
 #include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
@@ -53,6 +54,7 @@ bool ubuf_built_with_mpi() {
  * Comm+GEMM Overlap Common Core
  **************************************************************************************************/
 
+// Constructor for Userbuffers backend
 CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode,
                                  int numnodes, int tp_size, ExtAllgatherOp allgather_handle,
                                  ExtBarrierOp barrier_handle, int num_splits, int num_max_streams,
@@ -77,6 +79,7 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
              num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
 }
 
+// Constructor for cuBLASMp backend
 CommOverlapCore::CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm,
                                  bool is_p2p, bool atomic_gemm) {
   NVTE_CHECK(
@@ -84,8 +87,10 @@ CommOverlapCore::CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size
       "Comm+GEMM overlap with cuBLASMp backend requires TE to be built with NVTE_WITH_CUBLASMP=1.");
   _with_cublasmp = true;
 
+  NVTE_WARN("Creating CommOverlapCore with cuBLASMp backend.");
   _cublasmp_ctx =
       nvte_comm_gemm_ctx_create(reinterpret_cast<ncclComm_t>(nccl_comm_ptr), tp_size, tp_rank);
+  NVTE_WARN("Created cuBLASMp CommGemm context: ", reinterpret_cast<int64_t>(_cublasmp_ctx));
 
   _tp_id = tp_rank;
   _tp_size = tp_size;
@@ -346,6 +351,7 @@ void CommOverlapCore::cublasmp_gemm_rs(const TensorWrapper &A, bool transa, cons
  * Comm+GEMM Overlap Base (Pipelined / Collective)
  **************************************************************************************************/
 
+// Constructor for Userbuffers backend
 CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                  int myrank, int numranks, int mylocal, int numlocal, int mynode,
                                  int numnodes, int tp_size, ExtAllgatherOp allgather_handle,
@@ -729,6 +735,7 @@ void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStr
  * Comm+GEMM Overlap P2P Base (Ring-Exchange)
  **************************************************************************************************/
 
+// Constructor for Userbuffers backend
 CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                        int myrank, int numranks, int mylocal, int numlocal,
                                        int mynode, int numnodes, int tp_size,
