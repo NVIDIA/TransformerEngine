@@ -55,22 +55,26 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             assert num_groups in [None, 1], (
                 "SonicMoE topk kernel does not support grouped experts"
             )
-            assert score_function == "softmax", (
-                "SonicMoE topk kernel only supports score_function='softmax'"
-            )
-            fuse_softmax = score_function == "softmax"
+            if score_function:
+                assert score_function == "softmax", (
+                    "SonicMoE topk kernel only supports score_function='softmax'"
+                )
 
-            probs = torch.empty(num_tokens, topk, dtype=logits.dtype, device=logits.device)
-            routing_map = torch.empty(num_tokens, topk, dtype=torch.int32, device=logits.device)
-            _topk_fwd(logits, topk, probs, routing_map, require_softmax_fusion=fuse_softmax)
+            top_values = torch.empty((num_tokens, topk), dtype=logits.dtype, device=logits.device)
+            top_indices = torch.empty((num_tokens, topk), dtype=torch.int32, device=logits.device)
+            _topk_fwd(logits, topk, top_values, top_indices,
+                      require_softmax_fusion=score_function == "softmax")
             if scaling_factor:
-                probs *= scaling_factor
+                top_values *= scaling_factor
 
-            tensors_to_save = [routing_map]
-            if ctx.fuse_softmax:
-                tensors_to_save.append(probs)
+            probs = torch.zeros_like(logits).scatter(1, top_indices, top_values)
+            routing_map = torch.zeros_like(logits, dtype=torch.int32).scatter(
+                1, top_indices, 1).bool()
+
+            tensors_to_save = [top_indices]
+            if score_function == "softmax":
+                tensors_to_save.append(top_values)
             ctx.save_for_backward(*tensors_to_save)
-            ctx.fuse_softmax = fuse_softmax
 
         else:
             probs, routing_map, intermediate_output = tex.fused_topk_with_score_function_fwd(
@@ -113,13 +117,13 @@ class FusedTopkScoreFunction(torch.autograd.Function):
                 grad_probs /= ctx.scaling_factor
 
             if ctx.score_function == "softmax":
-                (routing_map, probs) = ctx.saved_tensors
+                (top_indices, top_values) = ctx.saved_tensors
                 if ctx.scaling_factor:
-                    probs /= ctx.scaling_factor
-                _softmax_topk_bwd(grad_logits, None, grad_probs, probs, routing_map, ctx.topk)
+                    top_values /= ctx.scaling_factor
+                _softmax_topk_bwd(grad_logits, None, grad_probs, top_values, top_indices, ctx.topk)
             else:
-                (routing_map, ) = ctx.saved_tensors
-                _topk_bwd(grad_logits, grad_probs, routing_map, ctx.topk)
+                (top_indices, ) = ctx.saved_tensors
+                _topk_bwd(grad_logits, grad_probs, top_indices, ctx.topk)
 
         else:
             (routing_map, intermediate_output) = ctx.saved_tensors
@@ -199,7 +203,7 @@ def fused_topk_with_score_function(
         group_logits,
         topk // group_topk,
         False,
-        1,
+        None,
         None,
         None,
         None,
@@ -211,7 +215,7 @@ def fused_topk_with_score_function(
         group_scores,
         group_topk,
         False,
-        1,
+        None,
         None,
         None,
         None,
@@ -236,7 +240,7 @@ def fused_topk_with_score_function(
         masked_logits,
         topk,
         False,
-        1,
+        None,
         None,
         scaling_factor,
         score_function,
