@@ -8,7 +8,6 @@
 
 #include <cublasmp.h>
 #include <cuda_runtime.h>
-#include <nvshmem.h>
 
 #include <map>
 #include <memory>
@@ -423,8 +422,10 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
 
   std::vector<uint8_t> workspace_host(wrksp_size_host);
   if (ctx->workspace_size < wrksp_size_device) {
-    nvshmem_free(ctx->workspace);
-    ctx->workspace = nvshmem_malloc(wrksp_size_device);
+    NVTE_CHECK_CUBLASMP(cublasMpDeregister(ctx->grid_row_major, ctx->workspace));
+    NVTE_CHECK_CUBLASMP(cublasMpFree(ctx->grod_col_major, ctx->workspace));
+    NVTE_CHECK_CUBLASMP(cublasMpMalloc(ctx->grid_col_major, &ctx->workspace, wrksp_size_device));
+    NVTE_CHECK_CUBLASMP(cublasMpRegister(ctx->grid_row_major, ctx->workspace, wrksp_size_device));
     ctx->workspace_size = wrksp_size_device;
   }
 
@@ -473,7 +474,6 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
 
 void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
   NVTE_API_CALL(nvte_comm_gemm_ctx_destroy);
-  nvshmemx_sync_all_on_stream(ctx->stream.get());
   delete ctx;
 }
 

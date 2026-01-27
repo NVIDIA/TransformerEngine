@@ -289,14 +289,8 @@ if (NVTE_WITH_CUBLASMP)
                  PATHS ${CUBLASMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
-    find_library(NVSHMEM_HOST_LIB
-                 NAMES nvshmem_host libnvshmem_host.so.3
-                 PATHS ${NVSHMEM_DIR}
-                 PATH_SUFFIXES lib
-                 REQUIRED)
-  target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${NVSHMEM_HOST_LIB})
+  target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB})
   message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
-  message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
 endif()
 
 # Hack to enable dynamic loading in cuDNN frontend
