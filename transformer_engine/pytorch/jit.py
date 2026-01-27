@@ -69,6 +69,7 @@ if torch.__version__ >= "2":
             return wrapper
 
         return decorator
+
 else:
     # Fallback for PyTorch < 2.0: no-op decorator
     def no_torch_dynamo(recursive=True):  # pylint: disable=unused-argument
