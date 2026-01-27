@@ -50,28 +50,26 @@ no_torch_dynamo = lambda recursive=True: lambda func: func
 if torch.__version__ >= "2":
     import torch._dynamo
 
-    if torch.__version__ >= "2.1":
+    def no_torch_dynamo(recursive=True):
+        """Decorator to disable Torch Dynamo, except during ONNX export."""
 
-        def no_torch_dynamo(recursive=True):
-            """Decorator to disable Torch Dynamo, except during ONNX export."""
+        def decorator(f):
+            # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
+            disabled_f = (
+                torch._dynamo.disable(f, recursive=recursive)
+                if torch.__version__ >= "2.1"
+                else torch._dynamo.disable(f)
+            )
 
-            def decorator(f):
-                disabled_f = torch._dynamo.disable(f, recursive=recursive)
+            @wraps(f)
+            def wrapper(*args, **kwargs):
+                if is_in_onnx_export_mode():
+                    return f(*args, **kwargs)
+                return disabled_f(*args, **kwargs)
 
-                @wraps(f)
-                def wrapper(*args, **kwargs):
-                    # Check dynamically at call time, not at decoration time
-                    if is_in_onnx_export_mode():
-                        return f(*args, **kwargs)
-                    return disabled_f(*args, **kwargs)
+            return wrapper
 
-                return wrapper
-
-            return decorator
-
-    else:
-        # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
-        no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
+        return decorator
 
 
 def set_jit_fusion_options() -> None:

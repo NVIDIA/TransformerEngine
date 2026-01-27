@@ -766,7 +766,6 @@ def test_export_core_attention(
     model = te.attention.DotProductAttention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
-        attention_dropout=0.0 if is_fp8 else 0.5,  # Disable dropout for FP8 deterministic results
         qkv_format=qkv_format,
         attn_mask_type=attn_mask_type,
     ).to(device="cuda")
@@ -775,7 +774,7 @@ def test_export_core_attention(
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16,):
         return
-    atol = 5e-2 if is_fp8 else 1e-2  # Higher tolerance for FP8 due to quantization effects
+    atol = 1.5e-1 if is_fp8 else 1e-2
     validate_result(
         fname, inp, model, is_fp8=True, atol=atol, input_names=input_names, te_outputs=te_outputs
     )

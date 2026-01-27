@@ -211,29 +211,11 @@ class FP8EmulationFunc(torch.autograd.Function):
     def onnx_forward(tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout=None):
         """
         ONNX-compatible forward for FP8 emulation using operations with defined ONNX translations.
-
-        This method performs quantize + dequantize to emulate FP8 effects using ONNX-compatible ops.
-        Uses the quantizer's onnx_quantize/onnx_dequantize methods for proper scaling behavior.
-
-        Parameters
-        ----------
-        tensor1, tensor2, tensor3 : torch.Tensor
-            Input tensors (e.g., Q, K, V for QKV_quantizer, or single tensor for S/O quantizers)
-        quantizer : Quantizer
-            The quantizer object with onnx_quantize/onnx_dequantize methods
-        quantizer_name : str
-            Name of quantizer: "QKV_quantizer", "S_quantizer", "O_quantizer", etc.
-        qkv_layout : str, optional
-            QKV layout string (not used in ONNX path)
-
-        Returns
-        -------
-        Tuple of emulated tensors
         """
         # pylint: disable=unused-argument
 
         if quantizer_name == "QKV_quantizer":
-            # Combine Q, K, V -> quantize together -> split back
+            # Flatten + concatenate + quantize + split. Equivalent to combine_and_quantize Case 3.
             orig_dtype = tensor1.dtype
             shapes = [tensor1.shape, tensor2.shape, tensor3.shape]
             numels = [tensor1.numel(), tensor2.numel(), tensor3.numel()]
