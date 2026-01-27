@@ -356,7 +356,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         # NVFP4 requires a specialized transpose that handles nibble repacking
         self._columnwise_data = tex.nvfp4_transpose(rowwise_data, out=self._columnwise_data)
         if self._columnwise_scale_inv is None:
-            assert self._quantizer is not None,
+            assert self._quantizer is not None
             # Use logical shape (self.size()), not packed byte shape (rowwise_data.shape)
             # NVFP4 packs 2 elements per byte, so rowwise_data.shape[-1] is K/2
             logical_shape = self.size()
