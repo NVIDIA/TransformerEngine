@@ -235,15 +235,14 @@ class FP8EmulationFunc(torch.autograd.Function):
             out3 = out[numels[0] + numels[1] :].reshape(shapes[2])
 
             return out1, out2, out3
-        elif quantizer_name in ["S_quantizer", "O_quantizer"]:
+        if quantizer_name in ["S_quantizer", "O_quantizer"]:
             # Emulate FP8 on single tensor using quantizer's ONNX methods
             orig_dtype = tensor1.dtype
             t_fp8 = quantizer.onnx_quantize(tensor1)
             out = quantizer.onnx_dequantize(t_fp8).to(orig_dtype)
             return out, tensor2, tensor3
-        else:
-            # Pass-through
-            return tensor1, tensor2, tensor3
+        # Pass-through
+        return tensor1, tensor2, tensor3
 
 
 class UnfusedDotProductAttention(torch.nn.Module):
