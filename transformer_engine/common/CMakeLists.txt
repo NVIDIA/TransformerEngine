@@ -286,14 +286,14 @@ if (NVTE_WITH_CUBLASMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${NVSHMEM_DIR}/include)
     find_library(CUBLASMP_LIB
-                 NAMES cublasmp libcublasmp
+                 NAMES cublasmp libcublasmp.so libcublasmp.so.0
                  PATHS ${CUBLASMP_DIR}
-                 PATH_SUFFIXES lib
+                 PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu
                  REQUIRED)
     find_library(NVSHMEM_HOST_LIB
-                 NAMES nvshmem_host libnvshmem_host.so.3
+                 NAMES nvshmem_host libnvshmem_host.so libnvshmem_host.so.3
                  PATHS ${NVSHMEM_DIR}
-                 PATH_SUFFIXES lib
+                 PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu
                  REQUIRED)
   target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${NVSHMEM_HOST_LIB})
   message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
