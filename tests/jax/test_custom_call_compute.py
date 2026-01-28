@@ -47,6 +47,7 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
+from transformer_engine.jax.cpp_extensions.cub import cub_topk
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -1955,3 +1956,38 @@ class TestDebugInspectFFI:
         actual = load_array_dump("my_tensor_gpu0.bin", shape, dtype)
 
         assert_allclose(actual, expected, dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16, jnp.float32])
+@pytest.mark.parametrize("problem_size", [(10000, 100), (50000, 200), (100000, 500), (1000000, 1000), (5000000, 2000)])
+class TestCubOps:
+    def test_cub_topk(self, dtype, problem_size):
+        n, k = problem_size
+
+        prng_key = jax.random.PRNGKey(0)
+        keys = jax.random.split(prng_key, 3)
+        topk_values = jax.random.uniform(keys[0], shape=(k,), dtype=dtype, minval=1.5, maxval=2.5)
+        bottom_values = jax.random.uniform(keys[1], shape=(n-k,), dtype=dtype, minval=0.0, maxval=1.0)
+        x = jnp.concatenate([topk_values, bottom_values])
+        x = jax.random.permutation(keys[2], x)
+
+        ref_topk_jit = jax.jit(jax.lax.top_k, static_argnums=(1,))
+        prim_topk_jit = jax.jit(cub_topk, static_argnums=(1,))
+
+        ref_topk, ref_indices = ref_topk_jit(x, k)
+        prim_topk, prim_indices = prim_topk_jit(x, k)
+
+        # CUB output does not guarantee the order of the topk values, sort them for comparison
+        ref_topk, ref_indices = jax.lax.sort_key_val(ref_topk, ref_indices)
+        prim_topk, prim_indices = jax.lax.sort_key_val(prim_topk, prim_indices)
+
+        assert_allclose(ref_topk, prim_topk, dtype=dtype)
+
+        # sort and sort_key_val are ascending, make sure the smallest topk value
+        # prim_topk[0] is not smaller than the k+1 largest value in the original array
+        sorted_x = jax.lax.sort(x)
+        assert(prim_topk[0] >= sorted_x[-(k+1)])
+
+        # TopK values can be duplicated, instead of directly comparing the indices, we check
+        # if the values at the returned indices are the same
+        assert_allclose(x[ref_indices], x[prim_indices], dtype=dtype)
