@@ -19,6 +19,7 @@ if torch.cuda.is_available():
 
 use_sonicmoe = bool(int(os.getenv("NVTE_USE_SONIC_MOE", "0")))
 
+
 # Pytorch-based group topk
 def group_limited_topk(
     scores: torch.Tensor,

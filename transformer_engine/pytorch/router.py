@@ -13,9 +13,10 @@ try:
     from sonicmoe.functional.forward import _topk_fwd
     from sonicmoe.functional.backward import _topk_bwd, _softmax_topk_bwd
 except ImportError:
-    assert not bool(int(os.getenv("NVTE_USE_SONIC_MOE", "0"))), (
-        "NVTE_USE_SONIC_MOE is enabled but sonicmoe is not installed."
-    )
+    assert not bool(
+        int(os.getenv("NVTE_USE_SONIC_MOE", "0"))
+    ), "NVTE_USE_SONIC_MOE is enabled but sonicmoe is not installed."
+
 
 class FusedTopkScoreFunction(torch.autograd.Function):
     """
@@ -46,30 +47,32 @@ class FusedTopkScoreFunction(torch.autograd.Function):
 
         if use_sonicmoe:
             assert topk <= 16, "SonicMoE topk kernel only supports topk <= 16"
-            assert num_experts <= 4096 and num_experts % 8 == 0, (
-                "SonicMoE topk kernel only supports # of experts <= 4096 and a multiple of 8"
-            )
-            assert not use_pre_softmax, (
-                "SonicMoE topk kernel does not support use_pre_softmax=True"
-            )
-            assert num_groups in [None, 1], (
-                "SonicMoE topk kernel does not support grouped experts"
-            )
+            assert (
+                num_experts <= 4096 and num_experts % 8 == 0
+            ), "SonicMoE topk kernel only supports # of experts <= 4096 and a multiple of 8"
+            assert not use_pre_softmax, "SonicMoE topk kernel does not support use_pre_softmax=True"
+            assert num_groups in [None, 1], "SonicMoE topk kernel does not support grouped experts"
             if score_function:
-                assert score_function == "softmax", (
-                    "SonicMoE topk kernel only supports score_function='softmax'"
-                )
+                assert (
+                    score_function == "softmax"
+                ), "SonicMoE topk kernel only supports score_function='softmax'"
 
             top_values = torch.empty((num_tokens, topk), dtype=logits.dtype, device=logits.device)
             top_indices = torch.empty((num_tokens, topk), dtype=torch.int32, device=logits.device)
-            _topk_fwd(logits, topk, top_values, top_indices,
-                      require_softmax_fusion=score_function == "softmax")
+            _topk_fwd(
+                logits,
+                topk,
+                top_values,
+                top_indices,
+                require_softmax_fusion=score_function == "softmax",
+            )
             if scaling_factor:
                 top_values *= scaling_factor
 
             probs = torch.zeros_like(logits).scatter(1, top_indices, top_values)
-            routing_map = torch.zeros_like(logits, dtype=torch.int32).scatter(
-                1, top_indices, 1).bool()
+            routing_map = (
+                torch.zeros_like(logits, dtype=torch.int32).scatter(1, top_indices, 1).bool()
+            )
 
             tensors_to_save = [top_indices]
             if score_function == "softmax":
@@ -111,8 +114,9 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         grad_probs = grad_probs.contiguous().view(-1, tensor_shape[-1])
 
         if ctx.use_sonicmoe:
-            grad_logits = torch.zeros(ctx.num_tokens, ctx.num_experts, dtype=grad_probs.dtype,
-                                      device=grad_probs.device)
+            grad_logits = torch.zeros(
+                ctx.num_tokens, ctx.num_experts, dtype=grad_probs.dtype, device=grad_probs.device
+            )
             if ctx.scaling_factor:
                 grad_probs /= ctx.scaling_factor
 
@@ -122,7 +126,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
                     top_values /= ctx.scaling_factor
                 _softmax_topk_bwd(grad_logits, None, grad_probs, top_values, top_indices, ctx.topk)
             else:
-                (top_indices, ) = ctx.saved_tensors
+                (top_indices,) = ctx.saved_tensors
                 _topk_bwd(grad_logits, grad_probs, top_indices, ctx.topk)
 
         else:
@@ -247,6 +251,7 @@ def fused_topk_with_score_function(
         None,
         True,
     )
+
 
 class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
     """

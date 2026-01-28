@@ -384,7 +384,7 @@ def get_requirements_from_github(
 
     if not module_name:
         module_name = package_name.split("/")[-1]
-    deps = [ f"{module_name} @ git+{pkg_url}@{branch}" ]
+    deps = [f"{module_name} @ git+{pkg_url}@{branch}"]
     try:
         with urlopen(req_url) as response:
             reqs = response.read().decode("utf-8").splitlines()
