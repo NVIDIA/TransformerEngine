@@ -185,9 +185,9 @@ def _dense_fwd_rule(
     # Check supported input layout
     x_is_transposed = x.ndim - 1 not in x_contracting_dims
     k_is_transposed = kernel.ndim - 1 in k_contracting_dims
-    assert (
-        not x_is_transposed and not k_is_transposed
-    ), "Dense layer only supports `NN` layout inputs, i.e. non-transposed X and Kernel."
+    # assert (
+    #     not x_is_transposed and not k_is_transposed
+    # ), f"Dense layer only supports `NN` layout inputs, i.e. non-transposed X and Kernel. {x_contracting_dims=},{x.ndim=},{k_contracting_dims=},{kernel.ndim=}"
 
     flatten_axis_x = -len(x_contracting_dims)
     flatten_axis_k = len(k_contracting_dims) - len(kernel.shape)
@@ -238,6 +238,46 @@ def _dense_fwd_rule(
     return output, ctx
 
 
+def dot_general_transpose_lhs(g, x, y, *, dimension_numbers, swap_ans=False):
+    # from: https://github.com/google/flax/blob/main/flax/linen/fp8_ops.py#L198
+    import itertools
+    import numpy as np
+
+    def _remaining(original, *removed_lists):
+        removed = set(itertools.chain(*removed_lists))
+        return tuple(i for i in original if i not in removed)
+
+    def _ranges_like(*xs):
+        start = 0
+        for x in xs:
+            x_len = len(x)
+            yield tuple(range(start, start + x_len))
+            start += x_len
+
+    (x_contract, y_contract), (x_batch, y_batch) = dimension_numbers
+    x_ndim = x.ndim
+    x_kept = _remaining(tuple(range(x_ndim)), x_contract, x_batch)
+    y_kept = _remaining(tuple(range(y.ndim)), y_contract, y_batch)
+    if swap_ans:
+        ans_batch, ans_y, _ = _ranges_like(x_batch, y_kept, x_kept)
+    else:
+        ans_batch, _, ans_y = _ranges_like(x_batch, x_kept, y_kept)
+    dims = ((ans_y, y_kept), (ans_batch, y_batch))
+    x_contract_sorted_by_y = tuple(np.take(x_contract, np.argsort(y_contract)))
+    out_axes = np.argsort(tuple(x_batch) + x_kept + x_contract_sorted_by_y)
+    x_bar = jax.lax.transpose(tex.gemm(g, y, contracting_dims=dims[0]), tuple(out_axes))
+    return x_bar
+
+
+def dot_general_transpose_rhs(g, x, y, *, dimension_numbers):
+    (x_contract, y_contract), (x_batch, y_batch) = dimension_numbers
+    swapped_dimension_numbers = ((y_contract, x_contract), (y_batch, x_batch))
+    y_bar = dot_general_transpose_lhs(
+        g, y, x, dimension_numbers=swapped_dimension_numbers, swap_ans=True
+    )
+    return y_bar
+
+
 def _dense_bwd_rule(
     contracting_dims,
     transpose_batch_sequence,
@@ -277,35 +317,24 @@ def _dense_bwd_rule(
         transpose_batch_sequence=transpose_batch_sequence,
     )
 
-    # GEMM NT
-    # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
-    g_contracting_dim = tuple(
-        range(grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
-    )
-    # k_non_contracting_dims
-    k_contracting_dim = tuple(
-        dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
-    )
+    fwd_cdims = (fwd_x_contracting_dims, fwd_k_contracting_dims)
+    batch_dims = ((), ())  # vmap is done outside dense VJP if needed
+    dims = (fwd_cdims, batch_dims)
 
-    dgrad = tex.gemm(
+    dgrad = dot_general_transpose_lhs(
         casted_grad.get_tensor(usage=TensorUsage.LHS),
-        casted_kernel_rhs,
-        contracting_dims=(g_contracting_dim, k_contracting_dim),
-        transpose_batch_sequence=transpose_batch_sequence,
-        collective_op=collective_op_set.backward,
-    )
-
-    # GEMM TN
-    # x_non_contracting_dims
-    g_contracting_dim = x_contracting_dim = tuple(
-        range(0, len(x_shape) - len(fwd_x_contracting_dims))
-    )
-
-    wgrad = tex.gemm(
         casted_x_lhs,
-        casted_grad.get_tensor(usage=TensorUsage.RHS),
-        contracting_dims=(x_contracting_dim, g_contracting_dim),
-        transpose_batch_sequence=transpose_batch_sequence,
+        casted_kernel_rhs,
+        dimension_numbers=dims,
+    )
+
+    wgrad = dot_general_transpose_rhs(
+        casted_grad.get_tensor(
+            usage=TensorUsage.LHS
+        ),  # TODO(jberchtold): should be RHS to use fused kernel for 2x layout? but would need to update dims accordingly
+        casted_x_lhs,
+        casted_kernel_rhs,
+        dimension_numbers=dims,
     )
 
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
