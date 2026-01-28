@@ -171,6 +171,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
+// Cub Topk
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CubTopkHandler);
+
 }  // namespace jax
 }  // namespace transformer_engine
 
