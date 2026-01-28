@@ -4,8 +4,18 @@
 """
 Fused functions used in the MoE router
 """
+import os
+
 import torch
 import transformer_engine_torch as tex
+
+try:
+    from sonicmoe.functional.forward import _topk_fwd
+    from sonicmoe.functional.backward import _topk_bwd, _softmax_topk_bwd
+except ImportError:
+    assert not bool(
+        int(os.getenv("NVTE_USE_SONIC_MOE", "0"))
+    ), "NVTE_USE_SONIC_MOE is enabled but sonicmoe is not installed."
 
 
 class FusedTopkScoreFunction(torch.autograd.Function):
@@ -25,6 +35,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         scaling_factor: float,
         score_function: str,
         expert_bias: torch.Tensor,
+        use_sonicmoe: bool = False,
     ):
         # pylint: disable=missing-function-docstring
         # Save the shape of the logits
@@ -33,49 +44,108 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         # Get the metadata of the viewed logits
         num_tokens = logits.size(0)
         num_experts = logits.size(1)
-        probs, routing_map, intermediate_output = tex.fused_topk_with_score_function_fwd(
-            logits,
-            topk,
-            use_pre_softmax,
-            num_groups,
-            group_topk,
-            scaling_factor,
-            score_function,
-            expert_bias,
-        )
-        # Restore the shape
-        probs = probs.view(tensor_shape)
-        ctx.save_for_backward(routing_map, intermediate_output)
+
+        if use_sonicmoe:
+            assert topk <= 16, "SonicMoE topk kernel only supports topk <= 16"
+            assert (
+                num_experts <= 4096 and num_experts % 8 == 0
+            ), "SonicMoE topk kernel only supports # of experts <= 4096 and a multiple of 8"
+            assert not use_pre_softmax, "SonicMoE topk kernel does not support use_pre_softmax=True"
+            assert num_groups in [None, 1], "SonicMoE topk kernel does not support grouped experts"
+            if score_function:
+                assert (
+                    score_function == "softmax"
+                ), "SonicMoE topk kernel only supports score_function='softmax'"
+
+            top_values = torch.empty((num_tokens, topk), dtype=logits.dtype, device=logits.device)
+            top_indices = torch.empty((num_tokens, topk), dtype=torch.int32, device=logits.device)
+            _topk_fwd(
+                logits,
+                topk,
+                top_values,
+                top_indices,
+                require_softmax_fusion=score_function == "softmax",
+            )
+            if scaling_factor:
+                top_values *= scaling_factor
+
+            probs = torch.zeros_like(logits).scatter(1, top_indices, top_values)
+            routing_map = (
+                torch.zeros_like(logits, dtype=torch.int32).scatter(1, top_indices, 1).bool()
+            )
+
+            tensors_to_save = [top_indices]
+            if score_function == "softmax":
+                tensors_to_save.append(top_values)
+            ctx.save_for_backward(*tensors_to_save)
+
+        else:
+            probs, routing_map, intermediate_output = tex.fused_topk_with_score_function_fwd(
+                logits,
+                topk,
+                use_pre_softmax,
+                num_groups,
+                group_topk,
+                scaling_factor,
+                score_function,
+                expert_bias,
+            )
+            ctx.save_for_backward(routing_map, intermediate_output)
+
         ctx.num_tokens = num_tokens
         ctx.num_experts = num_experts
         ctx.use_pre_softmax = use_pre_softmax
         ctx.topk = topk
         ctx.scaling_factor = scaling_factor
         ctx.score_function = score_function
+        ctx.use_sonicmoe = use_sonicmoe
+
+        # Restore the shape before returning probabilities
+        probs = probs.view(tensor_shape)
         return probs, routing_map
 
     @staticmethod
     def backward(ctx, grad_probs, _):
         # pylint: disable=missing-function-docstring
-        routing_map, intermediate_output = ctx.saved_tensors
         # Save the shape of the grad_probs
         tensor_shape = grad_probs.shape
+
         # Adjust the shape of the grad_probs to 2D shape
         grad_probs = grad_probs.contiguous().view(-1, tensor_shape[-1])
-        grad_logits = tex.fused_topk_with_score_function_bwd(
-            ctx.num_tokens,
-            ctx.num_experts,
-            routing_map,
-            intermediate_output,
-            grad_probs,
-            ctx.topk,
-            ctx.use_pre_softmax,
-            ctx.scaling_factor,
-            ctx.score_function,
-        )
+
+        if ctx.use_sonicmoe:
+            grad_logits = torch.zeros(
+                ctx.num_tokens, ctx.num_experts, dtype=grad_probs.dtype, device=grad_probs.device
+            )
+            if ctx.scaling_factor:
+                grad_probs /= ctx.scaling_factor
+
+            if ctx.score_function == "softmax":
+                (top_indices, top_values) = ctx.saved_tensors
+                if ctx.scaling_factor:
+                    top_values /= ctx.scaling_factor
+                _softmax_topk_bwd(grad_logits, None, grad_probs, top_values, top_indices, ctx.topk)
+            else:
+                (top_indices,) = ctx.saved_tensors
+                _topk_bwd(grad_logits, grad_probs, top_indices, ctx.topk)
+
+        else:
+            (routing_map, intermediate_output) = ctx.saved_tensors
+            grad_logits = tex.fused_topk_with_score_function_bwd(
+                ctx.num_tokens,
+                ctx.num_experts,
+                routing_map,
+                intermediate_output,
+                grad_probs,
+                ctx.topk,
+                ctx.use_pre_softmax,
+                ctx.scaling_factor,
+                ctx.score_function,
+            )
+
         # Restore the shape
         grad_logits = grad_logits.view(tensor_shape)
-        return grad_logits, None, None, None, None, None, None, None
+        return grad_logits, None, None, None, None, None, None, None, None
 
 
 def fused_topk_with_score_function(
@@ -113,15 +183,73 @@ def fused_topk_with_score_function(
     """
     if logits.dtype == torch.float64:
         raise ValueError("Current TE does not support float64 router type")
-    return FusedTopkScoreFunction.apply(
-        logits,
-        topk,
-        use_pre_softmax,
-        num_groups,
+
+    use_sonicmoe = bool(int(os.getenv("NVTE_USE_SONIC_MOE", "0")))
+    if num_groups in [None, 1] or not use_sonicmoe:
+        return FusedTopkScoreFunction.apply(
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+            use_sonicmoe,
+        )
+
+    # Grouped experts with SonicMoE are handled with three separate forward bindings for
+    # PyTorch autograd to handle the backward pass through other operations.
+    num_tokens = logits.size(0)
+    num_experts = logits.size(1)
+    group_logits = logits.view(num_tokens, num_groups, -1)
+    group_scores, _ = FusedTopkScoreFunction.apply(
+        group_logits,
+        topk // group_topk,
+        False,
+        None,
+        None,
+        None,
+        None,
+        None,
+        True,
+    )
+    group_scores = group_scores.sum(dim=-1)
+    _, group_idx = FusedTopkScoreFunction.apply(
+        group_scores,
         group_topk,
+        False,
+        None,
+        None,
+        None,
+        None,
+        None,
+        True,
+    )
+    group_mask = torch.zeros_like(group_scores)
+    group_mask.scatter(1, group_idx, 1)
+
+    # Mask the experts based on selection groups
+    score_mask = (
+        group_mask.unsqueeze(-1)
+        .expand(num_tokens, num_groups, num_experts // num_groups)
+        .reshape(num_tokens, -1)
+    )
+    group_idx = torch.topk(group_scores, k=group_topk, dim=-1, sorted=False)[1]
+    group_mask = torch.zeros_like(group_scores)
+    group_mask.scatter_(1, group_idx, 1)
+    masked_logits = logits.masked_fill(~score_mask.bool(), float("-inf"))
+
+    return FusedTopkScoreFunction.apply(
+        masked_logits,
+        topk,
+        False,
+        None,
+        None,
         scaling_factor,
         score_function,
-        expert_bias,
+        None,
+        True,
     )
 
 
