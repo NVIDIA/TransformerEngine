@@ -239,7 +239,13 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
     except ModuleNotFoundError as e:
         raise RuntimeError("CUDA not found.")
 
-    cuda_root = Path(nvidia.__file__).parent
+    # Handle namespace packages (PEP 420) which don't have __file__
+    # The nvidia package from PyPI CUDA packages is a namespace package
+    if hasattr(nvidia, "__path__") and nvidia.__path__:
+        cuda_root = Path(list(nvidia.__path__)[0])
+    else:
+        raise RuntimeError("Could not locate nvidia package directory.")
+
     return [
         subdir / "include"
         for subdir in cuda_root.iterdir()
