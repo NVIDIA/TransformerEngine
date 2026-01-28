@@ -302,13 +302,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   return ret;
 }
 
-/* cuBLAS version number at run-time */
-size_t cublas_version() {
-  // Cache version to avoid cuBLAS logging overhead
-  static size_t version = cublasLtGetVersion();
-  return version;
-}
-
 }  // namespace
 
 namespace transformer_engine {
@@ -501,8 +494,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #endif  // CUBLAS_VERSION >= 120800
     } else if (mxfp8_gemm) {
 #if CUBLAS_VERSION >= 120800
-      NVTE_CHECK(cublas_version() >= 120800,
-                 "MXFP8 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cublas_version());
+      NVTE_CHECK(cuda::cublas_version() >= 120800,
+                 "MXFP8 requires cuBLAS 12.8+, but run-time cuBLAS version is ",
+                 cuda::cublas_version());
 
       // Check that scales are in expected format
       NVTE_CHECK(inputA->with_gemm_swizzled_scales,
@@ -524,7 +518,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
       // Workaround for heuristic cache bug in cublasLt. This separates the MXFP8 cache key from non-block scaling.
       // CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE is unused for block scaling so it's safe to set.
-      if (cublas_version() <= 120803) {
+      if (cuda::cublas_version() <= 120803) {
         const int64_t dummy_a_vec_stride = 1;
         NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
             operationDesc, CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE, &dummy_a_vec_stride,
@@ -536,8 +530,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #endif                     // CUBLAS_VERSION >= 120800
     } else if (use_fp4) {  // NVFP4 GEMM
 #if CUBLAS_VERSION >= 120800
-      NVTE_CHECK(cublas_version() >= 120800,
-                 "FP4 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cublas_version());
+      NVTE_CHECK(cuda::cublas_version() >= 120800,
+                 "FP4 requires cuBLAS 12.8+, but run-time cuBLAS version is ",
+                 cuda::cublas_version());
 
       // Check that scales are in expected format
       NVTE_CHECK(inputA->with_gemm_swizzled_scales,
@@ -572,9 +567,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                (inputB->scaling_mode == NVTE_BLOCK_SCALING_1D ||
                 inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)) {
 #if CUBLAS_VERSION >= 120900
-      NVTE_CHECK(cublas_version() >= 120900,
+      NVTE_CHECK(cuda::cublas_version() >= 120900,
                  "FP8 block scaling requires cuBLAS 12.9+, but run-time cuBLAS version is ",
-                 cublas_version());
+                 cuda::cublas_version());
 
       // Check that matrix formats are valid
       NVTE_CHECK((!(inputA->scaling_mode == NVTE_BLOCK_SCALING_2D &&
@@ -607,7 +602,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     }
 
 #if CUBLAS_VERSION >= 120800
-    if (cublas_version() >= 120800) {
+    if (cuda::cublas_version() >= 120800) {
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
                                                        &scaling_mode_a, sizeof(scaling_mode_a)));
@@ -624,7 +619,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           operationDesc, CUBLASLT_MATMUL_DESC_AMAX_D_POINTER, &D_amax, sizeof(D_amax)));
 #if CUBLAS_VERSION >= 120800
-      if (cublas_version() >= 120800) {
+      if (cuda::cublas_version() >= 120800) {
         // NOTE: In all current cases where FP8 output is supported, the input is
         // scaled identically to the output.
         NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -711,9 +706,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     NVTE_CHECK(cuda::cudart_version() >= 12020 && cuda::cudart_version() < 13000,
                "Atomic GEMM requires CUDA >=12.2.0 and <13.0.0, but run-time CUDA version is ",
                cuda::cudart_version());
-    NVTE_CHECK(cublas_version() >= 120205 && cublas_version() < 130000,
+    NVTE_CHECK(cuda::cublas_version() >= 120205 && cuda::cublas_version() < 130000,
                "Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but run-time cuBLAS version is ",
-               cublas_version());
+               cuda::cublas_version());
     if (m_split == 0) m_split = 1;
     if (n_split == 0) n_split = 1;
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
@@ -939,9 +934,9 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
       "Atomic GEMM requires CUDA version >=12.2.0 and <13.0.0, but run-time CUDA version is ",
       transformer_engine::cuda::cudart_version());
   NVTE_CHECK(
-      cublas_version() >= 120205 && cublas_version() < 130000,
+      cuda::cublas_version() >= 120205 && cuda::cublas_version() < 130000,
       "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS version is ",
-      cublas_version());
+      cuda::cublas_version());
 
   const Tensor *inputA = convertNVTETensorCheck(A);
   const Tensor *inputB = convertNVTETensorCheck(B);
