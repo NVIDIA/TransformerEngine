@@ -158,6 +158,23 @@ class MetaxBackend(TEFLBackendBase):
         from .flash_attention import FlashAttentionMETAX
         return FlashAttentionMETAX
 
+    def get_attention_backend(self, attention_params=None):
+        # Import the metax get_attention_backend function
+        try:
+            from transformer_engine_metax.pytorch.attention.dot_product_attention import utils
+            return utils.get_attention_backend(attention_params)
+
+        except ImportError as e:
+            raise RuntimeError(
+                f"Failed to import metax FlashAttention: {e}. "
+                "Please ensure flash-attn is installed and transformer_engine_metax is available."
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to get_attention_backend: {e}. "
+                f"Attention_params: {self.attention_params}"
+            )
+
     def quantize(
         self,
         tensor: torch.Tensor,
