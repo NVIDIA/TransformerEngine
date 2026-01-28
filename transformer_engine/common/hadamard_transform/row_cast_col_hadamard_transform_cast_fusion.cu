@@ -361,7 +361,7 @@ __global__ static void row_col_rht_gemm_device(
 
 
 
-  // Allocate SMEMork
+  // Allocate SMEM
   extern __shared__ char shared_memory[];
   using SharedStorage = SharedStorage<TA, TB, ASmemLayout, BSmemLayout, ClusterShape, AccumulatorPipelineStageCount, EpilogueUnrollFactor, SchedulerPipelineStageCount>;
   SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(shared_memory);
@@ -1174,8 +1174,8 @@ void row_col_rht_gemm_ntt_w_sfc(
     mma);
 
   // Assert checks problem size should be multiple of 64
-  assert(M % 64 == 0);
-  assert(N % 64 == 0);
+  NVTE_CHECK(M % 64 == 0, "M must be a multiple of 64, but got ", M);
+  NVTE_CHECK(N % 64 == 0, "N must be a multiple of 64, but got ", N);
 
   uint32_t tiles_in_m = uint32_t(size(ceil_div(M, size<0>(cluster_tile_shape))));
   uint32_t tiles_in_n = uint32_t(size(ceil_div(N, k_tile_size)));
