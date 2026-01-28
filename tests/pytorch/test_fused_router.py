@@ -195,7 +195,6 @@ def run_comparison(
         score_function=score_function,
         expert_bias=expert_bias,
     )
-    print(f"PyTorch topk probs: {probs.shape}, routing_map: {routing_map.shape}")
 
     # Run the fused implementation
     probs_fused, routing_map_fused = fused_topk_with_score_function(
@@ -208,7 +207,6 @@ def run_comparison(
         score_function=score_function,
         expert_bias=expert_bias_clone,
     )
-    print(f"TE Fused topk probs: {probs_fused.shape}, routing_map: {routing_map_fused.shape}")
 
     torch.testing.assert_close(probs, probs_fused)
     torch.testing.assert_close(routing_map, routing_map_fused)

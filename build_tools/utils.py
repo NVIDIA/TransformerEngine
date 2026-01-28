@@ -17,6 +17,7 @@ from pathlib import Path
 from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
+from urllib.request import urlopen
 
 
 # Needs to stay consistent with .pre-commit-config.yaml config.
@@ -370,3 +371,25 @@ def copy_common_headers(
         new_path = dst_dir / path.relative_to(src_dir)
         new_path.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(path, new_path)
+
+
+def get_requirements_from_github(
+    package_name: str, module_name: str = None, branch: str = "main"
+) -> List[str]:
+    """Get the requirements.txt from a GitHub repository. This is required because setuptools
+    does not support reading requirements.txt from a git+https URL directly and will miss
+    dependencies if the package doesn't exist in PyPI"""
+    pkg_url = f"https://github.com/{package_name}.git"
+    req_url = f"https://raw.githubusercontent.com/{package_name}/{branch}/requirements.txt"
+
+    if not module_name:
+        module_name = package_name.split("/")[-1]
+    deps = [ f"{module_name} @ git+{pkg_url}@{branch}" ]
+    try:
+        with urlopen(req_url) as response:
+            reqs = response.read().decode("utf-8").splitlines()
+            deps.extend([req.strip() for req in reqs if req.strip() and not req.startswith("#")])
+    except Exception as e:
+        print(f"Could not fetch dependencies for {package_name} from {req_url}: {e}")
+
+    return deps
