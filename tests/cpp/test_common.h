@@ -504,60 +504,6 @@ int32_t getDeviceComputeCapability();
 constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
 
-// Custom deleters for RAII
-struct CudaDeleter {
-  void operator()(void* p) const { if (p) cudaFree(p); }
-};
-struct GroupedTensorDeleter {
-  void operator()(NVTEGroupedTensor h) const { if (h) nvte_destroy_grouped_tensor(h); }
-};
-
-template <typename T = void>
-using CudaPtr = std::unique_ptr<T, CudaDeleter>;
-using GroupedTensorHandle = std::unique_ptr<std::remove_pointer_t<NVTEGroupedTensor>, GroupedTensorDeleter>;
-
-// Helper to allocate CUDA memory into a CudaPtr
-template <typename T = void>
-CudaPtr<T> cuda_alloc(size_t bytes) {
-  void* ptr = nullptr;
-  NVTE_CHECK_CUDA(cudaMalloc(&ptr, bytes));
-  return CudaPtr<T>(static_cast<T*>(ptr));
-}
-
-// Helper owning GPU buffers that back NVTEGroupedTensor.
-// NVTEGroupedTensor does not own memory; data/offsets/scales
-// must be allocated and freed by the test.
-struct GroupedBuffers {
-  GroupedTensorHandle handle;
-  CudaPtr<> data;
-  CudaPtr<> scale_inv;
-  CudaPtr<int64_t> first_dims_dev;
-  CudaPtr<int64_t> last_dims_dev;
-  CudaPtr<int64_t> offsets_dev;
-  CudaPtr<> columnwise_data;
-  NVTEShape logical_shape{};
-  std::vector<int64_t> offsets_host;
-  std::vector<size_t> tensor_bytes;
-  size_t num_tensors{0};
-  size_t elem_size{0};
-  DType dtype{DType::kFloat32};
-  NVTEScalingMode scaling_mode{NVTE_DELAYED_TENSOR_SCALING};
-
-  GroupedBuffers() = default;
-  GroupedBuffers(const GroupedBuffers&) = delete;
-  GroupedBuffers& operator=(const GroupedBuffers&) = delete;
-  GroupedBuffers(GroupedBuffers&&) = default;
-  GroupedBuffers& operator=(GroupedBuffers&&) = default;
-  ~GroupedBuffers() = default;
-
-  // Convenience accessors for raw pointers
-  NVTEGroupedTensor get_handle() const { return handle.get(); }
-  void* get_data() const { return data.get(); }
-};
-
-GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
-                                    const NVTEScalingMode scaling_mode);
-
 }  // namespace test
 
 #if FP4_TYPE_SUPPORTED

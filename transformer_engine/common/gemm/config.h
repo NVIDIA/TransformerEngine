@@ -9,9 +9,6 @@
 
 #include <transformer_engine/transformer_engine.h>
 
-#include <cstdint>
-#include <optional>
-
 namespace transformer_engine {
 
 struct MatmulConfig {
@@ -32,22 +29,6 @@ struct MatmulConfig {
       sizeof(uint8_t),     // use_split_accumulator
       sizeof(int32_t)      // sm_count
   };
-};
-
-struct GroupedMatmulConfig {
-  // Average dimension hints for cuBLASLt algorithm selection heuristics.
-  // nullopt means "not set" - compute automatically from tensor shapes.
-  std::optional<int64_t> avg_m;
-  std::optional<int64_t> avg_n;
-  std::optional<int64_t> avg_k;
-
-  // Number of streaming multiprocessors to use in GEMM kernel
-  int sm_count = 0;
-
-  // Note: API transfers the value type, not std::optional
-  static constexpr size_t attr_sizes[] = {sizeof(decltype(avg_m)::value_type),
-                                          sizeof(decltype(avg_n)::value_type),
-                                          sizeof(decltype(avg_k)::value_type), sizeof(sm_count)};
 };
 
 }  // namespace transformer_engine
