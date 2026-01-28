@@ -296,6 +296,17 @@ void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **
 void nvte_group_amax(const NVTETensor input, NVTETensor *outputs, const size_t *split_sections,
                      size_t num_tensors, cudaStream_t stream);
 
+/*! \brief Grouped-tensor amax without doing hadamard transform.
+ *
+ *  This function is experimental and the API is not stable.
+ *
+ *  \param[in]      input            NVTEGroupedTensor Input tensor.
+ *  \param[in,out]  output           NVTEGroupedTensor Output tensor.
+ *  \param[in]      stream           CUDA stream used for the operation.
+ */
+void nvte_group_amax_graph_safe(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
