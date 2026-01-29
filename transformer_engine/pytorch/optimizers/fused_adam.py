@@ -140,17 +140,24 @@ class FusedAdam(torch.optim.Optimizer):
         if exp_avg_sq_dtype not in [torch.float32, torch.float16, torch.bfloat16, torch.uint8]:
             raise RuntimeError("FusedAdam only supports fp32/fp16/bf16/fp8 exp_avg_sq.")
 
-        # Currently, capturable mode only supports fp32 master weights and optimizer states.
-        # The reason is, if the master weights or optimizer states are not in fp32 dtype,
-        # they will be copied to temporary fp32 buffers first. These fp32 buffers are then
-        # used as inputs for the kernel. Consequently, the pointer for earch `.step()` differs,
-        # making CUDA Graph inapplicable in this scenario.
+        # Capturable mode requires fp32 master weights, and optimizer states (exp_avg/exp_avg_sq)
+        # must both be fp32 or both be bf16. This is because master weights in non-fp32 dtypes
+        # or optimizer states in non-fp32/bf16 dtypes require copying to temporary fp32 buffers
+        # before kernel execution, causing different pointers on each `.step()` call and making
+        # CUDA Graph inapplicable.
         if capturable and master_weights and master_weight_dtype != torch.float32:
             raise RuntimeError("Capturable mode only supports fp32 master weights.")
-        if capturable and exp_avg_dtype != torch.float32:
-            raise RuntimeError("Capturable mode only supports fp32 exp_avg.")
-        if capturable and exp_avg_sq_dtype != torch.float32:
-            raise RuntimeError("Capturable mode only supports fp32 exp_avg_sq")
+        if capturable:
+            valid_moment_dtypes = (
+                exp_avg_dtype == exp_avg_sq_dtype == torch.float32
+                or exp_avg_dtype == exp_avg_sq_dtype == torch.bfloat16
+            )
+            if not valid_moment_dtypes:
+                raise RuntimeError(
+                    "Capturable mode requires exp_avg_dtype and exp_avg_sq_dtype to be "
+                    "both torch.float32 or both torch.bfloat16, but got "
+                    f"exp_avg_dtype={exp_avg_dtype} and exp_avg_sq_dtype={exp_avg_sq_dtype}."
+                )
         if capturable and store_param_remainders:
             raise RuntimeError("Capturable mode doesn't support storing param remainders")
 
