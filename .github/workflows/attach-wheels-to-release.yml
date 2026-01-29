@@ -124,7 +124,7 @@ jobs:
           if [[ "$EVENT" == "release" ]]; then
             bash ./.github/scripts/check_for_ngc_images.sh
             MATRIX=$(echo '{
-              "os": ["${{ inputs.runs-on }}"],
+              "os": ["ubuntu-22.04", "ubuntu-22.04-arm"],
               "release-version": ["${{ inputs.release-version }}"],
               "image": "$(cat ngc_images.json | jq -cr)"
             }' | jq -rc)
