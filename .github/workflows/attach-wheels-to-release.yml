@@ -126,13 +126,13 @@ jobs:
             MATRIX=$(echo '{
               "os": ["ubuntu-22.04", "ubuntu-22.04-arm"],
               "release-version": ["${{ inputs.release-version }}"],
-              "image": "$(cat ngc_images.json | jq -cr)"
+              "container-image": "$(cat ngc_images.json | jq -cr)"
             }' | jq -rc)
           else
             MATRIX=$(echo '{
               "os": ["${{ inputs.runs-on }}"],
               "release-version": ["${{ inputs.release-version }}"],
-              "image": ["${{ inputs.ngc-image }}"]
+              "container-image": ["${{ inputs.ngc-image }}"]
             }' | jq -rc)
           fi
 
