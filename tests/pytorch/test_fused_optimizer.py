@@ -583,8 +583,8 @@ class TestAdamTest:
     def test_grad_scaler(self):
         params_ = [p for p in self.model_.parameters() if p.requires_grad]
         optimizer_ = te.optimizers.FusedAdam(params_, lr=self.lr, capturable=False)
-        scaler = torch.amp.GradScaler('cuda',enabled=True)
-        scaler_ = torch.amp.GradScaler('cuda',enabled=True)
+        scaler = torch.amp.GradScaler("cuda", enabled=True)
+        scaler_ = torch.amp.GradScaler("cuda", enabled=True)
 
         for i in range(100):
             x = torch.rand([32, 1, 28, 28]).cuda().to(memory_format=torch.channels_last)
@@ -634,8 +634,8 @@ class TestAdamTest:
     def test_grad_scaler_capturable(self):
         params_ = [p for p in self.model_.parameters() if p.requires_grad]
         optimizer_ = te.optimizers.FusedAdam(params_, lr=self.lr, capturable=True)
-        scaler = torch.amp.GradScaler('cuda',enabled=True)
-        scaler_ = torch.amp.GradScaler('cuda',enabled=True)
+        scaler = torch.amp.GradScaler("cuda", enabled=True)
+        scaler_ = torch.amp.GradScaler("cuda", enabled=True)
 
         for i in range(100):
             x = torch.rand([32, 1, 28, 28]).cuda().to(memory_format=torch.channels_last)
@@ -692,8 +692,8 @@ class TestAdamTest:
         optimizer_ = te.optimizers.FusedAdam(
             params_, lr=self.lr, capturable=True, master_weights=master_weights
         )
-        scaler = torch.amp.GradScaler('cuda',enabled=True)
-        scaler_ = torch.amp.GradScaler('cuda',enabled=True)
+        scaler = torch.amp.GradScaler("cuda", enabled=True)
+        scaler_ = torch.amp.GradScaler("cuda", enabled=True)
 
         for i in range(100):
             x = torch.rand([32, 1, 28, 28]).cuda().to(memory_format=torch.channels_last)
