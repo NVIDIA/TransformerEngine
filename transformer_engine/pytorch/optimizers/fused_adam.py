@@ -207,6 +207,9 @@ class FusedAdam(torch.optim.Optimizer):
         self.store_param_remainders = (
             store_param_remainders and master_weights and master_weight_dtype == torch.float32
         )
+        # If the exp_avg and exp_avg_sq dtypes are bfloat16, we can fuse the unscaling/scaling
+        # operations into the fused Adam kernel.
+        self.fuse_unscale = self.exp_avg_dtype == self.exp_avg_sq_dtype == torch.bfloat16
 
         # Deprecated options
         self.set_grad_none = set_grad_none
@@ -268,10 +271,9 @@ class FusedAdam(torch.optim.Optimizer):
         dtype = self.name_to_dtype_map[state_name]
         if dtype == torch.uint8:
             assert isinstance(scaled_state, Float8Tensor)
-            assert len(scaled_state._quantizer.scale) == 1, (
-                "Only scaling with one scaling factor                per tensor is supported by the"
-                " FusedAdam."
-            )
+            assert (
+                len(scaled_state._quantizer.scale) == 1
+            ), "Only scaling with one scaling factor per tensor is supported by the FusedAdam."
         else:
             assert scaled_state.dtype == dtype
 
@@ -293,13 +295,22 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled_state.mul_(rscale)
             scaled_state.copy_(unscaled_state)
 
-    def get_unscaled_state(self, param, state_name):
+    def get_unscaled_state(
+        self, param: torch.nn.Parameter, state_name: str, skip_unscale: bool = False
+    ) -> torch.Tensor:
         """Return the unscaled state corresponding to the input `param` and `state_name`.
 
         Arguments:
             param (torch.nn.Parameter): One of parameters in this optimizer.
             state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
                 and 'master_param`.
+            skip_unscale (optional, bool): Whether to skip the unscaling operation.
+                Should only be True if 'self.fuse_unscale' is True. Default is False.
+
+        Returns:
+            torch.Tensor: The unscaled state. Note that if the state is in BF16, the returned
+            tensor is still in BF16 because it doesn't require to be "unscaled", otherwise it
+            will be unscaled to FP32.
         """
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
@@ -321,7 +332,10 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled = state[state_name]
         elif dtype == torch.bfloat16:
             assert state[state_name].dtype == torch.bfloat16
-            unscaled = state[state_name].float()
+            if skip_unscale:
+                unscaled = state[state_name]
+            else:
+                unscaled = state[state_name].float()
         else:
             raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/bf16/fp32.")
         return unscaled
@@ -565,7 +579,9 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_state[name] = self.state[p][name]
                             assert unscaled_state[name].dtype == torch.int16
                         else:
-                            unscaled = self.get_unscaled_state(p, name)
+                            unscaled = self.get_unscaled_state(
+                                p, name, skip_unscale=self.fuse_unscale
+                            )
                             unscaled_state[name] = unscaled
                         if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
@@ -748,6 +764,8 @@ class FusedAdam(torch.optim.Optimizer):
 
             # Scaling
             for name in ["exp_avg", "exp_avg_sq", "master_param"]:
+                if self.fuse_unscale and name in ["exp_avg", "exp_avg_sq"]:
+                    continue
                 if len(unscaled_lists[name]) > 0:
                     for unscaled, scaled, scale in zip(
                         unscaled_lists[name], scaled_lists[name], state_scales[name]

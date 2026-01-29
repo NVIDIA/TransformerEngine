@@ -717,6 +717,21 @@ struct TypeInfo {
       NVTE_ERROR("Invalid type.");                                   \
   }
 
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(dtype, type, ...) \
+  switch (dtype) {                                                 \
+    using namespace transformer_engine;                            \
+    case DType::kFloat32: {                                        \
+      using type = float;                                          \
+      { __VA_ARGS__ }                                              \
+    } break;                                                       \
+    case DType::kBFloat16: {                                       \
+      using type = bf16;                                           \
+      { __VA_ARGS__ }                                              \
+    } break;                                                       \
+    default:                                                       \
+      NVTE_ERROR("Invalid type, expected Float32 or BFloat16.");   \
+  }
+
 // Add a pack_size argument to select the packed type for FP4
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4x2_ONLY(dtype, pack_size, type, ...) \
   switch (dtype) {                                                             \
