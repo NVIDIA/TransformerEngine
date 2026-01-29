@@ -765,6 +765,8 @@ class FusedAdam(torch.optim.Optimizer):
             # Scaling
             for name in ["exp_avg", "exp_avg_sq", "master_param"]:
                 if self.fuse_unscale and name in ["exp_avg", "exp_avg_sq"]:
+                    # When fused_unscale is True, the scaling is fused into the Adam kernel.
+                    # The momentums are updated inplace, so we don't need to scale here.
                     continue
                 if len(unscaled_lists[name]) > 0:
                     for unscaled, scaled, scale in zip(
