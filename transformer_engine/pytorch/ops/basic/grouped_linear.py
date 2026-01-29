@@ -42,7 +42,7 @@ class GroupedLinear(BasicOperation):
 
     Parameters
     ----------
-    group_size : int
+    num_groups : int
         Number of linear transformations.
     in_features : int
         Inner dimension of input tensor.
@@ -74,7 +74,7 @@ class GroupedLinear(BasicOperation):
 
     def __init__(
         self,
-        group_size: int,
+        num_groups: int,
         in_features: int,
         out_features: int,
         *,
@@ -87,11 +87,11 @@ class GroupedLinear(BasicOperation):
         super().__init__()
 
         # Weight tensor dimensions
-        self.group_size: int = group_size
+        self.num_groups: int = num_groups
         self.in_features: int = in_features
         self.out_features: int = out_features
-        if self.group_size <= 0:
-            raise ValueError(f"Invalid group size ({self.group_size})")
+        if self.num_groups <= 0:
+            raise ValueError(f"Invalid number of groups ({self.num_groups})")
         if self.in_features <= 0:
             raise ValueError(f"Invalid input size ({self.in_features})")
         if self.out_features <= 0:
@@ -114,7 +114,7 @@ class GroupedLinear(BasicOperation):
 
         # Register weights
         self.weight0: torch.nn.Parameter
-        for group_idx in range(self.group_size):
+        for group_idx in range(self.num_groups):
             weight_tensor = torch.empty(
                 self.out_features,
                 self.in_features,
@@ -128,7 +128,7 @@ class GroupedLinear(BasicOperation):
 
         # Register biases
         self.bias0: Optional[torch.nn.Parameter]
-        for group_idx in range(self.group_size):
+        for group_idx in range(self.num_groups):
             bias_tensor = None
             if bias:
                 bias_tensor = torch.empty(
@@ -148,9 +148,9 @@ class GroupedLinear(BasicOperation):
 
     def num_quantizers(self, mode: str) -> int:
         if mode == "forward":
-            return 2 * self.group_size
+            return 2 * self.num_groups
         if mode == "backward":
-            return self.group_size
+            return self.num_groups
         return 0
 
     @property
@@ -167,7 +167,7 @@ class GroupedLinear(BasicOperation):
             device = canonicalize_device(None)
 
         # Initialize weights
-        for group_idx in range(self.group_size):
+        for group_idx in range(self.num_groups):
             weight = getattr(self, f"weight{group_idx}")
 
             # Allocate buffers if needed
@@ -214,7 +214,7 @@ class GroupedLinear(BasicOperation):
         # Initialize biases if needed
         if self.bias0 is not None:
             with torch.no_grad():
-                for group_idx in range(self.group_size):
+                for group_idx in range(self.num_groups):
                     bias = getattr(self, f"bias{group_idx}")
                     if not devices_match(bias.device, device):
                         bias = torch.empty_like(bias, device=device)
@@ -235,7 +235,7 @@ class GroupedLinear(BasicOperation):
         device = self.weight0.device
         weight_requires_grad = self.weight0.requires_grad
         weight_tensor_type = type(self.weight0.data)
-        for group_idx in range(self.group_size):
+        for group_idx in range(self.num_groups):
             weight = getattr(self, f"weight{group_idx}")
             if weight.dtype != dtype:
                 raise RuntimeError(
@@ -259,7 +259,7 @@ class GroupedLinear(BasicOperation):
                 )
 
         # Check that biases are consistent
-        for group_idx in range(self.group_size):
+        for group_idx in range(self.num_groups):
             bias = getattr(self, f"bias{group_idx}")
             if self.has_bias:
                 if bias is None:
@@ -291,7 +291,7 @@ class GroupedLinear(BasicOperation):
             # Configure quantizer usages
             # Note: We cache the quantized input for backward pass,
             # but discard the quantized weights.
-            for group_idx in range(self.group_size):
+            for group_idx in range(self.num_groups):
                 input_quantizer = self.get_quantizer("forward", 2 * group_idx)
                 weight_quantizer = self.get_quantizer("forward", 2 * group_idx + 1)
                 grad_output_quantizer = self.get_quantizer("backward", group_idx)
@@ -302,7 +302,7 @@ class GroupedLinear(BasicOperation):
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
 
-        for group_idx in range(self.group_size):
+        for group_idx in range(self.num_groups):
             # Input/grad output quantizers use internal tensors
             input_quantizer = self.get_quantizer("forward", 2 * group_idx)
             grad_output_quantizer = self.get_quantizer("backward", group_idx)
@@ -372,7 +372,7 @@ class GroupedLinear(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
-        group_size = self.group_size
+        num_groups = self.num_groups
         has_bias = self.has_bias
         device = self.weight0.device
 
@@ -382,12 +382,12 @@ class GroupedLinear(BasicOperation):
         weight_requires_grad = ctx.requires_grad and self.weight0.requires_grad
 
         # Quantizers
-        input_quantizers = [None] * group_size
-        weight_quantizers = [None] * group_size
-        grad_output_quantizers = [None] * group_size
+        input_quantizers = [None] * num_groups
+        weight_quantizers = [None] * num_groups
+        grad_output_quantizers = [None] * num_groups
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         if with_quantized_compute:
-            for group_idx in range(group_size):
+            for group_idx in range(num_groups):
                 input_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx)
                 weight_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx + 1)
                 grad_output_quantizers[group_idx] = self.get_quantizer("backward", group_idx)
@@ -401,14 +401,14 @@ class GroupedLinear(BasicOperation):
         # Extract split sizes from extra input
         split_sizes = basic_op_extra_inputs[0][0]
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
-        if len(split_sizes_int) != group_size:
-            raise ValueError(f"Expected {group_size} splits, but got {len(split_sizes_int)}.")
+        if len(split_sizes_int) != num_groups:
+            raise ValueError(f"Expected {num_groups} splits, but got {len(split_sizes_int)}.")
 
         # Extract params
-        weights = [getattr(self, f"weight{idx}") for idx in range(group_size)]
+        weights = [getattr(self, f"weight{idx}") for idx in range(num_groups)]
         bs = None
         if has_bias:
-            bs = [maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(group_size)]
+            bs = [maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(num_groups)]
 
         # Convert weight dtype if needed
         ws = []
@@ -440,7 +440,7 @@ class GroupedLinear(BasicOperation):
             ws,
             xs,
             [out],
-            [None] * group_size,  # quantization_params
+            [None] * num_groups,  # quantization_params
             dtype,
             m_splits=split_sizes_int,
             bias=bs,
@@ -451,7 +451,7 @@ class GroupedLinear(BasicOperation):
 
         # Prepare weight tensors for backward pass
         if not input_requires_grad:
-            ws = [None] * group_size
+            ws = [None] * num_groups
         elif with_quantized_compute:
             for w, weight_param in zip(ws, weights):
                 if w is not weight_param:
@@ -459,7 +459,7 @@ class GroupedLinear(BasicOperation):
 
         # Prepare input tensor for backward pass
         if not weight_requires_grad:
-            xs = [None] * group_size
+            xs = [None] * num_groups
         elif with_quantized_compute:
             for x in xs:
                 x.update_usage(rowwise_usage=False, columnwise_usage=True)
@@ -489,7 +489,7 @@ class GroupedLinear(BasicOperation):
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
-        group_size = self.group_size
+        num_groups = self.num_groups
         has_bias = self.has_bias
         device = self.weight0.device
 
@@ -497,14 +497,14 @@ class GroupedLinear(BasicOperation):
         ctx = basic_op_ctxs[0]
         saved_tensors = ctx.saved_tensors
         split_sizes, saved_tensors = saved_tensors[0], saved_tensors[1:]
-        xs, saved_tensors = saved_tensors[:group_size], saved_tensors[group_size:]
-        ws, saved_tensors = saved_tensors[:group_size], saved_tensors[group_size:]
+        xs, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
+        ws, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
 
         # Split grad output tensor and convert dtypes if needed
         split_sizes_int = [int(s) for s in split_sizes.tolist()]
         dy = maybe_dequantize(grad_output, ctx.dtype)
         dys = None
-        grad_biases = [None] * group_size
+        grad_biases = [None] * num_groups
         if ctx.with_quantized_compute:
             for quantizer in ctx.grad_output_quantizers:
                 quantizer.set_usage(
@@ -524,13 +524,13 @@ class GroupedLinear(BasicOperation):
 
         # Initialize grad weight grads
         accumulate_into_main_grad = self._accumulate_into_main_grad
-        grad_weights = [None] * group_size
+        grad_weights = [None] * num_groups
         if ctx.weight_requires_grad:
             if accumulate_into_main_grad:
                 # Megatron-LM wgrad fusion
                 # Note: Get grad tensors from params so we can
                 # accumulate directly into it.
-                for group_idx in range(group_size):
+                for group_idx in range(num_groups):
                     weight_param = getattr(self, f"weight{group_idx}")
                     if hasattr(weight_param, "__fsdp_param__"):
                         weight_param.main_grad = weight_param.get_main_grad()
@@ -540,7 +540,7 @@ class GroupedLinear(BasicOperation):
                     grad_weights[group_idx] = weight_param.main_grad
             else:
                 weight_shape = ws[0].size()
-                for group_idx in range(group_size):
+                for group_idx in range(num_groups):
                     grad_weights[group_idx] = torch.empty(
                         weight_shape,
                         dtype=ctx.dtype,
@@ -563,7 +563,7 @@ class GroupedLinear(BasicOperation):
                 ws,
                 dys,
                 [grad_input],
-                [None] * group_size,  # quantization_params
+                [None] * num_groups,  # quantization_params
                 ctx.dtype,
                 layout="NN",
                 m_splits=split_sizes_int,
@@ -577,7 +577,7 @@ class GroupedLinear(BasicOperation):
                 xs,
                 dys,
                 grad_weights,
-                [None] * group_size,  # quantization_params
+                [None] * num_groups,  # quantization_params
                 ctx.dtype,
                 layout="NT",
                 m_splits=split_sizes_int,
@@ -591,8 +591,8 @@ class GroupedLinear(BasicOperation):
         # Megatron-LM wgrad fusion
         # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
-            grad_weights = [None] * group_size
-            for group_idx in range(group_size):
+            grad_weights = [None] * num_groups
+            for group_idx in range(num_groups):
                 weight_param = getattr(self, f"weight{group_idx}")
                 if hasattr(weight_param, "grad_added_to_main_grad"):
                     weight_param.grad_added_to_main_grad = True

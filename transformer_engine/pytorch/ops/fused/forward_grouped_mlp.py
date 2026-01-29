@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fused operation for forward GEMM + scale + add."""
+"""Fused operation for MoE grouped MLP."""
 
 from __future__ import annotations
 from collections.abc import Callable, Iterable
@@ -67,19 +67,19 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
             raise ValueError(
-                f"Unsupported dims for FC1 (group_size={fc1.group_size}, "
+                f"Unsupported dims for FC1 (num_groups={fc1.num_groups}, "
                 f"in_features={fc1.in_features}, out_features={fc1.out_features})."
             )
         if fc2.in_features % 256 != 0 or fc2.out_features % 256 != 0:
             raise ValueError(
-                f"Unsupported dims for FC2 (group_size={fc2.group_size}, "
+                f"Unsupported dims for FC2 (num_groups={fc2.num_groups}, "
                 f"in_features={fc2.in_features}, out_features={fc2.out_features})."
             )
-        if fc1.out_features != 2 * fc2.in_features or fc1.group_size != fc2.group_size:
+        if fc1.out_features != 2 * fc2.in_features or fc1.num_groups != fc2.num_groups:
             raise ValueError(
-                f"FC1 (group_size={fc1.group_size}, in_features={fc1.in_features}, "
+                f"FC1 (num_groups={fc1.num_groups}, in_features={fc1.in_features}, "
                 f"out_features={fc1.out_features}) "
-                f"and FC2 (group_size={fc2.group_size}, in_features={fc2.in_features}, "
+                f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
                 f"out_features={fc2.out_features}) do not match."
             )
         if fc1.has_bias or fc2.has_bias:
@@ -110,7 +110,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         assert len(in_shape) == 2, f"Expected 2D input tensor, got shape={in_shape}."
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
         fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
-        group_size = fc1_op.group_size
+        num_groups = fc1_op.num_groups
         device = fc1_op.weight0.device
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -125,13 +125,13 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         )
 
         # Quantizers
-        fc1_input_quantizers = [None] * group_size
-        fc1_weight_quantizers = [None] * group_size
-        fc1_grad_output_quantizers = [None] * group_size
-        fc2_input_quantizers = [None] * group_size
-        fc2_weight_quantizers = [None] * group_size
-        fc2_grad_output_quantizers = [None] * group_size
-        for idx in range(group_size):
+        fc1_input_quantizers = [None] * num_groups
+        fc1_weight_quantizers = [None] * num_groups
+        fc1_grad_output_quantizers = [None] * num_groups
+        fc2_input_quantizers = [None] * num_groups
+        fc2_weight_quantizers = [None] * num_groups
+        fc2_grad_output_quantizers = [None] * num_groups
+        for idx in range(num_groups):
             fc1_input_quantizers[idx] = fc1_op.get_quantizer("forward", 2 * idx)
             fc1_weight_quantizers[idx] = fc1_op.get_quantizer("forward", 2 * idx + 1)
             fc1_grad_output_quantizers[idx] = fc1_op.get_quantizer("backward", idx)
@@ -151,8 +151,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             )
         split_sizes = fc1_split_sizes
         split_sizes_cpu = [int(s) for s in split_sizes.tolist()]
-        if len(split_sizes_cpu) != group_size:
-            raise ValueError(f"Expected {group_size} splits, but got {len(split_sizes_cpu)}.")
+        if len(split_sizes_cpu) != num_groups:
+            raise ValueError(f"Expected {num_groups} splits, but got {len(split_sizes_cpu)}.")
         split_sizes = split_sizes.to(dtype=torch.int, device=device)
         split_points = torch.zeros(
             split_sizes.numel() + 1,
@@ -165,8 +165,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         scales = basic_op_extra_inputs[1][0]
 
         # Extract params
-        fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(group_size)]
-        fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(group_size)]
+        fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
+        fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
 
         # Convert weight dtype if needed
         fc1_ws = []
@@ -210,19 +210,19 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_w_data = torch.stack([w._rowwise_data for w in fc1_weights])
         fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
         fc1_w_data = fc1_w_data.view(
-            group_size, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1]
+            num_groups, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1]
         )
         fc1_w_data = fc1_w_data.flip(2).contiguous()  # Swap SwiGLU gate/activation
-        fc1_w_data = fc1_w_data.view(group_size, fc1_weight_shape[0], fc1_weight_shape[1])
+        fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_shape[1])
         fc1_w_data = fc1_w_data.permute(1, 2, 0)
         fc1_w_scales = torch.stack([w._rowwise_scale_inv for w in fc1_weights])
         fc1_w_scales = fc1_w_scales.view(dtype=torch.float8_e8m0fnu)
         fc1_w_scales = fc1_w_scales.view(
-            group_size, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1] // 32
+            num_groups, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1] // 32
         )
         fc1_w_scales = fc1_w_scales.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_scales = fc1_w_scales.view(
-            group_size, fc1_weight_shape[0] // 128, 4, 32, fc1_weight_shape[1] // 128, 4
+            num_groups, fc1_weight_shape[0] // 128, 4, 32, fc1_weight_shape[1] // 128, 4
         )
         fc1_w_scales = fc1_w_scales.permute(
             0, 1, 4, 3, 2, 5
@@ -259,7 +259,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc1_w_scales,
             tile_idx_to_expert_idx,
             num_non_exiting_tiles,
-            torch.ones(group_size, dtype=dtype, device=device),  # alpha_tensor
+            torch.ones(num_groups, dtype=dtype, device=device),  # alpha_tensor
             torch.ones(1, dtype=dtype, device=device),  # norm_const_tensor
             scales.detach().reshape(-1, 1, 1),
             split_points,
@@ -297,7 +297,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # Construct MXFP8 tensors for FC2
         fc2_xs = []
-        for group_idx in range(group_size):
+        for group_idx in range(num_groups):
             x = MXFP8Tensor(
                 shape=(split_sizes_cpu[group_idx], fc2_weight_shape[1]),
                 dtype=dtype,
@@ -319,10 +319,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc2_ws,
             fc2_xs,
             [fc2_out],
-            [None] * group_size,  # quantization_params
+            [None] * num_groups,  # quantization_params
             dtype,
             m_splits=split_sizes_cpu,
-            bias=[None] * group_size,
+            bias=[None] * num_groups,
             use_bias=False,
             single_output=True,
         )
@@ -411,7 +411,7 @@ def fuse_forward_ops(
             matches_pattern = False
         elif window[0].has_bias or window[2].has_bias:
             matches_pattern = False
-        elif window[0].group_size != window[2].group_size:
+        elif window[0].num_groups != window[2].num_groups:
             matches_pattern = False
         elif (
             window[0].in_features % 256 != 0
