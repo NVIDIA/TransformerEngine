@@ -299,7 +299,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Grouped matrix multiplication: D = alpha * op(A) @ op(B) + beta * C
  *
- * \note Requires cuBLAS 13.2+ (CUDA 13.1+) and Blackwell (SM100) or newer GPU architecture.
+ * \note Requires cuBLAS 13.2+ (CUDA 13.2+) and Blackwell (SM100) or newer GPU architecture.
  *       Will error at runtime if compiled with an older cuBLAS version or run on
  *       a pre-Blackwell GPU.
  *
@@ -322,7 +322,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  *  \param[in]  stream           CUDA stream for the operation.
  *
  * Requirements:
- * - cuBLAS 13.2+ (CUDA 13.1+)
+ * - cuBLAS 13.2+ (CUDA 13.2+)
  * - Blackwell (SM100) or newer GPU architecture
  * - A, B, C (if provided), D must have the same num_tensors
  * - For each i: D[i] = alpha[i] * op(A[i]) @ op(B[i]) + beta[i] * C[i]
