@@ -543,7 +543,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.2+
+  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.1+
   const int current_device = transformer_engine::cuda::current_device();
   NVTE_CHECK(transformer_engine::cuda::sm_arch(current_device) >= 100,
              "nvte_grouped_gemm requires Blackwell (SM100) or newer architecture.");
