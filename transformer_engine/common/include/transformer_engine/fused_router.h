@@ -23,7 +23,7 @@ extern "C" {
  *  \param[in]     num_groups      Number of groups in grouped topk.
  *  \param[in]     group_topk      Grouped topk value.
  *  \param[in]     scaling_factor  Scaling factor.
- *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax.
+ *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax, 2: sqrtsoftplus.
  *  \param[in]     expert_bias     Expert bias. (Only used at the sigmoid case)
  *  \param[out]    probs           Output tensor for probabilities.
  *  \param[out]    routing_map     Output tensor for routing map.
@@ -46,7 +46,7 @@ void nvte_fused_topk_with_score_function_forward(
  *  \param[in]     topk            Topk value.
  *  \param[in]     use_pre_softmax Whether to use softmax before topk.
  *  \param[in]     scaling_factor  Scaling factor.
- *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax.
+ *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax, 2: sqrtsoftplus.
  *  \param[out]    grad_logits     Gradient of logits.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
@@ -63,7 +63,7 @@ void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
  *  \param[in]     num_tokens      Number of tokens.
  *  \param[in]     num_experts     Number of experts.
  *  \param[in]     topk            Topk value.
- *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax.
+ *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax, 2: sqrtsoftplus.
  *  \param[out]    scores          Output tensor for scores.
  *  \param[in]     routing_map     Routing map.
  *  \param[in]     intermediate_output  Intermediate output from the forward pass. (Softmax/sigmoid output)
@@ -82,7 +82,7 @@ void nvte_fused_score_for_moe_aux_loss_forward(const NVTETensor logits, int num_
  *  \param[in]     num_tokens       Number of tokens.
  *  \param[in]     num_experts      Number of experts.
  *  \param[in]     topk             Topk value.
- *  \param[in]     score_function   Score function, 0: sigmoid, 1: softmax.
+ *  \param[in]     score_function   Score function, 0: sigmoid, 1: softmax, 2: sqrtsoftplus.
  *  \param[out]    grad_logits      Gradient of logits.
  *  \param[in]     stream           CUDA stream used for the operation.
  */

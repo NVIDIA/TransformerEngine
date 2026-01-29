@@ -78,11 +78,11 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
          * Possible preprocess the scores before the topk operation
          * - Pre-softmax
          * - Sigmoid
-         * - Sigmoid post-processing when topk > 1
+         * - Sqrtsoftplus
+         * - Sigmoid/Sqrtsoftplus post-processing when topk > 1
          * This is in-place scores update
          */
-    // score_function == 1 means softmax
-    if (score_function == 1) {
+    if (score_function == 1) {  // score_function == 1 means softmax
       // Apply softmax to the logits before the topk
       apply_softmax_on_float(local_logits, num_experts, lane_id);
       __syncwarp();
@@ -90,10 +90,7 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         intermediate_output[pos_offset + i] = local_logits[i];
       }
-    }
-
-    // score_function == 0 means sigmoid
-    if (score_function == 0) {
+    } else if (score_function == 0) {  // score_function == 0 means sigmoid
       // Apply sigmoid to the logits
       apply_sigmoid_on_float(local_logits, num_experts, lane_id);
       __syncwarp();
@@ -101,11 +98,20 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         intermediate_output[pos_offset + i] = local_logits[i];
       }
+    } else if (score_function == 2) {  // score_function == 2 means sqrtsoftplus
+      // First save the original logits for backward (needed for gradient computation)
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        intermediate_output[pos_offset + i] = local_logits[i];  // Save original logits
+      }
+      __syncwarp();
+      // Apply sqrtsoftplus to the logits
+      apply_sqrtsoftplus_on_float(local_logits, num_experts, lane_id);
     }
 
-    __syncwarp();  //Confirm the scores is written to the softmax/sigmoid output
+    __syncwarp();  //Confirm the scores is written to the output
 
-    if (score_function == 0) {
+    // Sigmoid/Sqrtsoftplus post-processing when topk > 1
+    if (score_function == 0 || score_function == 2) {
       if (topk > 1) {
         auto sum_logits =
             warp_reduce_on_shmem(local_logits, num_experts, ReduceFuncType::SUM, lane_id);
@@ -227,8 +233,9 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *int
     /***
          * Section: Backward of ops before the topk
          * - Pre-softmax bwd
-         * - Sigmoid Post-processing bwd when topk > 1
+         * - Sigmoid/Sqrtsoftplus Post-processing bwd when topk > 1
          * - Sigmoid bwd
+         * - Sqrtsoftplus bwd
          * - Write the grad_logits to the global mem
          */
     // Sigmoid Post-processing bwd when topk > 1
@@ -250,8 +257,46 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *int
                 ((static_cast<double>(sum_fwd_input) + epsilon) *
                  (static_cast<double>(sum_fwd_input) + epsilon));
       }
+      __syncwarp();
     }
-    __syncwarp();
+
+    // Sqrtsoftplus: First compute sqrtsoftplus output from original logits
+    // (needed for both post-processing bwd and activation bwd, compute once here)
+    // For sqrtsoftplus, intermediate_output stores original logits
+    if (score_function == 2) {
+      // Copy original logits to local_comp_buf and apply sqrtsoftplus in-place
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        local_comp_buf[i] = local_act_from_fwd[i];
+      }
+      __syncwarp();
+      apply_sqrtsoftplus_on_float(local_comp_buf, num_experts, lane_id);
+      __syncwarp();
+    }
+
+    // Sqrtsoftplus Post-processing bwd when topk > 1 (normalization backward)
+    if (topk > 1 && score_function == 2) {
+      auto sum_fwd_input =
+          warp_reduce_on_shmem(local_comp_buf, num_experts, ReduceFuncType::SUM, lane_id);
+      // Compute sum of output * grad using registers instead of shared memory
+      double local_sum_Output_x_Grad = 0.0;
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        local_sum_Output_x_Grad +=
+            static_cast<double>(local_grad[i]) * static_cast<double>(local_comp_buf[i]);
+      }
+      // Warp reduce the sum
+      for (int s = 16; s > 0; s /= 2) {
+        local_sum_Output_x_Grad += __shfl_xor_sync(0xffffffff, local_sum_Output_x_Grad, s);
+      }
+      double sum_Output_x_Grad = local_sum_Output_x_Grad;
+      // In-place update
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        local_grad[i] =
+            static_cast<double>(local_grad[i]) / (static_cast<double>(sum_fwd_input) + epsilon) -
+            sum_Output_x_Grad / ((static_cast<double>(sum_fwd_input) + epsilon) *
+                                 (static_cast<double>(sum_fwd_input) + epsilon));
+      }
+      __syncwarp();
+    }
 
     // Pre-softmax bwd
     if (score_function == 1) {
@@ -262,6 +307,14 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *int
     // Sigmoid bwd
     if (score_function == 0) {
       apply_sigmoid_bwd_on_float(local_grad, local_act_from_fwd, num_experts, lane_id);
+      __syncwarp();
+    }
+    // Sqrtsoftplus bwd
+    // For sqrtsoftplus, local_comp_buf already contains sqrtsoftplus output computed earlier
+    // Now compute gradient: dy/dx = sigmoid(x) / (2 * y)
+    if (score_function == 2) {
+      apply_sqrtsoftplus_bwd_on_float(local_grad, local_comp_buf, local_act_from_fwd, num_experts,
+                                      lane_id);
       __syncwarp();
     }
     // Write the grad_logits to the global mem

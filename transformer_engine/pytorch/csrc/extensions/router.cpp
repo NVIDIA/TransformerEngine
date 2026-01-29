@@ -9,7 +9,8 @@
 
 namespace transformer_engine::pytorch {
 
-static std::map<std::string, int> score_function_map = {{"sigmoid", 0}, {"softmax", 1}};
+static std::map<std::string, int> score_function_map = {
+    {"sigmoid", 0}, {"softmax", 1}, {"sqrtsoftplus", 2}};
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
     at::Tensor logits, int topk, bool use_pre_softmax, c10::optional<int> num_groups,
@@ -26,9 +27,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
                 "score_function must be sigmoid when expert_bias is not None");
   }
   // Check if the score function is valid
-  TORCH_CHECK(score_function == "softmax" || score_function == "sigmoid",
-              "score_function must be softmax or sigmoid for router fusion");
-  if (score_function == "sigmoid") {
+  TORCH_CHECK(score_function == "softmax" || score_function == "sigmoid" ||
+                  score_function == "sqrtsoftplus",
+              "score_function must be softmax, sigmoid or sqrtsoftplus for router fusion");
+  if (score_function == "sigmoid" || score_function == "sqrtsoftplus") {
     use_pre_softmax = false;  // Pre-softmax only happens at the softmax case
   }
 
@@ -99,8 +101,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
               "num_tokens and num_experts must be greater than 0");
   TORCH_CHECK(topk > 0, "topk must be greater than 0");
   // Check if the score function is valid
-  TORCH_CHECK(score_function == "softmax" || score_function == "sigmoid",
-              "score_function must be softmax or sigmoid for router fusion");
+  TORCH_CHECK(score_function == "softmax" || score_function == "sigmoid" ||
+                  score_function == "sqrtsoftplus",
+              "score_function must be softmax, sigmoid or sqrtsoftplus for router fusion");
   int score_function_value = score_function_map[score_function];
 
   // Construct the output tensor
