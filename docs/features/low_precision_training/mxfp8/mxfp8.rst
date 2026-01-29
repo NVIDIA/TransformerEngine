@@ -147,7 +147,7 @@ Here's how to use MXFP8 recipe in PyTorch and JAX:
 Supported devices
 -----------------
 
-Blackwell and later (SM 10.0+)
+Blackwell and later (SM 10.0, SM 10.3)
 
 
 ----

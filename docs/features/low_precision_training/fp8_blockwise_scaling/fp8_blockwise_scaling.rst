@@ -8,7 +8,7 @@ FP8 Blockwise Scaling
 
 .. warning::
 
-   ``Float8BlockScaling`` is **not currently supported** in JAX.
+   ``Float8BlockScaling`` is **currently not supported** in JAX.
 
 FP8 Blockwise Scaling recipe is inspired by the quantization scheme used to train the `DeepSeek-v3 model <https://arxiv.org/abs/2412.19437>`__ –
 the first open-source large-scale LLM trained entirely in FP8 precision.
@@ -174,7 +174,8 @@ Supported devices
 
 Hopper (SM 9.0)
 
-Blackwell and later (SM >= 10.0) – recipe is emulated with MXFP8. Note that this is done mainly for compatibility, MXFP8 is the preferred recipe on Blackwell.
+Blackwell and later (SM >= 10.0) – the recipe is emulated with MXFP8. Note that MXFP8 is the preferred recipe on Blackwell. 
+                                   Only scaling factors that are powers of 2 are supported.
 
 
 ----
