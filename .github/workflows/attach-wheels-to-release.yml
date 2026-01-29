@@ -173,9 +173,7 @@ jobs:
     if: ${{ github.event_name == 'release' || inputs.ngc-image != '' }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-22.04]
-        container-image: ${{ fromJson(needs.pre-flight.outputs.ngc-images) }}
+      matrix: ${{ fromJson(needs.pre-flight.outputs.build-wheel-matrix) }}
     steps:
       - name: "Checkout"
         uses: actions/checkout@v3
@@ -184,7 +182,7 @@ jobs:
         uses: ./.github/actions/build-pytorch-wheel
         id: build-pytorch-wheel
         with:
-          release-version: ${{ inputs.release-version }}
+          release-version: ${{ matrix.release-version }}
           base-image: ${{ matrix.container-image }}
 
       - name: Upload Release Asset
