@@ -328,8 +328,12 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         )
 
         # Prepare input tensors for backward pass
-        for x in itertools.chain(fc1_xs, fc2_xs):
-            x.update_usage(rowwise_usage=False, columnwise_usage=True)
+        if not weight_requires_grad:
+            fc1_xs = [None] * num_groups
+            fc2_xs = [None] * num_groups
+        else:
+            for x in itertools.chain(fc1_xs, fc2_xs):
+                x.update_usage(rowwise_usage=False, columnwise_usage=True)
 
         # Save state for backward pass
         if requires_grad:
