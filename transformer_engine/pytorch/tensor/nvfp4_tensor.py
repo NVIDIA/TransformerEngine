@@ -341,7 +341,10 @@ class NVFP4Quantizer(Quantizer):
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
-                columnwise_scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+                columnwise_scale_shape,
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
             )
             amax_columnwise = torch.zeros(
                 1, dtype=torch.float32, device=device, pin_memory=pin_memory
