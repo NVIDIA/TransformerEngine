@@ -78,10 +78,7 @@ jobs:
           '
 
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-build-isolation . -v --no-deps'
-        env:
-          NVTE_FRAMEWORK: pytorch
-          MAX_JOBS: 1
+        run: docker exec -e MAX_JOBS=1 -e NVTE_FRAMEWORK=pytorch builder bash -c 'pip install --no-build-isolation . -v --no-deps'
       - name: 'Sanity check'
         run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py'
   jax:
@@ -148,9 +145,6 @@ jobs:
             pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130
           '
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-cache-dir --no-build-isolation . -v --no-deps'
-        env:
-          NVTE_FRAMEWORK: all
-          MAX_JOBS: 1
+        run: docker exec -e MAX_JOBS=1 -e NVTE_FRAMEWORK=all builder bash -c 'pip install --no-cache-dir --no-build-isolation . -v --no-deps'
       - name: 'Sanity check'
         run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py'
