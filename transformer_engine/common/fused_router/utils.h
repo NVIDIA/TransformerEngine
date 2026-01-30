@@ -215,10 +215,14 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
   }
 }
 
-// Current TE only support float32/bf16/fp16, float64 probs should be considered in the future
+// Current TE only support float32/bf16/fp16/fp64
 #define TE_ROUTER_PROBS_TYPE_SWITCH_ALL(dtype, type, ...) \
   switch (dtype) {                                        \
     using namespace transformer_engine;                   \
+    case DType::kFloat64: {                               \
+      using type = double;                                \
+      { __VA_ARGS__ }                                     \
+    } break;                                              \
     case DType::kFloat32: {                               \
       using type = float;                                 \
       { __VA_ARGS__ }                                     \
@@ -252,6 +256,10 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
     } break;                                              \
     case DType::kFloat32: {                               \
       using type = float;                                 \
+      { __VA_ARGS__ }                                     \
+    } break;                                              \
+    case DType::kFloat64: {                               \
+      using type = double;                                \
       { __VA_ARGS__ }                                     \
     } break;                                              \
     default:                                              \
