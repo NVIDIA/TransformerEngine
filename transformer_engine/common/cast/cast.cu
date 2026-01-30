@@ -75,29 +75,9 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
 
   constexpr bool IS_ACT = false;
 
-  const size_t num_streams = nvte_get_num_compute_streams();
-
-  int num_stream_used = std::min(num_streams, num_tensors);
-  // wait for current stream to finish
-  NVTE_CHECK_CUDA(cudaEventRecord(detail::get_compute_stream_event(0), stream));
-  for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(
-        cudaStreamWaitEvent(detail::get_compute_stream(s), detail::get_compute_stream_event(0)));
-  }
-
   for (int i = 0; i < num_tensors; i++) {
-    dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(
-        inputs[i], outputs[i], quant_configs, detail::get_compute_stream(i % num_streams));
-  }
-
-  // record events on compute streams
-  for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(
-        cudaEventRecord(detail::get_compute_stream_event(s), detail::get_compute_stream(s)));
-  }
-  // wait for all compute streams to finish
-  for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
+    dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(inputs[i], outputs[i], quant_configs,
+                                                          stream);
   }
 }
 
