@@ -334,6 +334,12 @@ struct GroupedTensor {
   size_t num_tensors;
   NVTEGroupedTensor nvte_tensor;
 
+  /*! \brief Whether scaling factors are in format expected by GEMM
+   *
+   *  Only meaningful for MXFP8 and NVFP4.
+   */
+  bool with_gemm_swizzled_scales = false;
+
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
       : data(),
         columnwise_data(),
@@ -400,6 +406,7 @@ struct GroupedTensor {
     num_tensors = 0;
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
+    with_gemm_swizzled_scales = false;
   }
 };
 

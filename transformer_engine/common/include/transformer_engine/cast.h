@@ -89,6 +89,17 @@ extern "C" {
  */
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Casts input grouped tensor to MXFP8.
+ *         The type of quantized tensor in the output depends on the scaling mode of the output
+ *         tensor. See file level comments.
+ *
+ *  \param[in]     input            Input grouped tensor to be cast.
+ *  \param[in,out] output           Output grouped MXFP8 tensor.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                         cudaStream_t stream);
+
 /*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
  *         The type of quantized tensor in the output depends on the scaling mode of the output
@@ -132,6 +143,26 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
 void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor dbias,
                          NVTETensor workspace, cudaStream_t stream);
 
+/*! \brief Casts input grouped tensor to MXFP8. Additionally, reduces the input along columns.
+ *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ * This function produces 2 results:
+ *  - `output` is equal to `cast(dact(input))`
+ *  - `dbias` is equal to `reduce(dact(input), dim=1)`
+ *
+ *  Calling this function with the workspace being an empty tensor will not perform the operation,
+ *  but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     input            Input grouped tensor to be cast.
+ *  \param[in,out] output           Output grouped FP8/MXFP8 tensor.
+ *  \param[out]    dbias            Result of the reduction of the input along columns.
+ *  \param[out]    workspace        Workspace tensor.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                               NVTETensor dbias, NVTETensor workspace, cudaStream_t stream);
+
 /*! \brief Computes backward of GeLU operation on the input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the GeLU backward along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -154,6 +185,29 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
 void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor act_input,
                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream);
+
+/*! \brief Computes backward of GeLU operation on the grouped input, then casts to FP8/MXFP8.
+ *         Additionally, reduces the result of the GeLU backward along columns.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ * This function produces 2 results:
+ *  - `output` is equal to `cast(dact(input))`
+ *  - `dbias` is equal to `reduce(dact(input), dim=1)`
+ *
+ *  Calling this function with the workspace being an empty tensor will not perform the operation,
+ *  but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     input            Input grouped tensor to be cast.
+ *  \param[in]     act_input        Activation input grouped tensor.
+ *  \param[in,out] output           Output grouped FP8/MXFP8 tensor.
+ *  \param[out]    dbias            Result of the reduction of the input along columns.
+ *  \param[out]    workspace        Workspace tensor.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize_dbias_dgelu(const NVTEGroupedTensor input,
+                                     const NVTEGroupedTensor act_input, NVTEGroupedTensor output,
+                                     NVTETensor dbias, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes backward of SiLU operation on the input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the SiLU backward along columns.
@@ -178,6 +232,29 @@ void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor act_inpu
                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream);
 
+/*! \brief Computes backward of SiLU operation on the grouped input, then casts to FP8/MXFP8.
+ *         Additionally, reduces the result of the SiLU backward along columns.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ * This function produces 2 results:
+ *  - `output` is equal to `cast(dact(input))`
+ *  - `dbias` is equal to `reduce(dact(input), dim=1)`
+ *
+ *  Calling this function with the workspace being an empty tensor will not perform the operation,
+ *  but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     input            Input grouped tensor to be cast.
+ *  \param[in]     act_input        Activation input grouped tensor.
+ *  \param[in,out] output           Output grouped FP8/MXFP8 tensor.
+ *  \param[out]    dbias            Result of the reduction of the input along columns.
+ *  \param[out]    workspace        Workspace tensor.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize_dbias_dsilu(const NVTEGroupedTensor input,
+                                     const NVTEGroupedTensor act_input, NVTEGroupedTensor output,
+                                     NVTETensor dbias, NVTETensor workspace, cudaStream_t stream);
+
 /*! \brief Computes backward of ReLU operation on the input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the ReLU backward along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -200,6 +277,29 @@ void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor act_inpu
 void nvte_quantize_dbias_drelu(const NVTETensor input, const NVTETensor act_input,
                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream);
+
+/*! \brief Computes backward of ReLU operation on the grouped input, then casts to FP8/MXFP8.
+ *         Additionally, reduces the result of the ReLU backward along columns.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ * This function produces 2 results:
+ *  - `output` is equal to `cast(dact(input))`
+ *  - `dbias` is equal to `reduce(dact(input), dim=1)`
+ *
+ *  Calling this function with the workspace being an empty tensor will not perform the operation,
+ *  but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     input            Input grouped tensor to be cast.
+ *  \param[in]     act_input        Activation input grouped tensor.
+ *  \param[in,out] output           Output grouped FP8/MXFP8 tensor.
+ *  \param[out]    dbias            Result of the reduction of the input along columns.
+ *  \param[out]    workspace        Workspace tensor.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize_dbias_drelu(const NVTEGroupedTensor input,
+                                     const NVTEGroupedTensor act_input, NVTEGroupedTensor output,
+                                     NVTETensor dbias, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Computes backward of Quick GeLU operation on the input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the Quick GeLU backward along columns.
@@ -224,6 +324,29 @@ void nvte_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor act_inp
                                 NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                 cudaStream_t stream);
 
+/*! \brief Computes backward of Quick GeLU operation on the grouped input, then casts to FP8/MXFP8.
+ *         Additionally, reduces the result of the Quick GeLU backward along columns.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ * This function produces 2 results:
+ *  - `output` is equal to `cast(dact(input))`
+ *  - `dbias` is equal to `reduce(dact(input), dim=1)`
+ *
+ *  Calling this function with the workspace being an empty tensor will not perform the operation,
+ *  but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     input            Input grouped tensor to be cast.
+ *  \param[in]     act_input        Activation input grouped tensor.
+ *  \param[in,out] output           Output grouped FP8/MXFP8 tensor.
+ *  \param[out]    dbias            Result of the reduction of the input along columns.
+ *  \param[out]    workspace        Workspace tensor.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize_dbias_dqgelu(const NVTEGroupedTensor input,
+                                      const NVTEGroupedTensor act_input, NVTEGroupedTensor output,
+                                      NVTETensor dbias, NVTETensor workspace, cudaStream_t stream);
+
 /*! \brief Computes backward of Squared ReLU operation on the input, then casts to FP8/MXFP8.
  *         Additionally, reduces the result of the Squared ReLU backward along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -246,6 +369,29 @@ void nvte_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor act_inp
 void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor act_input,
                                 NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                 cudaStream_t stream);
+
+/*! \brief Computes backward of Squared ReLU operation on the grouped input, then casts to FP8/MXFP8.
+ *         Additionally, reduces the result of the Squared ReLU backward along columns.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ * This function produces 2 results:
+ *  - `output` is equal to `cast(dact(input))`
+ *  - `dbias` is equal to `reduce(dact(input), dim=1)`
+ *
+ *  Calling this function with the workspace being an empty tensor will not perform the operation,
+ *  but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     input            Input grouped tensor to be cast.
+ *  \param[in]     act_input        Activation input grouped tensor.
+ *  \param[in,out] output           Output grouped FP8/MXFP8 tensor.
+ *  \param[out]    dbias            Result of the reduction of the input along columns.
+ *  \param[out]    workspace        Workspace tensor.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize_dbias_dsrelu(const NVTEGroupedTensor input,
+                                      const NVTEGroupedTensor act_input, NVTEGroupedTensor output,
+                                      NVTETensor dbias, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Casts input tensor from reduced to higher precision.
  *         If the scaling mode of the input tensor is set to NVTE_MXFP8_1D_SCALING,
