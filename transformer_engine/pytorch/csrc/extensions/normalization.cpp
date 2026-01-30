@@ -120,8 +120,9 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
+    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax &&
+        !nvfp4_quantizer_cpp->with_amax_estimation) {
+      // True post-RHT amax is handled within NVFP4 quantizer
       impl = Impl::UNFUSED;
     } else if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // TE kernel supports amax output
@@ -356,8 +357,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
+    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax &&
+        !nvfp4_quantizer_cpp->with_amax_estimation) {
+      // True post-RHT amax is handled within NVFP4 quantizer
       impl = Impl::UNFUSED;
     } else if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // TE kernel supports amax output
