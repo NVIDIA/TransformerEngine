@@ -151,6 +151,8 @@ class FusedAdam(torch.optim.Optimizer):
             raise RuntimeError("Capturable mode only supports fp32 exp_avg.")
         if capturable and exp_avg_sq_dtype != torch.float32:
             raise RuntimeError("Capturable mode only supports fp32 exp_avg_sq")
+        if capturable and store_param_remainders:
+            raise RuntimeError("Capturable mode doesn't support storing param remainders")
 
         # If the optimizer is capturable then LR should be a tensor (on GPU)
         lr = torch.tensor(lr, dtype=torch.float32) if capturable else lr
@@ -205,8 +207,6 @@ class FusedAdam(torch.optim.Optimizer):
         self.store_param_remainders = (
             store_param_remainders and master_weights and master_weight_dtype == torch.float32
         )
-        if self.capturable and self.store_param_remainders:
-            raise RuntimeError("Capturable mode doesn't support storing param remainders")
 
         # Deprecated options
         self.set_grad_none = set_grad_none
