@@ -11,7 +11,7 @@ import transformer_engine_torch as tex
 class FusedTopkScoreFunction(torch.autograd.Function):
     """
     Fused Topk with Score Function router.
-    Currently, only support softmax and sigmoid.
+    Currently, support softmax, sigmoid and sqrtsoftplus.
     """
 
     @staticmethod
@@ -102,7 +102,7 @@ def fused_topk_with_score_function(
         used in the group topk
     scaling_factor : float
     score_function : str
-        currently only support softmax and sigmoid
+        currently support softmax, sigmoid and sqrtsoftplus
     expert_bias : torch.Tensor
         could be used in the sigmoid
 
@@ -189,7 +189,7 @@ def fused_compute_score_for_moe_aux_loss(
     logits : torch.Tensor
     topk : int
     score_function : str
-        currently only support softmax and sigmoid
+        currently support softmax, sigmoid and sqrtsoftplus
 
     Returns
     -------

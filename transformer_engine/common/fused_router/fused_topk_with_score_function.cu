@@ -96,11 +96,11 @@ __global__ void fused_topk_with_score_function_forward_kernel(
          * Possible preprocess the scores before the topk operation
          * - Pre-softmax
          * - Sigmoid
+         * - Sqrtsoftplus
          * - Expert bias
          * This is in-place scores update
          */
-    // score_function == 1 means softmax
-    if (use_pre_softmax && score_function == 1) {
+    if (use_pre_softmax && score_function == 1) {  // score_function == 1 means softmax
       // Apply softmax to the logits before the topk
       apply_softmax_on_float(scores, num_experts, lane_id);
       __syncwarp();
@@ -108,10 +108,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         intermediate_output[pos_offset + i] = scores[i];
       }
-    }
-
-    // score_function == 0 means sigmoid
-    if (score_function == 0) {
+    } else if (score_function == 0) {  // score_function == 0 means sigmoid
       // Apply sigmoid to the logits
       apply_sigmoid_on_float(scores, num_experts, lane_id);
       __syncwarp();
@@ -119,18 +116,26 @@ __global__ void fused_topk_with_score_function_forward_kernel(
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         intermediate_output[pos_offset + i] = scores[i];
       }
+    } else if (score_function == 2) {  // score_function == 2 means sqrtsoftplus
+      // First save the original logits for backward (needed for sigmoid computation)
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        intermediate_output[pos_offset + i] = scores[i];  // Save original logits
+      }
+      __syncwarp();
+      // Apply sqrtsoftplus to the logits
+      apply_sqrtsoftplus_on_float(scores, num_experts, lane_id);
     }
 
-    __syncwarp();  //Confirm the scores is written to the softmax/sigmoid output
+    __syncwarp();  //Confirm the scores is written to the output
 
-    // Expert bias is only used at the sigmoid case
-    if (expert_bias && score_function == 0) {
+    // Expert bias is only used at the sigmoid/sqrtsoftplus case
+    if (expert_bias && (score_function == 0 || score_function == 2)) {
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         scores[i] = static_cast<DataType>(static_cast<double>(scores[i]) +
                                           static_cast<double>(expert_bias[i]));
       }
+      __syncwarp();
     }
-    __syncwarp();
 
     /***
          * Section: Topk
@@ -140,7 +145,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
          * - topk with expert bias
          */
     // Topk on the scores
-    // The bias is not empty only happens at the sigmod case
+    // The bias being not empty happens at the sigmoid/sqrtsoftplus case
     if (group_topk > 0) {
       int group_size = num_experts / num_groups;
       // Top2
@@ -194,17 +199,17 @@ __global__ void fused_topk_with_score_function_forward_kernel(
          * Possible postprocess the scores after the topk operation
          * - Revert Expert bias
          * - Softmax
-         * - Sigmoid post-processing when topk > 1
+         * - Sigmoid/Sqrtsoftplus post-processing when topk > 1
          * - Write the result with scaling_factor
          */
     // Revert Expert bias from the topk scores
-    if (expert_bias && score_function == 0) {
+    if (expert_bias && (score_function == 0 || score_function == 2)) {
       for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
         topk_scores[i] =
             static_cast<double>(topk_scores[i]) - static_cast<double>(expert_bias[topk_indices[i]]);
       }
+      __syncwarp();
     }
-    __syncwarp();
 
     // score_function == 1 means softmax
     if (!use_pre_softmax && score_function == 1) {
@@ -215,10 +220,11 @@ __global__ void fused_topk_with_score_function_forward_kernel(
       for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
         intermediate_output[pos_offset + topk_indices[i]] = topk_scores[i];
       }
+      __syncwarp();
     }
 
-    // score_function == 0 means sigmoid
-    if (score_function == 0) {
+    // Sigmoid/Sqrtsoftplus post-processing when topk > 1
+    if (score_function == 0 || score_function == 2) {
       if (topk > 1) {
         double sum_scores = warp_reduce_on_shmem(topk_scores, topk, ReduceFuncType::SUM, lane_id);
         for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
@@ -346,7 +352,7 @@ __global__ void fused_topk_with_score_function_backward_kernel(
     /***
          * Section: Backward of ops after the topk
          * - Backward of the used scaling_factor
-         * - Sigmoid Post-processing bwd when topk > 1
+         * - Sigmoid/Sqrtsoftplus Post-processing bwd when topk > 1
          * - Softmax bwd if use_pre_softmax is false
          */
     // Backward of the used scaling_factor
@@ -357,25 +363,45 @@ __global__ void fused_topk_with_score_function_backward_kernel(
       }
     }
     __syncwarp();
-    // Sigmoid Post-processing bwd when topk > 1
-    if (topk > 1 && score_function == 0) {
-      double sum_fwd_input = masked_warp_reduce_on_shmem(
-          /*data ptr = */ local_act_from_fwd,
-          /*mask ptr = */ local_routing_map,
-          /*data size = */ num_experts,
-          /*reduce func = */ ReduceFuncType::SUM, lane_id);
-      // Put the result of output * grad to the comp_buf
+
+    // Sqrtsoftplus: First compute sqrtsoftplus output from original logits
+    // (needed for both post-processing bwd and activation bwd, compute once here)
+    // For sqrtsoftplus, intermediate_output stores original logits
+    if (score_function == 2) {
+      // Copy original logits to local_comp_buf and apply sqrtsoftplus in-place
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_comp_buf[i] = (local_routing_map[i] ? static_cast<double>(local_grad[i]) *
-                                                        static_cast<double>(local_act_from_fwd[i])
-                                                  : 0.0f);
+        local_comp_buf[i] = local_act_from_fwd[i];
       }
       __syncwarp();
-      double sum_Output_x_Grad = masked_warp_reduce_on_shmem(
-          /*data ptr = */ local_comp_buf,
+      apply_sqrtsoftplus_on_float(local_comp_buf, num_experts, lane_id);
+      __syncwarp();
+    }
+
+    // Sigmoid/Sqrtsoftplus Post-processing bwd when topk > 1 (normalization backward)
+    if (topk > 1 && (score_function == 0 || score_function == 2)) {
+      // Select the correct activation output buffer:
+      // - Sigmoid: local_act_from_fwd already contains sigmoid output
+      // - Sqrtsoftplus: local_comp_buf contains sqrtsoftplus output computed above
+      DataType *act_output = (score_function == 0) ? local_act_from_fwd : local_comp_buf;
+
+      double sum_fwd_input = masked_warp_reduce_on_shmem(
+          /*data ptr = */ act_output,
           /*mask ptr = */ local_routing_map,
           /*data size = */ num_experts,
           /*reduce func = */ ReduceFuncType::SUM, lane_id);
+      // Compute sum of output * grad using registers
+      double local_sum_Output_x_Grad = 0.0;
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        if (local_routing_map[i]) {
+          local_sum_Output_x_Grad +=
+              static_cast<double>(local_grad[i]) * static_cast<double>(act_output[i]);
+        }
+      }
+      // Warp reduce the sum
+      for (int s = 16; s > 0; s /= 2) {
+        local_sum_Output_x_Grad += __shfl_xor_sync(0xffffffff, local_sum_Output_x_Grad, s);
+      }
+      double sum_Output_x_Grad = local_sum_Output_x_Grad;
       // In-place update
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         if (local_routing_map[i]) {
@@ -386,8 +412,9 @@ __global__ void fused_topk_with_score_function_backward_kernel(
           local_grad[i] = 0.0f;
         }
       }
+      __syncwarp();
     }
-    __syncwarp();
+
     // Softmax bwd if use_pre_softmax is false
     if (!use_pre_softmax && score_function == 1) {
       apply_softmax_bwd_on_float(local_grad, local_act_from_fwd, local_comp_buf, local_routing_map,
@@ -410,6 +437,7 @@ __global__ void fused_topk_with_score_function_backward_kernel(
          * Section: Backward of ops before the topk
          * - Pre-softmax bwd
          * - Sigmoid bwd
+         * - Sqrtsoftplus bwd
          * - Write the grad_logits to the global mem
          */
     // Pre-softmax bwd
@@ -421,6 +449,14 @@ __global__ void fused_topk_with_score_function_backward_kernel(
     // Sigmoid bwd
     if (score_function == 0) {
       apply_sigmoid_bwd_on_float(local_grad, local_act_from_fwd, num_experts, lane_id);
+      __syncwarp();
+    }
+    // Sqrtsoftplus bwd
+    // For sqrtsoftplus, local_comp_buf already contains sqrtsoftplus output computed earlier
+    // Now compute gradient: dy/dx = sigmoid(x) / (2 * y)
+    if (score_function == 2) {
+      apply_sqrtsoftplus_bwd_on_float(local_grad, local_comp_buf, local_act_from_fwd, num_experts,
+                                      lane_id);
       __syncwarp();
     }
     // Write the grad_logits to the global mem
