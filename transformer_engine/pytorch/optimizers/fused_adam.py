@@ -158,8 +158,6 @@ class FusedAdam(torch.optim.Optimizer):
                     "both torch.float32 or both torch.bfloat16, but got "
                     f"exp_avg_dtype={exp_avg_dtype} and exp_avg_sq_dtype={exp_avg_sq_dtype}."
                 )
-        if capturable and store_param_remainders:
-            raise RuntimeError("Capturable mode doesn't support storing param remainders")
 
         # If the optimizer is capturable then LR should be a tensor (on GPU)
         lr = torch.tensor(lr, dtype=torch.float32) if capturable else lr
@@ -214,6 +212,8 @@ class FusedAdam(torch.optim.Optimizer):
         self.store_param_remainders = (
             store_param_remainders and master_weights and master_weight_dtype == torch.float32
         )
+        if self.capturable and self.store_param_remainders:
+            raise RuntimeError("Capturable mode doesn't support storing param remainders")
         # If the exp_avg and exp_avg_sq dtypes are bfloat16, we can fuse the unscaling/scaling
         # operations into the fused Adam kernel.
         self.fuse_unscale = self.exp_avg_dtype == self.exp_avg_sq_dtype == torch.bfloat16
