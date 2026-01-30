@@ -65,6 +65,8 @@ class QParams:
     amax_epsilon: optional minimum value of abs max
     random_hadamard_transform: whether to use random hadamard transform
     stochastic_rounding: whether to use stocastic rounding
+    fp4_2d_quantization: whether to use 2D block scaling for NVFP4
+    mxfp8_2d_quantization: whether to use 2D block scaling for MXFP8
     """
 
     power_2_scale: bool = False
@@ -72,6 +74,7 @@ class QParams:
     random_hadamard_transform: bool = False
     stochastic_rounding: bool = False
     fp4_2d_quantization: bool = False
+    mxfp8_2d_quantization: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -79,7 +82,8 @@ class QParams:
             f"amax_epsilon={self.amax_epsilon},\n"
             f"random_hadamard_transform={self.random_hadamard_transform},\n"
             f"stochastic_rounding={self.stochastic_rounding},\n"
-            f"fp4_2d_quantization={self.fp4_2d_quantization}\n)"
+            f"fp4_2d_quantization={self.fp4_2d_quantization},\n"
+            f"mxfp8_2d_quantization={self.mxfp8_2d_quantization}\n)"
         )
 
 
@@ -284,7 +288,12 @@ class MXFP8BlockScaling(Recipe):
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
                 Controls the FP8 data format used during forward and backward
                 pass.
+    enable_2d_quantization : bool, default = False
+                If set to `True`, 2D block scaling is used for weight tensors.
     """
+
+    # Configuration envvars
+    enable_2d_quantization: bool = os.getenv("NVTE_MXFP8_ENABLE_2D_QUANTIZATION", "0") == "1"
 
     margin: int = 0
     fp8_format: Format = Format.E4M3
@@ -294,11 +303,17 @@ class MXFP8BlockScaling(Recipe):
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
 
+        # Quantization params (same pattern as NVFP4BlockScaling)
+        self.fp8_quant_fwd_inp = QParams(mxfp8_2d_quantization=False)
+        self.fp8_quant_fwd_weight = QParams(mxfp8_2d_quantization=self.enable_2d_quantization)
+        self.fp8_quant_bwd_grad = QParams(mxfp8_2d_quantization=False)
+
     def __repr__(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
-            f"format={str(self.fp8_format).split('.')[1]}"
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"enable_2d_quantization={self.enable_2d_quantization}"
         )
 
 
