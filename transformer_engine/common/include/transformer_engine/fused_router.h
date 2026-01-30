@@ -24,7 +24,7 @@ extern "C" {
  *  \param[in]     group_topk      Grouped topk value.
  *  \param[in]     scaling_factor  Scaling factor.
  *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax, 2: sqrtsoftplus.
- *  \param[in]     expert_bias     Expert bias. (Only used at the sigmoid case)
+ *  \param[in]     expert_bias     Expert bias. (Used at the sigmoid/sqrtsoftplus cases)
  *  \param[out]    probs           Output tensor for probabilities.
  *  \param[out]    routing_map     Output tensor for routing map.
  *  \param[out]    intermediate_output  Output tensor for intermediate output. (Softmax/sigmoid output)

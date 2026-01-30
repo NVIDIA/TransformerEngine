@@ -119,11 +119,10 @@ __device__ inline void apply_sqrtsoftplus_on_float(DataType *scores, int data_si
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
     float x = static_cast<float>(scores[i]);
     // softplus(x) = log(1 + exp(x)), numerically stable version
+    // Matches PyTorch's Softplus(beta=1.0, threshold=20.0)
     float softplus_val;
     if (x > 20.0f) {
       softplus_val = x;  // for large x, softplus(x) ≈ x
-    } else if (x < -20.0f) {
-      softplus_val = expf(x);  // for small x, softplus(x) ≈ exp(x)
     } else {
       softplus_val = log1pf(expf(x));
     }
@@ -133,9 +132,8 @@ __device__ inline void apply_sqrtsoftplus_on_float(DataType *scores, int data_si
 
 // sqrtsoftplus backward:
 // y = sqrt(softplus(x))
-// dy/dx = sigmoid(x) / (2 * y)
-// where sigmoid(x) = 1 / (1 + exp(-x))
-// We need the original logits (x) to compute sigmoid, which we store in a separate buffer
+// Matches PyTorch's Softplus(beta=1.0, threshold=20.0)
+// We need the original logits (x) to compute the gradient
 template <typename DataType>
 __device__ inline void apply_sqrtsoftplus_bwd_on_float(DataType *grad, DataType *fwd_output,
                                                        DataType *logits_buf, int data_size,
@@ -143,10 +141,16 @@ __device__ inline void apply_sqrtsoftplus_bwd_on_float(DataType *grad, DataType 
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
     float x = static_cast<float>(logits_buf[i]);  // original logit
     float y = static_cast<float>(fwd_output[i]);  // sqrtsoftplus output
-    // sigmoid(x) = 1 / (1 + exp(-x))
-    float sigmoid_x = 1.0f / (1.0f + expf(-x));
-    // dy/dx = sigmoid(x) / (2 * y)
-    float dy_dx = sigmoid_x / (2.0f * y + epsilon);
+    float dy_dx;
+    if (x > 20.0f) {
+      // When softplus(x) = x, y = sqrt(x), dy/dx = 1/(2*y)
+      dy_dx = 1.0f / (2.0f * y + epsilon);
+    } else {
+      // When softplus(x) = log(1+exp(x)), dy/dx = sigmoid(x) / (2*y)
+      // where sigmoid(x) = 1 / (1 + exp(-x))
+      float sigmoid_x = 1.0f / (1.0f + expf(-x));
+      dy_dx = sigmoid_x / (2.0f * y + epsilon);
+    }
     grad[i] = static_cast<DataType>(static_cast<float>(grad[i]) * dy_dx);
   }
 }

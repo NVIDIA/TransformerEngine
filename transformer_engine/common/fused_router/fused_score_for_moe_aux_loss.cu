@@ -238,28 +238,6 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *int
          * - Sqrtsoftplus bwd
          * - Write the grad_logits to the global mem
          */
-    // Sigmoid Post-processing bwd when topk > 1
-    if (topk > 1 && score_function == 0) {
-      auto sum_fwd_input =
-          warp_reduce_on_shmem(local_act_from_fwd, num_experts, ReduceFuncType::SUM, lane_id);
-      // Put the result of output * grad to the comp_buf
-      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_comp_buf[i] = local_grad[i] * local_act_from_fwd[i];
-      }
-      __syncwarp();
-      auto sum_Output_x_Grad =
-          warp_reduce_on_shmem(local_comp_buf, num_experts, ReduceFuncType::SUM, lane_id);
-      // In-place update
-      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_grad[i] =
-            static_cast<double>(local_grad[i]) / (static_cast<double>(sum_fwd_input) + epsilon) -
-            static_cast<double>(sum_Output_x_Grad) /
-                ((static_cast<double>(sum_fwd_input) + epsilon) *
-                 (static_cast<double>(sum_fwd_input) + epsilon));
-      }
-      __syncwarp();
-    }
-
     // Sqrtsoftplus: First compute sqrtsoftplus output from original logits
     // (needed for both post-processing bwd and activation bwd, compute once here)
     // For sqrtsoftplus, intermediate_output stores original logits
@@ -273,15 +251,20 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *int
       __syncwarp();
     }
 
-    // Sqrtsoftplus Post-processing bwd when topk > 1 (normalization backward)
-    if (topk > 1 && score_function == 2) {
+    // Sigmoid/Sqrtsoftplus Post-processing bwd when topk > 1 (normalization backward)
+    if (topk > 1 && (score_function == 0 || score_function == 2)) {
+      // Select the correct activation output buffer:
+      // - Sigmoid: local_act_from_fwd already contains sigmoid output
+      // - Sqrtsoftplus: local_comp_buf contains sqrtsoftplus output computed above
+      DataType *act_output = (score_function == 0) ? local_act_from_fwd : local_comp_buf;
+
       auto sum_fwd_input =
-          warp_reduce_on_shmem(local_comp_buf, num_experts, ReduceFuncType::SUM, lane_id);
-      // Compute sum of output * grad using registers instead of shared memory
+          warp_reduce_on_shmem(act_output, num_experts, ReduceFuncType::SUM, lane_id);
+      // Compute sum of output * grad using registers
       double local_sum_Output_x_Grad = 0.0;
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_sum_Output_x_Grad +=
-            static_cast<double>(local_grad[i]) * static_cast<double>(local_comp_buf[i]);
+            static_cast<double>(local_grad[i]) * static_cast<double>(act_output[i]);
       }
       // Warp reduce the sum
       for (int s = 16; s > 0; s /= 2) {

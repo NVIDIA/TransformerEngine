@@ -134,8 +134,8 @@ __global__ void fused_topk_with_score_function_forward_kernel(
         scores[i] = static_cast<DataType>(static_cast<double>(scores[i]) +
                                           static_cast<double>(expert_bias[i]));
       }
+      __syncwarp();
     }
-    __syncwarp();
 
     /***
          * Section: Topk
@@ -145,7 +145,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
          * - topk with expert bias
          */
     // Topk on the scores
-    // The bias is not empty only happens at the sigmod case
+    // The bias being not empty happens at the sigmoid/sqrtsoftplus case
     if (group_topk > 0) {
       int group_size = num_experts / num_groups;
       // Top2
@@ -199,11 +199,11 @@ __global__ void fused_topk_with_score_function_forward_kernel(
          * Possible postprocess the scores after the topk operation
          * - Revert Expert bias
          * - Softmax
-         * - Sigmoid post-processing when topk > 1
+         * - Sigmoid/Sqrtsoftplus post-processing when topk > 1
          * - Write the result with scaling_factor
          */
     // Revert Expert bias from the topk scores
-    if (expert_bias && score_function == 0) {
+    if (expert_bias && (score_function == 0 || score_function == 2)) {
       for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
         topk_scores[i] =
             static_cast<double>(topk_scores[i]) - static_cast<double>(expert_bias[topk_indices[i]]);
@@ -225,17 +225,6 @@ __global__ void fused_topk_with_score_function_forward_kernel(
 
     // Sigmoid/Sqrtsoftplus post-processing when topk > 1
     if (score_function == 0 || score_function == 2) {
-      if (topk > 1) {
-        double sum_scores = warp_reduce_on_shmem(topk_scores, topk, ReduceFuncType::SUM, lane_id);
-        for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-          topk_scores[i] = static_cast<double>(topk_scores[i]) / (sum_scores + epsilon);
-        }
-      }
-      __syncwarp();
-    }
-
-    // score_function == 2 means sqrtsoftplus
-    if (score_function == 2) {
       if (topk > 1) {
         double sum_scores = warp_reduce_on_shmem(topk_scores, topk, ReduceFuncType::SUM, lane_id);
         for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
@@ -363,7 +352,7 @@ __global__ void fused_topk_with_score_function_backward_kernel(
     /***
          * Section: Backward of ops after the topk
          * - Backward of the used scaling_factor
-         * - Sigmoid Post-processing bwd when topk > 1
+         * - Sigmoid/Sqrtsoftplus Post-processing bwd when topk > 1
          * - Softmax bwd if use_pre_softmax is false
          */
     // Backward of the used scaling_factor
@@ -374,38 +363,6 @@ __global__ void fused_topk_with_score_function_backward_kernel(
       }
     }
     __syncwarp();
-
-    // Sigmoid Post-processing bwd when topk > 1
-    if (topk > 1 && score_function == 0) {
-      double sum_fwd_input = masked_warp_reduce_on_shmem(
-          /*data ptr = */ local_act_from_fwd,
-          /*mask ptr = */ local_routing_map,
-          /*data size = */ num_experts,
-          /*reduce func = */ ReduceFuncType::SUM, lane_id);
-      // Put the result of output * grad to the comp_buf
-      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_comp_buf[i] = (local_routing_map[i] ? static_cast<double>(local_grad[i]) *
-                                                        static_cast<double>(local_act_from_fwd[i])
-                                                  : 0.0f);
-      }
-      __syncwarp();
-      double sum_Output_x_Grad = masked_warp_reduce_on_shmem(
-          /*data ptr = */ local_comp_buf,
-          /*mask ptr = */ local_routing_map,
-          /*data size = */ num_experts,
-          /*reduce func = */ ReduceFuncType::SUM, lane_id);
-      // In-place update
-      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        if (local_routing_map[i]) {
-          local_grad[i] =
-              static_cast<double>(local_grad[i]) / (sum_fwd_input + epsilon) -
-              sum_Output_x_Grad / ((sum_fwd_input + epsilon) * (sum_fwd_input + epsilon));
-        } else {
-          local_grad[i] = 0.0f;
-        }
-      }
-      __syncwarp();
-    }
 
     // Sqrtsoftplus: First compute sqrtsoftplus output from original logits
     // (needed for both post-processing bwd and activation bwd, compute once here)
@@ -420,20 +377,24 @@ __global__ void fused_topk_with_score_function_backward_kernel(
       __syncwarp();
     }
 
-    // Sqrtsoftplus Post-processing bwd when topk > 1 (normalization backward)
-    if (topk > 1 && score_function == 2) {
-      // Now do the normalization backward (same as sigmoid)
+    // Sigmoid/Sqrtsoftplus Post-processing bwd when topk > 1 (normalization backward)
+    if (topk > 1 && (score_function == 0 || score_function == 2)) {
+      // Select the correct activation output buffer:
+      // - Sigmoid: local_act_from_fwd already contains sigmoid output
+      // - Sqrtsoftplus: local_comp_buf contains sqrtsoftplus output computed above
+      DataType *act_output = (score_function == 0) ? local_act_from_fwd : local_comp_buf;
+
       double sum_fwd_input = masked_warp_reduce_on_shmem(
-          /*data ptr = */ local_comp_buf,
+          /*data ptr = */ act_output,
           /*mask ptr = */ local_routing_map,
           /*data size = */ num_experts,
           /*reduce func = */ ReduceFuncType::SUM, lane_id);
-      // Compute sum of output * grad using registers instead of shared memory
+      // Compute sum of output * grad using registers
       double local_sum_Output_x_Grad = 0.0;
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         if (local_routing_map[i]) {
           local_sum_Output_x_Grad +=
-              static_cast<double>(local_grad[i]) * static_cast<double>(local_comp_buf[i]);
+              static_cast<double>(local_grad[i]) * static_cast<double>(act_output[i]);
         }
       }
       // Warp reduce the sum
