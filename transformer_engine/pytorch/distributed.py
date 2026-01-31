@@ -1100,7 +1100,11 @@ def _start_all_gather_fp8_blockwise(
 
     # Fall back to high-precision all-gather if FP8 is not supported
     if not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
-        out = torch.empty(out_shape, dtype=dtype, device=device)
+        # Dequantize if input is already quantized
+        if isinstance(inp, Float8BlockwiseQTensorStorage):
+            inp = inp.dequantize()
+        # Use dtype from actual input tensor (may differ from initial guess after dequantize)
+        out = torch.empty(out_shape, dtype=inp.dtype, device=inp.device)
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
         out = quantizer(out)
         return out, None
