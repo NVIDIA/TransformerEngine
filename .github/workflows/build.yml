@@ -39,6 +39,15 @@ jobs:
     name: 'PyTorch'
     runs-on: ubuntu-latest
     steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          df -h
+
       - name: Move /var/lib/docker/
         shell: bash -euxo pipefail {0}
         run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
@@ -46,9 +55,9 @@ jobs:
       - name: Maximize build space
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
         with:
-          root-reserve-mb: 5120
+          root-reserve-mb: 4096
           temp-reserve-mb: 32
-          swap-size-mb: 10240
+          swap-size-mb: 4096
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
@@ -66,22 +75,18 @@ jobs:
 
       - name: Start named container
         run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 sleep infinity
+          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d ghcr.io/nvidia/jax:jax sleep infinity
 
       - name: 'Dependencies'
         run: |
           docker exec builder bash -c '\
-            apt-get update && \
-            apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
-            pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript && \
-            apt-get clean \
+            pip install cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript && \
+            pip install torch --no-cache-dir && \
+            pip cache purge \
           '
 
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-build-isolation . -v --no-deps'
-        env:
-          NVTE_FRAMEWORK: pytorch
-          MAX_JOBS: 1
+        run: docker exec -e MAX_JOBS=1 -e NVTE_FRAMEWORK=pytorch builder bash -c 'pip install --no-build-isolation . -v --no-deps'
       - name: 'Sanity check'
         run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py'
   jax:
@@ -112,6 +117,15 @@ jobs:
     name: 'All'
     runs-on: ubuntu-latest
     steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          df -h
+
       - name: Move /var/lib/docker/
         shell: bash -euxo pipefail {0}
         run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
@@ -119,9 +133,9 @@ jobs:
       - name: Maximize build space
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
         with:
-          root-reserve-mb: 5120
+          root-reserve-mb: 4096
           temp-reserve-mb: 32
-          swap-size-mb: 10240
+          swap-size-mb: 4096
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
@@ -145,12 +159,10 @@ jobs:
         run: |
           docker exec builder bash -c '\
             pip install cmake==3.21.0 pybind11[global] einops onnxscript && \
-            pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130
+            pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 && \
+            pip cache purge
           '
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-cache-dir --no-build-isolation . -v --no-deps'
-        env:
-          NVTE_FRAMEWORK: all
-          MAX_JOBS: 1
+        run: docker exec -e MAX_JOBS=1 -e NVTE_FRAMEWORK=all builder bash -c 'pip install --no-cache-dir --no-build-isolation . -v --no-deps'
       - name: 'Sanity check'
         run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py'
