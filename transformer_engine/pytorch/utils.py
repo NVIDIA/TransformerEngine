@@ -452,6 +452,13 @@ def assert_dim_for_all_gather(
 ) -> None:
     """Assert that tensor dimensions are supported for all-gather"""
     if with_all_gather:
+        # Float8BlockQuantizer has a fallback path in gather_along_first_dim
+        # that handles non-quantizable local tensors by all-gathering in
+        # high precision first, then quantizing the result.
+        from .tensor import Float8BlockQuantizer
+
+        if isinstance(quantizer, Float8BlockQuantizer):
+            return
         assert quantizer.is_quantizable(tensor), (
             "All-gather requires quantizable tensor for quantizer " + quantizer.__class__.__name__
         )
