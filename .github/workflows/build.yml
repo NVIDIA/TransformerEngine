@@ -75,16 +75,13 @@ jobs:
 
       - name: Start named container
         run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 sleep infinity
+          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d ghcr.io/nvidia/jax:jax sleep infinity
 
       - name: 'Dependencies'
         run: |
           docker exec builder bash -c '\
-            apt-get update && \
-            apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
-            pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript && \
-            apt-get clean && \
-            rm -rf /var/lib/apt/lists/* && \
+            pip install cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript && \
+            pip install torch --no-cache-dir && \
             pip cache purge \
           '
 
