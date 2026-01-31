@@ -87,7 +87,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if swiglu.glu_interleave_size != 32:
             raise ValueError(
                 "Fused kernel requires 32-wide GLU interleaving, "
-                "but got glu_interleave_size={swiglu.glu_interleave_size}."
+                f"but got glu_interleave_size={swiglu.glu_interleave_size}."
             )
 
     def fuser_forward(
