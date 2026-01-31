@@ -125,14 +125,19 @@ class _NoopCatFunc(torch.autograd.Function):
                 return torch.cat(tensors, dim=dim)
             data_ptr += tensor.size(dim) * data_ptr_stride
 
+        # Out-of-place concatenation when view tensors have different storage
+        # Note: This works around an edge case with the split_quantize
+        # function, which might allocate a buffer and construct
+        # subviews. However, in order to reduce CPU overheads, these
+        # views are configured manually outside of PyTorch. PyTorch
+        # doesn't know these views share the same memory, and it
+        # blocks us from reconstructing the full tensor because it
+        # thinks we are accessing out-of-bounds memory.
+        if tensors[0].untyped_storage().nbytes() < out_shape[dim] * data_ptr_stride:
+            return torch.cat(tensors, dim=dim)
+
         # No-op concatenation
-        out = tensors[0].new()
-        out.set_(
-            tensors[0].untyped_storage(),
-            tensors[0].storage_offset(),
-            out_shape,
-            strides,
-        )
+        out = tensors[0].as_strided(out_shape, strides)
         out.requires_grad = any(tensor.requires_grad for tensor in tensors)
         return out
 
