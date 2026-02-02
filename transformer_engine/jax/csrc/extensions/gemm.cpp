@@ -669,6 +669,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   // printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0], lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
 
   if (is_grouped_dense_wgrad) {
+    NVTE_CHECK(false, "wgrad not supported");
     //// RHS
     NVTEShape rhsShape{.data={k, n}, .ndim=2};
     // rhs_is_trans = true;
@@ -713,27 +714,46 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   // Nominal case for FWD or DGRAD
 
   //// RHS
-  NVTEShape rhsShape{.data={num_gemms*k, n}, .ndim=2};
+  NVTEShape rhsShape{.data={num_gemms * k, n}, .ndim=2};
   // rhs_is_trans = true;
-  // if (rhs_is_trans) {
-  //   std::swap(rhsShape.data[0], rhsShape.data[1]);
-  // }
-  NVTE_CHECK(!rhs_is_trans, "GroupedGemmFFI currently only supports rhs_is_trans=false");
+
+  printf("GroupedGemmFFI: (lhs_is_trans=%d, rhs_is_trans=%d) m=%zu, k=%zu, n=%zu, rhs_shape=[", lhs_is_trans, rhs_is_trans, m, k, n);
+  for (auto dim : rhs_data.dimensions()) {
+    printf("%zu, ", dim);
+  }
+  printf("], lhs_shape=[");
+  for (auto dim : lhs_data.dimensions()) {
+    printf("%zu, ", dim);
+  }
+  printf("], out_shape=[");
+  for (auto dim : output->dimensions()) {
+    printf("%zu, ", dim);
+  }
+  printf("]\n");  
+
+
+  if (rhs_is_trans) {
+    rhsShape.data[0] = num_gemms * n;
+    rhsShape.data[1] = k;
+    // std::swap(rhsShape.data[0], rhsShape.data[1]);
+  }
+  // NVTE_CHECK(!rhs_is_trans, "GroupedGemmFFI currently only supports rhs_is_trans=false");
   auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
 
   //// LHS
   NVTEShape lhsShape{.data={m, k}, .ndim=2};
   // NVTE_CHECK(lhs_is_trans, "GroupedGemmFFI currently only supports lhs_is_trans=true");
   // lhs_is_trans = true;
-  // if (!lhs_is_trans) {
-  //   std::swap(lhsShape.data[0], lhsShape.data[1]);
-  // }
   if (!lhs_is_trans) {
-    cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
-    return ffi_with_cuda_error_check();
+    std::swap(lhsShape.data[0], lhsShape.data[1]);
   }
+  // if (!lhs_is_trans) {
+  //   printf("GroupedGemmFFI: lhs_is_trans=false, m=%zu, k=%zu, n=%zu\n", m, k, n);
+  //   cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
+  //   return ffi_with_cuda_error_check();
+  // }
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  lhs_tensor.set_group_info(group_sizes, group_offset_lhs, kNVTEGroupedFirstDims);
+  lhs_tensor.set_group_info(group_sizes, group_offset_lhs, lhs_is_trans ? kNVTEGroupedFirstDims : kNVTEGroupedLastDims);
 
   //// OUTPUT
   NVTEShape outShape{.data={m, n}, .ndim=2};
