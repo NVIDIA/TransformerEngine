@@ -34,7 +34,6 @@ from ..utils import (
     requires_grad,
     needs_quantized_gemm,
     assert_dim_for_fp8_exec,
-    assert_dim_for_all_gather,
     nvtx_range_pop,
     nvtx_range_push,
     get_nvtx_range_context,
@@ -175,7 +174,6 @@ class _Linear(torch.autograd.Function):
         own_quantized_input = False
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
-            assert_dim_for_all_gather(inputmat, with_input_all_gather_nccl, input_quantizer)
             if save_original_input:
                 assert not isinstance(
                     input_quantizer, Float8Quantizer

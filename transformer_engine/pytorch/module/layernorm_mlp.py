@@ -40,7 +40,6 @@ from ..utils import (
     init_method_constant,
     cast_if_needed,
     assert_dim_for_fp8_exec,
-    assert_dim_for_all_gather,
     clear_tensor_data,
     requires_grad,
     needs_quantized_gemm,
@@ -331,7 +330,6 @@ class _LayerNormMLP(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
-            assert_dim_for_all_gather(inputmat, sequence_parallel, fc1_input_quantizer)
 
         activation_func = _act_func(
             activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
