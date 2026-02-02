@@ -94,7 +94,7 @@ PyTorch
   loss = out.sum()
   loss.backward()
 
-For a tutorial with more details, see the `Quickstart Notebook <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/quickstart.ipynb>`_.
+For a tutorial with more details, see the `FP8 Primer <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/fp8_primer.ipynb>`_.
 
 JAX
 ^^^
@@ -141,7 +141,7 @@ Flax
       for _ in range(10):
         loss, (param_grads, other_grads) = fwd_bwd_fn(params, other_variables, inp)
 
-For a more comprehensive tutorial, check out our `Quickstart Notebook <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/quickstart.ipynb>`_.
+For a more comprehensive tutorial, check out our `FP8 Primer <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/fp8_primer.ipynb>`_.
 
 .. overview-end-marker-do-not-remove
 
@@ -389,11 +389,11 @@ FP8 has been tested extensively across different model architectures and configu
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | LLama2-7B  |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
-| LLM-8B     |  Megatron Core           | https://arxiv.org/abs/2506.08027                                                                        |
+| LLM-8B     |  Megatron Core   | https://arxiv.org/abs/2506.08027                                                                        |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | MPT-13B    |  Mosaic Composer | https://www.databricks.com/blog/turbocharged-training-optimizing-databricks-mosaic-ai-stack-fp8         |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
-| MoE-16B    |  Megatron Core           | https://arxiv.org/abs/2506.08027                                                                        |
+| MoE-16B    |  Megatron Core   | https://arxiv.org/abs/2506.08027                                                                        |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | LLama2-70B |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
