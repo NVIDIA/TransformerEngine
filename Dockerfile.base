@@ -40,7 +40,7 @@ RUN pip3 install ninja pybind11 nvidia-mathdx==25.1.1
 # TODO (ksivamai): fix in TE build
 RUN apt-get update && apt-get install -y libgoogle-glog-dev
 
-RUN pip install nvidia-nvshmem-cu${CUDA_VERSION%%.*} \
+RUN pip install nvidia-nvshmem-cu${CUDA_VERSION%%.*}==${NVSHMEM_VERSION} \
     && echo "/usr/local/lib/python3.12/dist-packages/nvidia/nvshmem/lib" >> /etc/ld.so.conf.d/nvidia-nvshmem.conf \
     && ldconfig
 RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts <<"EOF" bash -e
