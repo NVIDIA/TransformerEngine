@@ -422,8 +422,10 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
 
   std::vector<uint8_t> workspace_host(wrksp_size_host);
   if (ctx->workspace_size < wrksp_size_device) {
-    NVTE_CHECK_CUBLASMP(cublasMpBufferDeregister(ctx->grid_row_major.get(), ctx->workspace));
-    NVTE_CHECK_CUBLASMP(cublasMpFree(ctx->grid_col_major.get(), ctx->workspace));
+    if (ctx->workspace) {
+      NVTE_CHECK_CUBLASMP(cublasMpBufferDeregister(ctx->grid_row_major.get(), ctx->workspace));
+      NVTE_CHECK_CUBLASMP(cublasMpFree(ctx->grid_col_major.get(), ctx->workspace));
+    }
     NVTE_CHECK_CUBLASMP(cublasMpMalloc(ctx->grid_col_major.get(), &ctx->workspace, wrksp_size_device));
     NVTE_CHECK_CUBLASMP(cublasMpBufferRegister(ctx->grid_row_major.get(), ctx->workspace, wrksp_size_device));
     ctx->workspace_size = wrksp_size_device;
