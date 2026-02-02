@@ -142,6 +142,7 @@ jobs:
     name: Build Wheel
     runs-on: ${{ matrix.os }}
     needs: pre-flight
+    permissions: write-all
     if: ${{ github.event_name == 'release' || inputs.ngc-image == '' }}
     strategy:
       fail-fast: false
@@ -180,6 +181,7 @@ jobs:
     name: Build Wheels for NGC PyTorch images
     runs-on: ${{ matrix.os }}
     needs: pre-flight
+    permissions: write-all
     if: ${{ github.event_name == 'release' || inputs.ngc-image != '' }}
     strategy:
       fail-fast: false
