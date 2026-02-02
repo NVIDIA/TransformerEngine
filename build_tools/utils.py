@@ -228,7 +228,7 @@ def nvcc_path() -> Tuple[str, str]:
 def get_cuda_include_dirs() -> Tuple[str, str]:
     """Returns the CUDA header directory."""
 
-    force_wheels = bool(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS"))
+    force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
     # If cuda is installed via toolkit, all necessary headers
     # are bundled inside the top level cuda directory.
     if not force_wheels and cuda_toolkit_include_path() is not None:
