@@ -86,7 +86,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         instance._fp8_dtype = fp8_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
-        mark_not_offload(instance._rowwise_scale_inv, instance._columnwise_scale_inv)
+        # mark_not_offload(instance._rowwise_scale_inv, instance._columnwise_scale_inv)
 
         return instance
 
