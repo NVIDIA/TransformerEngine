@@ -12,7 +12,7 @@ jobs:
     name: 'Core'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
+      image: nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
@@ -20,6 +20,7 @@ jobs:
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
           pip install cmake==3.21.0 pybind11[global] ninja
+          git config --global --add safe.directory '*'
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -39,7 +40,7 @@ jobs:
     name: 'PyTorch'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
+      image: nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
@@ -47,7 +48,8 @@ jobs:
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
           pip install cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript
-          pip install torch --index-url https://download.pytorch.org/whl/cu121
+          pip install torch --index-url https://download.pytorch.org/whl/cu130
+          git config --global --add safe.directory '*'
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -66,15 +68,16 @@ jobs:
     name: 'JAX'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
+      image: nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
         run: |
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
-          pip install cmake==3.21.0 pybind11[global] ninja
-          pip install jax[cuda12]
+          pip install cmake==3.21.0 pybind11[global] ninja packaging
+          pip install jax
+          git config --global --add safe.directory '*'
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -93,7 +96,7 @@ jobs:
     name: 'All'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
+      image: nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
@@ -101,8 +104,9 @@ jobs:
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
           pip install cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript
-          pip install torch --index-url https://download.pytorch.org/whl/cu121
+          pip install torch --index-url https://download.pytorch.org/whl/cu130
           pip install jax[cuda12]
+          git config --global --add safe.directory '*'
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
