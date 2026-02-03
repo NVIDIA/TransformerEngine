@@ -1,0 +1,186 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 60 500 450" width="100%" style="max-width: 500px;">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      
+      .title { font: bold 18px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 14px sans-serif; fill: #333; text-anchor: middle; }
+      .small-text { font: 12px sans-serif; fill: #555; }
+      .dots-text { font: bold 24px sans-serif; fill: #333; text-anchor: middle; }
+      
+      /* Tensor colors */
+      .fp8-tensor { fill: #87CEEB; stroke: #444; stroke-width: 2; }
+      .fp8-block { fill: #87CEEB; stroke: #555; stroke-width: 1.5; }
+      .fp8-block-alt { fill: #5F9FCC; stroke: #555; stroke-width: 1.5; }
+      
+      /* Scaling factor colors */
+      .scale-factor { fill: #FFA500; stroke: #444; stroke-width: 2; }
+      .global-scale { fill: #FF6B6B; stroke: #444; stroke-width: 2; }
+      
+      .grid-line { stroke: #444; stroke-width: 2; }
+      .boundary-line { stroke: #444; stroke-width: 2; }
+    </style>
+  </defs>
+  
+  <!-- NVFP4 Scaling -->
+  <g id="nvfp4-scaling">
+    <text x="250" y="85" class="title">NVFP4 Hierarchical Scaling</text>
+    <text x="250" y="108" class="label" style="font-size: 12px;">(Block scaling + Global scaling)</text>
+    
+    <!-- NVFP4 Tensor split into many small blocks (40×10) -->
+    <g id="tensor-blocks">
+      <!-- White backgrounds for dots areas - cross pattern -->
+      <rect x="250.0" y="140.0" width="40" height="120" fill="#FFFFFF" stroke="none"/>
+      <rect x="130.0" y="190.0" width="240" height="30" fill="#FFFFFF" stroke="none"/>
+      
+      <!-- Blocks ONLY where they don't overlap with white cross -->
+      <rect x="130" y="140" width="40" height="10" class="fp8-block"/>
+      <rect x="170" y="140" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="210" y="140" width="40" height="10" class="fp8-block"/>
+      <rect x="290" y="140" width="40" height="10" class="fp8-block"/>
+      <rect x="330" y="140" width="40" height="10" class="fp8-block-alt"/>
+      
+      <rect x="130" y="150" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="170" y="150" width="40" height="10" class="fp8-block"/>
+      <rect x="210" y="150" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="290" y="150" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="330" y="150" width="40" height="10" class="fp8-block"/>
+      
+      <rect x="130" y="160" width="40" height="10" class="fp8-block"/>
+      <rect x="170" y="160" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="210" y="160" width="40" height="10" class="fp8-block"/>
+      <rect x="290" y="160" width="40" height="10" class="fp8-block"/>
+      <rect x="330" y="160" width="40" height="10" class="fp8-block-alt"/>
+      
+      <rect x="130" y="170" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="170" y="170" width="40" height="10" class="fp8-block"/>
+      <rect x="210" y="170" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="290" y="170" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="330" y="170" width="40" height="10" class="fp8-block"/>
+      
+      <rect x="130" y="180" width="40" height="10" class="fp8-block"/>
+      <rect x="170" y="180" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="210" y="180" width="40" height="10" class="fp8-block"/>
+      <rect x="290" y="180" width="40" height="10" class="fp8-block"/>
+      <rect x="330" y="180" width="40" height="10" class="fp8-block-alt"/>
+      
+      <!-- Three dots in VERTICAL white bar -->
+      <text x="270" y="167.5" class="dots-text">…</text>
+      <text x="270" y="242.5" class="dots-text">…</text>
+      
+      <!-- Three dots in HORIZONTAL white bar -->
+      <text x="190" y="205" class="dots-text">…</text>
+      <text x="330" y="205" class="dots-text">…</text>
+      
+      <!-- ONE diagonal dot at intersection -->
+      <text x="270" y="205" class="dots-text" transform="rotate(45 270 205)">…</text>
+      
+      <!-- Bottom rows (y >= 220 after horizontal white bar) -->
+      <rect x="130" y="220" width="40" height="10" class="fp8-block"/>
+      <rect x="170" y="220" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="210" y="220" width="40" height="10" class="fp8-block"/>
+      <rect x="290" y="220" width="40" height="10" class="fp8-block"/>
+      <rect x="330" y="220" width="40" height="10" class="fp8-block-alt"/>
+      
+      <rect x="130" y="230" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="170" y="230" width="40" height="10" class="fp8-block"/>
+      <rect x="210" y="230" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="290" y="230" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="330" y="230" width="40" height="10" class="fp8-block"/>
+      
+      <rect x="130" y="240" width="40" height="10" class="fp8-block"/>
+      <rect x="170" y="240" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="210" y="240" width="40" height="10" class="fp8-block"/>
+      <rect x="290" y="240" width="40" height="10" class="fp8-block"/>
+      <rect x="330" y="240" width="40" height="10" class="fp8-block-alt"/>
+      
+      <rect x="130" y="250" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="170" y="250" width="40" height="10" class="fp8-block"/>
+      <rect x="210" y="250" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="290" y="250" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="330" y="250" width="40" height="10" class="fp8-block"/>
+      
+      <!-- Main outline -->
+      <rect x="130.0" y="140.0" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    </g>
+    
+    <!-- Scaling factors tensor - 3+2 columns of 10px squares -->
+    <g id="scale-factors">
+      <!-- Orange background -->
+      <rect x="215" y="285" width="70" height="120" fill="#FFA500"/>
+      
+      <!-- White backgrounds for dots areas - cross pattern -->
+      <rect x="245" y="285" width="20" height="120" fill="#FFFFFF" stroke="none"/>
+      <rect x="215" y="335" width="70" height="30" fill="#FFFFFF" stroke="none"/>
+      
+      <!-- Grid lines showing 10x10 squares (3 left + 2 right columns) -->
+      <!-- Vertical lines every 10px (skipping white space) -->
+      <!-- Left 3 columns -->
+      <line x1="225" y1="285" x2="225" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="235" y1="285" x2="235" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="245" y1="285" x2="245" y2="335" class="grid-line" stroke-width="1"/>
+      
+      <!-- Right 2 columns -->
+      <line x1="265" y1="285" x2="265" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="275" y1="285" x2="275" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="285" y1="285" x2="285" y2="335" class="grid-line" stroke-width="1"/>
+      
+      <!-- Bottom sections -->
+      <line x1="225" y1="365" x2="225" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="235" y1="365" x2="235" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="245" y1="365" x2="245" y2="405" class="grid-line" stroke-width="1"/>
+      
+      <line x1="265" y1="365" x2="265" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="275" y1="365" x2="275" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="285" y1="365" x2="285" y2="405" class="grid-line" stroke-width="1"/>
+      
+      <!-- Horizontal lines every 10px -->
+      <line x1="215" y1="295" x2="245" y2="295" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="295" x2="285" y2="295" class="grid-line" stroke-width="1"/>
+      <line x1="215" y1="305" x2="245" y2="305" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="305" x2="285" y2="305" class="grid-line" stroke-width="1"/>
+      <line x1="215" y1="315" x2="245" y2="315" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="315" x2="285" y2="315" class="grid-line" stroke-width="1"/>
+      <line x1="215" y1="325" x2="245" y2="325" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="325" x2="285" y2="325" class="grid-line" stroke-width="1"/>
+      
+      <!-- Top bottom boundaries -->
+      <line x1="215" y1="335" x2="245" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="335" x2="285" y2="335" class="grid-line" stroke-width="1"/>
+      
+      <line x1="215" y1="365" x2="245" y2="365" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="365" x2="285" y2="365" class="grid-line" stroke-width="1"/>
+      <line x1="215" y1="375" x2="245" y2="375" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="375" x2="285" y2="375" class="grid-line" stroke-width="1"/>
+      <line x1="215" y1="385" x2="245" y2="385" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="385" x2="285" y2="385" class="grid-line" stroke-width="1"/>
+      <line x1="215" y1="395" x2="245" y2="395" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="395" x2="285" y2="395" class="grid-line" stroke-width="1"/>
+      
+      <!-- Bottom boundaries -->
+      <line x1="215" y1="405" x2="245" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="265" y1="405" x2="285" y2="405" class="grid-line" stroke-width="1"/>
+      
+      <!-- Main outline -->
+      <rect x="215" y="285" width="70" height="120" fill="none" stroke="#444" stroke-width="2"/>
+      
+      <!-- Three dots -->
+      <text x="255" y="312.5" class="dots-text" style="font-size: 14px;">…</text>
+      <text x="255" y="387.5" class="dots-text" style="font-size: 14px;">…</text>
+      <text x="230" y="350" class="dots-text" style="font-size: 14px;">…</text>
+      <text x="275" y="350" class="dots-text" style="font-size: 14px;">…</text>
+      <text x="255" y="350" class="dots-text" style="font-size: 14px;" transform="rotate(45 255 350)">…</text>
+    </g>
+    
+    <text x="250" y="430" class="small-text" text-anchor="middle">E4M3 scaling factors (one per 16 elements)</text>
+
+    <!-- Global Scaling Factor -->
+    <g id="global-scale" transform="translate(350, 320)">
+       <rect x="10" y="10" width="20" height="20" class="global-scale"/>
+       <text x="20" y="60" class="small-text" text-anchor="middle">Global Scale (FP32)</text>
+       <text x="20" y="75" class="small-text" text-anchor="middle">(one per tensor)</text>
+       <text x="-20" y="25" class="dots-text" style="font-size: 20px;">+</text>
+    </g>
+
+  </g>
+</svg>

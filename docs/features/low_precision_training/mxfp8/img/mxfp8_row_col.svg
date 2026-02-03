@@ -1,0 +1,266 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 650 450" width="100%" style="max-width: 650px;">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      .title { font: bold 18px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 14px sans-serif; fill: #333; text-anchor: middle; }
+      .small-text { font: 12px sans-serif; fill: #555; text-anchor: middle; }
+      .dots-text { font: bold 24px sans-serif; fill: #333; text-anchor: middle; }
+      .fp8-block { fill: #87CEEB; stroke: #555; stroke-width: 1.5; }
+      .fp8-block-alt { fill: #5F9FCC; stroke: #555; stroke-width: 1.5; }
+      .scale-block { fill: #FFA500; stroke: #555; stroke-width: 1.5; }
+    </style>
+  </defs>
+
+  <!-- ROWWISE SECTION -->
+  <text x="325" y="30" class="title">Rowwise (1x32 blocks)</text>
+  
+  <!-- Rowwise Data Tensor -->
+  <g id="rowwise-tensor">
+    <text x="160" y="55" class="small-text">Data</text>
+    
+    <rect x="40" y="70" width="40" height="10" class="fp8-block"/>
+    <rect x="80" y="70" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="120" y="70" width="40" height="10" class="fp8-block"/>
+    <rect x="200" y="70" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="240" y="70" width="40" height="10" class="fp8-block"/>
+    
+    <rect x="40" y="80" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="80" y="80" width="40" height="10" class="fp8-block"/>
+    <rect x="120" y="80" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="200" y="80" width="40" height="10" class="fp8-block"/>
+    <rect x="240" y="80" width="40" height="10" class="fp8-block-alt"/>
+    
+    <rect x="40" y="90" width="40" height="10" class="fp8-block"/>
+    <rect x="80" y="90" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="120" y="90" width="40" height="10" class="fp8-block"/>
+    <rect x="200" y="90" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="240" y="90" width="40" height="10" class="fp8-block"/>
+    
+    <rect x="40" y="100" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="80" y="100" width="40" height="10" class="fp8-block"/>
+    <rect x="120" y="100" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="200" y="100" width="40" height="10" class="fp8-block"/>
+    <rect x="240" y="100" width="40" height="10" class="fp8-block-alt"/>
+    
+    <rect x="40" y="110" width="40" height="10" class="fp8-block"/>
+    <rect x="80" y="110" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="120" y="110" width="40" height="10" class="fp8-block"/>
+    <rect x="200" y="110" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="240" y="110" width="40" height="10" class="fp8-block"/>
+    
+    <rect x="40" y="150" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="80" y="150" width="40" height="10" class="fp8-block"/>
+    <rect x="120" y="150" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="200" y="150" width="40" height="10" class="fp8-block"/>
+    <rect x="240" y="150" width="40" height="10" class="fp8-block-alt"/>
+    
+    <rect x="40" y="160" width="40" height="10" class="fp8-block"/>
+    <rect x="80" y="160" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="120" y="160" width="40" height="10" class="fp8-block"/>
+    <rect x="200" y="160" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="240" y="160" width="40" height="10" class="fp8-block"/>
+    
+    <rect x="40" y="170" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="80" y="170" width="40" height="10" class="fp8-block"/>
+    <rect x="120" y="170" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="200" y="170" width="40" height="10" class="fp8-block"/>
+    <rect x="240" y="170" width="40" height="10" class="fp8-block-alt"/>
+    
+    <rect x="40" y="180" width="40" height="10" class="fp8-block"/>
+    <rect x="80" y="180" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="120" y="180" width="40" height="10" class="fp8-block"/>
+    <rect x="200" y="180" width="40" height="10" class="fp8-block-alt"/>
+    <rect x="240" y="180" width="40" height="10" class="fp8-block"/>
+    
+    <rect x="40" y="70" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    <text x="180" y="97.5" class="dots-text">…</text>
+    <text x="180" y="172.5" class="dots-text">…</text>
+    <text x="100" y="135" class="dots-text">…</text>
+    <text x="240" y="135" class="dots-text">…</text>
+    <text x="180" y="135" class="dots-text" transform="rotate(45 180 135)">…</text>
+  </g>
+  
+  <!-- Rowwise Scale Tensor -->
+  <g id="rowwise-scales">
+    <text x="485" y="55" class="small-text">Scales</text>
+    
+    <!-- Rows 1-5 -->
+    <rect x="380" y="70" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="70" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="70" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="70" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="70" width="10" height="10" class="scale-block"/>
+    
+    <rect x="380" y="80" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="80" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="80" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="80" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="80" width="10" height="10" class="scale-block"/>
+    
+    <rect x="380" y="90" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="90" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="90" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="90" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="90" width="10" height="10" class="scale-block"/>
+    
+    <rect x="380" y="100" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="100" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="100" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="100" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="100" width="10" height="10" class="scale-block"/>
+    
+    <rect x="380" y="110" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="110" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="110" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="110" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="110" width="10" height="10" class="scale-block"/>
+    
+    <!-- Gap rows -->
+    <rect x="380" y="150" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="150" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="150" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="150" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="150" width="10" height="10" class="scale-block"/>
+    
+    <rect x="380" y="160" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="160" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="160" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="160" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="160" width="10" height="10" class="scale-block"/>
+    
+    <rect x="380" y="170" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="170" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="170" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="170" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="170" width="10" height="10" class="scale-block"/>
+    
+    <rect x="380" y="180" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="180" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="180" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="180" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="180" width="10" height="10" class="scale-block"/>
+    
+    <rect x="380" y="70" width="90" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    <text x="430" y="97.5" class="dots-text">…</text>
+    <text x="430" y="172.5" class="dots-text">…</text>
+    <text x="400" y="135" class="dots-text">…</text>
+    <text x="460" y="135" class="dots-text">…</text>
+    <text x="430" y="135" class="dots-text" transform="rotate(45 430 135)">…</text>
+  </g>
+
+  <!-- COLUMNWISE SECTION -->
+  <text x="325" y="230" class="title">Columnwise (32x1 blocks)</text>
+  
+  <!-- Columnwise Data Tensor -->
+  <g id="colwise-tensor">
+    <text x="160" y="255" class="small-text">Data</text>
+    
+    <rect x="40" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="50" y="270" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="60" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="70" y="270" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="80" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="90" y="270" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="100" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="110" y="270" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="120" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="130" y="270" width="10" height="40" class="fp8-block-alt"/>
+    
+    <rect x="180" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="190" y="270" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="200" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="210" y="270" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="220" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="230" y="270" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="240" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="250" y="270" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="260" y="270" width="10" height="40" class="fp8-block"/>
+    <rect x="270" y="270" width="10" height="40" class="fp8-block-alt"/>
+    
+    <rect x="40" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="50" y="350" width="10" height="40" class="fp8-block"/>
+    <rect x="60" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="70" y="350" width="10" height="40" class="fp8-block"/>
+    <rect x="80" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="90" y="350" width="10" height="40" class="fp8-block"/>
+    <rect x="100" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="110" y="350" width="10" height="40" class="fp8-block"/>
+    <rect x="120" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="130" y="350" width="10" height="40" class="fp8-block"/>
+    
+    <rect x="180" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="190" y="350" width="10" height="40" class="fp8-block"/>
+    <rect x="200" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="210" y="350" width="10" height="40" class="fp8-block"/>
+    <rect x="220" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="230" y="350" width="10" height="40" class="fp8-block"/>
+    <rect x="240" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="250" y="350" width="10" height="40" class="fp8-block"/>
+    <rect x="260" y="350" width="10" height="40" class="fp8-block-alt"/>
+    <rect x="270" y="350" width="10" height="40" class="fp8-block"/>
+    
+    <rect x="40" y="270" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    <text x="160" y="296" class="dots-text">…</text>
+    <text x="160" y="376" class="dots-text">…</text>
+    <text x="90" y="336" class="dots-text" transform="rotate(90 90 336)">…</text>
+    <text x="230" y="336" class="dots-text" transform="rotate(90 230 336)">…</text>
+    <text x="160" y="336" class="dots-text" transform="rotate(45 160 336)">…</text>
+  </g>
+  
+  <!-- Columnwise Scale Tensor - TRANSPOSED -->
+  <g id="colwise-scales">
+    <text x="485" y="255" class="small-text">Scales</text>
+    
+    <!-- Row 1 -->
+    <rect x="370" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="380" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="410" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="420" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="430" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="440" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="300" width="10" height="10" class="scale-block"/>
+    
+    <rect x="510" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="520" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="530" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="540" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="550" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="560" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="570" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="580" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="590" y="300" width="10" height="10" class="scale-block"/>
+    <rect x="600" y="300" width="10" height="10" class="scale-block"/>
+    
+    <!-- Row 2 (gap) -->
+    <rect x="370" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="380" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="390" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="400" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="410" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="420" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="430" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="440" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="450" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="460" y="330" width="10" height="10" class="scale-block"/>
+    
+    <rect x="510" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="520" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="530" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="540" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="550" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="560" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="570" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="580" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="590" y="330" width="10" height="10" class="scale-block"/>
+    <rect x="600" y="330" width="10" height="10" class="scale-block"/>
+    
+    <rect x="370" y="300" width="240" height="40" fill="none" stroke="#444" stroke-width="2"/>
+    <text x="490" y="320" class="dots-text">…</text>
+    <text x="430" y="320" class="dots-text">…</text>
+    <text x="560" y="320" class="dots-text">…</text>
+  </g>
+</svg>

@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1050 580" width="1050" height="580">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .column-title { font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; font-weight: 600; text-anchor: middle; fill: #424242; }
+      .divider { stroke: #bdbdbd; stroke-width: 1.5; stroke-dasharray: 8,6; }
+    </style>
+    <marker id="arrowhead" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto">
+      <polygon points="0 0, 6 2, 0 4" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="525" y="30" class="title">Master Weights Storage Approaches</text>
+  
+  <!-- Vertical dividers (dashed lines) -->
+  <line x1="350" y1="50" x2="350" y2="560" class="divider"/>
+  <line x1="700" y1="50" x2="700" y2="560" class="divider"/>
+  
+  <!-- Column 1: Low Precision Only -->
+  <text x="175" y="75" class="column-title">Low Precision Weights</text>
+  <text x="175" y="93" class="small-text">(no master weights)</text>
+  
+  <!-- Model box -->
+  <rect x="60" y="145" width="230" height="90" rx="6" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="175" y="168" class="label">Model</text>
+  <rect x="80" y="183" width="190" height="40" class="hp" rx="4"/>
+  <text x="175" y="208" class="text">Weights (BF16/FP16)</text>
+  
+  <!-- Arrow down -->
+  <path d="M 175 235 L 175 300" class="arrow"/>
+  
+  <!-- Computation -->
+  <rect x="90" y="300" width="170" height="50" class="gemm" rx="6"/>
+  <text x="175" y="330" class="text">Forward/Backward</text>
+  
+  <!-- Arrow down -->
+  <path d="M 175 350 L 175 415" class="arrow"/>
+  
+  <!-- Optimizer box -->
+  <rect x="60" y="415" width="230" height="90" rx="6" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="175" y="438" class="label">Optimizer</text>
+  <rect x="80" y="453" width="190" height="40" class="fp32" rx="4"/>
+  <text x="175" y="478" class="text">State (FP32)</text>
+  
+  <!-- Column 2: Master Weights in Model -->
+  <text x="525" y="75" class="column-title">Master Weights in Model</text>
+  
+  <!-- Model box -->
+  <rect x="410" y="145" width="230" height="90" rx="6" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="525" y="168" class="label">Model</text>
+  <rect x="430" y="183" width="190" height="40" class="fp32" rx="4"/>
+  <text x="525" y="208" class="text">Weights (FP32)</text>
+  
+  <!-- Arrow down with cast -->
+  <path d="M 525 235 L 525 300" class="arrow"/>
+  <rect x="465" y="255" width="120" height="26" class="quantize" rx="4"/>
+  <text x="525" y="273" class="small-text">cast to BF16/FP16</text>
+  
+  <!-- Computation -->
+  <rect x="440" y="300" width="170" height="50" class="gemm" rx="6"/>
+  <text x="525" y="330" class="text">Forward/Backward</text>
+  
+  <!-- Arrow down -->
+  <path d="M 525 350 L 525 415" class="arrow"/>
+  
+  <!-- Optimizer box -->
+  <rect x="410" y="415" width="230" height="90" rx="6" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="525" y="438" class="label">Optimizer</text>
+  <rect x="430" y="453" width="190" height="40" class="fp32" rx="4"/>
+  <text x="525" y="478" class="text">State (FP32)</text>
+  
+  <!-- Column 3: Master Weights in Optimizer -->
+  <text x="875" y="75" class="column-title">Master Weights in Optimizer</text>
+  
+  <!-- Cast box above Model -->
+  <rect x="815" y="105" width="120" height="26" class="quantize" rx="4"/>
+  <text x="875" y="123" class="small-text">cast to BF16/FP16</text>
+  
+  <!-- Arrow from cast to Model -->
+  <path d="M 875 131 L 875 145" class="arrow"/>
+  
+  <!-- Model box -->
+  <rect x="760" y="145" width="230" height="90" rx="6" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="875" y="168" class="label">Model</text>
+  <rect x="780" y="183" width="190" height="40" class="hp" rx="4"/>
+  <text x="875" y="208" class="text">Weights (BF16/FP16)</text>
+  
+  <!-- Arrow down -->
+  <path d="M 875 235 L 875 300" class="arrow"/>
+  
+  <!-- Computation -->
+  <rect x="790" y="300" width="170" height="50" class="gemm" rx="6"/>
+  <text x="875" y="330" class="text">Forward/Backward</text>
+  
+  <!-- Arrow down -->
+  <path d="M 875 350 L 875 415" class="arrow"/>
+  
+  <!-- Optimizer box with State and Master -->
+  <rect x="760" y="415" width="230" height="140" rx="6" fill="#f5f5f5" stroke="#9e9e9e" stroke-width="1.5"/>
+  <text x="875" y="438" class="label">Optimizer</text>
+  <rect x="780" y="453" width="190" height="40" class="fp32" rx="4"/>
+  <text x="875" y="478" class="text">State (FP32)</text>
+  <rect x="780" y="503" width="190" height="40" class="fp32" rx="4"/>
+  <text x="875" y="528" class="text">Master (FP32)</text>
+  
+  <!-- Arrow from Master to cast -->
+  <path d="M 970 523 L 1010 523 L 1010 118 L 935 118" class="arrow"/>
+  
+</svg>

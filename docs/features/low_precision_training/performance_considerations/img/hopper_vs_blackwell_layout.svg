@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 220" width="100%" style="max-width: 700px;">
+  <defs>
+    <style>
+      .title { font: bold 14px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 11px sans-serif; fill: #333; text-anchor: middle; }
+      .small-text { font: 10px sans-serif; fill: #555; text-anchor: middle; }
+      .cell-num { font: 9px sans-serif; fill: #1565c0; text-anchor: middle; dominant-baseline: middle; }
+      
+      /* Matrix colors */
+      .matrix-cell { fill: #bbdefb; stroke: #1565c0; stroke-width: 1; }
+    </style>
+  </defs>
+  
+  <!-- HOPPER SECTION (left) -->
+  <text x="175" y="25" class="title">FP8 tensor on Hopper</text>
+  
+  <!-- Rowwise tensor -->
+  <g id="hopper-rowwise" transform="translate(50, 50)">
+    <text x="40" y="-8" class="label">rowwise</text>
+    
+    <rect x="0" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="10" y="10" class="cell-num">0</text>
+    <rect x="20" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="30" y="10" class="cell-num">1</text>
+    <rect x="40" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="50" y="10" class="cell-num">2</text>
+    <rect x="60" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="70" y="10" class="cell-num">3</text>
+    
+    <rect x="0" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="10" y="30" class="cell-num">4</text>
+    <rect x="20" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="30" y="30" class="cell-num">5</text>
+    <rect x="40" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="50" y="30" class="cell-num">6</text>
+    <rect x="60" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="70" y="30" class="cell-num">7</text>
+    
+    <rect x="0" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="10" y="50" class="cell-num">8</text>
+    <rect x="20" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="30" y="50" class="cell-num">9</text>
+    <rect x="40" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="50" y="50" class="cell-num">10</text>
+    <rect x="60" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="70" y="50" class="cell-num">11</text>
+  </g>
+  
+  <!-- Columnwise tensor (transposed) -->
+  <g id="hopper-colwise" transform="translate(200, 50)">
+    <text x="32" y="-8" class="label">columnwise</text>
+    
+    <rect x="0" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="10" y="10" class="cell-num">0</text>
+    <rect x="20" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="30" y="10" class="cell-num">4</text>
+    <rect x="40" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="50" y="10" class="cell-num">8</text>
+    
+    <rect x="0" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="10" y="30" class="cell-num">1</text>
+    <rect x="20" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="30" y="30" class="cell-num">5</text>
+    <rect x="40" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="50" y="30" class="cell-num">9</text>
+    
+    <rect x="0" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="10" y="50" class="cell-num">2</text>
+    <rect x="20" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="30" y="50" class="cell-num">6</text>
+    <rect x="40" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="50" y="50" class="cell-num">10</text>
+    
+    <rect x="0" y="60" width="20" height="20" class="matrix-cell"/>
+    <text x="10" y="70" class="cell-num">3</text>
+    <rect x="20" y="60" width="20" height="20" class="matrix-cell"/>
+    <text x="30" y="70" class="cell-num">7</text>
+    <rect x="40" y="60" width="20" height="20" class="matrix-cell"/>
+    <text x="50" y="70" class="cell-num">11</text>
+  </g>
+  
+  
+  <!-- Separator -->
+  <line x1="350" y1="20" x2="350" y2="200" stroke="#bdbdbd" stroke-width="1" stroke-dasharray="4,4"/>
+  
+  <!-- BLACKWELL SECTION (right) -->
+  <text x="525" y="25" class="title">FP8 tensor on Blackwell</text>
+  
+  <!-- Single tensor for both usages -->
+  <g id="blackwell-both" transform="translate(455, 50)">
+    <text x="70" y="-8" class="label">rowwise and columnwise</text>
+    
+    <rect x="30" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="40" y="10" class="cell-num">0</text>
+    <rect x="50" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="60" y="10" class="cell-num">1</text>
+    <rect x="70" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="80" y="10" class="cell-num">2</text>
+    <rect x="90" y="0" width="20" height="20" class="matrix-cell"/>
+    <text x="100" y="10" class="cell-num">3</text>
+    
+    <rect x="30" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="40" y="30" class="cell-num">4</text>
+    <rect x="50" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="60" y="30" class="cell-num">5</text>
+    <rect x="70" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="80" y="30" class="cell-num">6</text>
+    <rect x="90" y="20" width="20" height="20" class="matrix-cell"/>
+    <text x="100" y="30" class="cell-num">7</text>
+    
+    <rect x="30" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="40" y="50" class="cell-num">8</text>
+    <rect x="50" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="60" y="50" class="cell-num">9</text>
+    <rect x="70" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="80" y="50" class="cell-num">10</text>
+    <rect x="90" y="40" width="20" height="20" class="matrix-cell"/>
+    <text x="100" y="50" class="cell-num">11</text>
+  </g>
+  
+</svg>

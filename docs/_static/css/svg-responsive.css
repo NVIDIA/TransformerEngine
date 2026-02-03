@@ -1,0 +1,72 @@
+/* Responsive styling for SVG images */
+
+/* Make all SVG images responsive */
+.document svg,
+.document object[type="image/svg+xml"],
+.rst-content svg {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1em auto;
+}
+
+/* For raw HTML embedded SVGs */
+.document .raw-html svg {
+    max-width: 100%;
+    height: auto;
+    width: 100%;
+}
+
+/* Ensure container doesn't overflow */
+.document .raw-html {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+/* Figure containers with captions */
+.svg-figure {
+    text-align: center;
+    margin: 20px auto;
+}
+
+.svg-figure img {
+    display: block;
+    margin: 0 auto;
+    height: auto;
+}
+
+/* Different width classes for figures */
+.svg-figure.width-70 img {
+    width: 70%;
+    max-width: 100%;
+}
+
+.svg-figure.width-80 img {
+    width: 80%;
+    max-width: 100%;
+}
+
+.svg-figure.width-90 img {
+    width: 90%;
+    max-width: 100%;
+}
+
+.svg-figure.width-100 img {
+    width: 100%;
+}
+
+/* Figure captions */
+.svg-caption {
+    font-style: italic;
+    margin-top: 10px;
+    color: #555;
+    font-size: 0.95em;
+    line-height: 1.4;
+}
+
+
+
+
+
+
+

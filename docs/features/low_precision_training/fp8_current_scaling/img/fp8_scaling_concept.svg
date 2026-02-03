@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380">
+  <style>
+    @import url("../_static/css/diagram-colors.css");
+    
+    .axis-line { stroke: #333; stroke-width: 2.5; }
+    .value-dot { fill: #2196f3; stroke: #1976d2; stroke-width: 1; }
+    .arrow { fill: #4caf50; }
+    .arrow-line { stroke: #4caf50; stroke-width: 3; }
+    .range-label { font-size: 14px; fill: #555; font-weight: 500; }
+  </style>
+
+  <!-- Top: Original values (before scaling) -->
+  <text x="450" y="55" class="section-title" text-anchor="middle">Original Tensor Values</text>
+  
+  <!-- Top axis -->
+  <line x1="80" y1="85" x2="820" y2="85" class="axis-line"/>
+  
+  <!-- Zero marker (center) -->
+  <line x1="450" y1="80" x2="450" y2="90" stroke="#333" stroke-width="2"/>
+  <text x="450" y="108" class="text" text-anchor="middle" font-size="12px">0</text>
+  
+  <!-- Value dots (before scaling - irregular, not symmetric around zero) -->
+  <circle cx="118" cy="85" r="6" fill="#e53935" stroke="#c62828" stroke-width="2"/>
+  <circle cx="159" cy="85" r="5" class="value-dot"/>
+  <circle cx="167" cy="85" r="5" class="value-dot"/>
+  <circle cx="187" cy="85" r="5" class="value-dot"/>
+  <circle cx="199" cy="85" r="5" class="value-dot"/>
+  <circle cx="228" cy="85" r="5" class="value-dot"/>
+  <circle cx="326" cy="85" r="5" class="value-dot"/>
+  <circle cx="368" cy="85" r="5" class="value-dot"/>
+  <circle cx="442" cy="85" r="5" class="value-dot"/>
+  <circle cx="621" cy="85" r="5" class="value-dot"/>
+  <circle cx="649" cy="85" r="5" class="value-dot"/>
+  <circle cx="725" cy="85" r="5" class="value-dot"/>
+  
+  <!-- amax label -->
+  <text x="118" y="70" class="text" fill="#e53935" font-weight="700" font-size="14px" text-anchor="middle">amax</text>
+  
+  <!-- Original range bracket spanning all values -->
+  <line x1="118" y1="100" x2="118" y2="110" stroke="#666" stroke-width="1.5"/>
+  <line x1="118" y1="110" x2="725" y2="110" stroke="#666" stroke-width="1.5"/>
+  <line x1="725" y1="100" x2="725" y2="110" stroke="#666" stroke-width="1.5"/>
+  <text x="750" y="114" class="range-label" text-anchor="start">Original range</text>
+  
+  <!-- Trapezoid showing compression from original range to FP8 range -->
+  <polygon points="118,115 725,115 650,165 250,165" fill="#e53935" opacity="0.2" stroke="#e53935" stroke-width="1.5"/>
+  
+  <!-- Bottom: After scaling -->
+  <text x="450" y="190" class="section-title" text-anchor="middle">Scaled Values (fit FP8 range)</text>
+  
+  <!-- Bottom axis -->
+  <line x1="80" y1="220" x2="820" y2="220" class="axis-line"/>
+  
+  <!-- Zero marker (center) -->
+  <line x1="450" y1="215" x2="450" y2="225" stroke="#333" stroke-width="2"/>
+  <text x="450" y="238" class="text" text-anchor="middle" font-size="12px">0</text>
+  
+  <!-- FP8 range bracket -->
+  <line x1="250" y1="245" x2="250" y2="255" stroke="#4caf50" stroke-width="1.5"/>
+  <line x1="250" y1="255" x2="650" y2="255" stroke="#4caf50" stroke-width="1.5"/>
+  <line x1="650" y1="245" x2="650" y2="255" stroke="#4caf50" stroke-width="1.5"/>
+  <text x="750" y="259" class="range-label" text-anchor="start" fill="#4caf50">FP8 range</text>
+  
+  <!-- Value dots (after scaling - homogeneous scaling from zero, all fit into FP8 range) -->
+  <circle cx="250" cy="220" r="6" fill="#e53935" stroke="#c62828" stroke-width="2"/>
+  <text x="250" y="205" class="text" fill="#e53935" font-weight="700" font-size="12px" text-anchor="middle">- FP8 range max</text>
+  <circle cx="275" cy="220" r="5" class="value-dot"/>
+  <circle cx="280" cy="220" r="5" class="value-dot"/>
+  <circle cx="292" cy="220" r="5" class="value-dot"/>
+  <circle cx="299" cy="220" r="5" class="value-dot"/>
+  <circle cx="316" cy="220" r="5" class="value-dot"/>
+  <circle cx="375" cy="220" r="5" class="value-dot"/>
+  <circle cx="401" cy="220" r="5" class="value-dot"/>
+  <circle cx="445" cy="220" r="5" class="value-dot"/>
+  <circle cx="553" cy="220" r="5" class="value-dot"/>
+  <circle cx="569" cy="220" r="5" class="value-dot"/>
+  <circle cx="615" cy="220" r="5" class="value-dot"/>
+
+  <!-- Third line: After cast to FP8 (quantized values) -->
+  <text x="450" y="290" class="section-title" text-anchor="middle">Cast to FP8 (quantized values)</text>
+  
+  <!-- Third axis -->
+  <line x1="80" y1="320" x2="820" y2="320" class="axis-line"/>
+  
+  <!-- Zero marker (center) -->
+  <line x1="450" y1="315" x2="450" y2="325" stroke="#333" stroke-width="2"/>
+  <text x="450" y="338" class="text" text-anchor="middle" font-size="12px">0</text>
+  
+  <!-- FP8 range bracket -->
+  <line x1="250" y1="345" x2="250" y2="355" stroke="#4caf50" stroke-width="1.5"/>
+  <line x1="250" y1="355" x2="650" y2="355" stroke="#4caf50" stroke-width="1.5"/>
+  <line x1="650" y1="345" x2="650" y2="355" stroke="#4caf50" stroke-width="1.5"/>
+  <text x="750" y="359" class="range-label" text-anchor="start" fill="#4caf50">FP8 range</text>
+  
+  <!-- Quantized dots - merged close values to show FP8 granularity -->
+  <circle cx="250" cy="320" r="6" fill="#e53935" stroke="#c62828" stroke-width="2"/>
+  <!-- merged: 275+280 -->
+  <circle cx="278" cy="317" r="4.5" class="value-dot"/>
+  <circle cx="278" cy="323" r="4.5" class="value-dot"/>
+  <!-- merged: 292+299 -->
+  <circle cx="296" cy="317" r="4.5" class="value-dot"/>
+  <circle cx="296" cy="323" r="4.5" class="value-dot"/>
+  <circle cx="318" cy="320" r="5" class="value-dot"/>
+  <circle cx="378" cy="320" r="5" class="value-dot"/>
+  <circle cx="404" cy="320" r="5" class="value-dot"/>
+  <circle cx="450" cy="320" r="5" class="value-dot"/>
+  <!-- merged: 553+569 -->
+  <circle cx="562" cy="317" r="4.5" class="value-dot"/>
+  <circle cx="562" cy="323" r="4.5" class="value-dot"/>
+  <circle cx="615" cy="320" r="5" class="value-dot"/>
+
+</svg>
