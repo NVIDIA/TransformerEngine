@@ -542,7 +542,6 @@ class _Linear(torch.autograd.Function):
 
             keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
             use_fp8_bwd = ctx.fp8 and not keep_backward_unquantized
-            use_quantized_bwd = use_fp8_bwd or ctx.debug
             if keep_backward_unquantized:
                 # Disable Userbuffers communication for backward pass when keep_backward_unquantized is True
                 ctx.ub_overlap_ag = False
@@ -589,7 +588,7 @@ class _Linear(torch.autograd.Function):
             # Configure quantizer for grad output tensor
             # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
             # requires column-wise usage
-            if ctx.grad_output_quantizer is not None and use_quantized_bwd:
+            if ctx.grad_output_quantizer is not None and use_fp8_bwd:
                 quantizer = ctx.grad_output_quantizer
                 quantizer.set_usage(rowwise=True, columnwise=True)
                 if ctx.ub_overlap_ag:
@@ -608,7 +607,7 @@ class _Linear(torch.autograd.Function):
                 not ctx.use_bias
                 and not ctx.requires_wgrad
                 and ctx.grad_output_quantizer is not None
-                and use_quantized_bwd
+                and use_fp8_bwd
             ):
                 ctx.grad_output_quantizer.set_usage(columnwise=False)
 
@@ -638,7 +637,7 @@ class _Linear(torch.autograd.Function):
             inputmat_total = None
             inputmat_total_work = None
             if ctx.requires_wgrad:
-                if use_quantized_bwd:
+                if use_fp8_bwd:
                     if isinstance(inputmat, QuantizedTensorStorage):
                         # Input tensor is already quantized
                         pass
@@ -664,7 +663,7 @@ class _Linear(torch.autograd.Function):
                         inputmat = cast_if_needed(inputmat, ctx.activation_dtype)
             if ctx.backward_input_needs_gather:
                 quantizer = None
-                if use_quantized_bwd:
+                if use_fp8_bwd:
                     quantizer = ctx.input_quantizer
                     if quantizer.supports_only_rowwise_all_gather():
                         # If data is in FP8, we compute FP8 transposes manually
@@ -706,7 +705,7 @@ class _Linear(torch.autograd.Function):
                 if isinstance(grad_output, QuantizedTensorStorage):
                     grad_output.update_usage(rowwise_usage=True)
                 if (
-                    use_quantized_bwd
+                    use_fp8_bwd
                     and ctx.weight_quantizer is not None
                     and isinstance(weight_fp8, QuantizedTensorStorage)
                 ):
@@ -720,7 +719,7 @@ class _Linear(torch.autograd.Function):
                         use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
                 # Update grad input quantizer
-                if ctx.grad_input_quantizer is not None and use_quantized_bwd:
+                if ctx.grad_input_quantizer is not None and use_fp8_bwd:
                     ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
                 # Output buffers for Userbuffers reduce-scatter
@@ -737,13 +736,13 @@ class _Linear(torch.autograd.Function):
                 # Note: dx = dy * w
 
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
-                weight_for_dgrad = weight_fp8 if use_quantized_bwd else weight
+                weight_for_dgrad = weight_fp8 if use_fp8_bwd else weight
                 gemm_out, *_, reduce_scatter_out = general_gemm(
                     weight_for_dgrad,
                     grad_output,
                     layout="NN",
                     grad=True,
-                    quantization_params=ctx.grad_input_quantizer if use_quantized_bwd else None,
+                    quantization_params=ctx.grad_input_quantizer if use_fp8_bwd else None,
                     out=gemm_out,
                     out_dtype=ctx.activation_dtype,
                     use_split_accumulator=use_split_accumulator,
@@ -792,7 +791,7 @@ class _Linear(torch.autograd.Function):
                 if inputmat_total_work is not None:
                     inputmat_total_work.wait()
                     inputmat_total_work = None
-                if use_quantized_bwd:
+                if use_fp8_bwd:
                     if isinstance(inputmat_total, QuantizedTensorStorage):
                         inputmat_total.update_usage(columnwise_usage=True)
                     else:
@@ -834,7 +833,7 @@ class _Linear(torch.autograd.Function):
                         ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
                     )
 
-                if use_quantized_bwd:
+                if use_fp8_bwd:
                     if isinstance(grad_output, QuantizedTensorStorage):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
@@ -870,7 +869,7 @@ class _Linear(torch.autograd.Function):
                         main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
                     "quantization_params": (
-                        ctx.grad_weight_quantizer if use_quantized_bwd else None
+                        ctx.grad_weight_quantizer if use_fp8_bwd else None
                     ),
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
