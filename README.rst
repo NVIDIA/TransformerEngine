@@ -181,7 +181,7 @@ For example to use the NGC JAX container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/jax:25.08-py3
+    docker run --gpus all -it --rm ghcr.io/nvidia/jax:jax
 
 Where 25.08 (corresponding to August 2025 release) is the container version.
 
