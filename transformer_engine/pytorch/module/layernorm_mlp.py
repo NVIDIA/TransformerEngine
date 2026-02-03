@@ -698,8 +698,13 @@ class _LayerNormMLP(torch.autograd.Function):
         # if we are not checkpointing, then we must save this if grad is enabled
         if is_grad_enabled and not save_for_checkpoint:
 
-            ln_out_to_save = ln_out_hp if keep_backward_unquantized else ln_out
-            act_out_to_save = act_out_hp if keep_backward_unquantized else act_out
+            ln_out_to_save = ln_out
+            act_out_to_save = act_out
+            if keep_backward_unquantized:
+                ln_out_to_save = ln_out_hp
+                act_out_to_save = act_out_hp
+            # ln_out_to_save = ln_out_hp if keep_backward_unquantized else ln_out
+            # act_out_to_save = act_out_hp if keep_backward_unquantized else act_out
             ctx.fc1_weight_quantizer = fc1_weight_quantizer
             ctx.fc2_weight_quantizer = fc2_weight_quantizer
 
@@ -1155,7 +1160,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx.fc2_weight.update_usage(columnwise_usage=True)
 
             # Perform GEMM
-            fc2_weight_for_dgrad = fc2_weight if use_fp8_bwd else origin_fc2_weight
+            fc2_weight_for_dgrad = fc2_weight
+            if keep_backward_unquantized:
+                fc2_weight_for_dgrad = origin_fc2_weight
+            # fc2_weight_for_dgrad = fc2_weight if use_fp8_bwd else origin_fc2_weight
             gemm_output, *_ = general_gemm(
                 fc2_weight_for_dgrad,
                 grad_output,
