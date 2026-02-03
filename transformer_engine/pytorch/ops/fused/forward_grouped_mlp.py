@@ -192,6 +192,14 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_xs = tex.split_quantize(fc1_x, split_sizes_cpu, fc1_input_quantizers)
 
         # Pack data tensors
+        # Note: Fused kernel expects tensor with non-contiguous
+        # logical dims.
+        # Data actual shape: (1, sum(m), k)
+        # Scale actual shape: (1, sum(m)/128, k/128, 32 (block row),
+        #  4 (block row), 4 (block col))
+        # Data logical shape: (sum(m), k, 1)
+        # Scale logical shape: (32 (block row), 4 (block row),
+        #   sum(m)/128, 4 (block col), k/128, 1)
         fc1_x_data = noop_cat([x._rowwise_data for x in fc1_xs])
         fc1_x_data = fc1_x_data.view(dtype=torch.float8_e4m3fn)
         fc1_x_data = fc1_x_data.unsqueeze(0).permute(1, 2, 0)
@@ -208,6 +216,14 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
 
         # Pack weight tensors
+        # Note: Fused kernel expects tensor with non-contiguous
+        # logical dims.
+        # Data actual shape: (num_groups, n, k)
+        # Scale actual shape: (num_groups, n/128, k/128, 32 (block row),
+        #  4 (block row), 4 (block col))
+        # Data logical shape: (n, k, num_groups)
+        # Scale logical shape: (32 (block row), 4 (block row), n/128,
+        #   4 (block col), k/128, num_groups)
         fc1_w_data = noop_cat([w._rowwise_data for w in fc1_weights])
         fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
         fc1_w_data = fc1_w_data.view(
@@ -224,7 +240,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_w_scales = fc1_w_scales.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_scales = fc1_w_scales.view(
             num_groups, fc1_weight_shape[0] // 128, 4, 32, fc1_weight_shape[1] // 128, 4
-        )
+        )  # Unswizzled layout
         fc1_w_scales = fc1_w_scales.permute(
             0, 1, 4, 3, 2, 5
         ).contiguous()  # Convert to swizzled layout
@@ -274,6 +290,14 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         )
 
         # Unpack kernel outputs
+        # Note: Fused kernel outputs tensors with non-contiguous
+        # logical dims.
+        # Row-wise data logical shape: (sum(m), k, 1)
+        # Row-wise scale logical shape: (32 (block row), 4 (block row),
+        #   sum(m)/128, 4 (block col), k/128, 1)
+        # Column-wise data logical shape: (sum(m), k, 1)
+        # Column-wise scale logical shape: (32 (block col), 4 (block col),
+        #   k/128, 4 (block row), sum(m)/128, 1)
         swiglu_in = fc1_kernel_out["c_tensor"]
         swiglu_in = swiglu_in.permute(2, 0, 1)
         swiglu_in = swiglu_in.view(in_shape[0], fc1_weight_shape[0] // 64, 2, 32)
