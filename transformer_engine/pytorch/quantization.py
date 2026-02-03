@@ -434,7 +434,8 @@ class FP8GlobalStateManager:
     def keep_backward_unquantized(cls) -> bool:
         """Should backward skip FP8 quantization and use high precision"""
         recipe = cls.get_fp8_recipe()
-        if recipe.delayed():
+        if recipe is not None and recipe.delayed():
+            # Ignore NVTE_KEEP_BACKWARD_UNQUANTIZED when delayed scaling is used
             return False
         return bool(int(os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0")))
 

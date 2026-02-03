@@ -100,7 +100,7 @@ class _GroupedLinear(torch.autograd.Function):
         ) = non_tensor_args
         keep_backward_unquantized = fp8 and FP8GlobalStateManager.keep_backward_unquantized()
         if keep_backward_unquantized:
-            # Note, keep_backward_unquantized is ignored when delayed scaling is used
+            # Note, NVTE_KEEP_BACKWARD_UNQUANTIZED is ignored when delayed scaling is used
             save_original_input = True
 
         num_gemms = len(m_splits)
