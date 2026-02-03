@@ -108,6 +108,7 @@ jobs:
         run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v --no-deps
         env:
           NVTE_FRAMEWORK: all
+          MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
           SCCACHE_CACHE_SIZE: "5G"
       - name: 'Sanity check'
