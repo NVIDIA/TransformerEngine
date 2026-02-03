@@ -729,7 +729,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   for (auto dim : output->dimensions()) {
     printf("%zu, ", dim);
   }
-  printf("]\n");  
+  printf("]\n");
 
 
   if (rhs_is_trans) {
@@ -770,8 +770,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
   nvte_grouped_gemm(
-    rhs_tensor, rhs_is_trans,
     lhs_tensor, lhs_is_trans,
+    rhs_tensor, rhs_is_trans,
     nullptr,
     out_tensor,
     alpha_tensor.data(),
