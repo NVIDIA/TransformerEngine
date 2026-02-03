@@ -32,7 +32,6 @@ jobs:
           NVTE_FRAMEWORK: none
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
-          SCCACHE_CACHE_SIZE: "2G"
       - name: 'Sanity check'
         run: python3 -c "import transformer_engine"
         working-directory: /
@@ -40,13 +39,15 @@ jobs:
     name: 'PyTorch'
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/nvidia/jax:jax
+      image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
         run: |
-          pip install --no-cache-dir cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript
-          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu130
+          apt-get update
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          pip install cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript
+          pip install torch --index-url https://download.pytorch.org/whl/cu121
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -59,18 +60,21 @@ jobs:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
-          SCCACHE_CACHE_SIZE: "2G"
       - name: 'Sanity check'
         run: python3 tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/nvidia/jax:jax
+      image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: pip install cmake==3.21.0 pybind11[global]
+        run: |
+          apt-get update
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          pip install cmake==3.21.0 pybind11[global] ninja
+          pip install jax[cuda12]
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -78,26 +82,27 @@ jobs:
       - name: ccache
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: |
-          NVTE_CCACHE_BIN=sccache NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
+        run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
-          SCCACHE_CACHE_SIZE: "2G"
       - name: 'Sanity check'
         run: python3 tests/jax/test_sanity_import.py
   all:
     name: 'All'
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/nvidia/jax:jax
+      image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
         run: |
-          pip install --no-cache-dir cmake==3.21.0 pybind11[global] einops onnxscript
-          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu130
+          apt-get update
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          pip install cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript
+          pip install torch --index-url https://download.pytorch.org/whl/cu121
+          pip install jax[cuda12]
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -110,7 +115,6 @@ jobs:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
-          SCCACHE_CACHE_SIZE: "2G"
       - name: 'Sanity check'
         run: |
           python3 tests/pytorch/test_sanity_import.py
