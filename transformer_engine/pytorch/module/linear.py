@@ -740,7 +740,6 @@ class _Linear(torch.autograd.Function):
                 weight_for_dgrad = weight_fp8
                 if keep_backward_unquantized:
                     weight_for_dgrad = weight
-                # weight_for_dgrad = weight_fp8 if use_fp8_bwd else weight
                 gemm_out, *_, reduce_scatter_out = general_gemm(
                     weight_for_dgrad,
                     grad_output,

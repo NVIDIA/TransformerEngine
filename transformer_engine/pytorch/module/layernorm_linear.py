@@ -418,7 +418,6 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_out_to_save = ln_out
             if keep_backward_unquantized:
                 ln_out_to_save = ln_out_hp
-            # ln_out_to_save = ln_out_hp if keep_backward_unquantized else ln_out
             ctx.weight_quantizer = weight_quantizer
             ctx.ln_out_needs_gather = (
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
@@ -758,7 +757,6 @@ class _LayerNormLinear(torch.autograd.Function):
             # dgrad GEMM
             # Note: dx = dy * w
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
-            # weight_for_dgrad = weight if use_fp8_bwd else origin_weight
             weight_for_dgrad = weight
             if keep_backward_unquantized:
                 weight_for_dgrad = origin_weight

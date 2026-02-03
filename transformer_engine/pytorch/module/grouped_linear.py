@@ -414,8 +414,6 @@ class _GroupedLinear(torch.autograd.Function):
                     dtype=ctx.activation_dtype,
                     device=ctx.device,
                 )
-                # weights_for_dgrad = weights if use_fp8_bwd else origin_weights
-                # if use_fp8_bwd:
                 weights_for_dgrad = weights
                 if keep_backward_unquantized:
                     weights_for_dgrad = origin_weights
