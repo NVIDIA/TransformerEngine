@@ -76,7 +76,7 @@ jobs:
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
           pip install cmake==3.21.0 pybind11[global] ninja packaging
-          pip install jax
+          pip install jax[cuda13] flax[cuda13]
           git config --global --add safe.directory '*'
       - name: 'Checkout'
         uses: actions/checkout@v3
@@ -105,7 +105,7 @@ jobs:
           apt-get install -y git python3.9 pip cudnn9-cuda-12
           pip install cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript
           pip install torch --index-url https://download.pytorch.org/whl/cu130
-          pip install jax[cuda12]
+          pip install jax[cuda13] flax[cuda13]
           git config --global --add safe.directory '*'
       - name: 'Checkout'
         uses: actions/checkout@v3
