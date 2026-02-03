@@ -186,10 +186,11 @@ For example to use the NGC JAX container interactively,
 Where 26.01 (corresponding to January 2026 release) is the container version.
 
 We recommend updating to the latest NGC container available here:
-* [Latest PyTorch NGC containers](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch)
-* [Latest JAX NGC containers](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/jax)
 
-If you run any examples, please ensure you are using a matching version of TransformerEngine. TransformerEngine is pre-built and packaged inside the containers with examples available at `/opt/transformerengine` or `/opt/transformer-engine`. If you would like to use examples from TE main branch and are running into import errors, please try the latest pip package or building from source.
+* https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch
+* https://catalog.ngc.nvidia.com/orgs/nvidia/containers/jax
+
+If you run any examples, please ensure you are using a matching version of TransformerEngine. TransformerEngine is pre-built and packaged inside the containers with examples available at ``/opt/transformerengine`` or ``/opt/transformer-engine``. If you would like to use examples from TE main branch and are running into import errors, please try the latest pip package or building from source, although NGC containers are recommended for ease-of-use for most users.
 
 **Benefits of using NGC containers:**
 
