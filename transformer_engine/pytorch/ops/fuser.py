@@ -294,11 +294,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             FP8GlobalStateManager.is_fp8_enabled()
             and FP8GlobalStateManager.keep_backward_unquantized()
         )
-        if (
-            func_ctx.is_first_module
-            and not keep_backward_unquantized
-            and not _is_graph_capturing()
-        ):
+        if func_ctx.is_first_module and not keep_backward_unquantized and not _is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
