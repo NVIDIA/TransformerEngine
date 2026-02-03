@@ -30,6 +30,7 @@ jobs:
         run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: none
+          MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
           SCCACHE_CACHE_SIZE: "5G"
       - name: 'Sanity check'
@@ -56,6 +57,7 @@ jobs:
         run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v --no-deps
         env:
           NVTE_FRAMEWORK: pytorch
+          MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
           SCCACHE_CACHE_SIZE: "5G"
       - name: 'Sanity check'
@@ -80,6 +82,7 @@ jobs:
           NVTE_CCACHE_BIN=sccache NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: jax
+          MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
           SCCACHE_CACHE_SIZE: "5G"
       - name: 'Sanity check'
