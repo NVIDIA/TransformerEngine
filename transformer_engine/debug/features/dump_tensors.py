@@ -48,9 +48,7 @@ class TensorLogger:
         if dist.is_initialized():
             self.rank = dist.get_rank()
 
-        self.root_dir = os.path.join(
-            root_log_dir, "tensor_dumps", f"rank_{self.rank}"
-        )
+        self.root_dir = os.path.join(root_log_dir, "tensor_dumps", f"rank_{self.rank}")
         os.makedirs(self.root_dir, exist_ok=True)
 
         debug_api.log_message(
@@ -75,8 +73,7 @@ class TensorLogger:
         """Save a tensor (or dict of tensors) to a file."""
         if self.root_dir is None:
             raise RuntimeError(
-                "[TE DumpTensors] TensorLogger not initialized. "
-                "Call initialize() first."
+                "[TE DumpTensors] TensorLogger not initialized. Call initialize() first."
             )
 
         safe_layer_name = self._sanitize_name(layer_name)
@@ -324,7 +321,9 @@ def _get_extended_tensors_mxfp8(tensor: MXFP8Tensor) -> Dict[str, Optional[torch
     if tensor._rowwise_scale_inv is not None:
         result["rowwise_block_scale_inv"] = tensor._rowwise_scale_inv.view(torch.float8_e8m0fnu)
     if tensor._columnwise_scale_inv is not None:
-        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv.view(torch.float8_e8m0fnu)
+        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv.view(
+            torch.float8_e8m0fnu
+        )
 
     return result
 
@@ -343,7 +342,9 @@ def _get_extended_tensors_nvfp4(tensor: NVFP4Tensor) -> Dict[str, Optional[torch
     if tensor._rowwise_scale_inv is not None:
         result["rowwise_block_scale_inv"] = tensor._rowwise_scale_inv.view(torch.float8_e4m3fn)
     if tensor._columnwise_scale_inv is not None:
-        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv.view(torch.float8_e4m3fn)
+        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv.view(
+            torch.float8_e4m3fn
+        )
 
     # Input absolute maximum value (used to compute tensor scale)
     if tensor._amax_rowwise is not None:
