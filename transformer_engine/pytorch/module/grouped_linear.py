@@ -414,13 +414,16 @@ class _GroupedLinear(torch.autograd.Function):
                     dtype=ctx.activation_dtype,
                     device=ctx.device,
                 )
-                weights_for_dgrad = weights if use_fp8_bwd else origin_weights
-                if use_fp8_bwd:
-                    # Make sure weights are available in column-wise format
-                    # for dgrad computation.
-                    for weight in weights_for_dgrad:
-                        if isinstance(weight, QuantizedTensorStorage):
-                            weight.update_usage(columnwise_usage=True)
+                # weights_for_dgrad = weights if use_fp8_bwd else origin_weights
+                # if use_fp8_bwd:
+                weights_for_dgrad = weights
+                if keep_backward_unquantized:
+                    weights_for_dgrad = origin_weights
+                # Make sure weights are available in column-wise format
+                # for dgrad computation.
+                for weight in weights_for_dgrad:
+                    if isinstance(weight, QuantizedTensorStorage):
+                        weight.update_usage(columnwise_usage=True)
                 general_grouped_gemm(
                     weights_for_dgrad,
                     grad_output,
