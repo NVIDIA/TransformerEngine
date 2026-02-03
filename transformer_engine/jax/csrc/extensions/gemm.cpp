@@ -741,6 +741,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       workspace_cublas.data(),
       nullptr,  // config (use defaults)
       stream);
+
+    cudaStreamSynchronize(stream);
+
     return ffi_with_cuda_error_check();
   }
 
@@ -786,7 +789,21 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   // printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
 
+  // This memset is required because the group sizes may not fill the full buffer since we overallocate for the worst case. However, in theory unused space on the grouped axis should not be utilizied downstream, but it seems like somehow it is utilized.
   cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
+
+  std::vector<int64_t> host_group_sizes(num_gemms);
+  cudaMemcpyAsync(host_group_sizes.data(), group_sizes.untyped_data(),
+                      num_gemms * sizeof(int32_t), cudaMemcpyDeviceToHost, stream);
+  cudaStreamSynchronize(stream);
+
+  int currentDevice;
+  cudaGetDevice(&currentDevice);
+  printf("[gpu=%d] Group sizes[total_group_size=%zu, m=%zu]: ", currentDevice, std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL), m);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    printf("%d, ", host_group_sizes[i]);
+  }
+  printf("\n");
 
   nvte_grouped_gemm(
     lhs_tensor, lhs_is_trans,
@@ -799,6 +816,31 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     workspace_cublas.data(),
     nullptr,  // config (use defaults)
     stream);
+  size_t _offset = std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL) * n * out_dtype_bytes;
+  cudaMemsetAsync(output->untyped_data() + _offset, 0, output->size_bytes() - _offset, stream);
+
+  std::vector<__bf16> debug_output(m*n);
+  cudaMemcpyAsync(debug_output.data(), output->untyped_data(),
+                      m * n * out_dtype_bytes, cudaMemcpyDeviceToHost, stream);
+  cudaStreamSynchronize(stream);
+
+  size_t totalPrints = 0;
+  constexpr size_t MAX_PRINTS = 1;
+  for (size_t i_m = 0; i_m < m; i_m++) {
+    for (size_t i_n = 0; i_n < n; i_n++) {
+      size_t index = i_m * n + i_n;
+      if (isnan(static_cast<float>(debug_output[index])) || isinf(static_cast<float>(debug_output[index]))) {
+        printf("[gpu=%d] Output contains NaN or Inf at index [%zu, %zu] (flat index %zu)\n", i_m, i_n, index);
+        totalPrints++;
+        if (totalPrints >= MAX_PRINTS) {
+          break;
+        }
+      }
+    }
+    if (totalPrints >= MAX_PRINTS) {
+      break;
+    }
+  }
 
   return ffi_with_cuda_error_check();
 }
@@ -826,8 +868,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("has_bias")
                                   .Attr<bool>("is_grouped_dense_wgrad")
-                                  .Attr<bool>("use_async_d2h_group_sizes"),
-                                FFI_CudaGraph_Traits);
+                                  .Attr<bool>("use_async_d2h_group_sizes")/*,
+                                FFI_CudaGraph_Traits*/);
 
 }  // namespace jax
 }  // namespace transformer_engine
