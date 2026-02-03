@@ -1,0 +1,31 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/docker-existing-dockerfile
+{
+    "name": "Transformer Engine Dev Container",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "mounts": [
+        "source=${localEnv:HOME}/.bash_history_devcontainer,target=/home/ubuntu/.bash_history,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.cache,target=/home/ubuntu/.cache,type=bind,consistency=cached"
+    ],
+    "initializeCommand": ".devcontainer/initializeCommand.sh",
+    "postCreateCommand": ".devcontainer/postCreateCommand.sh",
+    "remoteUser": "ubuntu",
+    "runArgs": [
+        "--gpus=all",
+        "--shm-size=4g"
+    ],
+    "containerEnv": {},
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "charliermarsh.ruff",
+                "eamodio.gitlens",
+                "ms-python.python",
+                "streetsidesoftware.code-spell-checker",
+                "tamasfe.even-better-toml"
+            ]
+        }
+    }
+}
