@@ -4,20 +4,93 @@
 
 """DumpTensors Feature support for nvidia-dlframework-inspect."""
 
+import os
 from typing import Dict, Optional
 
 import torch
+import torch.distributed as dist
 
 import nvdlfw_inspect.api as debug_api
-from nvdlfw_inspect.logging import get_tensor_logger
+from nvdlfw_inspect.logging import get_logger
 from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 from transformer_engine.debug.features.utils import next_enabled_iter
+from transformer_engine.pytorch.constants import TE_DType_To_Torch
 from transformer_engine.pytorch.tensor import QuantizedTensor, Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Tensor
+
+
+class TensorLogger:
+    """Logger for saving tensors to files. Each rank saves to its own directory."""
+
+    _instance = None
+    _initialized = False
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        if TensorLogger._initialized:
+            return
+        self.root_dir = None
+        self.rank = 0
+        TensorLogger._initialized = True
+
+    def initialize(self, root_log_dir: str):
+        """Initialize the TensorLogger with the root directory for tensor dumps."""
+        self.rank = 0
+        if dist.is_initialized():
+            self.rank = dist.get_rank()
+
+        self.root_dir = os.path.join(
+            root_log_dir, "tensor_dumps", f"rank_{self.rank}"
+        )
+        os.makedirs(self.root_dir, exist_ok=True)
+
+        debug_api.log_message(
+            f"TensorLogger initialized. Saving tensors to: {self.root_dir}",
+            log_level="info",
+        )
+
+    @staticmethod
+    def _sanitize_name(name: str) -> str:
+        """Sanitize layer/tensor names for use in file paths."""
+        for char in ["/", "\\", ":", "*", "?", '"', "<", ">", "|", " "]:
+            name = name.replace(char, "_")
+        return name
+
+    def save_tensor(
+        self,
+        tensor,
+        layer_name: str,
+        tensor_name: str,
+        iteration: int,
+    ):
+        """Save a tensor (or dict of tensors) to a file."""
+        if self.root_dir is None:
+            raise RuntimeError(
+                "[TE DumpTensors] TensorLogger not initialized. "
+                "Call initialize() first."
+            )
+
+        safe_layer_name = self._sanitize_name(layer_name)
+        safe_tensor_name = self._sanitize_name(tensor_name)
+
+        filename = f"{safe_layer_name}_{safe_tensor_name}_iter_{iteration:06d}.pt"
+        filepath = os.path.join(self.root_dir, filename)
+
+        torch.save(tensor, filepath)
+
+
+def _get_tensor_logger() -> TensorLogger:
+    """Get the singleton TensorLogger instance."""
+    return TensorLogger()
 
 
 @Registry.register_feature(namespace="transformer_engine")
@@ -37,14 +110,10 @@ class DumpTensors(TEConfigAPIMapper):
         If True, dump the high-precision tensor (before quantization).
     quantized_tensor : bool
         If True, dump the quantized tensor (after quantization).
-    extended_quantized_tensor_log : bool, default = False
-        If True, dump additional files with raw data and scales for quantized tensors:
-        - For Float8Tensor: raw_data (uint8), scale_inv (FP32)
-        - For MXFP8Tensor: rowwise_raw_data, columnwise_raw_data (uint8),
-          rowwise_scale_inv, columnwise_scale_inv (decoded to FP32)
-        - For NVFP4Tensor: rowwise_raw_data, columnwise_raw_data (uint8),
-          rowwise_scale_inv, columnwise_scale_inv (decoded to FP32),
-          rowwise_amax, columnwise_amax (FP32)
+    dump_quantized_internals : bool, default = False
+        If True, include extracted internal data from quantized tensors
+        (raw data, scales, etc.) in the output dictionary.
+        Useful for offline analysis. Output format may change between versions.
     tensors/tensors_struct : List[str]
         list of tensors to dump:
             - activation
@@ -78,7 +147,7 @@ class DumpTensors(TEConfigAPIMapper):
                         - tensor: activation
                           high_precision_tensor: True
                           quantized_tensor: True
-                          extended_quantized_tensor_log: True
+                          dump_quantized_internals: True
                           freq: 100
                         - tensor: weight
                           high_precision_tensor: True
@@ -87,17 +156,16 @@ class DumpTensors(TEConfigAPIMapper):
 
     Output Structure
     ----------------
-    Files are saved to: ``nvdlfw_inspect_tensor_dumps/rank_{rank}/``
+    Files are saved to: ``{nvdlfw_inspect_log_dir}/tensor_dumps/rank_{rank}/``
 
-    Basic files:
-        - ``{layer}_{tensor}_iter_{iter}_high_precision.pt``
-        - ``{layer}_{tensor}_iter_{iter}_quantized.pt``
+    Each tensor is saved as a dictionary in a single file:
+        ``{layer}_{tensor}_iter_{iter:06d}.pt``
 
-    Extended files (when extended_quantized_tensor_log=True):
-        - ``{layer}_{tensor}_iter_{iter}_raw_data.pt``
-        - ``{layer}_{tensor}_iter_{iter}_scale_inv.pt``
-        - (MXFP8/NVFP4) ``{layer}_{tensor}_iter_{iter}_rowwise_scale_inv.pt``
-        - (NVFP4) ``{layer}_{tensor}_iter_{iter}_rowwise_amax.pt``
+    Dictionary keys:
+        - ``high_precision``: pre-quantization tensor (if high_precision_tensor=True)
+        - ``quantized``: quantized tensor object (if quantized_tensor=True)
+        - Additional internal components when dump_quantized_internals=True
+          (raw data, scales, etc. - format may change between versions)
     """
 
     @api_method
@@ -151,43 +219,23 @@ class DumpTensors(TEConfigAPIMapper):
             )
             return
 
-        tensor_logger = get_tensor_logger()
+        tensor_logger = _get_tensor_logger()
+        if tensor_logger.root_dir is None:
+            tensor_logger.initialize(get_logger().root_log_dir)
 
-        # Dump high-precision tensor
+        # Build dictionary with all tensors to dump
+        dump_dict: Dict[str, torch.Tensor] = {}
+
         if dump_hp and tensor is not None:
-            tensor_logger.save_tensor(
-                tensor=tensor,
-                layer_name=layer_name,
-                tensor_name=tensor_name,
-                iteration=iteration,
-                suffix="_high_precision",
-            )
-            debug_api.log_message(
-                f"Feature={self.__class__.__name__}, API=inspect_tensor: "
-                f"Dumped high-precision {tensor_name} at iteration {iteration}",
-                layer_name,
-            )
+            dump_dict["high_precision"] = tensor
 
-        # Dump quantized tensor
         if dump_quant and quantized_tensor is not None:
-            tensor_logger.save_tensor(
-                tensor=quantized_tensor,
-                layer_name=layer_name,
-                tensor_name=tensor_name,
-                iteration=iteration,
-                suffix="_quantized",
-            )
-            debug_api.log_message(
-                f"Feature={self.__class__.__name__}, API=inspect_tensor: "
-                f"Dumped quantized {tensor_name} at iteration {iteration}",
-                layer_name,
-            )
+            dump_dict["quantized"] = quantized_tensor
 
-            # Extended logging for quantized tensors
-            if config.get("extended_quantized_tensor_log", False):
-                self._dump_extended_quantized_info(
-                    tensor_logger, quantized_tensor, layer_name, tensor_name, iteration
-                )
+            # Add internals for quantized tensors
+            if config.get("dump_quantized_internals", False):
+                internals = self._get_quantized_internals(quantized_tensor)
+                dump_dict.update(internals)
 
         elif dump_quant and quantized_tensor is None:
             debug_api.log_message(
@@ -196,132 +244,111 @@ class DumpTensors(TEConfigAPIMapper):
                 layer_name,
             )
 
-    def _dump_extended_quantized_info(
+        if dump_dict:
+            tensor_logger.save_tensor(
+                tensor=dump_dict,
+                layer_name=layer_name,
+                tensor_name=tensor_name,
+                iteration=iteration,
+            )
+            debug_api.log_message(
+                f"Feature={self.__class__.__name__}, API=inspect_tensor: "
+                f"Dumped {tensor_name} at iteration {iteration} (keys: {list(dump_dict.keys())})",
+                layer_name,
+            )
+
+    def _get_quantized_internals(
         self,
-        tensor_logger,
         quantized_tensor: QuantizedTensor,
-        layer_name: str,
-        tensor_name: str,
-        iteration: int,
-    ):
-        """Dump extended debug info for quantized tensors (raw data and scales)."""
-
+    ) -> Dict[str, torch.Tensor]:
+        """Get internal components of quantized tensors (raw data, scales, etc.)."""
         if isinstance(quantized_tensor, Float8Tensor):
-            # Float8Tensor: raw_data (uint8), scale_inv (FP32)
-            tensor_logger.save_tensor(
-                tensor=quantized_tensor._data,
-                layer_name=layer_name,
-                tensor_name=tensor_name,
-                iteration=iteration,
-                suffix="_raw_data",
-            )
-            tensor_logger.save_tensor(
-                tensor=quantized_tensor._scale_inv,
-                layer_name=layer_name,
-                tensor_name=tensor_name,
-                iteration=iteration,
-                suffix="_scale_inv",
-            )
-
+            tensors = _get_extended_tensors_fp8(quantized_tensor)
+        elif isinstance(quantized_tensor, Float8BlockwiseQTensor):
+            tensors = _get_extended_tensors_fp8_blockwise(quantized_tensor)
         elif isinstance(quantized_tensor, MXFP8Tensor):
-            # MXFP8Tensor: raw data and scales (decoded from E8M0)
-            if quantized_tensor._rowwise_data is not None:
-                tensor_logger.save_tensor(
-                    tensor=quantized_tensor._rowwise_data,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_rowwise_raw_data",
-                )
-            if quantized_tensor._columnwise_data is not None:
-                tensor_logger.save_tensor(
-                    tensor=quantized_tensor._columnwise_data,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_columnwise_raw_data",
-                )
-            # Decode E8M0 scales to FP32
-            if quantized_tensor._rowwise_scale_inv is not None:
-                decoded = torch.pow(
-                    torch.tensor(2.0, device=quantized_tensor._rowwise_scale_inv.device),
-                    quantized_tensor._rowwise_scale_inv.to(torch.float32) - 127.0,
-                )
-                tensor_logger.save_tensor(
-                    tensor=decoded,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_rowwise_scale_inv",
-                )
-            if quantized_tensor._columnwise_scale_inv is not None:
-                decoded = torch.pow(
-                    torch.tensor(2.0, device=quantized_tensor._columnwise_scale_inv.device),
-                    quantized_tensor._columnwise_scale_inv.to(torch.float32) - 127.0,
-                )
-                tensor_logger.save_tensor(
-                    tensor=decoded,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_columnwise_scale_inv",
-                )
-
+            tensors = _get_extended_tensors_mxfp8(quantized_tensor)
         elif isinstance(quantized_tensor, NVFP4Tensor):
-            # NVFP4Tensor: raw data, scales (decoded from E4M3), and amax
-            if quantized_tensor._rowwise_data is not None:
-                tensor_logger.save_tensor(
-                    tensor=quantized_tensor._rowwise_data,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_rowwise_raw_data",
-                )
-            if quantized_tensor._columnwise_data is not None:
-                tensor_logger.save_tensor(
-                    tensor=quantized_tensor._columnwise_data,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_columnwise_raw_data",
-                )
-            # Decode E4M3 scales to FP32
-            if quantized_tensor._rowwise_scale_inv is not None:
-                decoded = quantized_tensor._rowwise_scale_inv.view(torch.float8_e4m3fn).to(
-                    torch.float32
-                )
-                tensor_logger.save_tensor(
-                    tensor=decoded,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_rowwise_scale_inv",
-                )
-            if quantized_tensor._columnwise_scale_inv is not None:
-                decoded = quantized_tensor._columnwise_scale_inv.view(torch.float8_e4m3fn).to(
-                    torch.float32
-                )
-                tensor_logger.save_tensor(
-                    tensor=decoded,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_columnwise_scale_inv",
-                )
-            # Amax values (already FP32)
-            if quantized_tensor._amax_rowwise is not None:
-                tensor_logger.save_tensor(
-                    tensor=quantized_tensor._amax_rowwise,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_rowwise_amax",
-                )
-            if quantized_tensor._amax_columnwise is not None:
-                tensor_logger.save_tensor(
-                    tensor=quantized_tensor._amax_columnwise,
-                    layer_name=layer_name,
-                    tensor_name=tensor_name,
-                    iteration=iteration,
-                    suffix="_columnwise_amax",
-                )
+            tensors = _get_extended_tensors_nvfp4(quantized_tensor)
+        else:
+            return {}
+
+        # Filter out None values
+        return {k: v for k, v in tensors.items() if v is not None}
+
+
+def _get_extended_tensors_fp8(tensor: Float8Tensor) -> Dict[str, torch.Tensor]:
+    """Get extended tensors for Float8Tensor: raw FP8 data, transpose, and scale."""
+    torch_fp8_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
+    result = {
+        "data": tensor._data.view(torch_fp8_dtype),
+        "scale_inv": tensor._scale_inv,
+    }
+    if tensor._transpose is not None and not tensor._transpose_invalid:
+        result["transpose"] = tensor._transpose.view(torch_fp8_dtype)
+    return result
+
+
+def _get_extended_tensors_fp8_blockwise(
+    tensor: Float8BlockwiseQTensor,
+) -> Dict[str, Optional[torch.Tensor]]:
+    """Get extended tensors for Float8BlockwiseQTensor: raw FP8 data and block scales."""
+    torch_fp8_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
+    result: Dict[str, Optional[torch.Tensor]] = {}
+
+    if tensor._rowwise_data is not None:
+        result["rowwise_data"] = tensor._rowwise_data.view(torch_fp8_dtype)
+    if tensor._columnwise_data is not None:
+        result["columnwise_data"] = tensor._columnwise_data.view(torch_fp8_dtype)
+
+    # Block scaling factors (FP32)
+    if tensor._rowwise_scale_inv is not None:
+        result["rowwise_block_scale_inv"] = tensor._rowwise_scale_inv
+    if tensor._columnwise_scale_inv is not None:
+        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv
+
+    return result
+
+
+def _get_extended_tensors_mxfp8(tensor: MXFP8Tensor) -> Dict[str, Optional[torch.Tensor]]:
+    """Get extended tensors for MXFP8Tensor: raw FP8 data and block scales (E8M0)."""
+    torch_fp8_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
+    result: Dict[str, Optional[torch.Tensor]] = {}
+
+    if tensor._rowwise_data is not None:
+        result["rowwise_data"] = tensor._rowwise_data.view(torch_fp8_dtype)
+    if tensor._columnwise_data is not None:
+        result["columnwise_data"] = tensor._columnwise_data.view(torch_fp8_dtype)
+
+    # Block scaling factors (E8M0 format)
+    if tensor._rowwise_scale_inv is not None:
+        result["rowwise_block_scale_inv"] = tensor._rowwise_scale_inv.view(torch.float8_e8m0fnu)
+    if tensor._columnwise_scale_inv is not None:
+        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv.view(torch.float8_e8m0fnu)
+
+    return result
+
+
+def _get_extended_tensors_nvfp4(tensor: NVFP4Tensor) -> Dict[str, Optional[torch.Tensor]]:
+    """Get extended tensors for NVFP4Tensor: raw packed FP4 data, block scales, and amax."""
+    result: Dict[str, Optional[torch.Tensor]] = {}
+
+    # Raw data (packed FP4, 2 values per byte)
+    if tensor._rowwise_data is not None:
+        result["rowwise_data"] = tensor._rowwise_data
+    if tensor._columnwise_data is not None:
+        result["columnwise_data"] = tensor._columnwise_data
+
+    # Block scaling factors (E4M3 format)
+    if tensor._rowwise_scale_inv is not None:
+        result["rowwise_block_scale_inv"] = tensor._rowwise_scale_inv.view(torch.float8_e4m3fn)
+    if tensor._columnwise_scale_inv is not None:
+        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv.view(torch.float8_e4m3fn)
+
+    # Input absolute maximum value (used to compute tensor scale)
+    if tensor._amax_rowwise is not None:
+        result["amax_rowwise"] = tensor._amax_rowwise
+    if tensor._amax_columnwise is not None:
+        result["amax_columnwise"] = tensor._amax_columnwise
+
+    return result
