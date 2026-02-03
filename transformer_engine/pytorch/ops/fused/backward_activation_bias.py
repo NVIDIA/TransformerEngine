@@ -10,7 +10,7 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.quantization import Recipe
+from transformer_engine.pytorch.quantization import Recipe, FP8GlobalStateManager
 from transformer_engine.pytorch.ops.basic import Bias
 from transformer_engine.pytorch.ops.basic.activation import (
     _ActivationOperation,
@@ -105,7 +105,10 @@ class BackwardActivationBias(FusedOperation):
         """
 
         # Check if recipe supports bias activation fusion
-        if recipe is None:
+        if recipe is None or (
+            FP8GlobalStateManager.is_fp8_enabled()
+            and FP8GlobalStateManager.keep_backward_unquantized()
+        ):
             return ops
 
         # Scan through ops, fusing if possible

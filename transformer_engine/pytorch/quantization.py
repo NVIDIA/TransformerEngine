@@ -431,6 +431,11 @@ class FP8GlobalStateManager:
         return cls.HIGH_PRECISION_INIT_VAL
 
     @classmethod
+    def keep_backward_unquantized(cls) -> bool:
+        """Should backward skip FP8 quantization and use high precision"""
+        return bool(int(os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0")))
+
+    @classmethod
     def fp8_graph_capturing(cls) -> bool:
         """Is CUDA graph capture under way?"""
         return cls.FP8_GRAPH_CAPTURING or torch.cuda.is_current_stream_capturing()
