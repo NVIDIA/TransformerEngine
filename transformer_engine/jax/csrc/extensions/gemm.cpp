@@ -414,7 +414,19 @@ public:
   JAXX_GroupedTensorWrapper() = delete;
   JAXX_GroupedTensorWrapper(JAXX_Scaling_Mode scaling_mode, size_t num_tensors,
                             NVTEShape const& dataShape);
-  ~JAXX_GroupedTensorWrapper() = default;
+  JAXX_GroupedTensorWrapper(JAXX_GroupedTensorWrapper const&) = delete;
+  JAXX_GroupedTensorWrapper& operator=(JAXX_GroupedTensorWrapper const&) = delete;
+  JAXX_GroupedTensorWrapper(JAXX_GroupedTensorWrapper&& other) noexcept
+      : m_data_shape(other.m_data_shape),
+        m_grouped_tensor(other.m_grouped_tensor),
+        m_data_tensor(other.m_data_tensor),
+        m_scale_inv_tensor(other.m_scale_inv_tensor),
+        m_sizes_tensor(other.m_sizes_tensor),
+        m_offsets_tensor(other.m_offsets_tensor) {
+    other.m_grouped_tensor = nullptr;
+  }
+  JAXX_GroupedTensorWrapper& operator=(JAXX_GroupedTensorWrapper&&) = delete;
+  ~JAXX_GroupedTensorWrapper();
 
   void set_rowwise(Buffer_Type const& data, std::optional<Buffer_Type> const& scale_inv);
   void set_group_info(Buffer_Type const& group_sizes, Buffer_Type const& group_offsets, 
@@ -440,6 +452,12 @@ JAXX_GroupedTensorWrapper::JAXX_GroupedTensorWrapper(JAXX_Scaling_Mode scaling_m
                                                      NVTEShape const& dataShape) {
   m_data_shape = dataShape;
   m_grouped_tensor = nvte_create_grouped_tensor(get_nvte_scaling_mode(scaling_mode), num_tensors, dataShape);
+}
+
+JAXX_GroupedTensorWrapper::~JAXX_GroupedTensorWrapper() {
+  if (m_grouped_tensor != nullptr) {
+    nvte_destroy_grouped_tensor(m_grouped_tensor);
+  }
 }
 
 void JAXX_GroupedTensorWrapper::set_rowwise(Buffer_Type const& data,
@@ -528,7 +546,7 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const& data, std::opti
   }
   grouped_tensor_wrapper.set_rowwise(data, scale_inv);
 
-  return grouped_tensor_wrapper;
+  return std::move(grouped_tensor_wrapper);
 }
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
@@ -669,19 +687,19 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   // printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0], lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
 
   if (is_grouped_dense_wgrad) {
-      printf("GroupedGemmFFI: (lhs_is_trans=%d, rhs_is_trans=%d) m=%zu, k=%zu, n=%zu, rhs_shape=[", lhs_is_trans, rhs_is_trans, m, k, n);
-      for (auto dim : rhs_data.dimensions()) {
-        printf("%zu, ", dim);
-      }
-      printf("], lhs_shape=[");
-      for (auto dim : lhs_data.dimensions()) {
-        printf("%zu, ", dim);
-      }
-      printf("], out_shape=[");
-      for (auto dim : output->dimensions()) {
-        printf("%zu, ", dim);
-      }
-      printf("]\n");
+      // printf("GroupedGemmFFI: (lhs_is_trans=%d, rhs_is_trans=%d) m=%zu, k=%zu, n=%zu, rhs_shape=[", lhs_is_trans, rhs_is_trans, m, k, n);
+      // for (auto dim : rhs_data.dimensions()) {
+      //   printf("%zu, ", dim);
+      // }
+      // printf("], lhs_shape=[");
+      // for (auto dim : lhs_data.dimensions()) {
+      //   printf("%zu, ", dim);
+      // }
+      // printf("], out_shape=[");
+      // for (auto dim : output->dimensions()) {
+      //   printf("%zu, ", dim);
+      // }
+      // printf("]\n");
 
     NVTE_CHECK(lhs_is_trans && !rhs_is_trans, "For grouped dense wgrad, only TN GEMM is supported in TE/JAX currently.");
 
