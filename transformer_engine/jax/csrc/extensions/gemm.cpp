@@ -669,7 +669,22 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   // printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0], lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
 
   if (is_grouped_dense_wgrad) {
-    NVTE_CHECK(false, "wgrad not supported");
+      printf("GroupedGemmFFI: (lhs_is_trans=%d, rhs_is_trans=%d) m=%zu, k=%zu, n=%zu, rhs_shape=[", lhs_is_trans, rhs_is_trans, m, k, n);
+      for (auto dim : rhs_data.dimensions()) {
+        printf("%zu, ", dim);
+      }
+      printf("], lhs_shape=[");
+      for (auto dim : lhs_data.dimensions()) {
+        printf("%zu, ", dim);
+      }
+      printf("], out_shape=[");
+      for (auto dim : output->dimensions()) {
+        printf("%zu, ", dim);
+      }
+      printf("]\n");
+
+    NVTE_CHECK(lhs_is_trans && !rhs_is_trans, "For grouped dense wgrad, only TN GEMM is supported in TE/JAX currently.");
+
     //// RHS
     NVTEShape rhsShape{.data={k, n}, .ndim=2};
     // rhs_is_trans = true;
@@ -698,8 +713,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
     nvte_grouped_gemm(
-      rhs_tensor, rhs_is_trans,
       lhs_tensor, lhs_is_trans,
+      rhs_tensor, rhs_is_trans,
       nullptr,
       out_tensor,
       alpha_tensor.data(),
@@ -716,20 +731,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   //// RHS
   NVTEShape rhsShape{.data={num_gemms * k, n}, .ndim=2};
   // rhs_is_trans = true;
-
-  printf("GroupedGemmFFI: (lhs_is_trans=%d, rhs_is_trans=%d) m=%zu, k=%zu, n=%zu, rhs_shape=[", lhs_is_trans, rhs_is_trans, m, k, n);
-  for (auto dim : rhs_data.dimensions()) {
-    printf("%zu, ", dim);
-  }
-  printf("], lhs_shape=[");
-  for (auto dim : lhs_data.dimensions()) {
-    printf("%zu, ", dim);
-  }
-  printf("], out_shape=[");
-  for (auto dim : output->dimensions()) {
-    printf("%zu, ", dim);
-  }
-  printf("]\n");
 
 
   if (rhs_is_trans) {

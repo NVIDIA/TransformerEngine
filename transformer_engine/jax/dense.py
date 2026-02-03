@@ -666,7 +666,7 @@ def _grouped_dense_bwd_rule(
 
     # HACK
     # dgrad = jnp.zeros_like(dgrad)
-    wgrad = jnp.zeros_like(wgrad)
+    # wgrad = jnp.zeros_like(wgrad)
     return dgrad, wgrad, group_sizes_grad, dbias, dkernel_amax, quantizer_set
 
 
