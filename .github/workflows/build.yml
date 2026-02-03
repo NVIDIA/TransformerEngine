@@ -39,57 +39,30 @@ jobs:
   pytorch:
     name: 'PyTorch'
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nvidia/jax:jax
+      options: --user root
     steps:
-      - name: Free up disk space
+      - name: 'Dependencies'
         run: |
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          df -h
-
-      - name: Move /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          root-reserve-mb: 4096
-          temp-reserve-mb: 32
-          swap-size-mb: 4096
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          build-mount-path: '/var/lib/docker/'
-
-      - name: Restore /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
-
+          pip install cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript
+          pip install torch --no-cache-dir
+          pip cache purge
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
-
-      - name: Start named container
-        run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d ghcr.io/nvidia/jax:jax sleep infinity
-
-      - name: 'Dependencies'
-        run: |
-          docker exec builder bash -c '\
-            pip install cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript && \
-            pip install torch --no-cache-dir && \
-            pip cache purge \
-          '
-
+      - name: ccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: docker exec -e MAX_JOBS=1 -e NVTE_FRAMEWORK=pytorch builder bash -c 'pip install --no-build-isolation . -v --no-deps'
+        run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v --no-deps
+        env:
+          NVTE_FRAMEWORK: pytorch
+          MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
+          SCCACHE_CACHE_SIZE: "1G"
       - name: 'Sanity check'
-        run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py'
+        run: python3 tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
     runs-on: ubuntu-latest
@@ -118,53 +91,29 @@ jobs:
   all:
     name: 'All'
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nvidia/jax:jax
+      options: --user root
     steps:
-      - name: Free up disk space
+      - name: 'Dependencies'
         run: |
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          df -h
-
-      - name: Move /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
-        with:
-          root-reserve-mb: 4096
-          temp-reserve-mb: 32
-          swap-size-mb: 4096
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          build-mount-path: '/var/lib/docker/'
-
-      - name: Restore /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
-
+          pip install cmake==3.21.0 pybind11[global] einops onnxscript
+          pip install torch --no-cache-dir
+          pip cache purge
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
-
-      - name: Start named container
-        run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d ghcr.io/nvidia/jax:jax sleep infinity
-
-      - name: 'Dependencies'
-        run: |
-          docker exec builder bash -c '\
-            pip install cmake==3.21.0 pybind11[global] einops onnxscript && \
-            pip install torch --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 && \
-            pip cache purge
-          '
+      - name: ccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Build'
-        run: docker exec -e MAX_JOBS=1 -e NVTE_FRAMEWORK=all builder bash -c 'pip install --no-cache-dir --no-build-isolation . -v --no-deps'
+        run: NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v --no-deps
+        env:
+          NVTE_FRAMEWORK: all
+          MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
+          SCCACHE_CACHE_SIZE: "1G"
       - name: 'Sanity check'
-        run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py'
+        run: |
+          python3 tests/pytorch/test_sanity_import.py
+          python3 tests/jax/test_sanity_import.py
