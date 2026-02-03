@@ -175,15 +175,21 @@ For example to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.08-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:26.01-py3
 
 For example to use the NGC JAX container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm ghcr.io/nvidia/jax:jax
+    docker run --gpus all -it --rm nvcr.io/nvidia/jax:26.01-py3
 
-Where 25.08 (corresponding to August 2025 release) is the container version.
+Where 26.01 (corresponding to January 2026 release) is the container version.
+
+We recommend updating to the latest NGC container available here:
+* [Latest PyTorch NGC containers](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch)
+* [Latest JAX NGC containers](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/jax)
+
+If you run any examples, please ensure you are using a matching version of TransformerEngine. TransformerEngine is pre-built and packaged inside the containers with examples available at `/opt/transformerengine` or `/opt/transformer-engine`. If you would like to use examples from TE main branch and are running into import errors, please try the latest pip package or building from source.
 
 **Benefits of using NGC containers:**
 
