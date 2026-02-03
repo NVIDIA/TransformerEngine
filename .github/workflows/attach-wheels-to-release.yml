@@ -194,7 +194,7 @@ jobs:
         uses: ./.github/actions/build-pytorch-wheel
         id: build-pytorch-wheel
         with:
-          release-version: ${{ inputs.release-version }}
+          release-version: ${{ matrix.release-version }}
           base-image: ${{ matrix.container-image }}
 
       - name: Upload Release Asset
