@@ -105,12 +105,6 @@ class ForwardLinearScaleAdd(FusedOperation):
             if keep_backward_unquantized:
                 saved_input = input_ if input_requires_grad else None
                 saved_weight = linear_op.weight if weight_requires_grad else None
-            # saved_input = input_ if keep_backward_unquantized else x_local
-            # if not weight_requires_grad:
-            #     saved_input = None
-            # saved_weight = linear_op.weight if keep_backward_unquantized else w
-            # if not input_requires_grad:
-            #     saved_weight = None
             if is_cpu_offload_enabled():
                 mark_activation_offload(saved_input)
             linear_op_ctx.save_for_backward(saved_input, saved_weight)
