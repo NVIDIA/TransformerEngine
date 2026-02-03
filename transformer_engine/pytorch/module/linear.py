@@ -131,6 +131,7 @@ class _Linear(torch.autograd.Function):
         ) = non_tensor_args
         keep_backward_unquantized = fp8 and FP8GlobalStateManager.keep_backward_unquantized()
         if keep_backward_unquantized:
+            # Note, keep_backward_unquantized is ignored when delayed scaling is used
             save_original_input = True
 
         # NVTX label for profiling
