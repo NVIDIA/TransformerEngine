@@ -18,6 +18,7 @@
   pybind11::enum_<transformer_engine::DType>(m, "DType", pybind11::module_local())                 \
       .value("kByte", transformer_engine::DType::kByte)                                            \
       .value("kInt32", transformer_engine::DType::kInt32)                                          \
+      .value("kFloat64", transformer_engine::DType::kFloat64)                                      \
       .value("kFloat32", transformer_engine::DType::kFloat32)                                      \
       .value("kFloat16", transformer_engine::DType::kFloat16)                                      \
       .value("kBFloat16", transformer_engine::DType::kBFloat16)                                    \
