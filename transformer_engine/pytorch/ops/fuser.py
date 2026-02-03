@@ -109,10 +109,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Apply forward ops
         x = input_
         extra_outputs = [None] * fuser._num_basic_ops
-        keep_backward_unquantized = (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and FP8GlobalStateManager.keep_backward_unquantized()
-        )
         for op, basic_op_idxs in fuser._forward_ops:
 
             # Set if backward op is required
@@ -124,7 +120,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             prev_op_idx = basic_op_idxs[0] - 1
             prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx >= 0 else None
             prev_op_grad_output_quantizer = None
-            if prev_op is not None and not keep_backward_unquantized:
+            if prev_op is not None:
                 prev_op_grad_output_quantizer = prev_op.get_grad_output_quantizer()
             next_op_idx = basic_op_idxs[-1] + 1
             next_op = fuser._basic_ops[next_op_idx] if next_op_idx < fuser._num_basic_ops else None
@@ -290,11 +286,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             grad_extra_inputs_flat.extend(dxs)
 
         # Update FP8 scaling factors
-        keep_backward_unquantized = (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and FP8GlobalStateManager.keep_backward_unquantized()
-        )
-        if func_ctx.is_first_module and not keep_backward_unquantized and not _is_graph_capturing():
+        if func_ctx.is_first_module and not _is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
