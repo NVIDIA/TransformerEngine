@@ -544,6 +544,7 @@ class _Linear(torch.autograd.Function):
             use_fp8_bwd = ctx.fp8 and not keep_backward_unquantized
             use_quantized_bwd = use_fp8_bwd or ctx.debug
             if keep_backward_unquantized:
+                # Disable Userbuffers communication for backward pass when keep_backward_unquantized is True
                 ctx.ub_overlap_ag = False
                 ctx.ub_overlap_rs_dgrad = False
                 ctx.ub_bulk_dgrad = False
@@ -558,23 +559,23 @@ class _Linear(torch.autograd.Function):
             dgrad_shape = [reduce(multiply_op, ctx.inp_shape[:-1]), ctx.inp_shape[-1]]
             if ctx.ub_overlap_ag:
                 # Overlap grad_output all-gather with dgrad compute
-                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", use_fp8_bwd)
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", ctx.fp8)
                 ub_obj_dgrad = ctx.ub_obj_gradout
                 ub_type_dgrad = tex.CommOverlapType.AG
             elif ctx.ub_overlap_rs_dgrad:
                 # Overlap dgrad reduce-scatter with dgrad compute
-                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", use_fp8_bwd)
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", ctx.fp8)
                 ub_obj_dgrad = ctx.ub_obj_gradout
                 ub_type_dgrad = tex.CommOverlapType.RS
             else:
                 if ctx.ub_bulk_dgrad:
                     # Overlap inputmat all-gather with dgrad compute
-                    ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", use_fp8_bwd)
+                    ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad", ctx.fp8)
                     ub_obj_dgrad = ctx.ub_obj_gradout
                     ub_type_dgrad = tex.CommOverlapType.AG
                 if ctx.ub_bulk_wgrad:
                     # Overlap dgrad reduce-scatter with wgrad compute
-                    ub_obj_wgrad = get_ub(ctx.ub_name + "_wgrad", use_fp8_bwd)
+                    ub_obj_wgrad = get_ub(ctx.ub_name + "_wgrad", ctx.fp8)
                     ub_type_wgrad = tex.CommOverlapType.RS
 
             # --------------------------------------------------
@@ -801,11 +802,7 @@ class _Linear(torch.autograd.Function):
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
-                if (
-                    use_fp8_bwd
-                    and ctx.ub_overlap_ag
-                    and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer)
-                ):
+                if ctx.ub_overlap_ag and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer):
                     # UB does not support pipelined overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
@@ -817,7 +814,7 @@ class _Linear(torch.autograd.Function):
                     dgrad_send_stream, dgrad_recv_stream = ub_obj_dgrad.get_communication_stream()
 
                     # This object is separate from the ub_obj_wgrad object which is passed to the GEMM
-                    ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad", use_fp8_bwd)
+                    ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad", ctx.fp8)
 
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
