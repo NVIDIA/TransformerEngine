@@ -738,12 +738,10 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
              "Either rowwise or columnwise output data need to be allocated.");
 
   ScalingType scaling_type = ScalingType::BIDIMENSIONAL;
-  if (use_rowwise_scaling && (!use_colwise_scaling)) {
+  if (!use_colwise_scaling) {
     scaling_type = ScalingType::ROWWISE;
-  } else if ((!use_rowwise_scaling) && use_colwise_scaling) {
+  } else if (!use_rowwise_scaling) {
     scaling_type = ScalingType::COLWISE;
-  } else if (use_rowwise_scaling && use_colwise_scaling) {
-    scaling_type = ScalingType::BIDIMENSIONAL;
   }
 
   ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
@@ -774,9 +772,11 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   }
 
   const size_t num_tensors = input->num_tensors;
-  NVTE_CHECK(
-      num_tensors < MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-      "Number of tensors in a group is larger than the MAX number of supported descriptors (64).");
+  if (!is_single_tensor) {
+    NVTE_CHECK(num_tensors < MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+              "Number of tensors in a group is larger than "
+              "the MAX number of supported descriptors (64).");
+  }
 
   const size_t first_logical_dim = input->logical_shape.data[0];
   const size_t last_logical_dim = input->logical_shape.data[1];
@@ -786,9 +786,10 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   if (shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS) {
     NVTE_CHECK(first_logical_dim % 128 == 0,
                "First dimension of a grouped tensor should be divisible by 128.");
+  } else {
+    NVTE_CHECK(last_logical_dim % 128 == 0,
+               "Last dimension of a grouped tensor should be divisible by 128.");
   }
-  NVTE_CHECK(last_logical_dim % 128 == 0,
-             "Last dimension of a grouped tensor should be divisible by 128.");
 
   e8m0_t *const scales_rowwise_ptr = reinterpret_cast<e8m0_t *>(output->scale_inv.dptr);
   e8m0_t *const scales_colwise_ptr = reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr);
