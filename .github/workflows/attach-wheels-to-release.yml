@@ -126,7 +126,7 @@ jobs:
             MATRIX=$(echo '{
               "os": ["ubuntu-22.04", "ubuntu-22.04-arm"],
               "release-version": ["${{ github.event.release.tag_name }}"],
-              "container-image": "$(cat ngc_images.json | jq -cr)"
+              "container-image": $(cat ngc_images.json | jq -cr)
             }' | jq -rc)
           else
             MATRIX=$(echo '{
