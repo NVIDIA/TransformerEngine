@@ -236,9 +236,14 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
         strides[i] = strides[i + 1] * shape_int64[i + 1];
       }
     }
-    // Create view sharing the same storage
-    return at::empty({0}, buffer.options().dtype(dtype))
-        .set_(buffer.storage(), storage_offset, shape_int64, strides);
+    // Directly create TensorImpl with shared storage (avoids empty + set_ overhead)
+    auto impl = c10::make_intrusive<at::TensorImpl>(
+        c10::Storage(buffer.storage()),
+        buffer.key_set(),
+        caffe2::TypeMeta::fromScalarType(dtype));
+    impl->set_storage_offset(storage_offset);
+    impl->set_sizes_and_strides(shape_int64, strides);
+    return at::Tensor(std::move(impl));
   };
 
   // Allocate row-wise data
@@ -394,9 +399,14 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
         strides[i] = strides[i + 1] * shape_int64[i + 1];
       }
     }
-    // Create view sharing the same storage
-    return at::empty({0}, buffer.options().dtype(dtype))
-        .set_(buffer.storage(), storage_offset, shape_int64, strides);
+    // Directly create TensorImpl with shared storage (avoids empty + set_ overhead)
+    auto impl = c10::make_intrusive<at::TensorImpl>(
+        c10::Storage(buffer.storage()),
+        buffer.key_set(),
+        caffe2::TypeMeta::fromScalarType(dtype));
+    impl->set_storage_offset(storage_offset);
+    impl->set_sizes_and_strides(shape_int64, strides);
+    return at::Tensor(std::move(impl));
   };
 
   // Allocate row-wise data
@@ -552,9 +562,14 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
         strides[i] = strides[i + 1] * shape_int64[i + 1];
       }
     }
-    // Create view sharing the same storage
-    return at::empty({0}, buffer.options().dtype(dtype))
-        .set_(buffer.storage(), storage_offset, shape_int64, strides);
+    // Directly create TensorImpl with shared storage (avoids empty + set_ overhead)
+    auto impl = c10::make_intrusive<at::TensorImpl>(
+        c10::Storage(buffer.storage()),
+        buffer.key_set(),
+        caffe2::TypeMeta::fromScalarType(dtype));
+    impl->set_storage_offset(storage_offset);
+    impl->set_sizes_and_strides(shape_int64, strides);
+    return at::Tensor(std::move(impl));
   };
 
   // Lambda function for converting std::vector<size_t> shape to NVFP4 shape (last dim divided by 2)
@@ -1006,7 +1021,6 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   // Allocate output tensors
   std::vector<TensorWrapper> output_cpp_list;
   std::vector<py::object> output_py_list;
-  allocation_method = AllocationMethod::UNFUSED;
   switch (allocation_method) {
     case AllocationMethod::BULK_FP8_BLOCKWISE: {
       // Bulk allocation for FP8 block-scaling tensors
