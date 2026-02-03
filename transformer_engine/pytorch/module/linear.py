@@ -637,7 +637,7 @@ class _Linear(torch.autograd.Function):
             inputmat_total = None
             inputmat_total_work = None
             if ctx.requires_wgrad:
-                if use_fp8_bwd:
+                if use_fp8_bwd or ctx.debug:
                     if isinstance(inputmat, QuantizedTensorStorage):
                         # Input tensor is already quantized
                         pass
@@ -663,7 +663,7 @@ class _Linear(torch.autograd.Function):
                         inputmat = cast_if_needed(inputmat, ctx.activation_dtype)
             if ctx.backward_input_needs_gather:
                 quantizer = None
-                if use_fp8_bwd:
+                if use_fp8_bwd or ctx.debug:
                     quantizer = ctx.input_quantizer
                     if quantizer.supports_only_rowwise_all_gather():
                         # If data is in FP8, we compute FP8 transposes manually
@@ -791,7 +791,7 @@ class _Linear(torch.autograd.Function):
                 if inputmat_total_work is not None:
                     inputmat_total_work.wait()
                     inputmat_total_work = None
-                if use_fp8_bwd:
+                if use_fp8_bwd or ctx.debug:
                     if isinstance(inputmat_total, QuantizedTensorStorage):
                         inputmat_total.update_usage(columnwise_usage=True)
                     else:
@@ -833,7 +833,7 @@ class _Linear(torch.autograd.Function):
                         ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
                     )
 
-                if use_fp8_bwd:
+                if use_fp8_bwd or ctx.debug:
                     if isinstance(grad_output, QuantizedTensorStorage):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
