@@ -892,9 +892,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     "out_dtype": (
                         main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
-                    "quantization_params": (
-                        ctx.grad_weight_quantizer if use_fp8_bwd else None
-                    ),
+                    "quantization_params": (ctx.grad_weight_quantizer if use_fp8_bwd else None),
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
                         if not getattr(weight, "overwrite_main_grad", False)

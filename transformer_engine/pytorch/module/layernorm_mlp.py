@@ -1502,9 +1502,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         if ctx.fuse_wgrad_accumulation
                         else ctx.activation_dtype
                     ),
-                    "quantization_params": (
-                        ctx.fc1_grad_weight_quantizer if use_fp8_bwd else None
-                    ),
+                    "quantization_params": (ctx.fc1_grad_weight_quantizer if use_fp8_bwd else None),
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
                         if not getattr(fc2_weight, "overwrite_main_grad", False)
