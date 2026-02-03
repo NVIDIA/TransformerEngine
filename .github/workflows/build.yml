@@ -32,6 +32,7 @@ jobs:
           NVTE_FRAMEWORK: none
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
+          SCCACHE_CACHE_SIZE: "1G"
       - name: 'Sanity check'
         run: python3 -c "import transformer_engine"
         working-directory: /
@@ -111,6 +112,7 @@ jobs:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
+          SCCACHE_CACHE_SIZE: "1G"
       - name: 'Sanity check'
         run: python3 tests/jax/test_sanity_import.py
   all:
