@@ -10,7 +10,7 @@ on:
 jobs:
   core:
     name: 'Core'
-    runs-on: ubuntu-latest-4-cores
+    runs-on: ubuntu-latest
     container:
       image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
       options: --user root
@@ -37,7 +37,7 @@ jobs:
         working-directory: /
   pytorch:
     name: 'PyTorch'
-    runs-on: ubuntu-latest-4-cores
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/nvidia/jax:jax
       options: --user root
@@ -45,7 +45,7 @@ jobs:
       - name: 'Dependencies'
         run: |
           pip install --no-cache-dir cmake==3.21.0 pybind11[global] ninja pydantic importlib-metadata>=1.0 packaging numpy einops onnxscript
-          pip install --no-cache-dir torch
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu130
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -62,7 +62,7 @@ jobs:
         run: python3 tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
-    runs-on: ubuntu-latest-4-cores
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/nvidia/jax:jax
       options: --user root
@@ -86,7 +86,7 @@ jobs:
         run: python3 tests/jax/test_sanity_import.py
   all:
     name: 'All'
-    runs-on: ubuntu-latest-4-cores
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/nvidia/jax:jax
       options: --user root
@@ -94,7 +94,7 @@ jobs:
       - name: 'Dependencies'
         run: |
           pip install --no-cache-dir cmake==3.21.0 pybind11[global] einops onnxscript
-          pip install --no-cache-dir torch
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu130
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
