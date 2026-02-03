@@ -94,7 +94,6 @@ class UserbuffersForwardLinear(FusedOperation):
         tensor_parallel_size: Optional[int] = None,
         sequence_parallel: bool = False,
         with_quantized_compute: bool = False,
-        keep_backward_unquantized: bool = False,
         input_quantizer: Optional[Quantizer] = None,
         weight_quantizer: Optional[Quantizer] = None,
         output_quantizer: Optional[Quantizer] = None,
@@ -127,8 +126,6 @@ class UserbuffersForwardLinear(FusedOperation):
             distributing along inner dimension (embedding dim)
         with_quantized_compute: bool, default = False
             Whether to perform compute with quantized data.
-        keep_backward_unquantized: bool, default = `False`
-            Whether to skip quantized backward and use high precision.
         input_quantizer: Quantizer, optional
             Builder class for quantized input tensor.
         weight_quantizer: Quantizer, optional
@@ -203,10 +200,7 @@ class UserbuffersForwardLinear(FusedOperation):
         if with_ub_all_gather:
             if input_quantizer is not None:
                 if not is_quantized_tensor(x_local):
-                    input_quantizer.set_usage(
-                        rowwise=True,
-                        columnwise=weight_requires_grad and not keep_backward_unquantized,
-                    )
+                    input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
                     if isinstance(
                         input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                     ):
@@ -222,10 +216,7 @@ class UserbuffersForwardLinear(FusedOperation):
         else:
             if with_quantized_compute:
                 if not is_quantized_tensor(x_local):
-                    input_quantizer.set_usage(
-                        rowwise=True,
-                        columnwise=weight_requires_grad and not keep_backward_unquantized,
-                    )
+                    input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
                     x_local = input_quantizer(x_local)
             else:
                 x_local = maybe_dequantize(x_local, dtype)
@@ -236,10 +227,7 @@ class UserbuffersForwardLinear(FusedOperation):
         if not with_quantized_compute:
             w = maybe_dequantize(w, dtype)
         elif with_quantized_compute and not is_quantized_tensor(w):
-            weight_quantizer.set_usage(
-                rowwise=True,
-                columnwise=input_requires_grad and not keep_backward_unquantized,
-            )
+            weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
             w = weight_quantizer(w)
 
         # Construct output tensor if needed
@@ -269,23 +257,14 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Prepare weight tensor for backward pass
         if input_requires_grad:
-            if (
-                w is not weight
-                and with_quantized_compute
-                and is_quantized_tensor(w)
-                and not keep_backward_unquantized
-            ):
+            if w is not weight and with_quantized_compute and is_quantized_tensor(w):
                 w.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:
             w = None
 
         # Prepare input tensor for backward pass
         if weight_requires_grad:
-            if (
-                with_quantized_compute
-                and is_quantized_tensor(x_local)
-                and not keep_backward_unquantized
-            ):
+            if with_quantized_compute and is_quantized_tensor(x_local):
                 if not (isinstance(x_local, Float8TensorStorage) and with_ub_all_gather):
                     # FP8 does not support all-gather of transpose data
                     x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
@@ -332,9 +311,6 @@ class UserbuffersForwardLinear(FusedOperation):
         grad_output_quantizer = linear_op.get_quantizer("backward", 0)
         grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        keep_backward_unquantized = (
-            with_quantized_compute and FP8GlobalStateManager.keep_backward_unquantized()
-        )
         if with_quantized_compute:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if not any((recipe.delayed(), recipe.float8_current_scaling(), recipe.mxfp8())):
@@ -364,7 +340,6 @@ class UserbuffersForwardLinear(FusedOperation):
             tensor_parallel_size=self.tensor_parallel_size,
             sequence_parallel=self.sequence_parallel,
             with_quantized_compute=with_quantized_compute,
-            keep_backward_unquantized=keep_backward_unquantized,
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=None,  # Not supported
@@ -377,18 +352,10 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Save state for backward pass
         if linear_op_ctx.requires_grad:
-            saved_input = input_ if keep_backward_unquantized else x_local
-            if not weight_requires_grad:
-                saved_input = None
-            saved_weight = linear_op.weight if keep_backward_unquantized else w
-            if not input_requires_grad:
-                saved_weight = None
             if is_cpu_offload_enabled():
-                mark_activation_offload(saved_input)
-            linear_op_ctx.save_for_backward(saved_input, saved_weight)
-            linear_op_ctx.with_quantized_compute = (
-                with_quantized_compute and not keep_backward_unquantized
-            )
+                mark_activation_offload(x_local)
+            linear_op_ctx.save_for_backward(x_local, w)
+            linear_op_ctx.with_quantized_compute = with_quantized_compute
             linear_op_ctx.input_quantizer = input_quantizer
             linear_op_ctx.weight_quantizer = weight_quantizer
             linear_op_ctx.grad_output_quantizer = grad_output_quantizer
