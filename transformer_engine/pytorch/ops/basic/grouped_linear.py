@@ -190,8 +190,7 @@ class GroupedLinear(BasicOperation):
 
             # Configure quantizers
             quantizers = [
-                self.get_quantizer("forward", 2 * idx + 1)
-                for idx in range(self.num_groups)
+                self.get_quantizer("forward", 2 * idx + 1) for idx in range(self.num_groups)
             ]
             with_rowwise_usage = True
             with_columnwise_usage = torch.is_grad_enabled()
@@ -244,10 +243,7 @@ class GroupedLinear(BasicOperation):
 
         # Use quantizers to construct quantized weights
         with torch.no_grad():
-            return [
-                quantizer(weight)
-                for quantizer, weight in zip(quantizers, weights)
-            ]
+            return [quantizer(weight) for quantizer, weight in zip(quantizers, weights)]
 
     def _quantize_weights_mxfp8(
         self,
