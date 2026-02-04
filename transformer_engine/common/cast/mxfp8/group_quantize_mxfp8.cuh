@@ -802,10 +802,6 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     NVTE_CHECK(first_logical_dim % 128 == 0,
                "First dimension of a grouped tensor should be divisible by 128.");
   }
-  if (use_colwise_scaling) {
-    NVTE_CHECK(last_logical_dim % 32 == 0,
-               "Last dimension of a grouped tensor should be divisible by 32.");
-  }
 
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
