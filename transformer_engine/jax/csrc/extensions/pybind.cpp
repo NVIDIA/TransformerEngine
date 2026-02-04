@@ -81,8 +81,8 @@ pybind11::dict Registrations() {
       pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
       pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
 
-  dict["te_inspect_ffi"] = pybind11::dict(
-      pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
+  dict["te_inspect_ffi"] =
+      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
 
   return dict;
 }

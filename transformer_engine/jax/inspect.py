@@ -45,7 +45,7 @@ class InspectPrimitive(BasePrimitive):
 
         return ffi.ffi_lowering(
             InspectPrimitive.name,
-            operand_output_aliases={0: 0},  # donate input buffer to output buffer           
+            operand_output_aliases={0: 0},  # donate input buffer to output buffer
         )(
             ctx,
             x,
@@ -59,21 +59,20 @@ class InspectPrimitive(BasePrimitive):
         inspect implementation
         """
         assert InspectPrimitive.inner_primitive is not None
-        (
-            x
-        ) = InspectPrimitive.inner_primitive.bind(
+        (x) = InspectPrimitive.inner_primitive.bind(
             x,
         )
         return x
 
+
 register_primitive(InspectPrimitive)
+
 
 @partial(jax.custom_vjp, nondiff_argnums=())
 def _inspect(
     x,
 ):
-    """
-    """
+    """ """
     output, _ = _inspect_fwd_rule(
         x,
     )
@@ -95,10 +94,11 @@ def _inspect_bwd_rule(
 ):
     """"""
     del ctx
-    return grad,
+    return (grad,)
 
 
 _inspect.defvjp(_inspect_fwd_rule, _inspect_bwd_rule)
+
 
 def inspect_array(x: jnp.ndarray, name: str) -> jnp.ndarray:
     """Utility function to inspect JAX arrays by printing their name, shape, dtype, and statistics.
