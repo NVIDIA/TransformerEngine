@@ -260,8 +260,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   const size_t rows =
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-  const size_t scale_stride_rowwise = cols / SCALE_DIM_X;
-  const size_t scale_stride_colwise = cols;
+
+  const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
+  const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
 
   const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
@@ -292,7 +293,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
   }
 
-  const size_t blocks_X_num_in_current_tensor = cols / CHUNK_DIM_X;
+  const size_t blocks_X_num_in_current_tensor = DIVUP(cols, static_cast<size_t>(128));
   const size_t block_id_in_current_tensor =
       is_single_tensor ? blockIdx.x : (blockIdx.x - tensor_base / ELTS_PER_CHUNK);
 
@@ -731,6 +732,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   using namespace group_quantize_kernel;
 
   checkCuDriverContext(stream);
+  CheckNoopTensor(*noop, "cast_noop");
 
   const bool use_rowwise_scaling = output->has_data();
   const bool use_colwise_scaling = output->has_columnwise_data();
@@ -771,25 +773,47 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                "Grad and activations tensors must have the same type.");
   }
 
-  const size_t num_tensors = input->num_tensors;
-  if (!is_single_tensor) {
-    NVTE_CHECK(num_tensors < MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-              "Number of tensors in a group is larger than "
-              "the MAX number of supported descriptors (64).");
-  }
-
   const size_t first_logical_dim = input->logical_shape.data[0];
   const size_t last_logical_dim = input->logical_shape.data[1];
   const size_t elts_total = first_logical_dim * last_logical_dim;
+
+  const size_t num_tensors = input->num_tensors;
+
+  size_t blocks = 0;
+
+  if (is_single_tensor) {
+    const size_t blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
+    const size_t blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
+    blocks = blocks_Y * blocks_X;
+  } else {
+    NVTE_CHECK(num_tensors < MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+              "Number of tensors in a group is larger than "
+              "the MAX number of supported descriptors (64).");
+    // Only full tiles supported
+    NVTE_CHECK(last_logical_dim % CHUNK_DIM_X == 0,
+               "Last dimension of a grouped tensor should be divisible by 128.");
+    blocks = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
+  }
+  const dim3 grid(blocks);
+  const size_t block_size = THREADS_PER_CHUNK;
 
   // Logical shape of a tensor with varying all dims is [1, M*K]
   if (shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS) {
     NVTE_CHECK(first_logical_dim % 128 == 0,
                "First dimension of a grouped tensor should be divisible by 128.");
-  } else {
-    NVTE_CHECK(last_logical_dim % 128 == 0,
-               "Last dimension of a grouped tensor should be divisible by 128.");
   }
+  if (use_colwise_scaling) {
+    NVTE_CHECK(last_logical_dim % 32 == 0,
+               "Last dimension of a grouped tensor should be divisible by 32.");
+  }
+
+  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
+  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
+  const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
+
+  float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
+  float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
+  const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
   e8m0_t *const scales_rowwise_ptr = reinterpret_cast<e8m0_t *>(output->scale_inv.dptr);
   e8m0_t *const scales_colwise_ptr = reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr);
@@ -800,20 +824,6 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   if (use_colwise_scaling) {
     NVTE_CHECK(scales_colwise_ptr != nullptr, "Columnwise scaling tensor must be allocated");
   }
-
-  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
-  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
-  const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
-
-  CheckNoopTensor(*noop, "cast_noop");
-
-  const size_t blocks = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
-  const dim3 grid(blocks);
-  const size_t block_size = THREADS_PER_CHUNK;
-
-  const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
-  const size_t scale_stride_colwise =
-      use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
 
   const size_t dbias_rows = DIVUP(first_logical_dim, CHUNK_DIM_Y);
   const size_t dbias_cols = last_logical_dim;
@@ -831,10 +841,6 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
       return;
     }
   }
-
-  float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
-  float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
-  const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input->dtype(), IType,

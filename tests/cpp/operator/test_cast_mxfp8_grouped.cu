@@ -253,11 +253,47 @@ void performTest(const ProcessingMethod processing_method,
     const size_t rows = logical_shape_vec[0];
     const size_t cols = logical_shape_vec[1];
 
-    const size_t elts_num = rows * cols;
-    const size_t sfs_num = (rows * cols) / 32;
+    size_t elts_num = 0;
+    size_t rowwise_sfs_num = 0;
+    size_t colwise_sfs_num = 0;
+
+    std::vector<size_t> rowwise_scales_first_dim(num_tensors, 0);
+    std::vector<size_t> rowwise_scales_last_dim(num_tensors, 0);
+    std::vector<size_t> rowwise_scales_offset(num_tensors + 1, 0);
+    std::vector<size_t> colwise_scales_first_dim(num_tensors, 0);
+    std::vector<size_t> colwise_scales_last_dim(num_tensors, 0);
+    std::vector<size_t> colwise_scales_offset(num_tensors + 1, 0);
+
+    for (size_t t = 0; t < num_tensors; ++t) {
+        const size_t M = first_dims_h[t];
+        const size_t K = last_dims_h[t];
+        const size_t elts = M * K; 
+        elts_num += elts;
+
+        const size_t unpadded_rowwise_blocks_Y = M;
+        const size_t unpadded_rowwise_blocks_X = divide_round_up(K, 32);
+        const size_t unpadded_colwise_blocks_Y = divide_round_up(M, 32);
+        const size_t unpadded_colwise_blocks_X = K;
+
+        rowwise_scales_first_dim[t] = round_up_to_nearest_multiple(unpadded_rowwise_blocks_Y, 128);
+        rowwise_scales_last_dim[t] = round_up_to_nearest_multiple(unpadded_rowwise_blocks_X, 4);
+        colwise_scales_first_dim[t] = round_up_to_nearest_multiple(unpadded_colwise_blocks_Y, 4);
+        colwise_scales_last_dim[t] = round_up_to_nearest_multiple(unpadded_colwise_blocks_X, 128);
+
+        const size_t rowwise_sfs = rowwise_scales_first_dim[t] * rowwise_scales_last_dim[t]; 
+        const size_t colwise_sfs = colwise_scales_first_dim[t] * colwise_scales_last_dim[t]; 
+
+        rowwise_sfs_num += rowwise_sfs;
+        colwise_sfs_num += colwise_sfs;
+
+        rowwise_scales_offset[t+1] = rowwise_sfs_num; 
+        colwise_scales_offset[t+1] = colwise_sfs_num; 
+    }
 
     const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS) || (shape_rep == VARYING_FIRST_DIM);
-    std::vector<size_t> scales_shape = {sfs_num};
+
+    std::vector<size_t> scales_rowwise_shape = {rowwise_sfs_num};
+    std::vector<size_t> scales_colwise_shape = {colwise_sfs_num};
 
     std::mt19937 gen;
     std::uniform_real_distribution<> dis(-2.0, 1.0);
@@ -267,13 +303,13 @@ void performTest(const ProcessingMethod processing_method,
 
     std::vector<OutputType> out_data_rowwise_h(rowwise ? elts_num : 0);
     std::vector<OutputType> out_data_colwise_h(colwise ? elts_num : 0);
-    std::vector<fp8e8m0> out_scales_rowwise_h(rowwise ? sfs_num : 0);
-    std::vector<fp8e8m0> out_scales_colwise_h(colwise ? sfs_num : 0);
+    std::vector<fp8e8m0> out_scales_rowwise_h(rowwise ? rowwise_sfs_num : 0);
+    std::vector<fp8e8m0> out_scales_colwise_h(colwise ? colwise_sfs_num : 0);
 
     std::vector<OutputType> out_data_rowwise_ref(rowwise ? elts_num : 0);
     std::vector<OutputType> out_data_colwise_ref(colwise ? elts_num : 0);
-    std::vector<fp8e8m0> out_scales_rowwise_ref(rowwise ? sfs_num : 0);
-    std::vector<fp8e8m0> out_scales_colwise_ref(colwise ? sfs_num : 0);
+    std::vector<fp8e8m0> out_scales_rowwise_ref(rowwise ? rowwise_sfs_num : 0);
+    std::vector<fp8e8m0> out_scales_colwise_ref(colwise ? colwise_sfs_num : 0);
 
     std::vector<InputType> ref_output_dbias(is_single_tensor ? cols : 0);
 
@@ -300,7 +336,8 @@ void performTest(const ProcessingMethod processing_method,
 
     const size_t in_data_size = elts_num * sizeof(InputType);
     const size_t out_data_size = elts_num * sizeof(OutputType);
-    const size_t out_scales_size = sfs_num * sizeof(fp8e8m0);
+    const size_t rowwise_scales_size = rowwise_sfs_num * sizeof(fp8e8m0);
+    const size_t colwise_scales_size = colwise_sfs_num * sizeof(fp8e8m0);
 
     const size_t first_dims_size = num_tensors * sizeof(size_t);
     const size_t last_dims_size = num_tensors * sizeof(size_t);
@@ -374,11 +411,11 @@ void performTest(const ProcessingMethod processing_method,
 
     if (rowwise) {
         cudaMalloc((void**)&out_data_rowwise_d, out_data_size);
-        cudaMalloc((void**)&out_scales_rowwise_d, out_scales_size);
+        cudaMalloc((void**)&out_scales_rowwise_d, rowwise_scales_size);
         cudaMemset(out_data_rowwise_d, 0, out_data_size);
-        cudaMemset(out_scales_rowwise_d, 0, out_scales_size);
+        cudaMemset(out_scales_rowwise_d, 0, rowwise_scales_size);
         NVTEBasicTensor out_data_rowwise_tensor = {out_data_rowwise_d, static_cast<NVTEDType>(otype), logical_shape_};
-        NVTEShape scales_rowwise_shape_ = nvte_make_shape(scales_shape.data(), scales_shape.size());
+        NVTEShape scales_rowwise_shape_ = nvte_make_shape(scales_rowwise_shape.data(), scales_rowwise_shape.size());
         NVTEBasicTensor out_scales_rowwise_tensor = {out_scales_rowwise_d, NVTEDType::kNVTEFloat8E8M0, scales_rowwise_shape_};
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &out_data_rowwise_tensor);
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseScaleInv, &out_scales_rowwise_tensor);
@@ -386,11 +423,11 @@ void performTest(const ProcessingMethod processing_method,
 
     if (colwise) {
         cudaMalloc((void**)&out_data_colwise_d, out_data_size);
-        cudaMalloc((void**)&out_scales_colwise_d, out_scales_size);
+        cudaMalloc((void**)&out_scales_colwise_d, colwise_scales_size);
         cudaMemset(out_data_colwise_d, 0, out_data_size);
-        cudaMemset(out_scales_colwise_d, 0, out_scales_size);
+        cudaMemset(out_scales_colwise_d, 0, colwise_scales_size);
         NVTEBasicTensor out_data_colwise_tensor = {out_data_colwise_d, static_cast<NVTEDType>(otype), logical_shape_};
-        NVTEShape scales_colwise_shape_ = nvte_make_shape(scales_shape.data(), scales_shape.size());
+        NVTEShape scales_colwise_shape_ = nvte_make_shape(scales_colwise_shape.data(), scales_colwise_shape.size());
         NVTEBasicTensor out_scales_colwise_tensor = {out_scales_colwise_d, NVTEDType::kNVTEFloat8E8M0, scales_colwise_shape_};
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseData, &out_data_colwise_tensor);
         nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseScaleInv, &out_scales_colwise_tensor);
@@ -400,8 +437,12 @@ void performTest(const ProcessingMethod processing_method,
 
     // Reference (CPU)
     if (is_single_tensor) {
-        const size_t scales_stride_rowwise = cols / 32;
-        const size_t scales_stride_colwise = cols;
+
+        const size_t unpadded_rowwise_blocks_X = divide_round_up(cols, 32);
+        const size_t unpadded_colwise_blocks_X = cols;
+
+        const size_t scales_stride_rowwise = round_up_to_nearest_multiple(unpadded_rowwise_blocks_X, 4);
+        const size_t scales_stride_colwise = round_up_to_nearest_multiple(unpadded_colwise_blocks_X, 128);
 
         compute_ref<InputType, OutputType>(
             processing_method, OP, rowwise, colwise, in_data.data(), grad_data.data(),
@@ -416,17 +457,18 @@ void performTest(const ProcessingMethod processing_method,
             const size_t M = first_dims_h[t];
             const size_t K = last_dims_h[t];
 
-            const size_t scales_stride_rowwise = K / 32;
-            const size_t scales_stride_colwise = K;
+            const size_t scales_stride_rowwise = rowwise_scales_last_dim[t];
+            const size_t scales_stride_colwise = colwise_scales_last_dim[t];
             const size_t data_offset = offsets_h[t];
-            const size_t sfs_offset = data_offset / 32;
+            const size_t rowwise_sfs_offset = rowwise_scales_offset[t];
+            const size_t colwise_sfs_offset = colwise_scales_offset[t];
 
             const InputType* const grad_ptr = grad_data.data() + data_offset;
             const InputType* const in_ptr = in_data.data() + data_offset;
             OutputType* const out_data_rowwise_ptr = out_data_rowwise_ref.data() + data_offset;
             OutputType* const out_data_colwise_ptr = out_data_colwise_ref.data() + data_offset;
-            fp8e8m0* const out_scales_rowwise_ptr = out_scales_rowwise_ref.data() + sfs_offset;
-            fp8e8m0* const out_scales_colwise_ptr = out_scales_colwise_ref.data() + sfs_offset;
+            fp8e8m0* const out_scales_rowwise_ptr = out_scales_rowwise_ref.data() + rowwise_sfs_offset;
+            fp8e8m0* const out_scales_colwise_ptr = out_scales_colwise_ref.data() + colwise_sfs_offset;
 
             compute_ref<InputType, OutputType>(
                 processing_method, OP, rowwise, colwise, in_ptr, grad_ptr,
@@ -496,11 +538,11 @@ void performTest(const ProcessingMethod processing_method,
 
     if (rowwise) {
         cudaMemcpy(out_data_rowwise_h.data(), out_data_rowwise_d, out_data_size, cudaMemcpyDeviceToHost);
-        cudaMemcpy(out_scales_rowwise_h.data(), out_scales_rowwise_d, out_scales_size, cudaMemcpyDeviceToHost);
+        cudaMemcpy(out_scales_rowwise_h.data(), out_scales_rowwise_d, rowwise_scales_size, cudaMemcpyDeviceToHost);
 
         size_t mismatches_scales = 0;
         compare_scaling_factors("rowwise_scales", out_scales_rowwise_h.data(), out_scales_rowwise_ref.data(),
-                                1, sfs_num, sfs_num, mismatches_scales, scale_diff_abs_tolerance,
+                                1, rowwise_sfs_num, rowwise_sfs_num, mismatches_scales, scale_diff_abs_tolerance,
                                 abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 
         const size_t mismatches_elts = 32 * mismatches_scales;
@@ -511,11 +553,11 @@ void performTest(const ProcessingMethod processing_method,
 
     if (colwise) {
         cudaMemcpy(out_data_colwise_h.data(), out_data_colwise_d, out_data_size, cudaMemcpyDeviceToHost);
-        cudaMemcpy(out_scales_colwise_h.data(), out_scales_colwise_d, out_scales_size, cudaMemcpyDeviceToHost);
+        cudaMemcpy(out_scales_colwise_h.data(), out_scales_colwise_d, colwise_scales_size, cudaMemcpyDeviceToHost);
 
         size_t mismatches_scales = 0;
         compare_scaling_factors("colwise_scales", out_scales_colwise_h.data(), out_scales_colwise_ref.data(),
-                                1, sfs_num, sfs_num, mismatches_scales, scale_diff_abs_tolerance,
+                                1, colwise_sfs_num, colwise_sfs_num, mismatches_scales, scale_diff_abs_tolerance,
                                 abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 
         const size_t mismatches_elts = 32 * mismatches_scales;
@@ -586,6 +628,7 @@ std::vector<std::vector<size_t>> input_config = {
     {SAME_BOTH_DIMS,        1,      128,128},
     {SAME_BOTH_DIMS,        2,      256,128},
     {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
+    {VARYING_FIRST_DIM,     2,      384,160,                    128,256},
     {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
     {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
     {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
@@ -651,8 +694,8 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
             }
         }
         offsets[t+1] = offsets[t] + first_dims[t] * last_dims[t];
-        // Skips tests if tensor dims are not multiples of 128
-        if ((first_dims[t] % 128 != 0) || (last_dims[t] % 128 != 0)) {
+        // Skips tests if tensor shape is not as required by the kernel 
+        if ((first_dims[t] % 128 != 0) || (last_dims[t] % 32 != 0)) {
             GTEST_SKIP();
         }
     }
