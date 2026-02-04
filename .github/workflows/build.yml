@@ -33,7 +33,7 @@ jobs:
           NVTE_FRAMEWORK: none
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
-          NVTE_CUDA_ARCHS: "90"
+          NVTE_CUDA_ARCHS: "90;100"
       - name: 'Sanity check'
         run: python3 -c "import transformer_engine"
         working-directory: /
@@ -63,7 +63,7 @@ jobs:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
-          NVTE_CUDA_ARCHS: "90"
+          NVTE_CUDA_ARCHS: "90;100"
       - name: 'Sanity check'
         run: python3 tests/pytorch/test_sanity_import.py
   jax:
@@ -92,7 +92,7 @@ jobs:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
-          NVTE_CUDA_ARCHS: "90"
+          NVTE_CUDA_ARCHS: "90;100"
       - name: 'Sanity check'
         run: python3 tests/jax/test_sanity_import.py
   all:
@@ -122,7 +122,7 @@ jobs:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
-          NVTE_CUDA_ARCHS: "90"
+          NVTE_CUDA_ARCHS: "90;100"
       - name: 'Sanity check'
         run: |
           python3 tests/pytorch/test_sanity_import.py
