@@ -726,7 +726,6 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         is_meta = torch.device(device).type == "meta"
         self.reset_parameters(defer_init=is_meta)
-        self.make_grouped_weights(defer_init=is_meta)
 
         if self.wgrad_store.delay_wgrad_compute():
             for name, param in self.named_parameters():
@@ -781,8 +780,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.set_tensor_parallel_attributes(defer_init=defer_init)
 
     def reset_parameters(self, defer_init=False):
-        super().reset_parameters(defer_init=defer_init)
+        super().reset_parameters(defer_init=defer_init) 
+        self.make_grouped_weights(defer_init=defer_init)
         self.set_tensor_parallel_attributes(defer_init=defer_init)
+
 
     def set_tensor_parallel_attributes(self, defer_init=False) -> None:
         """Set attributes needed for TP"""

@@ -250,6 +250,8 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
 py::object dequantize(const py::handle &input, DType otype);
 
+py::object quantize_grouped(const py::handle& input, py::handle& output);
+
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
 

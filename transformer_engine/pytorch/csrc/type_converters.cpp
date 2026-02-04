@@ -185,32 +185,52 @@ NVTEScalingMode ScalingModeFromQuantizer(py::handle quantizer) {
   return NVTE_DELAYED_TENSOR_SCALING;
 }
 
+DType GetTransformerEngineDTypeForScaleInv(py::handle quantizer, at::Tensor scale_inv) {
+  auto *quantizer_ptr = quantizer.ptr();
+  if (IsMXFP8Quantizers(quantizer_ptr)) {
+    return DType::kFloat8E8M0;
+  }
+  if (IsFloat8BlockwiseQuantizers(quantizer_ptr)) {
+    return DType::kFloat32;
+  }
+  if (IsNVFP4Quantizers(quantizer_ptr)) {
+    return DType::kFloat8E4M3;
+  }
+  return GetTransformerEngineDType(scale_inv.scalar_type());
+}
+
+
+
 GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   // Returns a GroupedTensorWrapper from a PyTorch GroupedTensor.
   const auto num_tensors = tensor.attr("num_tensors").cast<size_t>();
   const auto logical_shape = tensor.attr("logical_shape").cast<std::vector<size_t>>();
-
+  py::handle quantizer = py::none();
+  DType quantizer_dtype = DType::kNumTypes;
   NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   if (!tensor.attr("quantizers").is_none()) {
     const auto quantizers = tensor.attr("quantizers").cast<py::list>();
-    if (!quantizers.empty() && !quantizers[0].is_none()) {
-      scaling_mode = ScalingModeFromQuantizer(quantizers[0]);
+    quantizer = quantizers[0];
+    if (!quantizers.empty() && !quantizer.is_none()) {
+      scaling_mode = ScalingModeFromQuantizer(quantizer);
+      quantizer_dtype = quantizer.attr("dtype").cast<DType>();
     }
   }
-
   auto ret = GroupedTensorWrapper(num_tensors, logical_shape, scaling_mode);
 
   // Rowwise data
   if (!tensor.attr("data").is_none()) {
     const auto &data = tensor.attr("data").cast<at::Tensor>();
-    ret.set_rowwise_data(data.data_ptr(), GetTransformerEngineDType(data.scalar_type()),
+    DType data_dtype = quantizer.is_none() ? GetTransformerEngineDType(data.scalar_type()) : quantizer_dtype;
+    ret.set_rowwise_data(data.data_ptr(), data_dtype,
                          getTensorShape(data));
   }
 
   // Columnwise data
   if (!tensor.attr("columnwise_data").is_none()) {
     const auto &data = tensor.attr("columnwise_data").cast<at::Tensor>();
-    ret.set_columnwise_data(data.data_ptr(), GetTransformerEngineDType(data.scalar_type()),
+    DType data_dtype = quantizer.is_none() ? GetTransformerEngineDType(data.scalar_type()) : quantizer_dtype;
+    ret.set_columnwise_data(data.data_ptr(), data_dtype,
                             getTensorShape(data));
   }
 
@@ -237,13 +257,13 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   if (!tensor.attr("scale_inv").is_none()) {
     const auto &scale_inv = tensor.attr("scale_inv").cast<at::Tensor>();
     ret.set_rowwise_scale_inv(scale_inv.data_ptr(),
-                              GetTransformerEngineDType(scale_inv.scalar_type()),
+                              GetTransformerEngineDTypeForScaleInv(quantizer, scale_inv),
                               getTensorShape(scale_inv));
   }
   if (!tensor.attr("columnwise_scale_inv").is_none()) {
     const auto &scale_inv = tensor.attr("columnwise_scale_inv").cast<at::Tensor>();
     ret.set_columnwise_scale_inv(scale_inv.data_ptr(),
-                                 GetTransformerEngineDType(scale_inv.scalar_type()),
+                                 GetTransformerEngineDTypeForScaleInv(quantizer, scale_inv),
                                  getTensorShape(scale_inv));
   }
 

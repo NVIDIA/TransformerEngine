@@ -960,6 +960,7 @@ class TensorWrapper {
 /*! \struct GroupedTensorWrapper
  *  \brief C++ wrapper for the NVTEGroupedTensor class.
  */
+
 class GroupedTensorWrapper {
  public:
   /*! \brief Constructs new GroupedTensorWrapper.
@@ -1168,7 +1169,8 @@ enum class Float8BlockScaleTensorFormat {
   /*! FP8 data is transposed if needed and scales are swizzled */
   GEMM_READY = 0,
   /*! FP8 data is untransposed and scales are not swizzled or padded */
-  COMPACT = 1
+  COMPACT = 1,
+  INVALID
 };
 
 /*! \struct QuantizationConfigWrapper

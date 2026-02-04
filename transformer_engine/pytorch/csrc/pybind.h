@@ -95,6 +95,8 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor,
 
 TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer);
 
+GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor);
+
 inline bool IsFloatingPointType(at::ScalarType type) {
   return type == at::kFloat || type == at::kHalf || type == at::kBFloat16;
 }

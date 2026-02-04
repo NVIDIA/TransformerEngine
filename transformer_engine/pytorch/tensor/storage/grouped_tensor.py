@@ -718,6 +718,7 @@ class GroupedTensor:
                     columnwise_scale_inv=columnwise_scale_inv,
                     fp8_dtype=self.quantizers[i].dtype,
                     quantizer=self.quantizers[i],
+                    with_gemm_swizzled_scales=self.quantizers[i].optimize_for_gemm,
                 )
                 result.append(tensor)
 
@@ -779,11 +780,6 @@ class GroupedTensor:
 
                 # Compute is_2D_scaled and data_format from quantizer attributes
                 is_2D_scaled = self.quantizers[i].block_scaling_dim == 2
-                data_format = (
-                    Float8BlockScaleTensorFormat.COMPACT
-                    if self.quantizers[i].all_gather_usage
-                    else Float8BlockScaleTensorFormat.GEMM_READY
-                )
 
                 if self.quantizers[i].internal:
                     float8_blockwise_q_tensor_class = Float8BlockwiseQTensorStorage
@@ -800,7 +796,6 @@ class GroupedTensor:
                     fp8_dtype=self.quantizers[i].dtype,
                     quantizer=self.quantizers[i],
                     is_2D_scaled=is_2D_scaled,
-                    data_format=data_format,
                 )
                 result.append(tensor)
 
@@ -862,6 +857,7 @@ class GroupedTensor:
                     amax_columnwise=amax_columnwise,
                     fp4_dtype=self.quantizers[i].dtype,
                     quantizer=self.quantizers[i],
+                    with_gemm_swizzled_scales=self.quantizers[i].optimize_for_gemm,
                 )
                 result.append(tensor)
 
