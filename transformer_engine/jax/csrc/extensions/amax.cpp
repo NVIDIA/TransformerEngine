@@ -96,5 +96,28 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Attr<bool>("produce_regular_amax")              // produce_regular_amax
         .Attr<int64_t>("flatten_axis"));                 // flatten_axis
 
+
+Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type output_buf) {
+  NVTE_CHECK(input_buf.untyped_data() != nullptr,
+             "Input must be provided for inspect operation");
+  NVTE_CHECK(output_buf->untyped_data() != nullptr,
+             "Output must be provided for inspect operation");
+  NVTE_CHECK(input_buf.untyped_data() == output_buf->untyped_data(),
+             "Input and output must point to the same buffer for inspect operation");
+
+  printf("JTEST: Hello\n");
+
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    InspectHandler, InspectFFI,
+    FFI::Bind()
+        .Ctx<FFI_Stream_Type>()                          // stream
+        .Arg<Buffer_Type>()                              // input
+        .Ret<Buffer_Type>()                              // output
+    );
+
+
 }  // namespace jax
 }  // namespace transformer_engine
