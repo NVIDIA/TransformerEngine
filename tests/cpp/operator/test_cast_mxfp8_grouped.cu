@@ -267,7 +267,7 @@ void performTest(const ProcessingMethod processing_method,
     for (size_t t = 0; t < num_tensors; ++t) {
         const size_t M = first_dims_h[t];
         const size_t K = last_dims_h[t];
-        const size_t elts = M * K; 
+        const size_t elts = M * K;
         elts_num += elts;
 
         const size_t unpadded_rowwise_blocks_Y = M;
@@ -280,14 +280,14 @@ void performTest(const ProcessingMethod processing_method,
         colwise_scales_first_dim[t] = round_up_to_nearest_multiple(unpadded_colwise_blocks_Y, 4);
         colwise_scales_last_dim[t] = round_up_to_nearest_multiple(unpadded_colwise_blocks_X, 128);
 
-        const size_t rowwise_sfs = rowwise_scales_first_dim[t] * rowwise_scales_last_dim[t]; 
-        const size_t colwise_sfs = colwise_scales_first_dim[t] * colwise_scales_last_dim[t]; 
+        const size_t rowwise_sfs = rowwise_scales_first_dim[t] * rowwise_scales_last_dim[t];
+        const size_t colwise_sfs = colwise_scales_first_dim[t] * colwise_scales_last_dim[t];
 
         rowwise_sfs_num += rowwise_sfs;
         colwise_sfs_num += colwise_sfs;
 
-        rowwise_scales_offset[t+1] = rowwise_sfs_num; 
-        colwise_scales_offset[t+1] = colwise_sfs_num; 
+        rowwise_scales_offset[t+1] = rowwise_sfs_num;
+        colwise_scales_offset[t+1] = colwise_sfs_num;
     }
 
     const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS) || (shape_rep == VARYING_FIRST_DIM);
@@ -694,7 +694,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
             }
         }
         offsets[t+1] = offsets[t] + first_dims[t] * last_dims[t];
-        // Skips tests if tensor shape is not as required by the kernel 
+        // Skips tests if tensor shape is not as required by the kernel
         if ((first_dims[t] % 128 != 0) || (last_dims[t] % 32 != 0)) {
             GTEST_SKIP();
         }

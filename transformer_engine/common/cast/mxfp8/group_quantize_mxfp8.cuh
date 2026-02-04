@@ -787,8 +787,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     blocks = blocks_Y * blocks_X;
   } else {
     NVTE_CHECK(num_tensors < MAX_SUPPORTED_TENSOR_DESCRIPTORS,
-              "Number of tensors in a group is larger than "
-              "the MAX number of supported descriptors (64).");
+               "Number of tensors in a group is larger than "
+               "the MAX number of supported descriptors (64).");
     // Only full tiles supported
     NVTE_CHECK(last_logical_dim % CHUNK_DIM_X == 0,
                "Last dimension of a grouped tensor should be divisible by 128.");
