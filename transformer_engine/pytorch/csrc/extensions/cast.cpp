@@ -80,7 +80,7 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
-py::object quantize_grouped(const py::handle &input, py::handle& output) {
+py::object quantize_grouped(const py::handle &input, py::handle &output) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
