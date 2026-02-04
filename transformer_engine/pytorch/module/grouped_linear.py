@@ -304,11 +304,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.inp_shape = inp.shape
             ctx.requires_dgrad = inp.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
-            if (
-                ctx.fp8
-                and not ctx.keep_backward_unquantized
-                and requires_grad(inp, weights[0], biases[0])
-            ):
+            if ctx.fp8 and requires_grad(inp, weights[0], biases[0]):
                 ctx.reduce_and_update_bwd_fp8_tensors = (
                     ctx.reduce_and_update_bwd_fp8_tensors
                     or FP8GlobalStateManager.is_first_fp8_module()
