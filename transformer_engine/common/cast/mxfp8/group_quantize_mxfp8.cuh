@@ -186,7 +186,8 @@ __global__ void update_tma_descriptors(
   const bool leading_thread = (threadIdx.x == 0);
   const size_t tensor_id = blockIdx.x;
 
-  const size_t rows = get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+  const size_t rows =
+      get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
   const size_t offset_elts = offsets_ptr[tensor_id];
@@ -207,15 +208,15 @@ __global__ void update_tma_descriptors(
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_rowwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_rowwise,
-                             &g_tensor_maps_output_rowwise[tensor_id], global_data_ptr, rows,
-                             cols, sizeof(OType));
+                             &g_tensor_maps_output_rowwise[tensor_id], global_data_ptr, rows, cols,
+                             sizeof(OType));
     }
     if (colwise) {
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_colwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_colwise,
-                             &g_tensor_maps_output_colwise[tensor_id], global_data_ptr, rows,
-                             cols, sizeof(OType));
+                             &g_tensor_maps_output_colwise[tensor_id], global_data_ptr, rows, cols,
+                             sizeof(OType));
     }
   }
 }
