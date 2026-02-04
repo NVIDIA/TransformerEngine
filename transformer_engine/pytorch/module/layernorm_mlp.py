@@ -1338,7 +1338,7 @@ class _LayerNormMLP(torch.autograd.Function):
             elif (
                 _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[2] is not None
                 and use_fp8_bwd
-                ):
+            ):
                 # Fusion: gemm, bias + gelu + quantize
                 dbias_dact_quantize_func = _act_func(
                     ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
