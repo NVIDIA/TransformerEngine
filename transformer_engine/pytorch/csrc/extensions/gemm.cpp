@@ -570,4 +570,70 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   return bias;
 }
 
+py::object te_general_grouped_gemm_for_grouped_tensor(
+    py::handle A, bool transa, py::handle B, bool transb, py::object C, py::handle D,
+    at::Tensor alpha, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
+    int math_sm_count) {
+  using namespace transformer_engine::pytorch::detail;
+
+  init_extension();
+
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  at::cuda::CUDAGuard device_guard(workspace_cublas.device());
+
+  auto grouped_A = GroupedTensorFromPyTorchGroupedTensor(A);
+  auto grouped_B = GroupedTensorFromPyTorchGroupedTensor(B);
+  auto grouped_D = GroupedTensorFromPyTorchGroupedTensor(D);
+
+  std::optional<GroupedTensorWrapper> grouped_C = std::nullopt;
+  if (!C.is_none()) {
+    grouped_C = GroupedTensorFromPyTorchGroupedTensor(C);
+  }
+
+  const size_t num_tensors = grouped_A.num_tensors();
+  NVTE_CHECK(num_tensors > 0, "Grouped GEMM requires non-empty inputs.");
+  NVTE_CHECK(grouped_B.num_tensors() == num_tensors,
+             "Grouped GEMM requires A and B to have the same num_tensors.");
+  NVTE_CHECK(grouped_D.num_tensors() == num_tensors,
+             "Grouped GEMM requires D to have the same num_tensors as inputs.");
+  if (grouped_C.has_value()) {
+    NVTE_CHECK(grouped_C->num_tensors() == num_tensors,
+               "Grouped GEMM requires C to have the same num_tensors as inputs.");
+  }
+
+  NVTE_CHECK(alpha.numel() == static_cast<int64_t>(num_tensors),
+             "Grouped GEMM expects alpha to have num_tensors elements.");
+  NVTE_CHECK(beta.numel() == static_cast<int64_t>(num_tensors),
+             "Grouped GEMM expects beta to have num_tensors elements.");
+
+  auto te_alpha = makeTransformerEngineTensor(alpha);
+  auto te_beta = makeTransformerEngineTensor(beta);
+
+  auto te_workspace_setup = makeTransformerEngineTensor(
+      workspace_setup.data_ptr(), std::vector<size_t>{static_cast<size_t>(workspace_setup.numel())},
+      DType::kByte);
+  auto te_workspace_cublas = makeTransformerEngineTensor(
+      workspace_cublas.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(workspace_cublas.numel())}, DType::kByte);
+
+  std::optional<transformer_engine::GroupedMatmulConfigWrapper> config;
+  if (math_sm_count > 0) {
+    config.emplace();
+    config->set_sm_count(math_sm_count);
+  }
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb,
+                      grouped_C.has_value() ? grouped_C->data() : nullptr, grouped_D.data(),
+                      te_alpha.data(), te_beta.data(), te_workspace_setup.data(),
+                      te_workspace_cublas.data(),
+                      config.has_value() ? static_cast<NVTEGroupedMatmulConfig>(*config) : nullptr,
+                      at::cuda::getCurrentCUDAStream());
+  });
+
+  return py::reinterpret_borrow<py::object>(D);
+}
+
 }  // namespace transformer_engine::pytorch

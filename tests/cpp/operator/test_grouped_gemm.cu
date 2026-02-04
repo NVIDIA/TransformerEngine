@@ -44,8 +44,8 @@ enum class ShapeCase {
 size_t grouped_setup_workspace_size(const size_t num_tensors) {
   const size_t ptr_bytes = num_tensors * sizeof(void*);
   const size_t int_bytes = num_tensors * sizeof(int);
-  // Layout: 6 pointer arrays (A, B, C, D, alpha, beta) + 6 int arrays (a_rows, a_cols, b_rows, b_cols, d_rows, d_cols)
-  size_t size = 6 * ptr_bytes + 6 * int_bytes;
+  // Layout: 8 pointer arrays (A, B, C, D, alpha, beta, a_scale, b_scale) + 6 int arrays
+  size_t size = 8 * ptr_bytes + 6 * int_bytes;
   const size_t alignment = 256;
   size = ((size + alignment - 1) / alignment) * alignment;
   return size;
@@ -88,16 +88,16 @@ struct TestParams {
 std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
   switch (scase) {
     case ShapeCase::kAllSame:
-      return {{64, 64, 32}, {64, 64, 32}, {64, 64, 32}};
+      return {{128, 256, 384}, {128, 256, 384}, {128, 256, 384}};
     case ShapeCase::kSameFirst:
       // Same M (first dim), varying N and K
-      return {{64, 80, 32}, {64, 96, 48}, {64, 112, 64}};
+      return {{128, 256, 384}, {128, 384, 512}, {128, 512, 640}};
     case ShapeCase::kSameLast:
       // Same N (last dim), varying M and K
-      return {{64, 80, 32}, {80, 80, 48}, {96, 80, 64}};
+      return {{128, 256, 384}, {256, 256, 512}, {384, 256, 640}};
     case ShapeCase::kAllDifferent:
     default:
-      return {{64, 96, 32}, {80, 112, 48}, {96, 128, 64}};
+      return {{128, 256, 384}, {256, 384, 512}, {384, 512, 640}};
   }
 }
 
@@ -123,10 +123,11 @@ void run_grouped_gemm_case(const TestParams& params) {
 
   for (size_t i = 0; i < num_gemms; ++i) {
     const auto [M, N, K] = shapes[i];
-    const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{M, K}
-                                                      : std::vector<size_t>{K, M};
-    const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{K, N}
-                                                      : std::vector<size_t>{N, K};
+
+    const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{N, K}
+                                                      : std::vector<size_t>{K, N};
+    const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{K, M}
+                                                      : std::vector<size_t>{M, K};
     switch (params.input_case) {
       case InputCase::kFP8Current: {
         A_tensors.emplace_back(make_fp8_operand("A" + std::to_string(i), a_shape));
@@ -247,6 +248,8 @@ void run_grouped_gemm_case(const TestParams& params) {
                     nullptr,  // config (use defaults)
                     0);
 
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  // Compare results
   for (size_t i = 0; i < num_gemms; ++i) {
     Tensor grouped_split("grouped_D" + std::to_string(i),
                          std::vector<size_t>{static_cast<size_t>(std::get<0>(shapes[i])),
@@ -288,7 +291,7 @@ std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest
 
 // TestParams: {input_case, transa, transb, shape_case, use_null_c}
 const std::vector<TestParams> kTestParams = {
-    // Basic tests
+    // FP8 tests (each tensor has random mean/stddev -> different scales)
     {InputCase::kFP8Current, true, false, ShapeCase::kAllDifferent, false},
     {InputCase::kFP8Current, false, true, ShapeCase::kAllDifferent, false},
     {InputCase::kFP8Current, false, false, ShapeCase::kAllSame, false},
