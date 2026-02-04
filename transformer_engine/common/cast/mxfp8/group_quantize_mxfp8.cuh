@@ -131,18 +131,24 @@ __device__ __forceinline__ size_t get_tensor_cols_num(
 }
 
 // Copies the base tensor map to shmem, modifies the copy, stores the modified tensor map at index
-template <typename T>
 __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_tensor_map,
                                                        CUtensorMap *global_tensor_map,
                                                        const uintptr_t global_data_ptr,
                                                        const size_t global_dim_Y,
-                                                       const size_t global_dim_X) {
-  const size_t global_stride_bytes = global_dim_X * sizeof(T);
-
+                                                       const size_t global_dim_X,
+                                                       const size_t data_type_size_bytes) {
   __shared__ CUtensorMap shared_tensor_map;
   shared_tensor_map = base_tensor_map;  // Copy the base tensor map into shmem
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
+    const size_t global_stride_bytes = global_dim_X * data_type_size_bytes;
+    if (global_stride_bytes % TMA_GMEM_ALIGNMENT != 0) {
+      NVTE_DEVICE_ERROR("Shape not supported, as data stride must be 16B aligned.");
+    }
+    if (global_data_ptr % TMA_GMEM_ALIGNMENT != 0) {
+      NVTE_DEVICE_ERROR("Tensor data pointer must be 16B aligned");
+    }
+
     asm volatile(
         "{\n\t"
         ".reg.b64 tensor_map_ptr; \n\t"
@@ -180,8 +186,7 @@ __global__ void update_tma_descriptors(
   const bool leading_thread = (threadIdx.x == 0);
   const size_t tensor_id = blockIdx.x;
 
-  const size_t rows =
-      get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+  const size_t rows = get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
   const size_t offset_elts = offsets_ptr[tensor_id];
@@ -189,28 +194,28 @@ __global__ void update_tma_descriptors(
   if (leading_thread && (tensor_id < num_tensors)) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
-      modify_base_tensor_map<IType>(base_tensor_map_input, &g_tensor_maps_input[tensor_id],
-                                    global_data_ptr, rows, cols);
+      modify_base_tensor_map(base_tensor_map_input, &g_tensor_maps_input[tensor_id],
+                             global_data_ptr, rows, cols, sizeof(IType));
     }
     if (compute_dactivations) {
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(act_input_data_ptr + offset_elts);
-      modify_base_tensor_map<IType>(base_tensor_map_act_input, &g_tensor_maps_act_input[tensor_id],
-                                    global_data_ptr, rows, cols);
+      modify_base_tensor_map(base_tensor_map_act_input, &g_tensor_maps_act_input[tensor_id],
+                             global_data_ptr, rows, cols, sizeof(IType));
     }
     if (rowwise) {
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_rowwise_data_ptr + offset_elts);
-      modify_base_tensor_map<OType>(base_tensor_map_output_rowwise,
-                                    &g_tensor_maps_output_rowwise[tensor_id], global_data_ptr, rows,
-                                    cols);
+      modify_base_tensor_map(base_tensor_map_output_rowwise,
+                             &g_tensor_maps_output_rowwise[tensor_id], global_data_ptr, rows,
+                             cols, sizeof(OType));
     }
     if (colwise) {
       const uintptr_t global_data_ptr =
           reinterpret_cast<uintptr_t>(output_colwise_data_ptr + offset_elts);
-      modify_base_tensor_map<OType>(base_tensor_map_output_colwise,
-                                    &g_tensor_maps_output_colwise[tensor_id], global_data_ptr, rows,
-                                    cols);
+      modify_base_tensor_map(base_tensor_map_output_colwise,
+                             &g_tensor_maps_output_colwise[tensor_id], global_data_ptr, rows,
+                             cols, sizeof(OType));
     }
   }
 }
