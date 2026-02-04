@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 
 #include <iostream>
+#include <fstream>
 
 #include "../extensions.h"
 #include "transformer_engine/cast.h"
@@ -98,16 +99,33 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 
 
 Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type output_buf) {
-  NVTE_CHECK(input_buf.untyped_data() != nullptr,
-             "Input must be provided for inspect operation");
-  NVTE_CHECK(output_buf->untyped_data() != nullptr,
-             "Output must be provided for inspect operation");
-  NVTE_CHECK(input_buf.untyped_data() == output_buf->untyped_data(),
-             "Input and output must point to the same buffer for inspect operation");
+    NVTE_CHECK(input_buf.untyped_data() != nullptr,
+                "Input must be provided for inspect operation");
+    NVTE_CHECK(output_buf->untyped_data() != nullptr,
+                "Output must be provided for inspect operation");
+    NVTE_CHECK(input_buf.untyped_data() == output_buf->untyped_data(),
+                "Input and output must point to the same buffer for inspect operation");
 
-  printf("JTEST: Hello\n");
 
-  return ffi_with_cuda_error_check();
+    std::vector<uint8_t> input_data(input_buf.size_bytes());
+    cudaMemcpyAsync(input_data.data(), input_buf.untyped_data(), input_buf.size_bytes(),
+                        cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    int device;
+    cudaGetDevice(&device);
+
+    std::string filename = "my_tensor_gpu" + std::to_string(device) + ".bin";
+    std::ofstream file(filename, std::ios::binary);
+    if (file.is_open()) {
+        file.write(reinterpret_cast<const char*>(input_data.data()), input_data.size());
+        file.close();
+    }
+    printf("Tensor data written to %s\n", filename.c_str());
+
+    // TODO: make a metadata file with tensor shape and dtype?
+
+    return ffi_with_cuda_error_check();
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
