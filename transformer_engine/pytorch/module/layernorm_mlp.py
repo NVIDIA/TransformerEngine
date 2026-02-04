@@ -1391,16 +1391,16 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_dgrad_shape = [reduce(multiply_op, inputmat.shape[:-1]), inputmat.shape[-1]]
             if ctx.ub_overlap_rs_dgrad:
                 # Overlap DGRAD+RS
-                ub_obj_fc1_dgrad = get_ub("fc1_dgrad", use_fp8_bwd)
+                ub_obj_fc1_dgrad = get_ub("fc1_dgrad", ctx.fp8)
                 ub_type_fc1_dgrad = tex.CommOverlapType.RS
             else:
                 if ctx.ub_bulk_dgrad:
                     # Overlap ln_out all-gather with DGRAD compute
-                    ub_obj_fc1_dgrad = get_ub("fc1_dgrad", use_fp8_bwd)
+                    ub_obj_fc1_dgrad = get_ub("fc1_dgrad", ctx.fp8)
                     ub_type_fc1_dgrad = tex.CommOverlapType.AG
                 if ctx.ub_bulk_wgrad:
                     # Overlap FC1 DGRAD reduce-scatter with WGRAD compute
-                    ub_obj_fc1_wgrad = get_ub("fc1_wgrad", use_fp8_bwd)
+                    ub_obj_fc1_wgrad = get_ub("fc1_wgrad", ctx.fp8)
                     ub_type_fc1_wgrad = tex.CommOverlapType.RS
 
             # --------------------------------------------------
