@@ -5,7 +5,7 @@
 """Fusible operation for bias."""
 
 from __future__ import annotations
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 import contextlib
 import math
 from typing import Any, Optional
@@ -22,12 +22,13 @@ from ...module.base import (
     get_dummy_wgrad,
 )
 from ...quantization import FP8GlobalStateManager, Recipe
-from ...tensor import Quantizer
+from ...tensor import MXFP8Quantizer, MXFP8Tensor, Quantizer
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
     clear_tensor_data,
     devices_match,
+    round_up_to_nearest_multiple,
 )
 from .._common import is_quantized_tensor, maybe_dequantize
 from ..op import BasicOperation, OperationContext
@@ -118,7 +119,7 @@ class GroupedLinear(BasicOperation):
             weight_tensor = torch.empty(
                 self.out_features,
                 self.in_features,
-                device=device,
+                device="meta",
                 dtype=dtype,
             )
             self.register_parameter(
@@ -133,7 +134,7 @@ class GroupedLinear(BasicOperation):
             if bias:
                 bias_tensor = torch.empty(
                     self.out_features,
-                    device=device,
+                    device="meta",
                     dtype=dtype,
                 )
                 bias_tensor = torch.nn.Parameter(bias_tensor)
@@ -166,30 +167,35 @@ class GroupedLinear(BasicOperation):
         if device.type == "meta":
             device = canonicalize_device(None)
 
-        # Initialize weights
-        for group_idx in range(self.num_groups):
-            weight = getattr(self, f"weight{group_idx}")
-
-            # Allocate buffers if needed
-            if is_quantized_tensor(weight):
-                weight = torch.empty(
-                    weight.size(),
-                    dtype=weight.dtype,
-                    device=device,
-                )
-            elif not devices_match(weight.device, device):
-                weight = torch.empty_like(weight, device=device)
-
-            # Initialize values
+        # Initialize weight values
+        # Note: Allocate a single buffer in order to support grouped
+        # GEMM kernels that expect a single weight buffer.
+        packed_weights = torch.empty(
+            self.num_groups,
+            self.out_features,
+            self.in_features,
+            dtype=self.weight0.dtype,
+            device=device,
+        )
+        weights = [packed_weights[idx] for idx in range(self.num_groups)]
+        for weight in weights:
             init_context = contextlib.nullcontext()
             if self._rng_state_tracker_function is not None:
                 init_context = self._rng_state_tracker_function().fork()
             with init_context:
                 torch.nn.init.kaiming_uniform_(weight, a=math.sqrt(5))
 
-            # Quantize weight if needed
-            if self._with_quantized_weight:
-                quantizer = self.get_quantizer("forward", 2 * group_idx + 1)
+        # Quantize weights if needed
+        if self._with_quantized_weight:
+
+            # Configure quantizers
+            quantizers = [
+                self.get_quantizer("forward", 2 * idx + 1)
+                for idx in range(self.num_groups)
+            ]
+            with_rowwise_usage = True
+            with_columnwise_usage = torch.is_grad_enabled()
+            for quantizer in quantizers:
                 if quantizer is None:
                     raise RuntimeError(
                         "Tried to quantize weight with deferred initialization "
@@ -199,29 +205,123 @@ class GroupedLinear(BasicOperation):
                         "performed within autocast."
                     )
                 quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=torch.is_grad_enabled(),
+                    rowwise=with_rowwise_usage,
+                    columnwise=with_columnwise_usage,
                 )
                 quantizer.internal = False
-                with torch.no_grad():
-                    weight = quantizer(weight)
 
-            # Save updated parameters
+            # Quantize weights
+            weights = self._quantize_weights(weights, quantizers)
+
+        # Register weights
+        for group_idx, weight in enumerate(weights):
             if not isinstance(weight, torch.nn.Parameter):
                 weight = torch.nn.Parameter(weight)
             setattr(self, f"weight{group_idx}", weight)
 
         # Initialize biases if needed
         if self.bias0 is not None:
-            with torch.no_grad():
-                for group_idx in range(self.num_groups):
-                    bias = getattr(self, f"bias{group_idx}")
-                    if not devices_match(bias.device, device):
-                        bias = torch.empty_like(bias, device=device)
-                    bias.zero_()
-                    if not isinstance(bias, torch.nn.Parameter):
-                        bias = torch.nn.Parameter(bias)
-                    setattr(self, f"bias{group_idx}", bias)
+            packed_biases = torch.zeros(
+                self.num_groups,
+                self.out_features,
+                dtype=self.bias0.dtype,
+                device=device,
+            )
+            for group_idx in range(self.num_groups):
+                bias = torch.nn.Parameter(packed_biases[group_idx])
+                setattr(self, f"bias{group_idx}", bias)
+
+    def _quantize_weights(
+        self,
+        weights: Sequence[torch.Tensor],
+        quantizers: Sequence[Quantizer],
+    ) -> Sequence[torch.Tensor]:
+        """Construct quantized weight tensors."""
+
+        # Manually construct MXFP8 weights
+        if isinstance(quantizers[0], MXFP8Quantizer):
+            return self._quantize_weights_mxfp8(weights, quantizers)
+
+        # Use quantizers to construct quantized weights
+        with torch.no_grad():
+            return [
+                quantizer(weight)
+                for quantizer, weight in zip(quantizers, weights)
+            ]
+
+    def _quantize_weights_mxfp8(
+        self,
+        weights: Sequence[torch.Tensor],
+        quantizers: Sequence[Quantizer],
+    ) -> Sequence[MXFP8Tensor]:
+        """Construct MXFP8 weight tensors.
+
+        Instead of allocating separate buffers for each weight tensor,
+        this function constructs large buffers and assigns subviews to
+        each tensor. This is intended to support grouped GEMM kernels
+        that expect packed buffers.
+
+        """
+
+        # Tensor dimensions
+        num_groups = len(weights)
+        out_features, in_features = weights[0].size()
+        packed_shape = (num_groups, out_features, in_features)
+        unpacked_shape = (out_features, in_features)
+
+        # Tensor attributes
+        device = weights[0].device
+        dtype = weights[0].dtype
+        requires_grad = torch.is_grad_enabled()
+        with_rowwise_usage = quantizers[0].rowwise_usage
+        with_columnwise_usage = quantizers[0].columnwise_usage
+
+        # Construct packed buffers
+        rowwise_data = [None] * num_groups
+        rowwise_scales = [None] * num_groups
+        columnwise_data = [None] * num_groups
+        columnwise_scales = [None] * num_groups
+        if with_rowwise_usage:
+            scale_shape = (
+                num_groups,
+                round_up_to_nearest_multiple(out_features, 128),
+                round_up_to_nearest_multiple(in_features // 32, 4),
+            )
+            packed_data = torch.empty(packed_shape, dtype=torch.uint8, device=device)
+            packed_scales = torch.empty(scale_shape, dtype=torch.uint8, device=device)
+            rowwise_data = [packed_data[idx] for idx in range(num_groups)]
+            rowwise_scales = [packed_scales[idx] for idx in range(num_groups)]
+        if with_columnwise_usage:
+            scale_shape = (
+                num_groups,
+                round_up_to_nearest_multiple(out_features // 32, 4),
+                round_up_to_nearest_multiple(in_features, 128),
+            )
+            packed_data = torch.empty(packed_shape, dtype=torch.uint8, device=device)
+            packed_scales = torch.empty(scale_shape, dtype=torch.uint8, device=device)
+            columnwise_data = [packed_data[idx] for idx in range(num_groups)]
+            columnwise_scales = [packed_scales[idx] for idx in range(num_groups)]
+
+        # Construct MXFP8 tensors and cast to MXFP8
+        out = []
+        with torch.no_grad():
+            for group_idx in range(num_groups):
+                weight = MXFP8Tensor(
+                    shape=unpacked_shape,
+                    dtype=dtype,
+                    fp8_dtype=dtype,
+                    rowwise_data=rowwise_data[group_idx],
+                    rowwise_scale_inv=rowwise_scales[group_idx],
+                    columnwise_data=columnwise_data[group_idx],
+                    columnwise_scale_inv=columnwise_scales[group_idx],
+                    quantizer=quantizers[group_idx],
+                    requires_grad=requires_grad,
+                    with_gemm_swizzled_scales=False,
+                )
+                weight.copy_(weights[group_idx])
+                out.append(weight)
+
+        return out
 
     def pre_first_fuser_forward(self) -> None:
         super().pre_first_fuser_forward()

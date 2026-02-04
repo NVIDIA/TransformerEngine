@@ -165,23 +165,17 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Extract post-scales from extra input
         scales = basic_op_extra_inputs[1][0]
 
-        # Extract params
-        fc1_weights = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
-        fc2_weights = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
-
-        # Convert weight dtype if needed
-        fc1_ws = []
-        fc2_ws = []
-        for w, quantizer in zip(fc1_weights, fc1_weight_quantizers):
-            if not is_quantized_tensor(w):
+        # Extract params and quantize to MXFP8 if needed
+        fc1_ws = [getattr(fc1_op, f"weight{idx}") for idx in range(num_groups)]
+        fc2_ws = [getattr(fc2_op, f"weight{idx}") for idx in range(num_groups)]
+        if not is_quantized_tensor(fc1_ws[0]):
+            for quantizer in fc1_weight_quantizers:
                 quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                w = quantizer(w)
-            fc1_ws.append(w)
-        for w, quantizer in zip(fc2_weights, fc2_weight_quantizers):
-            if not is_quantized_tensor(w):
+            fc1_ws = fc1_op._quantize_weights_mxfp8(fc1_ws, fc1_weight_quantizers)
+        if not is_quantized_tensor(fc2_ws[0]):
+            for quantizer in fc2_weight_quantizers:
                 quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
-                w = quantizer(w)
-            fc2_ws.append(w)
+            fc2_ws = fc2_op._quantize_weights_mxfp8(fc2_ws, fc2_weight_quantizers)
 
         # Split input tensor and convert dtypes if needed
         fc1_x = maybe_dequantize(input_, dtype)
@@ -224,7 +218,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Data logical shape: (n, k, num_groups)
         # Scale logical shape: (32 (block row), 4 (block row), n/128,
         #   4 (block col), k/128, num_groups)
-        fc1_w_data = noop_cat([w._rowwise_data for w in fc1_weights])
+        fc1_w_data = noop_cat([w._rowwise_data for w in fc1_ws])
         fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
         fc1_w_data = fc1_w_data.view(
             num_groups, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1]
@@ -232,7 +226,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_w_data = fc1_w_data.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_shape[1])
         fc1_w_data = fc1_w_data.permute(1, 2, 0)
-        fc1_w_scales = noop_cat([w._rowwise_scale_inv for w in fc1_weights])
+        fc1_w_scales = noop_cat([w._rowwise_scale_inv for w in fc1_ws])
         fc1_w_scales = fc1_w_scales.view(dtype=torch.float8_e8m0fnu)
         fc1_w_scales = fc1_w_scales.view(
             num_groups, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1] // 32
