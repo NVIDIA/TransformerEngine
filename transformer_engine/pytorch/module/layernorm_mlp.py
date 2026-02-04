@@ -354,10 +354,8 @@ class _LayerNormMLP(torch.autograd.Function):
         # bwd needs fc1 input when grad is enabled, fc1 needs grad, and either
         # 1) no checkpointing
         # or 2) doing the recomputation with checkpointing
-        backwards_needs_fc1_input = (
-            fc1_weight.requires_grad
-            and ((is_grad_enabled and not checkpoint) or is_recomputation)
-            and not keep_backward_unquantized
+        backwards_needs_fc1_input = fc1_weight.requires_grad and (
+            (is_grad_enabled and not checkpoint) or is_recomputation
         )
 
         device = inp.device
