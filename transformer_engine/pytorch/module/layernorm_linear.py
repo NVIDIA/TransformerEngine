@@ -812,11 +812,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
-                if (
-                    use_fp8_bwd
-                    and ctx.ub_overlap_ag
-                    and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer)
-                ):
+                if ctx.ub_overlap_ag and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer):
                     # UB does not support pipelined overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
@@ -828,7 +824,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     dgrad_send_stream, dgrad_recv_stream = ub_obj_dgrad.get_communication_stream()
 
                     # This object is separate from the ub_obj_wgrad object which is passed to the GEMM
-                    ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad", use_fp8_bwd)
+                    ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad", ctx.fp8)
 
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
