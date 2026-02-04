@@ -11,7 +11,7 @@ from jax import ffi
 
 from .cpp_extensions.base import BasePrimitive, register_primitive
 
-__all__ = ["inspect_array"]
+__all__ = ["inspect_array", "load_array_dump"]
 
 
 class InspectPrimitive(BasePrimitive):
@@ -109,3 +109,20 @@ def inspect_array(x: jnp.ndarray, name: str) -> jnp.ndarray:
     """
     # TODO: Handle the name of the tensor in the primitive and output files
     return _inspect(x)
+
+
+def load_array_dump(filename: str, shape: tuple, dtype: jnp.dtype) -> jnp.ndarray:
+    """Utility function to load a JAX array from a dumped binary file.
+
+    Args:
+        filename (str): The path to the binary file containing the array data.
+        shape (tuple): The shape of the array to be loaded.
+        dtype (jnp.dtype): The data type of the array to be loaded.
+
+    Returns:
+        jnp.ndarray: The loaded JAX array.
+    """
+    with open(filename, "rb") as f:
+        data = f.read()
+    array = jnp.frombuffer(data, dtype=dtype).reshape(shape)
+    return array

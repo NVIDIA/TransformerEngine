@@ -121,7 +121,15 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type ou
         file.write(reinterpret_cast<const char*>(input_data.data()), input_data.size());
         file.close();
     }
-    printf("Tensor data written to %s\n", filename.c_str());
+    printf("Tensor data written to %s (shape: [", filename.c_str());
+    for (size_t i = 0; i < input_buf.dimensions().size(); ++i) {
+        printf("%ld", static_cast<long>(input_buf.dimensions()[i]));
+        if (i < input_buf.dimensions().size() - 1) {
+            printf(", ");
+        }
+    }
+    printf("], dtype: %d)\n", static_cast<int>(input_buf.element_type()));
+
 
     // TODO: make a metadata file with tensor shape and dtype?
 
