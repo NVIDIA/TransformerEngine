@@ -1026,7 +1026,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
             keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
             use_fp8_bwd = ctx.fp8 and not keep_backward_unquantized
-            fp8_recipe_bwd = ctx.fp8_recipe if use_fp8_bwd else None
             if keep_backward_unquantized:
                 # Disable Userbuffers communication for backward pass when keep_backward_unquantized is True
                 ctx.ub_overlap_ag = False
@@ -1252,7 +1251,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # Whether to set grad arg in general_gemm
                 grad_arg = True
-                if use_fp8_bwd and fp8_recipe_bwd.float8_block_scaling():
+                if use_fp8_bwd and ctx.fp8_recipe.float8_block_scaling():
                     grad_arg = False
 
                 # Arguments to include in wgrad GEMM closure
@@ -1302,7 +1301,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     if fc2_bias_grad is None:
                         if (
                             use_fp8_bwd
-                            and fp8_recipe_bwd.float8_block_scaling()
+                            and ctx.fp8_recipe.float8_block_scaling()
                             and fc2_bias is not None
                         ):
                             # BGRAD not fused with GEMM for float8 blockwise gemm.
@@ -1336,9 +1335,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 dact = dact_func(fc2_dgrad, fc1_out.to(ctx.activation_dtype), None, **act_params)
                 fc1_bias_grad = dact.sum(dim=0)
                 dact = ctx.fc1_grad_output_quantizer(dact)
-            elif _act_func(ctx.activation, fp8_recipe_bwd)[2] is not None and use_fp8_bwd:
+            elif (
+                _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[2] is not None
+                and use_fp8_bwd
+                ):
                 # Fusion: gemm, bias + gelu + quantize
-                dbias_dact_quantize_func = _act_func(ctx.activation, fp8_recipe_bwd)[2]
+                dbias_dact_quantize_func = _act_func(
+                    ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
+                )[2]
                 fc1_bias_grad, dact = dbias_dact_quantize_func(
                     fc2_dgrad,
                     fc1_out.to(ctx.activation_dtype),
@@ -1348,7 +1352,9 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 # Fusion: gemm + gelu,
                 if not fc2_dgrad_gemm_gelu_fusion:
-                    activation_func_bwd = _act_func(ctx.activation, fp8_recipe_bwd)[1]
+                    activation_func_bwd = _act_func(
+                        ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
+                    )[1]
                     dact = activation_func_bwd(
                         fc2_dgrad, fc1_out.to(ctx.activation_dtype), None, **act_params
                     )  # activation in high precision
@@ -1357,7 +1363,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     # TODO float8 blockwise current scaling (as well as custom quantizers) has no bgrad fusion for now
                     if (
                         isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer)
-                        or fp8_recipe_bwd.custom()
+                        or ctx.fp8_recipe.custom()
                     ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
                         dact = ctx.fc1_grad_output_quantizer(dact)
