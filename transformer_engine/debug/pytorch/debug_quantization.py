@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -36,7 +36,7 @@ _tensor_to_gemm_names_map = {
 }
 
 API_CALL_MODIFY = "modify_tensor()"
-STANDARD_FP8_QUANTIZE = "FP8 Quantize"
+STANDARD_QUANTIZE = "Quantize"
 HIGH_PRECISION = "High Precision"
 
 
@@ -62,11 +62,16 @@ class DebugQuantizer(Quantizer):
         self.tp_group = tp_group  # used in inspect_tensor calls
         self.iteration = TEDebugState.get_iteration()
 
-        # .internal = True is slightly faster, but results
-        # in errors when caching the weights.
-        # Setting .internal = False is safer.
+        # Configure parent quantizer
         if parent_quantizer is not None:
+            # .internal = True is slightly faster, but results
+            # in errors when caching the weights.
+            # Setting .internal = False is safer.
             parent_quantizer.internal = False
+
+            # .optimize_for_gemm = True is not supported because debug
+            # quantizers perform non-GEMM operations.
+            parent_quantizer.optimize_for_gemm = False
 
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 
@@ -83,7 +88,7 @@ class DebugQuantizer(Quantizer):
         # inspect_tensor*_enabled are bool fields,
         # indicating whether some feature will need to run inspect_tensor_* calls.
         #
-        # *_tensor_plan are one of [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE, HIGH_PRECISION]
+        # *_tensor_plan are one of [API_CALL_MODIFY, STANDARD_QUANTIZE, HIGH_PRECISION]
         # determining what will happen when the quantizer is used for that tensor.
         self.output_tensor = tensor_name in ["output", "wgrad", "dgrad"]
         if self.output_tensor:
@@ -165,7 +170,7 @@ class DebugQuantizer(Quantizer):
     def get_tensors_plan(self):
         """
         Returns (rowwise_plan, columnwise_plan). Each element of the tuple is one of
-        API_CALL_MODIFY, STANDARD_FP8_QUANTIZE, or HIGH_PRECISION, indicating the behavior
+        API_CALL_MODIFY, STANDARD_QUANTIZE, or HIGH_PRECISION, indicating the behavior
         of this quantizer with respect to these tensors.
         """
         import nvdlfw_inspect.api as debug_api
@@ -186,16 +191,16 @@ class DebugQuantizer(Quantizer):
             rowwise_plan = API_CALL_MODIFY
         else:
             if self.parent_quantizer is not None:
-                fp8_quantize = self.process_enabled_api_call(
-                    debug_api.transformer_engine.fp8_gemm_enabled(
+                quantize_enabled = self.process_enabled_api_call(
+                    debug_api.transformer_engine.fp8_gemm_enabled(  # API name kept for compatibility
                         layer_name=self.layer_name,
                         gemm=self.rowwise_gemm_name,
                         iteration=self.iteration,
                     )
                 )
 
-                if fp8_quantize:
-                    rowwise_plan = STANDARD_FP8_QUANTIZE
+                if quantize_enabled:
+                    rowwise_plan = STANDARD_QUANTIZE
         if rowwise_plan is None:
             rowwise_plan = HIGH_PRECISION
 
@@ -213,16 +218,16 @@ class DebugQuantizer(Quantizer):
                 columnwise_plan = API_CALL_MODIFY
             else:
                 if self.parent_quantizer is not None:
-                    fp8_quantize = self.process_enabled_api_call(
-                        debug_api.transformer_engine.fp8_gemm_enabled(
+                    quantize_enabled = self.process_enabled_api_call(
+                        debug_api.transformer_engine.fp8_gemm_enabled(  # API name kept for compatibility
                             layer_name=self.layer_name,
                             gemm=self.columnwise_gemm_name,
                             iteration=self.iteration,
                         )
                     )
 
-                    if fp8_quantize:
-                        columnwise_plan = STANDARD_FP8_QUANTIZE
+                    if quantize_enabled:
+                        columnwise_plan = STANDARD_QUANTIZE
         if columnwise_plan is None:
             columnwise_plan = HIGH_PRECISION
 
@@ -273,7 +278,7 @@ class DebugQuantizer(Quantizer):
         del args["quantizer"]
 
         if (
-            self.rowwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE]
+            self.rowwise_tensor_plan in [API_CALL_MODIFY, STANDARD_QUANTIZE]
             and self.inspect_tensor_postquantize_enabled_rowwise
         ):
             args["tensor"] = rowwise_gemm_tensor
@@ -281,7 +286,7 @@ class DebugQuantizer(Quantizer):
             debug_api.transformer_engine.inspect_tensor_postquantize(**args)
 
         if (
-            self.columnwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE]
+            self.columnwise_tensor_plan in [API_CALL_MODIFY, STANDARD_QUANTIZE]
             and self.inspect_tensor_postquantize_enabled_columnwise
         ):
             args["tensor"] = columnwise_gemm_tensor
@@ -312,14 +317,14 @@ class DebugQuantizer(Quantizer):
                 self.parent_quantizer.set_usage(rowwise=True)
 
         rowwise_gemm_tensor, columnwise_gemm_tensor = None, None
-        if STANDARD_FP8_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
+        if STANDARD_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
             quantized_tensor = self.parent_quantizer(tensor)
-            # if both rowwise_tensor_plan and columnwise_tensor_plan need to be in fp8,
+            # if both rowwise_tensor_plan and columnwise_tensor_plan need to be quantized,
             # one tensor with columnwise=True and rowwise=True is computed
             # and both rowwise_tensor_plan and columnwise_tensor_plan point to it.
-            if self.rowwise_tensor_plan == STANDARD_FP8_QUANTIZE:
+            if self.rowwise_tensor_plan == STANDARD_QUANTIZE:
                 rowwise_gemm_tensor = quantized_tensor
-            if self.columnwise_tensor_plan == STANDARD_FP8_QUANTIZE:
+            if self.columnwise_tensor_plan == STANDARD_QUANTIZE:
                 columnwise_gemm_tensor = quantized_tensor
 
         # 2. modify_tensor() is called, if it is used.
@@ -374,7 +379,7 @@ class DebugQuantizer(Quantizer):
         """This call is invoked after the gemm to inspect and modify the output tensor."""
         import nvdlfw_inspect.api as debug_api
 
-        assert self.parent_quantizer is None, "FP8 output is not supported for debug=True."
+        assert self.parent_quantizer is None, "Quantized output is not supported for debug=True."
         assert self.output_tensor
         tensor_to_gemm = {"output": "fprop", "wgrad": "wgrad", "dgrad": "dgrad"}
         if self.rowwise_tensor_plan == API_CALL_MODIFY:
@@ -415,9 +420,9 @@ class DebugQuantizer(Quantizer):
         ):
             return True
         if self.parent_quantizer is not None:
-            if self.rowwise_tensor_plan != STANDARD_FP8_QUANTIZE:
+            if self.rowwise_tensor_plan != STANDARD_QUANTIZE:
                 return True
-            if self.columnwise_tensor_plan != STANDARD_FP8_QUANTIZE:
+            if self.columnwise_tensor_plan != STANDARD_QUANTIZE:
                 return True
         return False
 
@@ -441,7 +446,7 @@ class DebugQuantizer(Quantizer):
         if self.parent_quantizer is not None:
             if (
                 dst.rowwise_gemm_tensor is not None
-                and self.rowwise_tensor_plan == STANDARD_FP8_QUANTIZE
+                and self.rowwise_tensor_plan == STANDARD_QUANTIZE
             ):
                 if hasattr(dst.rowwise_gemm_tensor, "quantize_"):
                     dst.rowwise_gemm_tensor.quantize_(src, noop_flag=None)
@@ -450,7 +455,7 @@ class DebugQuantizer(Quantizer):
                 updated_rowwise_gemm = True
             if (
                 dst.columnwise_gemm_tensor is not None
-                and self.columnwise_tensor_plan == STANDARD_FP8_QUANTIZE
+                and self.columnwise_tensor_plan == STANDARD_QUANTIZE
                 and not updated_rowwise_gemm
             ):
                 if hasattr(dst.columnwise_gemm_tensor, "quantize_"):
@@ -535,14 +540,12 @@ class DebugQuantizer(Quantizer):
         """
         Updates the usage of the parent quantizer.
         """
-        rowwise_gemm_quantize = (
-            self.rowwise_usage and self.rowwise_tensor_plan == STANDARD_FP8_QUANTIZE
-        )
+        rowwise_gemm_quantize = self.rowwise_usage and self.rowwise_tensor_plan == STANDARD_QUANTIZE
         columnwise_gemm_quantize = (
-            self.columnwise_usage and self.columnwise_tensor_plan == STANDARD_FP8_QUANTIZE
+            self.columnwise_usage and self.columnwise_tensor_plan == STANDARD_QUANTIZE
         )
 
-        if STANDARD_FP8_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
+        if STANDARD_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
             self.parent_quantizer.set_usage(
                 rowwise=rowwise_gemm_quantize,
                 columnwise=columnwise_gemm_quantize,

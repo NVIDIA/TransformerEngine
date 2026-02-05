@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -208,13 +208,14 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     window_size_right   Sliding window size (the right half).
  *  \param[in]     return_max_logit    Whether to produce Max and Sum_Exp, or Stats.
  *  \param[in]     cuda_graph          Whether cuda graph capture is enabled or not.
+ *  \param[in]     deterministic       Whether determinism is required or not.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right, bool return_max_logit, bool cuda_graph);
+    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic);
 
 /*! \brief Compute dot product attention with packed QKV input.
  *
@@ -269,22 +270,21 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     softmax_type             Attention softmax type.
  *  \param[in]     window_size_left         Sliding window size (the left half).
  *  \param[in]     window_size_right        Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal    Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
 [[deprecated(
     "nvte_fused_attn_fwd_qkvpacked() is deprecated. Please use nvte_fused_attn_fwd() with separate "
     "Q, K, V tensors instead.")]]
-void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
-                                   const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
-                                   NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
-                                   const NVTETensor cu_seqlens_padded, const NVTETensor rng_state,
-                                   size_t max_seqlen, bool is_training, bool return_max_logit,
-                                   bool cuda_graph, float attn_scale, float dropout,
-                                   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                                   NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                                   int64_t window_size_left, int64_t window_size_right,
-                                   NVTETensor workspace, cudaStream_t stream);
+void nvte_fused_attn_fwd_qkvpacked(
+    const NVTETensor QKV, const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
+    NVTETensor O, NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
+    const NVTETensor cu_seqlens_padded, const NVTETensor rng_state, size_t max_seqlen,
+    bool is_training, bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
@@ -332,6 +332,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
  *  \param[in]     softmax_type             Attention softmax type.
  *  \param[in]     window_size_left         Sliding window size (the left half).
  *  \param[in]     window_size_right        Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal    Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     deterministic            Whether to execute with deterministic behaviours.
  *  \param[in]     cuda_graph               Whether cuda graph capture is enabled or not.
  *  \param[in]     workspace                Workspace tensor.
@@ -346,8 +347,8 @@ void nvte_fused_attn_bwd_qkvpacked(
     NVTETensor dSoftmaxOffset, const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded,
     size_t max_seqlen, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    int64_t window_size_left, int64_t window_size_right, bool deterministic, bool cuda_graph,
-    NVTETensor workspace, cudaStream_t stream);
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    bool deterministic, bool cuda_graph, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute dot product attention with packed KV input.
  *
@@ -409,7 +410,7 @@ void nvte_fused_attn_bwd_qkvpacked(
  *  \param[in]     softmax_type              Attention softmax type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
- *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
@@ -425,7 +426,8 @@ void nvte_fused_attn_fwd_kvpacked(
     size_t max_seqlen_kv, bool is_training, bool return_max_logit, bool cuda_graph,
     float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, NVTETensor workspace, cudaStream_t stream);
+    int64_t window_size_right, bool bottom_right_diagonal, NVTETensor workspace,
+    cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed KV input.
  *
@@ -479,6 +481,7 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[in]     softmax_type              Attention softmax type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
  *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     workspace                 Workspace tensor.
@@ -495,8 +498,8 @@ void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q, size_t max_seqlen_kv,
     float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, bool deterministic, bool cuda_graph, NVTETensor workspace,
-    cudaStream_t stream);
+    int64_t window_size_right, bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
+    NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute dot product attention with separate Q, K and V.
  *
@@ -560,19 +563,23 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     softmax_type              Attention softmax type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd(
-    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
-    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
-    const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
-    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
-    bool cuda_graph, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    int64_t window_size_left, int64_t window_size_right, NVTETensor workspace, cudaStream_t stream);
+void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
+                         const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
+                         NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
+                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                         const NVTETensor cu_seqlens_q_padded,
+                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
+                         const NVTETensor page_table_v, const NVTETensor rng_state,
+                         size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
+                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
+                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+                         int64_t window_size_left, int64_t window_size_right,
+                         bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -629,6 +636,7 @@ void nvte_fused_attn_fwd(
  *  \param[in]     softmax_type              Attention softmax type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
  *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     workspace                 Workspace tensor.
@@ -644,8 +652,9 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          size_t max_seqlen_kv, float attn_scale, float dropout,
                          NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                         int64_t window_size_left, int64_t window_size_right, bool deterministic,
-                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream);
+                         int64_t window_size_left, int64_t window_size_right,
+                         bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
+                         NVTETensor workspace, cudaStream_t stream);
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
@@ -673,7 +682,7 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
  *  \param[in]     len                      batch_size x sequence_length.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
+uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlens, NVTETensor workspace, size_t len,
                                        cudaStream_t stream);
 
 /*!  \brief Set the seed and offset for RNG state.
@@ -830,8 +839,7 @@ void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETens
  *  \param[in]     tensor           Input tensor.
  *  \param[in]     cu_seqlens       Cumulative sequence lengths, [batch_size + 1].
  *  \param[out]    new_tensor       Output tensor.
- *  \param[in]     b                Batch size.
- *  \param[in]     max_seq_len      Maximum sequence length.
+ *  \param[in]     t                Packed sequence length.
  *  \param[in]     stream           CUDA stream used for this operation.
  */
 void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,

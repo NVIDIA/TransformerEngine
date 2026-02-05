@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -15,13 +15,13 @@ Transformer Engine provides a set of precision debug tools which allow you to ea
 - log the statistics for each of the tensors in every matrix multiply (GEMM) operation,
 - run selected GEMMs in higher precision,
 - run current scaling - with one scaling factor per tensor - for particular GEMMs,
-- test new precisions and integrate them with FP8 training,
+- test new precisions and integrate them with quantized training (FP8, NVFP4, etc.),
 - ... and many more.
 
 There are 4 things one needs to do to use Transformer Engine debug features:
 
 1. Create a configuration YAML file to configure the desired features.
-2. Import, initialize, and install the `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ tool.
+2. Import and initialize the `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ tool, which is installed as a dependency of Transformer Engine.
 3. One can pass ``name="..."`` when creating TE layers to easier identify layer names. If this is not provided, names will be inferred automatically.
 4. Invoke ``debug_api.step()`` at the end of one forward-backward pass.
 

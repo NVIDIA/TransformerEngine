@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -30,6 +30,7 @@ add_executable(test_operator
                test_causal_softmax.cu
                test_swizzle.cu
                test_swap_first_dims.cu
+               test_grouped_gemm.cu
                ../test_common.cu)
 
 # Find required packages

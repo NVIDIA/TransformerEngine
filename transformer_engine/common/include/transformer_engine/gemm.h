@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -11,6 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_GEMM_H_
 #define TRANSFORMER_ENGINE_GEMM_H_
 
+#include <stdint.h>
+
 #include "transformer_engine.h"
 
 #ifdef __cplusplus
@@ -19,6 +21,9 @@ extern "C" {
 
 /*! \brief Configuration for matrix multiplication. */
 typedef void *NVTEMatmulConfig;
+
+/*! \brief Configuration for grouped matrix multiplication. */
+typedef void *NVTEGroupedMatmulConfig;
 
 /*! \enum NVTEMatmulConfigAttribute
  * \brief Type of option for matrix multiplication.
@@ -52,12 +57,72 @@ enum NVTEMatmulConfigAttribute {
   kNVTEMatmulConfigNumAttributes
 };
 
+/*! \enum NVTEGroupedMatmulConfigAttribute
+ * \brief Type of option for grouped matrix multiplication.
+ */
+enum NVTEGroupedMatmulConfigAttribute {
+  /*! Average M dimension hint
+   *
+   * Optional hint for average M dimension across all matrices in the group.
+   * Used by cuBLASLt for algorithm selection heuristics. If not set,
+   * computed automatically from D's logical shape.
+   */
+  kNVTEGroupedMatmulConfigAvgM = 0,
+  /*! Average N dimension hint
+   *
+   * Optional hint for average N dimension across all matrices in the group.
+   * Used by cuBLASLt for algorithm selection heuristics. If not set,
+   * computed automatically from D's logical shape.
+   */
+  kNVTEGroupedMatmulConfigAvgN = 1,
+  /*! Average K (reduction) dimension hint
+   *
+   * Optional hint for average K dimension across all matrices in the group.
+   * Used by cuBLASLt for algorithm selection heuristics. If not set,
+   * computed automatically from A's logical shape.
+   */
+  kNVTEGroupedMatmulConfigAvgK = 2,
+  /*! Number of streaming multiprocessors to use in GEMM kernel. */
+  kNVTEGroupedMatmulConfigSMCount = 3,
+  kNVTEGroupedMatmulConfigNumAttributes
+};
+
 /*! \brief Create a matrix multiplication configuration. */
 NVTEMatmulConfig nvte_create_matmul_config();
 
 /*! \brief Query an option in matrix multiplication configuration.
  *
- *  \param[in] config Matrix multiplication configuration.
+ *  \param[in]  config        Matrix multiplication configuration.
+ *  \param[in]  attr          Option type.
+ *  \param[out] buf           Memory address to write option value to.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
+ */
+void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
+                                      void *buf, size_t size_in_bytes, size_t *size_written);
+
+/*! \brief Set an option in matrix multiplication configuration.
+ *
+ *  \param[in/out] config        Matrix multiplication configuration.
+ *  \param[in]     attr          Option type.
+ *  \param[in]     buf           Memory address to read option value from.
+ *  \param[in]     size_in_bytes Size of buf.
+ */
+void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
+                                      const void *buf, size_t size_in_bytes);
+
+/*! \brief Destroy a matrix multiplication configuration. */
+void nvte_destroy_matmul_config(NVTEMatmulConfig config);
+
+/*! \brief Create a grouped matrix multiplication configuration. */
+NVTEGroupedMatmulConfig nvte_create_grouped_matmul_config();
+
+/*! \brief Query an option in grouped matrix multiplication configuration.
+ *
+ *  \param[in] config Grouped matrix multiplication configuration.
  *  \param[in] attr Option type.
  *  \param[out] buf Memory address to write option value. Ignored if
  *                  NULL.
@@ -66,21 +131,23 @@ NVTEMatmulConfig nvte_create_matmul_config();
  *                           buf. If buf is NULL, then the number of
  *                           bytes that would have been written.
  */
-void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
-                                      void *buf, size_t size_in_bytes, size_t *size_written);
+void nvte_get_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
+                                              NVTEGroupedMatmulConfigAttribute attr, void *buf,
+                                              size_t size_in_bytes, size_t *size_written);
 
-/*! \brief Set an option in matrix multiplication configuration.
+/*! \brief Set an option in grouped matrix multiplication configuration.
  *
- *  \param[in] config Matrix multiplication configuration.
+ *  \param[in] config Grouped matrix multiplication configuration.
  *  \param[in] attr Option type.
  *  \param[out] buf Memory address to read option value.
  *  \param[in] size_in_bytes Size of buf.
  */
-void nvte_set_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigAttribute attr,
-                                      const void *buf, size_t size_in_bytes);
+void nvte_set_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
+                                              NVTEGroupedMatmulConfigAttribute attr,
+                                              const void *buf, size_t size_in_bytes);
 
-/*! \brief Destroy a matrix multiplication configuration. */
-void nvte_destroy_matmul_config(NVTEMatmulConfig config);
+/*! \brief Destroy a grouped matrix multiplication configuration. */
+void nvte_destroy_grouped_matmul_config(NVTEGroupedMatmulConfig config);
 
 /*! \brief Compute matrix multiplication of 2 matrices, potentially fused with other operations (deprecated).
  *
@@ -228,6 +295,46 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             bool transa, bool transb, bool grad, NVTETensor *workspace,
                             bool accumulate, bool use_split_accumulator, int math_sm_count,
                             cudaStream_t stream);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Grouped matrix multiplication: D = alpha * op(A) @ op(B) + beta * C
+ *
+ * \note Requires cuBLAS 13.2+ (CUDA 13.1+) and Blackwell (SM100) or newer GPU architecture.
+ *       Will error at runtime if compiled with an older cuBLAS version or run on
+ *       a pre-Blackwell GPU.
+ *
+ * Performs batched GEMM on a collection of matrices with potentially different shapes.
+ * All tensors in the group must have compatible dimensions for matrix multiplication.
+ * Uses NVTEGroupedTensor to efficiently handle collections of tensors with contiguous
+ * memory layout and shape metadata.
+ *
+ *  \param[in]  A                Input grouped tensor A.
+ *  \param[in]  transa           Whether to transpose A matrices.
+ *  \param[in]  B                Input grouped tensor B.
+ *  \param[in]  transb           Whether to transpose B matrices.
+ *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
+ *  \param[out] D                Output grouped tensor D.
+ *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
+ *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
+ *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
+ *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
+ *  \param[in]  config           Additional configuration (can be NULL for defaults).
+ *  \param[in]  stream           CUDA stream for the operation.
+ *
+ * Requirements:
+ * - cuBLAS 13.2+ (CUDA 13.1+)
+ * - Blackwell (SM100) or newer GPU architecture
+ * - A, B, C (if provided), D must have the same num_tensors
+ * - For each i: D[i] = alpha[i] * op(A[i]) @ op(B[i]) + beta[i] * C[i]
+ * - Shape compatibility: if transa=false, transb=false:
+ *   - A[i]: (M[i], K[i]), B[i]: (K[i], N[i]), D[i]: (M[i], N[i])
+ */
+void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
+                       const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
+                       const NVTETensor beta, NVTETensor workspace_setup,
+                       NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
+                       cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus
@@ -255,9 +362,11 @@ class MatmulConfigWrapper {
   MatmulConfigWrapper(const MatmulConfigWrapper &) = delete;
   MatmulConfigWrapper &operator=(const MatmulConfigWrapper &) = delete;
 
+  /*! \brief Move constructor. */
   MatmulConfigWrapper(MatmulConfigWrapper &&other) : config_{other.config_} {
     other.config_ = nullptr;
   }
+  /*! \brief Move-assignment operator. */
   MatmulConfigWrapper &operator=(MatmulConfigWrapper &&other) {
     if (config_ != nullptr) {
       nvte_destroy_matmul_config(config_);
@@ -294,14 +403,15 @@ class MatmulConfigWrapper {
 
   /*! \brief Set whether to compute GELU in GEMM epilogue. */
   void set_with_gelu_epilogue(bool with_gelu_epilogue) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithGELUEpilogue,
-                                     &with_gelu_epilogue, sizeof(bool));
+    const auto val = static_cast<uint8_t>(with_gelu_epilogue);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithGELUEpilogue, &val, sizeof(val));
   }
 
   /*! \brief Set whether to compute GELU backward in GEMM epilogue. */
   void set_with_dgelu_epilogue(bool with_dgelu_epilogue) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithDGELUEpilogue,
-                                     &with_dgelu_epilogue, sizeof(bool));
+    const auto val = static_cast<uint8_t>(with_dgelu_epilogue);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigWithDGELUEpilogue, &val,
+                                     sizeof(val));
   }
 
   /*! \brief Set auxilliary tensor for GEMM epilogue. */
@@ -312,18 +422,84 @@ class MatmulConfigWrapper {
 
   /*! \brief Set whether to use split accumulator for FP8 GEMM. */
   void set_use_split_accumulator(bool use_split_accumulator) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigUseSplitAccumulator,
-                                     &use_split_accumulator, sizeof(bool));
+    const auto val = static_cast<uint8_t>(use_split_accumulator);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigUseSplitAccumulator, &val,
+                                     sizeof(val));
   }
 
   /*! \brief Set number of streaming multiprocessors to use in GEMM kernel. */
   void set_sm_count(int sm_count) {
-    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigSMCount, &sm_count, sizeof(int));
+    const auto val = static_cast<int32_t>(sm_count);
+    nvte_set_matmul_config_attribute(config_, kNVTEMatmulConfigSMCount, &val, sizeof(val));
   }
 
  private:
   /*! \brief Wrapped NVTEMatmulConfig. */
   NVTEMatmulConfig config_ = nullptr;
+};
+
+/*! \struct GroupedMatmulConfigWrapper
+ *  \brief C++ wrapper for NVTEGroupedMatmulConfig.
+ */
+class GroupedMatmulConfigWrapper {
+ public:
+  GroupedMatmulConfigWrapper() : config_{nvte_create_grouped_matmul_config()} {}
+
+  GroupedMatmulConfigWrapper(const GroupedMatmulConfigWrapper &) = delete;
+  GroupedMatmulConfigWrapper &operator=(const GroupedMatmulConfigWrapper &) = delete;
+
+  GroupedMatmulConfigWrapper(GroupedMatmulConfigWrapper &&other) : config_{other.config_} {
+    other.config_ = nullptr;
+  }
+  GroupedMatmulConfigWrapper &operator=(GroupedMatmulConfigWrapper &&other) {
+    if (config_ != nullptr) {
+      nvte_destroy_grouped_matmul_config(config_);
+    }
+    config_ = other.config_;
+    other.config_ = nullptr;
+    return *this;
+  }
+
+  ~GroupedMatmulConfigWrapper() {
+    if (config_ != nullptr) {
+      nvte_destroy_grouped_matmul_config(config_);
+      config_ = nullptr;
+    }
+  }
+
+  /*! \brief Get the underlying NVTEGroupedMatmulConfig.
+   *
+   *  \return NVTEGroupedMatmulConfig held by this GroupedMatmulConfigWrapper.
+   */
+  operator NVTEGroupedMatmulConfig() const noexcept { return config_; }
+
+  /*! \brief Set average M dimension hint for algorithm selection. */
+  void set_avg_m(int64_t avg_m) {
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigAvgM, &avg_m,
+                                             sizeof(int64_t));
+  }
+
+  /*! \brief Set average N dimension hint for algorithm selection. */
+  void set_avg_n(int64_t avg_n) {
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigAvgN, &avg_n,
+                                             sizeof(int64_t));
+  }
+
+  /*! \brief Set average K dimension hint for algorithm selection. */
+  void set_avg_k(int64_t avg_k) {
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigAvgK, &avg_k,
+                                             sizeof(int64_t));
+  }
+
+  /*! \brief Set number of streaming multiprocessors to use. */
+  void set_sm_count(int sm_count) {
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigSMCount, &sm_count,
+                                             sizeof(int));
+  }
+
+ private:
+  /*! \brief Wrapped NVTEGroupedMatmulConfig. */
+  NVTEGroupedMatmulConfig config_ = nullptr;
 };
 
 }  // namespace transformer_engine

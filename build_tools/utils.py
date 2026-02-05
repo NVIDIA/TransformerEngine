@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -228,9 +228,10 @@ def nvcc_path() -> Tuple[str, str]:
 def get_cuda_include_dirs() -> Tuple[str, str]:
     """Returns the CUDA header directory."""
 
+    force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
     # If cuda is installed via toolkit, all necessary headers
     # are bundled inside the top level cuda directory.
-    if cuda_toolkit_include_path() is not None:
+    if not force_wheels and cuda_toolkit_include_path() is not None:
         return [cuda_toolkit_include_path()]
 
     # Use pip wheels to include all headers.
@@ -239,15 +240,14 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
     except ModuleNotFoundError as e:
         raise RuntimeError("CUDA not found.")
 
-    cuda_root = Path(nvidia.__file__).parent
+    if nvidia.__file__ is not None:
+        cuda_root = Path(nvidia.__file__).parent
+    else:
+        cuda_root = Path(nvidia.__path__[0])  # namespace
     return [
-        cuda_root / "cuda_nvcc" / "include",
-        cuda_root / "cublas" / "include",
-        cuda_root / "cuda_runtime" / "include",
-        cuda_root / "cudnn" / "include",
-        cuda_root / "cuda_cccl" / "include",
-        cuda_root / "nvtx" / "include",
-        cuda_root / "cuda_nvrtc" / "include",
+        subdir / "include"
+        for subdir in cuda_root.iterdir()
+        if subdir.is_dir() and (subdir / "include").is_dir()
     ]
 
 

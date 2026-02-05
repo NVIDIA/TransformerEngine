@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -25,11 +25,6 @@ mkdir -p "$XML_LOG_DIR"
 # Config with the dummy feature which prevents nvinspect from being disabled.
 # Nvinspect will be disabled if no feature is active.
 : ${NVTE_TEST_NVINSPECT_DUMMY_CONFIG_FILE:=$TE_PATH/tests/pytorch/debug/test_configs/dummy_feature.yaml}
-
-# It is not installed as a requirement,
-# because it is not available on PyPI.
-pip uninstall -y nvdlfw-inspect
-pip install git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git
 
 pip install pytest==8.2.1 || error_exit "Failed to install pytest"
 

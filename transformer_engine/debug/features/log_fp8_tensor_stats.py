@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -9,12 +9,13 @@ from contextlib import contextmanager
 
 import torch
 import nvdlfw_inspect.api as debug_api
-
+import transformer_engine_torch as tex
 
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
+from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
@@ -22,7 +23,14 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
+
+try:
+    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+
+    _nvfp4_available = True
+except ImportError:
+    _nvfp4_available = False
+    NVFP4Quantizer = None
 
 
 ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
@@ -39,6 +47,8 @@ def _get_recipe_name(quantizer: Optional[Quantizer]):
         return "mxfp8"
     if isinstance(quantizer, Float8BlockQuantizer):
         return "fp8_block_scaling"
+    if _nvfp4_available and isinstance(quantizer, NVFP4Quantizer):
+        return "nvfp4"
     raise ValueError(f"Unsupported quantizer type: {type(quantizer)}")
 
 
@@ -164,6 +174,16 @@ class LogFp8TensorStats(BaseLogTensorStats):
         if recipe_from_stat != "" and recipe_from_stat not in ALL_RECIPE_NAMES:
             raise ValueError(f"Stat {stat} contains an unsupported recipe name: {recipe_from_stat}")
 
+        # Block any NVFP4 stats in LogFp8TensorStats (FP8-specific logic won't work)
+        # But allow recipe-prefixed FP8 stats like "mxfp8_underflows%" even with NVFP4 quantizer
+        if recipe_from_stat == "nvfp4":
+            raise ValueError(
+                f"[NVTORCH INSPECT ERROR] Cannot compute NVFP4 stats '{stat}' in LogFp8TensorStats."
+                " FP8-specific statistics do not work with NVFP4. Use LogNvfp4TensorStats for"
+                " NVFP4-specific stats, or use FP8 recipe-prefixed stats (e.g.,"
+                " 'mxfp8_underflows%', 'fp8_block_scaling_mse') for what-if FP8 comparisons."
+            )
+
         if recipe_from_stat in ["fp8_delayed_scaling", "fp8_current_scaling"] and columnwise:
             raise ValueError(
                 f"Stat {stat} is not supported. Columnwise tensor statistics are not supported for"
@@ -189,6 +209,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
     def get_recipe_from_stat(self, stat: str, default_recipe: str = ""):
         """Returns the recipe name from the stat string."""
+
         columnwise_stat = stat.endswith("_columnwise")
         for recipe_name in ALL_RECIPE_NAMES:
             if recipe_name in stat:
@@ -213,7 +234,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         Yields the aux_dict.
         Needs to clean after usage, because it possibly change the usage of the quantized tensor.
         """
-        fp8_dtype = None
+        fp8_dtype = tex.DType.kFloat8E4M3
         if recipe_name in ["fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling"]:
             assert isinstance(
                 quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer)
@@ -282,6 +303,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
 
         quantized_tensor = rowwise_quantized_tensor
+
         assert isinstance(
             quantized_tensor, QuantizedTensor
         ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats quantized_tensor must be a QuantizedTensor."

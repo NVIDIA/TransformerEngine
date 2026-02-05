@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Encoder training with multi-GPU, multiprocessing, and tensor parallelism"""
@@ -307,11 +307,11 @@ def get_datasets(max_seq_len):
     vocab = {}
     word_id = 0
 
-    train_ds = load_dataset("glue", "cola", split="train")
+    train_ds = load_dataset("nyu-mll/glue", "cola", split="train")
     train_ds.set_format(type="np")
     train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
 
-    test_ds = load_dataset("glue", "cola", split="validation")
+    test_ds = load_dataset("nyu-mll/glue", "cola", split="validation")
     test_ds.set_format(type="np")
     test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
     return train_ds, test_ds, word_id
