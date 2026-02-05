@@ -546,6 +546,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.ub_overlap_rs_dgrad = False
                 ctx.ub_bulk_dgrad = False
                 ctx.ub_bulk_wgrad = False
+                ctx.grad_input_quantizer = None
+                ctx.grad_weight_quantizer = None
+                ctx.grad_output_quantizer = None
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -654,7 +657,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Configure quantizer for grad output tensor
             # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
             # requires column-wise usage
-            if ctx.grad_output_quantizer is not None and ctx.fp8:
+            if ctx.grad_output_quantizer is not None:
                 quantizer = ctx.grad_output_quantizer
                 quantizer.set_usage(rowwise=True, columnwise=True)
                 if ctx.ub_overlap_ag:
@@ -744,7 +747,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
             # Update grad input quantizer
-            if ctx.grad_input_quantizer is not None and ctx.fp8:
+            if ctx.grad_input_quantizer is not None:
                 ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
             # Output buffers for Userbuffers reduce-scatter
@@ -768,7 +771,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 grad_output,
                 layout="NN",
                 grad=True,
-                quantization_params=ctx.grad_input_quantizer if ctx.fp8 else None,
+                quantization_params=ctx.grad_input_quantizer,
                 out=gemm_out,
                 out_dtype=ctx.activation_dtype,
                 use_split_accumulator=use_split_accumulator,
@@ -895,7 +898,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     "out_dtype": (
                         main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
-                    "quantization_params": (ctx.grad_weight_quantizer if ctx.fp8 else None),
+                    "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
                         if not getattr(weight, "overwrite_main_grad", False)
