@@ -315,7 +315,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.debug = debug
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
-            
+
             # keep_backward_unquantized overrides
             if keep_backward_unquantized:
                 ctx.fp8 = ctx.fp8 and not keep_backward_unquantized
