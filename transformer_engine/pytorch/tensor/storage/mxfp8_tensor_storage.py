@@ -18,7 +18,6 @@ from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ...utils import _empty_tensor
-from ...cpu_offload import mark_not_offload
 
 
 class _FromMXFP8Func(torch.autograd.Function):
@@ -86,7 +85,6 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         instance._fp8_dtype = fp8_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
-        # mark_not_offload(instance._rowwise_scale_inv, instance._columnwise_scale_inv)
 
         return instance
 
