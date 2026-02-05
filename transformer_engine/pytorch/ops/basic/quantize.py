@@ -60,7 +60,7 @@ class Quantize(BasicOperation):
         quantize_backward = (
             fp8_enabled
             and self._quantize_backward
-            and not FP8GlobalStateManager.keep_backward_unquantized()
+            and FP8GlobalStateManager.get_fp8_recipe().quantize_backward
         )
 
         # Quantize if needed
