@@ -87,7 +87,7 @@ class ForwardLinearBiasAdd(FusedOperation):
         grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         keep_backward_unquantized = (
-            with_quantized_compute and FP8GlobalStateManager.keep_backward_unquantized()
+            with_quantized_compute and (not FP8GlobalStateManager.get_fp8_recipe().quantize_backward)
         )
 
         # Get autocast dtype if needed
