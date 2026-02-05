@@ -87,6 +87,21 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     )
 
 
+def _validate_recipe_quantization_flags(recipe: Recipe) -> None:
+    """Validate forward/backward quantization flags on a recipe."""
+    quantize_forward = getattr(recipe, "quantize_forward", True)
+    quantize_backward = getattr(recipe, "quantize_backward", True)
+    if not quantize_forward and quantize_backward:
+        raise ValueError(
+            "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
+        )
+    if recipe.delayed() and not quantize_backward:
+        raise ValueError(
+            "Invalid recipe configuration: delayed scaling does not support "
+            "quantize_backward=False."
+        )
+
+
 def check_recipe_support(recipe: Recipe) -> None:
     """Check if the given recipe is supported."""
     recipe_supported = True
@@ -429,15 +444,6 @@ class FP8GlobalStateManager:
     def with_high_precision_init_val(cls) -> bool:
         """Should the high precision initial values be stored with FP8 parameters"""
         return cls.HIGH_PRECISION_INIT_VAL
-
-    @classmethod
-    def keep_backward_unquantized(cls) -> bool:
-        """Should backward skip FP8 quantization and use high precision"""
-        recipe = cls.get_fp8_recipe()
-        if recipe is not None and recipe.delayed():
-            # Ignore NVTE_KEEP_BACKWARD_UNQUANTIZED when delayed scaling is used
-            return False
-        return bool(int(os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0")))
 
     @classmethod
     def fp8_graph_capturing(cls) -> bool:
@@ -851,16 +857,21 @@ def autocast(
                           are reduced at the end of each training step.
     """
 
-    if enabled:
-        check_recipe_support(recipe)
+    fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
+    if enabled or calibrating:
+        _validate_recipe_quantization_flags(fp8_recipe)
+    quantize_forward = getattr(fp8_recipe, "quantize_forward", True)
+    effective_enabled = enabled and quantize_forward
+    if effective_enabled:
+        check_recipe_support(fp8_recipe)
 
     # Save current state so we always restore it on exit.
     fp8_state = FP8GlobalStateManager.get_autocast_state()
 
     FP8GlobalStateManager.autocast_enter(
-        enabled=enabled,
+        enabled=effective_enabled,
         calibrating=calibrating,
-        fp8_recipe=recipe,
+        fp8_recipe=fp8_recipe,
         fp8_group=amax_reduction_group,
         _graph=_graph,
     )
@@ -868,7 +879,7 @@ def autocast(
         yield
     finally:
         FP8GlobalStateManager.set_autocast_state(fp8_state)
-        FP8GlobalStateManager.autocast_exit(enabled, _graph=_graph)
+        FP8GlobalStateManager.autocast_exit(effective_enabled, _graph=_graph)
 
 
 def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:

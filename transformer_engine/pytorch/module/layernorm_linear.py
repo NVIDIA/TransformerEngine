@@ -141,7 +141,7 @@ class _LayerNormLinear(torch.autograd.Function):
             symmetric_ar_type,
             debug,
         ) = non_tensor_args
-        keep_backward_unquantized = fp8 and FP8GlobalStateManager.keep_backward_unquantized()
+        keep_backward_unquantized = fp8 and (not FP8GlobalStateManager.get_fp8_recipe().quantize_backward)
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._LayerNormLinear.forward"

@@ -235,7 +235,7 @@ class _LayerNormMLP(torch.autograd.Function):
             debug,
             recompute_for_bwd,
         ) = non_tensor_args
-        keep_backward_unquantized = fp8 and FP8GlobalStateManager.keep_backward_unquantized()
+        keep_backward_unquantized = fp8 and (not FP8GlobalStateManager.get_fp8_recipe().quantize_backward)
         assert (
             not keep_backward_unquantized
         ), "NVTE_KEEP_BACKWARD_UNQUANTIZED is not implemented in LayerNormMLP"

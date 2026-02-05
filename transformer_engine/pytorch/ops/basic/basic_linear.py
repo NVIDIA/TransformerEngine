@@ -332,7 +332,9 @@ class BasicLinear(BasicOperation):
             # Note: We cache the quantized input for backward pass,
             # but discard the quantized weights.
             weight_requires_grad = requires_grad and self.weight.requires_grad
-            keep_backward_unquantized = FP8GlobalStateManager.keep_backward_unquantized()
+            keep_backward_unquantized = (
+                FP8GlobalStateManager.is_fp8_enabled() and (not FP8GlobalStateManager.get_fp8_recipe().quantize_backward)
+            )
             columnwise_usage = weight_requires_grad and not keep_backward_unquantized
             input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
@@ -989,7 +991,7 @@ class BasicLinear(BasicOperation):
         grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         keep_backward_unquantized = (
-            with_quantized_compute and FP8GlobalStateManager.keep_backward_unquantized()
+            with_quantized_compute and (not FP8GlobalStateManager.get_fp8_recipe().quantize_backward)
         )
 
         # Get autocast dtype if needed
