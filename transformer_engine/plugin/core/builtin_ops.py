@@ -71,3 +71,11 @@ def register_builtins(registry: OpRegistry) -> None:
     except Exception as e:
         # KunLunXin may not be available, this is expected
         pass
+    
+    # Register Iluvatar (VENDOR) implementations
+    try:
+        from .backends.vendor.iluvatar.register_ops import register_builtins as register_iluvatar
+        register_iluvatar(registry)
+    except Exception as e:
+        # Iluvatar may not be available, this is expected
+        pass
