@@ -4,29 +4,39 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import transformer_engine.jax as te
-from transformer_engine.common.recipe import Recipe, Float8CurrentScaling, MXFP8BlockScaling, DelayedScaling, NVFP4BlockScaling
+from transformer_engine.common.recipe import (
+    Recipe,
+    Float8CurrentScaling,
+    MXFP8BlockScaling,
+    DelayedScaling,
+    NVFP4BlockScaling,
+)
 from flax import linen as nn
+
 
 def make_einsum_cls(quantization_recipe):
     def te_einsum(generate_quantizer_set, s, x, kernel, **kwargs):
-      def dot_general(x, kernel, dims, *args, **kwargs):
-        contracting_dims, batch_dims = dims
-        assert batch_dims == ((), ()), "Batch dims not supported in TE/JAX yet"
+        def dot_general(x, kernel, dims, *args, **kwargs):
+            contracting_dims, batch_dims = dims
+            assert batch_dims == ((), ()), "Batch dims not supported in TE/JAX yet"
 
-        quantizer_set = generate_quantizer_set("quantizer_set_for_einsum")
-        return te.dense.dense(
-            x,
-            kernel,
-            contracting_dims=contracting_dims,
-            quantizer_set=quantizer_set,
-        )
-      return jnp.einsum(s, x, kernel, _dot_general=dot_general, **kwargs)
-  
+            quantizer_set = generate_quantizer_set("quantizer_set_for_einsum")
+            return te.dense.dense(
+                x,
+                kernel,
+                contracting_dims=contracting_dims,
+                quantizer_set=quantizer_set,
+            )
+
+        return jnp.einsum(s, x, kernel, _dot_general=dot_general, **kwargs)
+
     return te.flax.wrap_function_in_te_state_module(te_einsum, quantization_recipe, "einsum")()
 
+
 class EinsumType(Enum):
-    JAX = 'jax'
-    TE = 'te'
+    JAX = "jax"
+    TE = "te"
+
 
 def main():
 
@@ -47,9 +57,10 @@ def main():
 
         @nn.compact
         def __call__(self, x):
-            kernel = self.param('kernel', jax.nn.initializers.lecun_normal(), (32, 32), jnp.bfloat16)
+            kernel = self.param(
+                "kernel", jax.nn.initializers.lecun_normal(), (32, 32), jnp.bfloat16
+            )
             return self._einsum("ij,jk->ik", x, kernel)
-    
 
     def test_model(einsum_type: EinsumType, quantization_recipe: Recipe = None):
         model = SimpleModel(einsum_type=einsum_type, quantization_recipe=quantization_recipe)
@@ -68,7 +79,7 @@ def main():
     # Compare outputs
     atol = float(jnp.finfo(jnp.float8_e4m3fn).eps)
     np.testing.assert_allclose(ref_out, te_out, atol=atol)
-    
+
 
 if __name__ == "__main__":
     main()

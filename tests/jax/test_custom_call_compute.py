@@ -1762,11 +1762,8 @@ fwd_bwd_dtypes = [
 GROUPED_DENSE_INPUT_SHAPES = [
     # (n_groups, m, n, k), the actual m will be multiplied by 32
     # (5, 32, 128, 64),  # Test the case where n_groups is not a multiple of 4
-    
     # (4, 16, 4, 4),
-
     # (3, 192, 64, 96),
-
     (8, 16384, 14336, 4096),
     # (8, 16384, 16384, 4096),
     # (8, 64, 32, 128),
@@ -1778,6 +1775,7 @@ grouped_gemm_supported_scaling_modes = [
     # ScalingMode.DELAYED_TENSOR_SCALING,
     ScalingMode.CURRENT_TENSOR_SCALING
 ]
+
 
 @pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
@@ -1815,7 +1813,7 @@ class TestGroupedDense:
         # m //= 32
         # group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
         # group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
-        # group_sizes = jnp.diff(group_sizes) 
+        # group_sizes = jnp.diff(group_sizes)
 
         # # Make one empty input lhs to test empty GEMM handling
         # group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1])
@@ -1839,19 +1837,20 @@ class TestGroupedDense:
 
         def load_tensor(name: str):
             import numpy as np
-            tensor = np.load(f'/mnt/jberchtold/polyphe-lustre-home/maxtext/gemm_{name}.npy')
+
+            tensor = np.load(f"/mnt/jberchtold/polyphe-lustre-home/maxtext/gemm_{name}.npy")
             return jnp.array(tensor)
 
-        lhs = load_tensor('lhs').astype(dtype)
-        rhs = load_tensor('rhs').astype(dtype)
+        lhs = load_tensor("lhs").astype(dtype)
+        rhs = load_tensor("rhs").astype(dtype)
         bias = None
-        group_sizes = load_tensor('group_sizes').astype(jnp.int32)
+        group_sizes = load_tensor("group_sizes").astype(jnp.int32)
 
         lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
         rhs_contracting_dim = (1,) if data_layout[1] == "N" else (2,)
         contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
 
-        print(f'{lhs.shape=}, {rhs.shape=}, {group_sizes=}, {contracting_dims=}')
+        print(f"{lhs.shape=}, {rhs.shape=}, {group_sizes=}, {contracting_dims=}")
         # import pdb; pdb.set_trace()
 
         return lhs, rhs, group_sizes, contracting_dims, bias
@@ -1859,45 +1858,46 @@ class TestGroupedDense:
     def _tensor_to_image(self, tensor, value_range=None):
         import numpy as np
         from PIL import Image
+
         # Convert to numpy
         tensor_np = jnp.array(tensor, dtype=jnp.float32)
-        
+
         # Replace NaNs with a large value for visualization
         tensor_np = jnp.where(jnp.isnan(tensor_np), 5000, tensor_np)
-        
+
         # Determine normalization range
         if value_range is None:
             min_val = tensor_np.min()
             max_val = tensor_np.max()
         else:
             min_val, max_val = value_range
-        
+
         # Normalize to 0-255 range for visualization
         range_val = max_val - min_val + 1e-8
         normalized = jnp.clip((tensor_np - min_val) / range_val * 255, 0, 255)
-        
+
         # Downsample by averaging 4x4 blocks
         h, w = normalized.shape
         new_h, new_w = h // 4, w // 4
-        normalized = normalized[:new_h*4, :new_w*4]  # Trim to multiple of 4
+        normalized = normalized[: new_h * 4, : new_w * 4]  # Trim to multiple of 4
         normalized = normalized.reshape(new_h, 4, new_w, 4).mean(axis=(1, 3))
         normalized = np.array(normalized)
         normalized_uint8 = normalized.astype(np.uint8)
-        
+
         # Create grayscale image
-        img = Image.fromarray(normalized_uint8, mode='L')
+        img = Image.fromarray(normalized_uint8, mode="L")
         return img
 
     def _assert_grouped_gemm_output(self, out, group_sizes, ref, dtype):
         assert out.dtype == ref.dtype
         print(f"Group sizes [{jnp.sum(group_sizes)}]: {group_sizes}")
-        self._tensor_to_image(out, value_range=(jnp.min(ref), jnp.max(ref))).save('output_te.png')
-        self._tensor_to_image(ref, value_range=(jnp.min(ref), jnp.max(ref))).save('output_ref.png')
+        self._tensor_to_image(out, value_range=(jnp.min(ref), jnp.max(ref))).save("output_te.png")
+        self._tensor_to_image(ref, value_range=(jnp.min(ref), jnp.max(ref))).save("output_ref.png")
         self._tensor_to_image(
             jnp.abs(out.astype(jnp.float32) - ref.astype(jnp.float32)),
-            value_range=(jnp.min(ref), jnp.max(ref))
+            value_range=(jnp.min(ref), jnp.max(ref)),
             # value_range=(0, 0.5)
-        ).save('output_diff.png')
+        ).save("output_diff.png")
         assert_allclose(out, ref, dtype=jnp.float32)
         # ref_list = jnp.split(ref_list, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         # out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
@@ -1906,8 +1906,8 @@ class TestGroupedDense:
         # for i in range(len(ref_list)):
         #     print(f"Asserting output for group {i}, output shape: {out_list[i].shape}, ref shape: {ref_list[i].shape}")
         #     assert_allclose(
-        #         out_list[i], 
-        #         ref_list[i], 
+        #         out_list[i],
+        #         ref_list[i],
         #         dtype=dtype, #jnp.float8_e4m3fn # HACK: TE impl is close but not precise enough for 16-bit
         #     )
 
@@ -1978,7 +1978,7 @@ class TestGroupedDense:
         # Note: we use jnp.sum instead of jnp.mean to make the gradient larger
         # and prevent them from being clamp to zero in FP8. / sqrt(x.size) is used to
         # normalize the output and prevent the gradient from being too large for FP8.
-        out_sum_list = jnp.sum(out_list) # [jnp.sum(out) for out in out_list]
+        out_sum_list = jnp.sum(out_list)  # [jnp.sum(out) for out in out_list]
         return jnp.sum(jnp.asarray(out_sum_list)) / jnp.sqrt(x.size)
 
     def _primitive_sum_grouped_dense(
@@ -2020,9 +2020,16 @@ class TestGroupedDense:
         print("Hi")
 
         def write_images(prim, ref):
-            self._tensor_to_image(prim, value_range=(jnp.min(ref), jnp.max(ref))).save('output_te.png')
-            self._tensor_to_image(ref, value_range=(jnp.min(ref), jnp.max(ref))).save('output_ref.png')
-            self._tensor_to_image(jnp.abs(prim.astype(jnp.float32) - ref.astype(jnp.float32)), value_range=(jnp.min(ref), jnp.max(ref))).save('output_diff.png')
+            self._tensor_to_image(prim, value_range=(jnp.min(ref), jnp.max(ref))).save(
+                "output_te.png"
+            )
+            self._tensor_to_image(ref, value_range=(jnp.min(ref), jnp.max(ref))).save(
+                "output_ref.png"
+            )
+            self._tensor_to_image(
+                jnp.abs(prim.astype(jnp.float32) - ref.astype(jnp.float32)),
+                value_range=(jnp.min(ref), jnp.max(ref)),
+            ).save("output_diff.png")
 
         assert_allclose(prim_out_sum, ref_out_sum, dtype=dtype)
         assert_allclose(prim_dgrad, ref_dgrad, atol=0.015, rtol=0.75)
@@ -2077,18 +2084,22 @@ class TestGroupedDense:
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         # assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
 
-@pytest_parametrize_wrapper('eqn,a_shape,b_shape', [
-    # ('ij,jk->ik', (64, 32), (32, 128)),
-    # ('bij,bjk->bik', (8, 64, 32), (8, 32, 128)),
-    # ('abc,cde->abde', (4, 8, 16), (16, 32, 64)),
-    ('BSM,BSEC->EBCM', (2, 16, 16), (2, 16, 8, 8)),                            
-    ('EBCM,EMH->EBCH', (8, 2, 1024, 4096), (8, 4096, 14336)) ,                           
-    ('EBCM,EMH->EBCH', (8, 2, 1024, 4096), (8, 4096, 14336)),
-    ('EBCH,EHM->EBCM', (8, 2, 1024, 14336), (8, 14336, 4096)),
-    ('EBCM,BSEC->BSM', (8, 2, 1024, 4096), (2, 4096, 8, 1024)),
-])
-@pytest_parametrize_wrapper('dtype', [jnp.bfloat16])
-@pytest_parametrize_wrapper('quantization_recipe', supported_recipes)
+
+@pytest_parametrize_wrapper(
+    "eqn,a_shape,b_shape",
+    [
+        # ('ij,jk->ik', (64, 32), (32, 128)),
+        # ('bij,bjk->bik', (8, 64, 32), (8, 32, 128)),
+        # ('abc,cde->abde', (4, 8, 16), (16, 32, 64)),
+        ("BSM,BSEC->EBCM", (2, 16, 16), (2, 16, 8, 8)),
+        ("EBCM,EMH->EBCH", (8, 2, 1024, 4096), (8, 4096, 14336)),
+        ("EBCM,EMH->EBCH", (8, 2, 1024, 4096), (8, 4096, 14336)),
+        ("EBCH,EHM->EBCM", (8, 2, 1024, 14336), (8, 14336, 4096)),
+        ("EBCM,BSEC->BSM", (8, 2, 1024, 4096), (2, 4096, 8, 1024)),
+    ],
+)
+@pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
+@pytest_parametrize_wrapper("quantization_recipe", supported_recipes)
 class TestEinsum:
 
     def _te_einsum(self, eqn, a, b, quantization_recipe):
@@ -2113,7 +2124,9 @@ class TestEinsum:
         a = jax.random.uniform(subkeys[0], a_shape, dtype=dtype)
         b = jax.random.uniform(subkeys[1], b_shape, dtype=dtype)
 
-        te_out = jax.jit(functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe))(a, b)
+        te_out = jax.jit(
+            functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe)
+        )(a, b)
         ref_out = jax.jit(functools.partial(self._ref_einsum, eqn))(a, b)
 
         # jax.config.update("jax_numpy_rank_promotion", "raise")
@@ -2137,14 +2150,25 @@ class TestEinsum:
             @functools.wraps(f)
             def wrapped(*args):
                 return jnp.mean(f(*args))
+
             return wrapped
 
-        te_fwd, te_grads = jax.jit(jax.value_and_grad(wrap_in_mean(functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe))))(a, b)
-        ref_fwd, ref_grads = jax.jit(jax.value_and_grad(wrap_in_mean(functools.partial(self._ref_einsum, eqn))))(a, b)
+        te_fwd, te_grads = jax.jit(
+            jax.value_and_grad(
+                wrap_in_mean(
+                    functools.partial(self._te_einsum, eqn, quantization_recipe=quantization_recipe)
+                )
+            )
+        )(a, b)
+        ref_fwd, ref_grads = jax.jit(
+            jax.value_and_grad(wrap_in_mean(functools.partial(self._ref_einsum, eqn)))
+        )(a, b)
 
         assert_allclose(te_fwd, ref_fwd, dtype=dtype)
 
-        assert len(te_grads) == len(ref_grads), f"Number of gradients differ: {len(te_grads)=} vs {len(ref_grads)=}"
+        assert len(te_grads) == len(
+            ref_grads
+        ), f"Number of gradients differ: {len(te_grads)=} vs {len(ref_grads)=}"
 
         for te_grad, ref_grad in zip(te_grads, ref_grads):
             assert_allclose(te_grad, ref_grad, dtype=dtype)

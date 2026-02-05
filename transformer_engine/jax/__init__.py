@@ -30,6 +30,7 @@ import jax
 from transformer_engine.common import load_framework_extension
 
 from . import rtc
+
 print("Compiling JAX RTC extension...")
 rtc.compile_extension()
 load_framework_extension("jax")

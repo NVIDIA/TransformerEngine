@@ -112,7 +112,9 @@ def setup_jax_extension(
         libraries=["nccl"],
     )
 
+
 _compiled = False
+
 
 def compile_extension():
     import os
@@ -148,10 +150,14 @@ def compile_extension():
     os.makedirs(cmd.build_lib, exist_ok=True)
     cmd.run()
 
-    subprocess.call([
-        "cp",
-        os.path.join(cmd.build_lib, "transformer_engine_jax" + cmd.get_ext_filename(fullname="")),
-        base_dir,
-    ])
+    subprocess.call(
+        [
+            "cp",
+            os.path.join(
+                cmd.build_lib, "transformer_engine_jax" + cmd.get_ext_filename(fullname="")
+            ),
+            base_dir,
+        ]
+    )
 
     _compiled = True
