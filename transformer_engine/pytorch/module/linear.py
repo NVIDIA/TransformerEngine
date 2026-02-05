@@ -504,7 +504,6 @@ class _Linear(torch.autograd.Function):
                 ctx.grad_input_quantizer = None
                 ctx.grad_weight_quantizer = None
                 ctx.grad_output_quantizer = None
-                
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
