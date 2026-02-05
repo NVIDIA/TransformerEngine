@@ -541,7 +541,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # keep_backward_unquantized overrides
             if keep_backward_unquantized:
-                # Disable Userbuffers communication for backward pass when keep_backward_unquantized is True
+                ctx.fp8 = ctx.fp8 and not keep_backward_unquantized
                 ctx.ub_overlap_ag = False
                 ctx.ub_overlap_rs_dgrad = False
                 ctx.ub_bulk_dgrad = False
@@ -617,7 +617,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 origin_weight.main_grad = main_grad
 
             keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
-            use_fp8_bwd = ctx.fp8 and not keep_backward_unquantized
 
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
@@ -655,7 +654,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Configure quantizer for grad output tensor
             # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
             # requires column-wise usage
-            if ctx.grad_output_quantizer is not None and use_fp8_bwd:
+            if ctx.grad_output_quantizer is not None and ctx.fp8:
                 quantizer = ctx.grad_output_quantizer
                 quantizer.set_usage(rowwise=True, columnwise=True)
                 if ctx.ub_overlap_ag:
@@ -692,7 +691,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_out_total_work = None
             if ctx.ln_out_needs_gather:
                 quantizer = None
-                if ctx.input_quantizer is not None and use_fp8_bwd:
+                if ctx.input_quantizer is not None and ctx.fp8:
                     quantizer = ctx.input_quantizer
                     if quantizer.supports_only_rowwise_all_gather():
                         # If data is in FP8, we compute FP8 transposes manually
@@ -731,7 +730,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
             if (
-                use_fp8_bwd
+                ctx.fp8
                 and ctx.weight_quantizer is not None
                 and isinstance(weight, QuantizedTensorStorage)
             ):
@@ -739,13 +738,13 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Choose whether to use GEMM kernel with split accumulator
             use_split_accumulator = _2X_ACC_DGRAD
-            if use_fp8_bwd:
+            if ctx.fp8:
                 recipe = ctx.fp8_recipe
                 if hasattr(recipe, "fp8_gemm_dgrad"):
                     use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
             # Update grad input quantizer
-            if ctx.grad_input_quantizer is not None and use_fp8_bwd:
+            if ctx.grad_input_quantizer is not None and ctx.fp8:
                 ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
             # Output buffers for Userbuffers reduce-scatter
@@ -769,7 +768,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 grad_output,
                 layout="NN",
                 grad=True,
-                quantization_params=ctx.grad_input_quantizer if use_fp8_bwd else None,
+                quantization_params=ctx.grad_input_quantizer if ctx.fp8 else None,
                 out=gemm_out,
                 out_dtype=ctx.activation_dtype,
                 use_split_accumulator=use_split_accumulator,
@@ -854,14 +853,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 if ln_out_total_work is not None:
                     ln_out_total_work.wait()
                     ln_out_total_work = None
-                if use_fp8_bwd or ctx.debug:
+                if ctx.fp8 or ctx.debug:
                     if isinstance(ln_out_total, QuantizedTensorStorage):
                         ln_out_total.update_usage(columnwise_usage=True)
                     else:
                         ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
                         ln_out_total = ctx.input_quantizer(ln_out_total)
 
-                if use_fp8_bwd or ctx.debug:
+                if ctx.fp8 or ctx.debug:
                     if isinstance(grad_output, QuantizedTensorStorage):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
@@ -870,7 +869,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 # Figure out whether to use split accumulator
                 use_split_accumulator = _2X_ACC_WGRAD
-                if use_fp8_bwd:
+                if ctx.fp8:
                     recipe = ctx.fp8_recipe
                     if hasattr(recipe, "fp8_gemm_wgrad"):
                         use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
@@ -896,7 +895,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     "out_dtype": (
                         main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
-                    "quantization_params": (ctx.grad_weight_quantizer if use_fp8_bwd else None),
+                    "quantization_params": (ctx.grad_weight_quantizer if ctx.fp8 else None),
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
                         if not getattr(weight, "overwrite_main_grad", False)
@@ -904,7 +903,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ),
                     "layout": "NT",
                     "out": main_grad if ctx.fuse_wgrad_accumulation else None,
-                    "bias": (bias if (grad_bias is None and not use_fp8_bwd) else None),
+                    "bias": (bias if (grad_bias is None and not ctx.fp8) else None),
                     "use_split_accumulator": use_split_accumulator,
                     "grad": True,
                     "ub": ub_obj_wgrad,
