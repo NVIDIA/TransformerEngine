@@ -129,7 +129,9 @@ class _Linear(torch.autograd.Function):
             save_original_input,
             debug,
         ) = non_tensor_args
-        keep_backward_unquantized = fp8 and (not FP8GlobalStateManager.get_fp8_recipe().quantize_backward)
+        keep_backward_unquantized = fp8 and (
+            not FP8GlobalStateManager.get_fp8_recipe().quantize_backward
+        )
         if keep_backward_unquantized:
             # Note, NVTE_KEEP_BACKWARD_UNQUANTIZED is ignored when delayed scaling is used
             save_original_input = True
