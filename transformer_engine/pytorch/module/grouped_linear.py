@@ -754,10 +754,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         weight_quantizers = self._get_weight_quantizers()
 
         # Create the weight storage.
-        grouped_weights = GroupedTensor.make_grouped_tensor(
+        grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_gemms,
             shape=[(self.out_features, self.in_features)] * self.num_gemms,
-            quantizers=weight_quantizers,
+            quantizer=weight_quantizers[0],
             dtype=self.params_dtype,
         )
 

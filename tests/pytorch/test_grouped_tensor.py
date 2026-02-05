@@ -10,6 +10,7 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.tensor.storage.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch import (
+    Quantizer,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
     Float8BlockQuantizer,
@@ -53,48 +54,46 @@ _quantization_params = [
 ]
 
 
-def make_quantizers(quantization: str, num_tensors: int, shape: List[Tuple[int, int]]):
+def make_quantizer(quantization: str, num_tensors: int, shape: List[Tuple[int, int]]) -> Quantizer:
     """Create quantizers for given quantization scheme"""
-    quantizers = []
-    for i in range(num_tensors):
-        if quantization == "fp8_delayed_scaling":
-            quantizer = Float8Quantizer(
-                scale=torch.ones(1, dtype=torch.float32, device="cuda"),
-                amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
-                fp8_dtype=tex.DType.kFloat8E4M3,
-            )
-        elif quantization == "fp8_current_scaling":
-            quantizer = Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
-                device="cuda",
-            )
-            quantizer.set_usage(rowwise=True, columnwise=False)
-        elif quantization == "fp8_blockwise":
-            quantizer = Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3,
-                rowwise=True,
-                columnwise=False,
-                force_pow_2_scales=True,
-                amax_epsilon=0.0,
-                block_scaling_dim=1,
-            )
-        elif quantization == "mxfp8":
-            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-        elif quantization == "nvfp4":
-            quantizer = NVFP4Quantizer(
-                with_rht=False,
-                with_post_rht_amax=False,
-                with_2d_quantization=False,
-                stochastic_rounding=False,
-                with_random_sign_mask=False,
-            )
-        else:
-            raise ValueError(f"Unknown quantization scheme: {quantization}")
 
-        quantizer.internal = False
-        quantizers.append(quantizer)
+    if quantization == "fp8_delayed_scaling":
+        quantizer = Float8Quantizer(
+            scale=torch.ones(1, dtype=torch.float32, device="cuda"),
+            amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+    elif quantization == "fp8_current_scaling":
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+        quantizer.set_usage(rowwise=True, columnwise=False)
+    elif quantization == "fp8_blockwise":
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+            force_pow_2_scales=True,
+            amax_epsilon=0.0,
+            block_scaling_dim=1,
+        )
+    elif quantization == "mxfp8":
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+    elif quantization == "nvfp4":
+        quantizer = NVFP4Quantizer(
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )
+    else:
+        raise ValueError(f"Unknown quantization scheme: {quantization}")
 
-    return quantizers
+    quantizer.internal = False
+
+    return quantizer
 
 
 def _get_rowwise_data_tensor(qtensor, quantization: str) -> torch.Tensor:
@@ -124,10 +123,10 @@ class TestGroupedTensor:
         num_tensors = 4
         shape = [(256, 512) for _ in range(num_tensors)]
 
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=None,
+            quantizer=None,
             device="cuda",
             dtype=torch.float32,
         )
@@ -146,10 +145,10 @@ class TestGroupedTensor:
         num_tensors = 3
         shape = [(128, 512), (256, 512), (384, 512)]
 
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=None,
+            quantizer=None,
             device="cuda",
             dtype=torch.float32,
         )
@@ -164,59 +163,15 @@ class TestGroupedTensor:
             shape[0][1],
         )  # sum of first dims
 
-    def test_basic_construction_varying_last_dim(self) -> None:
-        """Test GroupedTensor construction with varying last dimension"""
-        num_tensors = 3
-        shape = [(512, 128), (512, 256), (512, 384)]
-
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
-            num_tensors=num_tensors,
-            shape=shape,
-            quantizers=None,
-            device="cuda",
-            dtype=torch.float32,
-        )
-
-        assert grouped_tensor.num_tensors == num_tensors
-        assert not grouped_tensor.all_same_shape()
-        assert grouped_tensor.all_same_first_dim()
-        assert not grouped_tensor.all_same_last_dim()
-        assert grouped_tensor.get_common_first_dim() == shape[0][0]
-        assert grouped_tensor.logical_shape == (
-            shape[0][0],
-            sum(v for _, v in shape),
-        )  # sum of last dims
-
-    def test_basic_construction_varying_both_dims(self) -> None:
-        """Test GroupedTensor construction with varying both dimensions"""
-        num_tensors = 3
-        shape = [(128, 256), (256, 384), (384, 512)]
-
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
-            num_tensors=num_tensors,
-            shape=shape,
-            quantizers=None,
-            device="cuda",
-            dtype=torch.float32,
-        )
-
-        assert grouped_tensor.num_tensors == num_tensors
-        assert not grouped_tensor.all_same_shape()
-        assert not grouped_tensor.all_same_first_dim()
-        assert not grouped_tensor.all_same_last_dim()
-        assert grouped_tensor.varying_both_dims()
-        total_elements = sum(s[0] * s[1] for s in shape)
-        assert grouped_tensor.logical_shape == (1, total_elements)
-
     def test_split_into_quantized_tensors_no_quantization(self) -> None:
         """Test split_into_quantized_tensors for unquantized tensors"""
         num_tensors = 3
         shape = [(256, 512) for _ in range(num_tensors)]
 
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=None,
+            quantizer=None,
             device="cuda",
             dtype=torch.float32,
         )
@@ -248,12 +203,12 @@ class TestGroupedTensor:
         """Test split_into_quantized_tensors for quantized tensors"""
         num_tensors = 3
         shape = [(512, 512) for _ in range(num_tensors)]
-        quantizers = make_quantizers(quantization, num_tensors, shape)
+        quantizers = make_quantizer(quantization, num_tensors, shape)
 
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=quantizers,
+            quantizer=quantizers,
             device="cuda",
         )
 
@@ -279,10 +234,10 @@ class TestGroupedTensor:
         num_tensors = 3
         shape = [(128, 512), (256, 512), (384, 512)]
 
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=None,
+            quantizer=None,
             device="cuda",
             dtype=torch.float32,
         )
@@ -305,12 +260,12 @@ class TestGroupedTensor:
         """Test that quantize is done in-place for all recipes"""
         num_tensors = 3
         shape = [(512, 512) for _ in range(num_tensors)]
-        quantizers = make_quantizers(quantization, num_tensors, shape)
+        quantizers = make_quantizer(quantization, num_tensors, shape)
 
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=quantizers,
+            quantizer=quantizers,
             device="cuda",
         )
 
@@ -345,12 +300,12 @@ class TestGroupedTensor:
         """Test quantize with varying shapes"""
         num_tensors = 3
         shape = [(256, 512), (512, 512), (768, 512)]
-        quantizers = make_quantizers(quantization, num_tensors, shape)
+        quantizers = make_quantizer(quantization, num_tensors, shape)
 
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=quantizers,
+            quantizer=quantizers,
             device="cuda",
         )
 
@@ -379,7 +334,7 @@ class TestGroupedTensor:
         """Test the static quantize method"""
         num_tensors = 3
         shape = [(512, 512) for _ in range(num_tensors)]
-        quantizers = make_quantizers(quantization, num_tensors, shape)
+        quantizers = make_quantizer(quantization, num_tensors, shape)
 
         # Create input tensors
         input_tensors = [torch.randn(s, dtype=torch.float32, device="cuda") for s in shape]
@@ -387,7 +342,7 @@ class TestGroupedTensor:
         # Use static quantize method
         grouped_tensor = GroupedTensor.create_and_quantize(
             tensors=input_tensors,
-            quantizers=quantizers,
+            quantizer=quantizers,
             device="cuda",
         )
 
@@ -407,7 +362,8 @@ class TestGroupedTensor:
             assert rowwise_data.data_ptr() == original_data_ptr + expected_offset
 
     @pytest.mark.parametrize(
-        "shape", [[(256, 512), (512, 512), (768, 512)], [(512, 512), (512, 512), (512, 512)]]
+        "shape",
+        [[(256, 512), (512, 512), (768, 512)], [(512, 512), (512, 512), (512, 512)]],
     )
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_quantize_grouped_mxfp8(self, shape: List[Tuple[int, int]]) -> None:
@@ -421,10 +377,10 @@ class TestGroupedTensor:
         quantized_tensors = [
             MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(tensor) for tensor in input_tensors
         ]
-        grouped_input = GroupedTensor.make_grouped_tensor(
+        grouped_input = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=None,
+            quantizer=None,
             device="cuda",
             dtype=torch.bfloat16,
         )
@@ -438,10 +394,10 @@ class TestGroupedTensor:
         # Create MXFP8 output grouped tensor (rowwise only for easier validation)
         quantizers = [MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3) for _ in range(num_tensors)]
 
-        grouped_output = GroupedTensor.make_grouped_tensor(
+        grouped_output = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=quantizers,
+            quantizer=quantizers,
             device="cuda",
         )
 
@@ -466,10 +422,10 @@ class TestGroupedTensor:
         num_tensors = 3
         shape = [(256, 512) for _ in range(num_tensors)]
 
-        grouped_tensor = GroupedTensor.make_grouped_tensor(
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizers=None,
+            quantizer=None,
             device="cuda",
             dtype=torch.float32,
         )
