@@ -219,8 +219,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
 
   // Helper function to construct tensor view using storage sharing
   // Note: All views share the same storage, so record_stream() works correctly.
-  auto make_torch_view = [](at::Tensor &buffer, const std::vector<size_t> &shape,
-                            size_t offset, at::ScalarType dtype) -> at::Tensor {
+  auto make_torch_view = [](at::Tensor &buffer, const std::vector<size_t> &shape, size_t offset,
+                            at::ScalarType dtype) -> at::Tensor {
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     bool is_empty_shape = product(shape) == 0;
     if (buffer.data_ptr<uint8_t>() == nullptr || is_empty_shape) {
@@ -239,9 +239,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     }
     // Directly create TensorImpl with shared storage (avoids empty + set_ overhead)
     auto impl = c10::make_intrusive<at::TensorImpl>(
-        c10::Storage(buffer.storage()),
-        buffer.key_set(),
-        caffe2::TypeMeta::fromScalarType(dtype));
+        c10::Storage(buffer.storage()), buffer.key_set(), caffe2::TypeMeta::fromScalarType(dtype));
     impl->set_storage_offset(storage_offset);
     impl->set_sizes_and_strides(shape_int64, strides);
     return at::Tensor(std::move(impl));
@@ -384,8 +382,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
 
   // Helper function to construct tensor view using storage sharing
   // Note: All views share the same storage, so record_stream() works correctly.
-  auto make_torch_view = [](at::Tensor &buffer, const std::vector<size_t> &shape,
-                            size_t offset, at::ScalarType dtype) -> at::Tensor {
+  auto make_torch_view = [](at::Tensor &buffer, const std::vector<size_t> &shape, size_t offset,
+                            at::ScalarType dtype) -> at::Tensor {
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     bool is_empty_shape = product(shape) == 0;
     if (buffer.data_ptr<uint8_t>() == nullptr || is_empty_shape) {
@@ -404,9 +402,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     }
     // Directly create TensorImpl with shared storage (avoids empty + set_ overhead)
     auto impl = c10::make_intrusive<at::TensorImpl>(
-        c10::Storage(buffer.storage()),
-        buffer.key_set(),
-        caffe2::TypeMeta::fromScalarType(dtype));
+        c10::Storage(buffer.storage()), buffer.key_set(), caffe2::TypeMeta::fromScalarType(dtype));
     impl->set_storage_offset(storage_offset);
     impl->set_sizes_and_strides(shape_int64, strides);
     return at::Tensor(std::move(impl));
@@ -549,8 +545,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
   // Helper function to construct tensor view using storage sharing
   // Note: All views share the same storage, so record_stream() works correctly.
-  auto make_torch_view = [](at::Tensor &buffer, const std::vector<size_t> &shape,
-                            size_t offset, at::ScalarType dtype) -> at::Tensor {
+  auto make_torch_view = [](at::Tensor &buffer, const std::vector<size_t> &shape, size_t offset,
+                            at::ScalarType dtype) -> at::Tensor {
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     bool is_empty_shape = product(shape) == 0;
     if (buffer.data_ptr<uint8_t>() == nullptr || is_empty_shape) {
@@ -569,9 +565,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     }
     // Directly create TensorImpl with shared storage (avoids empty + set_ overhead)
     auto impl = c10::make_intrusive<at::TensorImpl>(
-        c10::Storage(buffer.storage()),
-        buffer.key_set(),
-        caffe2::TypeMeta::fromScalarType(dtype));
+        c10::Storage(buffer.storage()), buffer.key_set(), caffe2::TypeMeta::fromScalarType(dtype));
     impl->set_storage_offset(storage_offset);
     impl->set_sizes_and_strides(shape_int64, strides);
     return at::Tensor(std::move(impl));
