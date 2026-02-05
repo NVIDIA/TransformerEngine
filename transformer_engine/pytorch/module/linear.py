@@ -493,6 +493,13 @@ class _Linear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
 
+            # keep_backward_unquantized overrides
+            if keep_backward_unquantized:
+                ctx.ub_overlap_ag = False
+                ctx.ub_overlap_rs_dgrad = False
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_bulk_wgrad = False
+
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
@@ -545,12 +552,6 @@ class _Linear(torch.autograd.Function):
 
             keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
             use_fp8_bwd = ctx.fp8 and not keep_backward_unquantized
-            if keep_backward_unquantized:
-                # Disable Userbuffers communication for backward pass when keep_backward_unquantized is True
-                ctx.ub_overlap_ag = False
-                ctx.ub_overlap_rs_dgrad = False
-                ctx.ub_bulk_dgrad = False
-                ctx.ub_bulk_wgrad = False
 
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
