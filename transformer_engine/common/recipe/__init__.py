@@ -269,8 +269,6 @@ class Float8CurrentScaling(Recipe):
     fp8_mha: bool = False
     quantize_forward: bool = True
     quantize_backward: bool = field(default_factory=_default_quantize_backward)
-    quantize_forward: bool = True
-    quantize_backward: bool = field(default_factory=_default_quantize_backward)
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
