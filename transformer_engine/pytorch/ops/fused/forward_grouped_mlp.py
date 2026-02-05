@@ -155,12 +155,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if len(split_sizes_cpu) != num_groups:
             raise ValueError(f"Expected {num_groups} splits, but got {len(split_sizes_cpu)}.")
         split_sizes = split_sizes.to(dtype=torch.int, device=device)
-        split_points = torch.zeros(
-            split_sizes.numel() + 1,
-            dtype=torch.int,
-            device=device,
-        )
-        torch.cumsum(split_sizes, 0, out=split_points[1:])
+        split_points = torch.cumsum(split_sizes, 0, dtype=torch.int)
 
         # Extract post-scales from extra input
         scales = basic_op_extra_inputs[1][0]
@@ -220,18 +215,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         #   4 (block col), k/128, num_groups)
         fc1_w_data = noop_cat([w._rowwise_data for w in fc1_ws])
         fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
-        fc1_w_data = fc1_w_data.view(
-            num_groups, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1]
-        )
-        fc1_w_data = fc1_w_data.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_shape[1])
         fc1_w_data = fc1_w_data.permute(1, 2, 0)
         fc1_w_scales = noop_cat([w._rowwise_scale_inv for w in fc1_ws])
         fc1_w_scales = fc1_w_scales.view(dtype=torch.float8_e8m0fnu)
-        fc1_w_scales = fc1_w_scales.view(
-            num_groups, fc1_weight_shape[0] // 64, 2, 32, fc1_weight_shape[1] // 32
-        )
-        fc1_w_scales = fc1_w_scales.flip(2).contiguous()  # Swap SwiGLU gate/activation
         fc1_w_scales = fc1_w_scales.view(
             num_groups, fc1_weight_shape[0] // 128, 4, 32, fc1_weight_shape[1] // 128, 4
         )  # Unswizzled layout
@@ -240,46 +227,20 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         ).contiguous()  # Convert to swizzled layout
         fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
-        # Kernel tile logic
-        mma_tiler_mn = (256, 256)
-        tile_points = torch.arange(
-            0,
-            in_shape[0],
-            mma_tiler_mn[0],
-            dtype=torch.int,
-            device=device,
-        )
-        tile_idx_to_expert_idx = torch.searchsorted(
-            split_points[1:],
-            tile_points,
-            out_int32=True,
-            side="right",
-        )
-        num_non_exiting_tiles = torch.full(
-            (1,),
-            in_shape[0] // mma_tiler_mn[0],
-            dtype=torch.int,
-            device=device,
-        )
-
         # Fused kernel for FC1 + SwiGLU + post-scale
         fc1_kernel_out = self.grouped_gemm_swiglu_kernel()(
             fc1_x_data,
             fc1_w_data,
             fc1_x_scales,
             fc1_w_scales,
-            tile_idx_to_expert_idx,
-            num_non_exiting_tiles,
-            torch.ones(num_groups, dtype=dtype, device=device),  # alpha_tensor
-            torch.ones(1, dtype=dtype, device=device),  # norm_const_tensor
-            scales.detach().reshape(-1, 1, 1),
             split_points,
+            torch.ones(num_groups, dtype=dtype, device=device),  # alpha_tensor
+            norm_const_tensor=torch.ones(1, dtype=dtype, device=device),
+            prob_tensor=scales.detach().reshape(-1, 1, 1),
             acc_dtype=torch.float32,
             c_dtype=torch.bfloat16,
             d_dtype=torch.float8_e4m3fn,
             cd_major="n",
-            mma_tiler_mn=mma_tiler_mn,
-            cluster_shape_mn=(2, 1),
             sf_vec_size=32,
         )
 
@@ -294,9 +255,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         #   k/128, 4 (block row), sum(m)/128, 1)
         swiglu_in = fc1_kernel_out["c_tensor"]
         swiglu_in = swiglu_in.permute(2, 0, 1)
-        swiglu_in = swiglu_in.view(in_shape[0], fc1_weight_shape[0] // 64, 2, 32)
-        swiglu_in = swiglu_in.flip(2)  # Undo swapped SwiGLU gate/activation
-        swiglu_in = swiglu_in.contiguous().view(in_shape[0], fc1_weight_shape[0])
+        swiglu_in = swiglu_in.view(in_shape[0], fc1_weight_shape[0])
         fc2_in_row_data = fc1_kernel_out["d_tensor"]
         fc2_in_row_data = fc2_in_row_data.permute(2, 0, 1)
         fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1])
