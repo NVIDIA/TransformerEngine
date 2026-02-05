@@ -315,6 +315,14 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.debug = debug
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
+            
+            # keep_backward_unquantized overrides
+            if keep_backward_unquantized:
+                ctx.fp8 = ctx.fp8 and not keep_backward_unquantized
+                ctx.ub_overlap_ag = False
+                ctx.ub_overlap_rs_dgrad = False
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_bulk_wgrad = False
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -331,7 +339,6 @@ class _GroupedLinear(torch.autograd.Function):
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
             keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
-            use_fp8_bwd = ctx.fp8 and not keep_backward_unquantized
 
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
@@ -347,7 +354,7 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
-            if use_fp8_bwd and not ctx.debug:
+            if ctx.fp8 and not ctx.debug:
                 if ctx.use_bias:
                     grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                     recipe = ctx.fp8_recipe
@@ -401,7 +408,7 @@ class _GroupedLinear(torch.autograd.Function):
 
             if ctx.requires_dgrad:
                 dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
-                if use_fp8_bwd or ctx.debug:
+                if ctx.fp8 or ctx.debug:
                     recipe = ctx.fp8_recipe
                     if hasattr(recipe, "fp8_gemm_dgrad"):
                         dgrad_gemm_use_split_accumulator = (
@@ -435,7 +442,7 @@ class _GroupedLinear(torch.autograd.Function):
 
             if ctx.weights_requires_grad:
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
-                if use_fp8_bwd:
+                if ctx.fp8:
                     recipe = ctx.fp8_recipe
                     if hasattr(recipe, "fp8_gemm_wgrad"):
                         wgrad_gemm_use_split_accumulator = (
@@ -463,7 +470,7 @@ class _GroupedLinear(torch.autograd.Function):
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
-                    if use_fp8_bwd and not ctx.debug:
+                    if ctx.fp8 and not ctx.debug:
                         inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
@@ -540,7 +547,7 @@ class _GroupedLinear(torch.autograd.Function):
             if not ctx.use_bias or (
                 ctx.wgrad_store is not None
                 and ctx.wgrad_store.delay_wgrad_compute()
-                and not use_fp8_bwd
+                and not ctx.fp8
             ):
                 grad_biases = [None] * ctx.num_gemms
 
