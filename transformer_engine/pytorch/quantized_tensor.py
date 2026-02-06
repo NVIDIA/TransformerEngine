@@ -161,6 +161,105 @@ def restore_from_saved(
     return tensor_objects
 
 
+def get_columnwise_subview_info(
+    inputmats: list, columnwise_buffer: torch.Tensor
+) -> list:
+    """
+    Get boundary information for columnwise internal tensors in inputmats.
+
+    This function extracts the byte offsets, shapes, strides, and dtypes of
+    columnwise internal tensors (_columnwise_data, _columnwise_scale_inv,
+    _columnwise_amax) relative to a shared buffer. This information is used
+    to restore subviews after CPU offload/reload.
+
+    Only extracts columnwise data info since rowwise data is typically
+    discarded when weight_requires_grad is True.
+
+    Uses tuples instead of dicts to minimize CPU overhead.
+
+    Args:
+        inputmats: List of QuantizedTensorStorage objects created by bulk allocation.
+        columnwise_buffer: The buffer that contains the columnwise data (must be uint8).
+
+    Returns:
+        List of tuples: [(columnwise_data_info, columnwise_scale_info, columnwise_amax_info), ...]
+        Each info is (byte_offset, shape, stride, dtype) or None if not present.
+        byte_offset is the offset in bytes from the start of the buffer.
+    """
+    if columnwise_buffer is None:
+        return []
+
+    info_list = []
+    buffer_ptr = columnwise_buffer.data_ptr()
+
+    for tensor in inputmats:
+        # Get columnwise_data info
+        # Use data_ptr() difference to get the actual byte offset in buffer
+        col_data = getattr(tensor, "_columnwise_data", None)
+        col_data_info = (
+            (col_data.data_ptr() - buffer_ptr, col_data.shape, col_data.stride(), col_data.dtype)
+            if col_data is not None
+            else None
+        )
+
+        # Get columnwise_scale_inv info
+        col_scale = getattr(tensor, "_columnwise_scale_inv", None)
+        col_scale_info = (
+            (col_scale.data_ptr() - buffer_ptr, col_scale.shape, col_scale.stride(), col_scale.dtype)
+            if col_scale is not None
+            else None
+        )
+
+        # Get columnwise_amax info (for NVFP4)
+        col_amax = getattr(tensor, "_columnwise_amax", None)
+        col_amax_info = (
+            (col_amax.data_ptr() - buffer_ptr, col_amax.shape, col_amax.stride(), col_amax.dtype)
+            if col_amax is not None
+            else None
+        )
+
+        info_list.append((col_data_info, col_scale_info, col_amax_info))
+    return info_list
+
+
+def restore_columnwise_subviews(
+    inputmats: list, columnwise_buffer: torch.Tensor, info_list: list
+) -> None:
+    """
+    Restore columnwise internal tensors from reloaded buffer.
+
+    After CPU offload and reload, the columnwise_buffer may be at a new memory
+    location. This function restores the columnwise internal tensors of inputmats
+    to point to the correct locations in the reloaded buffer using as_strided.
+
+    Args:
+        inputmats: List of QuantizedTensorStorage objects to restore.
+        columnwise_buffer: The reloaded columnwise buffer (must be uint8).
+        info_list: Boundary info returned by get_columnwise_subview_info().
+    """
+    if columnwise_buffer is None or not info_list:
+        return
+
+    for tensor, info in zip(inputmats, info_list):
+        col_data_info, col_scale_info, col_amax_info = info
+
+        # Restore columnwise_data using as_strided (avoids empty + set_ overhead)
+        # NOTE: byte_offset == element_offset because buffer dtype is uint8
+        if col_data_info is not None:
+            byte_offset, shape, stride, _ = col_data_info
+            tensor._columnwise_data = columnwise_buffer.as_strided(shape, stride, byte_offset)
+
+        # Restore columnwise_scale_inv
+        if col_scale_info is not None:
+            byte_offset, shape, stride, _ = col_scale_info
+            tensor._columnwise_scale_inv = columnwise_buffer.as_strided(shape, stride, byte_offset)
+
+        # Restore columnwise_amax (NVFP4)
+        if col_amax_info is not None:
+            byte_offset, shape, stride, _ = col_amax_info
+            tensor._columnwise_amax = columnwise_buffer.as_strided(shape, stride, byte_offset)
+
+
 class Quantizer(abc.ABC):
     """Builder class for quantized tensors.
 

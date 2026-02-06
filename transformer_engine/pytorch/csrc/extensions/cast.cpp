@@ -194,13 +194,15 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
 
 namespace {
 
-std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp8_blockwise_tensors(
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>>
+bulk_allocate_fp8_blockwise_tensors(
     std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
     std::vector<Float8BlockQuantizer *> &quantizer_cpp_list) {
   init_extension();
-  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>> retval;
   auto &tensor_py_list = std::get<0>(retval);
   auto &tensor_cpp_list = std::get<1>(retval);
+  auto &buffer_list = std::get<2>(retval);  // Buffers for offload
 
   // Number of tensors
   const size_t num_tensors = shape_list.size();
@@ -217,34 +219,20 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   constexpr size_t fp8_elem_size = 1;
   constexpr size_t scale_elem_size = 4;
 
-  // Helper function to construct tensor view using storage sharing
-  // Note: All views share the same storage, so record_stream() works correctly.
-  auto make_torch_view = [](at::Tensor &buffer, const std::vector<size_t> &shape,
+  // Helper function to construct tensor view
+  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
+  // will survive until all views are deleted.
+  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
                             size_t offset, at::ScalarType dtype) -> at::Tensor {
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     bool is_empty_shape = product(shape) == 0;
-    if (buffer.data_ptr<uint8_t>() == nullptr || is_empty_shape) {
+    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
       return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
     }
-    // Calculate storage offset based on dtype element size
-    size_t elem_size = at::elementSize(dtype);
-    int64_t storage_offset = static_cast<int64_t>(offset / elem_size);
-    // Compute default strides for the shape
-    std::vector<int64_t> strides(shape_int64.size());
-    if (!strides.empty()) {
-      strides.back() = 1;
-      for (int64_t i = static_cast<int64_t>(strides.size()) - 2; i >= 0; --i) {
-        strides[i] = strides[i + 1] * shape_int64[i + 1];
-      }
-    }
-    // Directly create TensorImpl with shared storage (avoids empty + set_ overhead)
-    auto impl = c10::make_intrusive<at::TensorImpl>(
-        c10::Storage(buffer.storage()),
-        buffer.key_set(),
-        caffe2::TypeMeta::fromScalarType(dtype));
-    impl->set_storage_offset(storage_offset);
-    impl->set_sizes_and_strides(shape_int64, strides);
-    return at::Tensor(std::move(impl));
+    return at::from_blob(
+        buffer->data_ptr<uint8_t>() + offset, shape_int64,
+        [buffer](void *) {},  // deleter holds shared_ptr
+        at::device(at::kCUDA).dtype(dtype));
   };
 
   // Allocate row-wise data
@@ -273,7 +261,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     }
 
     // Allocate full buffer
-    auto buffer = at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8));
+    auto buffer = std::make_shared<at::Tensor>(
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -315,7 +305,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     }
 
     // Allocate full buffer
-    auto buffer = at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8));
+    auto buffer = std::make_shared<at::Tensor>(
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -358,13 +350,15 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   return retval;
 }
 
-std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mxfp8_tensors(
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>>
+bulk_allocate_mxfp8_tensors(
     std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
     std::vector<MXFP8Quantizer *> &quantizer_cpp_list) {
   init_extension();
-  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>> retval;
   auto &tensor_py_list = std::get<0>(retval);
   auto &tensor_cpp_list = std::get<1>(retval);
+  auto &buffer_list = std::get<2>(retval);  // Buffers for offload
 
   // Number of tensors
   const size_t num_tensors = shape_list.size();
@@ -382,34 +376,20 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   constexpr size_t fp8_elem_size = 1;
   constexpr size_t scale_elem_size = 1;
 
-  // Helper function to construct tensor view using storage sharing
-  // Note: All views share the same storage, so record_stream() works correctly.
-  auto make_torch_view = [](at::Tensor &buffer, const std::vector<size_t> &shape,
+  // Helper function to construct tensor view
+  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
+  // will survive until all views are deleted.
+  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
                             size_t offset, at::ScalarType dtype) -> at::Tensor {
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     bool is_empty_shape = product(shape) == 0;
-    if (buffer.data_ptr<uint8_t>() == nullptr || is_empty_shape) {
+    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
       return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
     }
-    // Calculate storage offset based on dtype element size
-    size_t elem_size = at::elementSize(dtype);
-    int64_t storage_offset = static_cast<int64_t>(offset / elem_size);
-    // Compute default strides for the shape
-    std::vector<int64_t> strides(shape_int64.size());
-    if (!strides.empty()) {
-      strides.back() = 1;
-      for (int64_t i = static_cast<int64_t>(strides.size()) - 2; i >= 0; --i) {
-        strides[i] = strides[i + 1] * shape_int64[i + 1];
-      }
-    }
-    // Directly create TensorImpl with shared storage (avoids empty + set_ overhead)
-    auto impl = c10::make_intrusive<at::TensorImpl>(
-        c10::Storage(buffer.storage()),
-        buffer.key_set(),
-        caffe2::TypeMeta::fromScalarType(dtype));
-    impl->set_storage_offset(storage_offset);
-    impl->set_sizes_and_strides(shape_int64, strides);
-    return at::Tensor(std::move(impl));
+    return at::from_blob(
+        buffer->data_ptr<uint8_t>() + offset, shape_int64,
+        [buffer](void *) {},  // deleter holds shared_ptr
+        at::device(at::kCUDA).dtype(dtype));
   };
 
   // Allocate row-wise data
@@ -438,7 +418,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     }
 
     // Allocate full buffer
-    auto buffer = at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8));
+    auto buffer = std::make_shared<at::Tensor>(
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -477,7 +459,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     }
 
     // Allocate full buffer
-    auto buffer = at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8));
+    auto buffer = std::make_shared<at::Tensor>(
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -523,14 +507,17 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
 // allocate fp4 data, fp8 scalings, and amax values
 // layout: [fp4_data0, ..., fp4_dataN, fp8_scaling0, ..., fp8_scalingN, amax0, ..., amaxN]
 // amax buffer will be zeroed out by later amax kernels, so we can use empty to allocate
-std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_allocate_nvfp4_tensors(
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool, std::vector<at::Tensor>>
+bulk_allocate_nvfp4_tensors(
     std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
     std::vector<NVFP4Quantizer *> &quantizer_cpp_list) {
   init_extension();
-  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> retval;
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool, std::vector<at::Tensor>>
+      retval;
   auto &tensor_py_list = std::get<0>(retval);
   auto &tensor_cpp_list = std::get<1>(retval);
   auto &contiguous_data_and_scale = std::get<2>(retval);
+  auto &buffer_list = std::get<3>(retval);  // Buffers for offload
   contiguous_data_and_scale = true;
 
   // Number of tensors
@@ -547,34 +534,20 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) Enable based on optimize_for_gemm;
   constexpr size_t scale_elem_size = 1;
 
-  // Helper function to construct tensor view using storage sharing
-  // Note: All views share the same storage, so record_stream() works correctly.
-  auto make_torch_view = [](at::Tensor &buffer, const std::vector<size_t> &shape,
+  // Helper function to construct tensor view
+  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
+  // will survive until all views are deleted.
+  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
                             size_t offset, at::ScalarType dtype) -> at::Tensor {
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     bool is_empty_shape = product(shape) == 0;
-    if (buffer.data_ptr<uint8_t>() == nullptr || is_empty_shape) {
+    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
       return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
     }
-    // Calculate storage offset based on dtype element size
-    size_t elem_size = at::elementSize(dtype);
-    int64_t storage_offset = static_cast<int64_t>(offset / elem_size);
-    // Compute default strides for the shape
-    std::vector<int64_t> strides(shape_int64.size());
-    if (!strides.empty()) {
-      strides.back() = 1;
-      for (int64_t i = static_cast<int64_t>(strides.size()) - 2; i >= 0; --i) {
-        strides[i] = strides[i + 1] * shape_int64[i + 1];
-      }
-    }
-    // Directly create TensorImpl with shared storage (avoids empty + set_ overhead)
-    auto impl = c10::make_intrusive<at::TensorImpl>(
-        c10::Storage(buffer.storage()),
-        buffer.key_set(),
-        caffe2::TypeMeta::fromScalarType(dtype));
-    impl->set_storage_offset(storage_offset);
-    impl->set_sizes_and_strides(shape_int64, strides);
-    return at::Tensor(std::move(impl));
+    return at::from_blob(
+        buffer->data_ptr<uint8_t>() + offset, shape_int64,
+        [buffer](void *) {},  // deleter holds shared_ptr
+        at::device(at::kCUDA).dtype(dtype));
   };
 
   // Lambda function for converting std::vector<size_t> shape to NVFP4 shape (last dim divided by 2)
@@ -627,7 +600,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     }
 
     // Allocate full buffer
-    auto buffer = at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8));
+    auto buffer = std::make_shared<at::Tensor>(
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -688,7 +663,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     }
 
     // Allocate full buffer
-    auto buffer = at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8));
+    auto buffer = std::make_shared<at::Tensor>(
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -1135,10 +1112,9 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 
 }  // namespace
 
-std::vector<py::object> split_quantize(const at::Tensor &tensor,
-                                       const std::vector<size_t> &split_sections,
-                                       std::vector<py::handle> quantizer_list,
-                                       bool disable_bulk_allocation) {
+std::tuple<std::vector<py::object>, std::vector<at::Tensor>> split_quantize(
+    const at::Tensor &tensor, const std::vector<size_t> &split_sections,
+    std::vector<py::handle> quantizer_list, bool disable_bulk_allocation) {
   init_extension();
 
   // Check number of tensors
@@ -1146,7 +1122,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   NVTE_CHECK(quantizer_list.size() == num_splits, "Expected ", num_splits, " quantizers, but got ",
              quantizer_list.size());
   if (num_splits == 0) {
-    return {};
+    return {{}, {}};
   }
 
   // Input tensor properties
@@ -1213,6 +1189,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   // Allocate output tensors
   std::vector<TensorWrapper> output_cpp_list;
   std::vector<py::object> output_py_list;
+  std::vector<at::Tensor> buffer_list;  // Buffers for offload (can be used for record_stream)
   switch (allocation_method) {
     case AllocationMethod::BULK_FP8_BLOCKWISE: {
       // Bulk allocation for FP8 block-scaling tensors
@@ -1220,7 +1197,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (auto &quantizer : quantizer_cpp_list) {
         blockwise_quantizers.push_back(static_cast<Float8BlockQuantizer *>(quantizer.get()));
       }
-      std::tie(output_py_list, output_cpp_list) =
+      std::tie(output_py_list, output_cpp_list, buffer_list) =
           bulk_allocate_fp8_blockwise_tensors(split_shapes, quantizer_list, blockwise_quantizers);
       break;
     }
@@ -1230,7 +1207,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (auto &quantizer : quantizer_cpp_list) {
         mxfp8_quantizers.push_back(static_cast<MXFP8Quantizer *>(quantizer.get()));
       }
-      std::tie(output_py_list, output_cpp_list) =
+      std::tie(output_py_list, output_cpp_list, buffer_list) =
           bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
       break;
     }
@@ -1241,7 +1218,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
         nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
       }
       bool contiguous_data_and_scale;
-      std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
+      std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale, buffer_list) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
       if (!contiguous_data_and_scale) {
         // Avoid fused quantize kernel if data is not contiguous
@@ -1278,7 +1255,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
   }
 
-  return output_py_list;
+  return {output_py_list, buffer_list};
 }
 
 }  // namespace pytorch
