@@ -195,9 +195,9 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
 namespace {
 
 std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>>
-bulk_allocate_fp8_blockwise_tensors(
-    std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
-    std::vector<Float8BlockQuantizer *> &quantizer_cpp_list) {
+bulk_allocate_fp8_blockwise_tensors(std::vector<std::vector<size_t>> &shape_list,
+                                    std::vector<py::handle> &quantizer_py_list,
+                                    std::vector<Float8BlockQuantizer *> &quantizer_cpp_list) {
   init_extension();
   std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>> retval;
   auto &tensor_py_list = std::get<0>(retval);
@@ -351,9 +351,9 @@ bulk_allocate_fp8_blockwise_tensors(
 }
 
 std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>>
-bulk_allocate_mxfp8_tensors(
-    std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
-    std::vector<MXFP8Quantizer *> &quantizer_cpp_list) {
+bulk_allocate_mxfp8_tensors(std::vector<std::vector<size_t>> &shape_list,
+                            std::vector<py::handle> &quantizer_py_list,
+                            std::vector<MXFP8Quantizer *> &quantizer_cpp_list) {
   init_extension();
   std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>> retval;
   auto &tensor_py_list = std::get<0>(retval);
@@ -508,9 +508,9 @@ bulk_allocate_mxfp8_tensors(
 // layout: [fp4_data0, ..., fp4_dataN, fp8_scaling0, ..., fp8_scalingN, amax0, ..., amaxN]
 // amax buffer will be zeroed out by later amax kernels, so we can use empty to allocate
 std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool, std::vector<at::Tensor>>
-bulk_allocate_nvfp4_tensors(
-    std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
-    std::vector<NVFP4Quantizer *> &quantizer_cpp_list) {
+bulk_allocate_nvfp4_tensors(std::vector<std::vector<size_t>> &shape_list,
+                            std::vector<py::handle> &quantizer_py_list,
+                            std::vector<NVFP4Quantizer *> &quantizer_cpp_list) {
   init_extension();
   std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool, std::vector<at::Tensor>>
       retval;

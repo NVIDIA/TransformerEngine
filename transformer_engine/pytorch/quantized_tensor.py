@@ -161,9 +161,7 @@ def restore_from_saved(
     return tensor_objects
 
 
-def get_columnwise_subview_info(
-    inputmats: list, columnwise_buffer: torch.Tensor
-) -> list:
+def get_columnwise_subview_info(inputmats: list, columnwise_buffer: torch.Tensor) -> list:
     """
     Get boundary information for columnwise internal tensors in inputmats.
 
@@ -205,7 +203,12 @@ def get_columnwise_subview_info(
         # Get columnwise_scale_inv info
         col_scale = getattr(tensor, "_columnwise_scale_inv", None)
         col_scale_info = (
-            (col_scale.data_ptr() - buffer_ptr, col_scale.shape, col_scale.stride(), col_scale.dtype)
+            (
+                col_scale.data_ptr() - buffer_ptr,
+                col_scale.shape,
+                col_scale.stride(),
+                col_scale.dtype,
+            )
             if col_scale is not None
             else None
         )

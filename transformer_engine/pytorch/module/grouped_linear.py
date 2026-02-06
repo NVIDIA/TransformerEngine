@@ -347,9 +347,7 @@ class _GroupedLinear(torch.autograd.Function):
 
             # Restore subviews from reloaded buffer
             if ctx.cpu_offloading and ctx.subview_restore_info and offload_buffer is not None:
-                restore_columnwise_subviews(
-                    inputmats, offload_buffer, ctx.subview_restore_info
-                )
+                restore_columnwise_subviews(inputmats, offload_buffer, ctx.subview_restore_info)
 
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
@@ -475,7 +473,9 @@ class _GroupedLinear(torch.autograd.Function):
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
                     if ctx.fp8 and not ctx.debug:
-                        inputmats, _ = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                        inputmats, _ = tex.split_quantize(
+                            inp_view, ctx.m_splits, ctx.input_quantizers
+                        )
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view, ctx.input_quantizers, ctx.m_splits, ctx.activation_dtype
