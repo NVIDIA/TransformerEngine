@@ -174,7 +174,7 @@ class ClampedSwiGLU(BasicOperation):
        1. Both gate and pre-activations are clipped based on parameter limit.
        2. Activation uses sigmoid(alpha * x) instead of sigmoid(x) used in Swish activation.
 
-    .. warning::    The input tensor is chunked along the last dimension to get gates/pre-activations which is differnt
+    .. warning::    The input tensor is chunked along the last dimension to get gates/pre-activations which is different
     from GPT OSS implementation where the gates/pre-activations are assumed to be interleaved in the input tensor.
 
     Parameters
@@ -268,7 +268,7 @@ class ClampedSwiGLU(BasicOperation):
 
 
 class ScaledSwiGLU(BasicOperation):
-    """SwiGLU with post-scaling
+    r"""SwiGLU with post-scaling
 
     If the SwiGLU output has shape ``(d_1, ..., d_n)``, it is
     multiplied with an extra input tensor of shape

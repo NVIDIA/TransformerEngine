@@ -5,10 +5,9 @@
 """Fused operation for MoE grouped MLP."""
 
 from __future__ import annotations
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 import functools
-import itertools
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -17,7 +16,7 @@ from ...cpp_extensions import general_grouped_gemm
 from ...module._common import noop_cat
 from ...module.base import get_dummy_wgrad
 from ...quantization import Recipe
-from ...tensor import MXFP8Tensor, Quantizer
+from ...tensor import MXFP8Tensor
 from ...utils import clear_tensor_data, get_device_compute_capability
 from ..basic import GroupedLinear, ScaledSwiGLU
 from ..fuser import register_backward_fusion
@@ -96,7 +95,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
-        **unused,
+        **unused,  # pylint: disable=unused-argument
     ) -> tuple[
         torch.Tensor,
         list[tuple[Optional[torch.Tensor], ...]],

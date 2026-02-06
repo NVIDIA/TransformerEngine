@@ -35,7 +35,7 @@ from ..op import BasicOperation, OperationContext
 
 
 class GroupedLinear(BasicOperation):
-    """Apply multiple linear transformations: :math:``y_i = x_i W_i^T + b_i``
+    r"""Apply multiple linear transformations: :math:``y_i = x_i W_i^T + b_i``
 
     This is equivalent to splitting the input tensor along its first
     dimension, applying a separate ``torch.nn.Linear`` to each split,
