@@ -796,14 +796,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                   cudaMemcpyDeviceToHost, stream);
   cudaStreamSynchronize(stream);
 
-  int currentDevice;
-  cudaGetDevice(&currentDevice);
-  printf("[gpu=%d] Group sizes[total_group_size=%zu, m=%zu]: ", currentDevice,
-         std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL), m);
-  for (size_t i = 0; i < num_gemms; ++i) {
-    printf("%d, ", host_group_sizes[i]);
-  }
-  printf("\n");
+  // int currentDevice;
+  // cudaGetDevice(&currentDevice);
+  // printf("[gpu=%d] Group sizes[total_group_size=%zu, m=%zu]: ", currentDevice,
+  //        std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL), m);
+  // for (size_t i = 0; i < num_gemms; ++i) {
+  //   printf("%d, ", host_group_sizes[i]);
+  // }
+  // printf("\n");
 
   nvte_grouped_gemm(lhs_tensor, lhs_is_trans, rhs_tensor, rhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
