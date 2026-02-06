@@ -3373,19 +3373,17 @@ class TestSequentialModules:
             and glu_interleave_size == 32
         ):
             forward_ops = module._module_groups[0]._forward_ops
+            backward_ops = module._module_groups[0]._backward_ops
             assert len(forward_ops) == 1
             assert isinstance(
                 forward_ops[0][0],
                 te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
             )
-
-        def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-            """Convert to FP64 CPU tensor"""
-            if tensor is None:
-                return None
-            out = tensor.detach().to(dtype=torch.float64, device="cpu")
-            out = out.requires_grad_(requires_grad=tensor.requires_grad)
-            return out
+            assert len(backward_ops) == 1
+            assert isinstance(
+                backward_ops[0][0],
+                te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
+            )
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.25, "atol": 0.5}

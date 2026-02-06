@@ -618,7 +618,7 @@ class GroupedLinear(BasicOperation):
             if has_bias:
                 grad_biases = [dy.reshape(-1, dy.size(-1)).sum(dim=0) for dy in dys]
 
-        # Initialize grad weight grads
+        # Initialize grad weight buffers
         accumulate_into_main_grad = self._accumulate_into_main_grad
         grad_weights = [None] * num_groups
         if ctx.weight_requires_grad:
@@ -630,10 +630,10 @@ class GroupedLinear(BasicOperation):
                     weight_param = getattr(self, f"weight{group_idx}")
                     if hasattr(weight_param, "__fsdp_param__"):
                         weight_param.main_grad = weight_param.get_main_grad()
-                    accumulate_into_main_grad = not getattr(
-                        weight_param, "overwrite_main_grad", False
-                    )
                     grad_weights[group_idx] = weight_param.main_grad
+                accumulate_into_main_grad = not getattr(
+                    self.weight0, "overwrite_main_grad", False
+                )
             else:
                 weight_shape = ws[0].size()
                 for group_idx in range(num_groups):

@@ -227,6 +227,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         ).contiguous()  # Convert to swizzled layout
         fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
+        # Kernel scaling factors
+        ones = torch.ones(num_groups, dtype=dtype, device=device)
+
         # Fused kernel for FC1 + SwiGLU + post-scale
         fc1_kernel_out = self.grouped_gemm_swiglu_kernel()(
             fc1_x_data,
@@ -234,8 +237,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc1_x_scales,
             fc1_w_scales,
             split_points,
-            torch.ones(num_groups, dtype=dtype, device=device),  # alpha_tensor
-            norm_const_tensor=torch.ones(1, dtype=dtype, device=device),
+            ones,  # alpha_tensor
+            norm_const_tensor=ones[:1],
             prob_tensor=scales.detach().reshape(-1, 1, 1),
             acc_dtype=torch.float32,
             c_dtype=torch.bfloat16,
