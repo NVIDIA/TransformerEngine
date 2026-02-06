@@ -1558,8 +1558,17 @@ class TestBasicOps:
     @pytest.mark.parametrize(
         "activation",
         (
-            "gelu", "geglu", "qgelu", "qgeglu", "relu", "reglu",
-            "glu", "srelu", "sreglu", "silu", "swiglu",
+            "gelu",
+            "geglu",
+            "qgelu",
+            "qgeglu",
+            "relu",
+            "reglu",
+            "glu",
+            "srelu",
+            "sreglu",
+            "silu",
+            "swiglu",
         ),
     )
     @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (32, 1, 32)))
