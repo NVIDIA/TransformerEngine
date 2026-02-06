@@ -1,6 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+import os
 import torch
 from typing import Optional
 from transformer_engine.pytorch.router import (
@@ -15,6 +16,8 @@ seed = 42
 torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
+
+use_sonicmoe = bool(int(os.getenv("NVTE_USE_SONIC_MOE", "0")))
 
 
 # Pytorch-based group topk
@@ -221,6 +224,7 @@ def run_comparison(
     torch.testing.assert_close(logits.grad, logits_clone.grad)
 
 
+@pytest.mark.skipif(use_sonicmoe, reason="SonicMoE does not support sigmoid scaling function.")
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
 @pytest.mark.parametrize("num_experts", [128, 32])
@@ -256,8 +260,8 @@ def test_topk_sigmoid(
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
 @pytest.mark.parametrize("num_experts", [128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
-@pytest.mark.parametrize("use_pre_softmax", [True, False])
-@pytest.mark.parametrize("group_topk", [None, 4])
+@pytest.mark.parametrize("use_pre_softmax", [False] if use_sonicmoe else [False, True])
+@pytest.mark.parametrize("group_topk", [None] if use_sonicmoe else [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
 def test_topk_softmax(
     dtype,
@@ -268,7 +272,7 @@ def test_topk_softmax(
     group_topk,
     scaling_factor,
 ):
-    num_groups = 8 if group_topk else None
+    num_groups = (4 if use_sonicmoe else 8) if group_topk else None
     run_comparison(
         dtype=dtype,
         num_tokens=num_tokens,
