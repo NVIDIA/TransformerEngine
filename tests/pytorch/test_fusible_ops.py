@@ -1632,7 +1632,7 @@ class TestBasicOps:
         elif activation == "sigmoid":
             y_ref = torch.nn.functional.sigmoid(x_ref)
         elif activation == "glu":
-            x = x_ref.reshape(*in_shape[:-1], 2, in_shape[-1])
+            x = x_ref.reshape(*in_shape[:-1], 2, in_shape[-1] // 2)
             x = x.flip(-2)  # PyTorch GLU swaps gate and linear unit
             x = x.reshape(in_shape)
             y_ref = torch.nn.glu(x)
