@@ -65,7 +65,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
 
         # Check for unsupported configurations
         if not self.is_supported():
-            self.grouped_gemm_swiglu_kernel()  # Try triggering import error
+            self.grouped_gemm_dswiglu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
             raise ValueError(
@@ -146,10 +146,10 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc2_dys = tex.split_quantize(fc2_dy, split_sizes_cpu, fc2_ctx.grad_output_quantizers)
 
         # Quantize FC2 weights to MXFP8 if needed
-        if not is_quantized_tensor(fc1_ws[0]):
-            for quantizer in fc1_ctx.weight_quantizers:
+        if not is_quantized_tensor(fc2_ws[0]):
+            for quantizer in fc2_ctx.weight_quantizers:
                 quantizer.set_usage(rowwise=False, columnwise=True)
-            fc1_ws = fc1_op._quantize_weights_mxfp8(fc1_ws, fc1_ctx.weight_quantizers)
+            fc2_ws = fc2_op._quantize_weights_mxfp8(fc2_ws, fc2_ctx.weight_quantizers)
 
         # Pack data tensors
         # Note: Fused kernel expects tensor with non-contiguous
@@ -178,17 +178,16 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         # Pack weight tensors
         # Note: Fused kernel expects tensor with non-contiguous
         # logical dims.
-        # Data actual shape: (num_groups, n, k)
-        # Scale actual shape: (num_groups, k/128, n/128, 32 (block col),
+        # Data actual shape: (num_groups, k, n)
+        # Scale actual shape: (num_groups, n/128, k/128, 32 (block col),
         #  4 (block col), 4 (block row))
         # Data logical shape: (n, k, num_groups)
-        # Scale logical shape: (32 (block col), 4 (block col), k/128,
-        #   4 (block row), n/128, num_groups)
+        # Scale logical shape: (32 (block col), 4 (block col), n/128,
+        #   4 (block row), k/128, num_groups)
         fc2_w_data = noop_cat([w._columnwise_data for w in fc2_ws])
         fc2_w_data = fc2_w_data.view(dtype=torch.float8_e4m3fn)
         fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_shape[1])
-        fc2_w_data = fc2_w_data.transpose(1, 2).contiguous()  ### TODO Remove
-        fc2_w_data = fc2_w_data.permute(1, 2, 0)
+        fc2_w_data = fc2_w_data.permute(2, 1, 0)
         fc2_w_scales = noop_cat([w._columnwise_scale_inv for w in fc2_ws])
         fc2_w_scales = fc2_w_scales.view(dtype=torch.float8_e8m0fnu)
         fc2_w_scales = fc2_w_scales.view(
@@ -261,7 +260,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 rowwise_scale_inv=fc1_dy_row_scale[group_idx],
                 columnwise_data=fc1_dy_col_data[group_idx],
                 columnwise_scale_inv=fc1_dy_col_scale[group_idx],
-                quantizer=fc2_ctx.grad_output_quantizers[group_idx],
+                quantizer=fc1_ctx.grad_output_quantizers[group_idx],
                 requires_grad=False,
                 with_gemm_swizzled_scales=True,
             )
