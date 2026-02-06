@@ -1887,7 +1887,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.layer_norm_bias = None
 
         # FC1 init
-        if self.activation in ["geglu", "glu", "qgeglu", "reglu", "sreglu", "swiglu", "clamped_swiglu"]:
+        if self.activation in [
+            "geglu",
+            "glu",
+            "qgeglu",
+            "reglu",
+            "sreglu",
+            "swiglu",
+            "clamped_swiglu",
+        ]:
             fc1_output_features = 2 * self.size_per_partition
         else:
             fc1_output_features = self.size_per_partition
