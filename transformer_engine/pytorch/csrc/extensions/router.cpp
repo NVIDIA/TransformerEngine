@@ -24,7 +24,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
   // Expert bias only happens at the sigmoid case
   if (expert_bias.has_value()) {
     TORCH_CHECK(score_function == "sigmoid" || score_function == "sqrtsoftplus",
-                "score_function must be sigmoid when expert_bias is not None");
+                "score_function must be sigmoid or sqrtsoftplus when expert_bias is not None");
   }
   // Check if the score function is valid
   TORCH_CHECK(score_function == "softmax" || score_function == "sigmoid" ||
