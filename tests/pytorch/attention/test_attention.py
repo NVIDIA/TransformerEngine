@@ -162,7 +162,13 @@ def test_dot_product_attention(
         )
 
     # Get backends
+    # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s. 
+    # For all other shapes test fwd+bwd
     is_training = True
+    # TODO(KshitijLakhani): Set is_training to True for all cases once cuDNN supports dbias for 111s.
+    if config.bias_shape == "111s":
+        is_training = False
+        logging.info(f"Setting is_training to False as cuDNN does not support dbias for {config.bias_shape=} ")
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -526,7 +532,7 @@ def test_dpa_mask(dtype, model_configs, model):
 
 model_configs_bias = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "bias_1_0": ModelConfig(4, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="111s"),
+    "bias_1_0": ModelConfig(4, 128, 16, 64, attn_bias_type="post_scale_bias"),
     "bias_1_1": ModelConfig(2, 128, 16, 64, max_seqlen_kv=256, attn_bias_type="post_scale_bias"),
     "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias"),
     "bias_1_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="post_scale_bias"),
@@ -636,7 +642,8 @@ model_configs_bias_shapes = {
     "bias_1_1": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="1hss"),
     "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="b1ss"),
     "bias_1_3": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"),
-    "bias_1_4": ModelConfig(
+    "bias_1_4": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="111s"),
+    "bias_1_5": ModelConfig(
         4,
         2048,
         24,
@@ -646,7 +653,7 @@ model_configs_bias_shapes = {
         bias_shape="1hss",
         alibi_type="custom",
     ),
-    "bias_1_5": ModelConfig(
+    "bias_1_6": ModelConfig(
         2,
         2048,
         24,
@@ -1146,11 +1153,14 @@ def _run_dot_product_attention(
         # For 1hss, 11ss, b1ss, bhss
         shape_cache = shape
         shape = shape.replace("_s_s", "_sq_skv")
-        if shape==shape_cache:
-            # For 111s
+        # For 111s
+        if shape == shape_cache:
             shape = shape.replace("_1_s", "_1_skv")
         tensor_shape = [dim_to_num[j] for j in shape.split("_")]
         bias = torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        # For 111s, dbias calculation is not supported as of cuDNN 9.18
+        if config.bias_shape == "111s":
+            bias.requires_grad = False
 
     # Create RNG
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
