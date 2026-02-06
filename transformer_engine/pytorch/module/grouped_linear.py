@@ -782,7 +782,6 @@ class GroupedLinear(TransformerEngineBaseModule):
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
         self.make_grouped_weights(defer_init=defer_init)
-        self.set_tensor_parallel_attributes(defer_init=defer_init)
 
     def set_tensor_parallel_attributes(self, defer_init=False) -> None:
         """Set attributes needed for TP"""

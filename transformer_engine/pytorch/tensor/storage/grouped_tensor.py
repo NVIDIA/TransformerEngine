@@ -9,8 +9,6 @@ import math
 
 import torch
 
-from transformer_engine_torch import Float8BlockScaleTensorFormat
-
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ..mxfp8_tensor import MXFP8Tensor
@@ -317,7 +315,7 @@ class GroupedTensor:
         # First dim
         first_dim_list = [s[0] for s in shape]
         uniform_first_dim = all(first_dim_list[0] == x for x in first_dim_list)
-        logical_first_dim = math.prod(first_dim_list)
+        logical_first_dim = sum(first_dim_list)
         if uniform_first_dim:
             first_dims = None
         else:
@@ -380,7 +378,6 @@ class GroupedTensor:
         assert logical_first_dim > 0, "Logical first dim must be positive for GroupedTensor"
         assert logical_last_dim > 0, "Logical last dim must be positive for GroupedTensor"
 
-        # TODO(ksivaman): Need for graphing. Re-enable this check.
         # assert (
         #     logical_first_dim % 128 == 0
         # ), "Logical first dim must be divisible by 128"
@@ -403,9 +400,14 @@ class GroupedTensor:
                 ]
             )
             offsets = tensor_offsets.tolist()
+            first_dims_list = first_dims.tolist()
             for i in range(num_tensors):
-                shape.append((offsets[i + 1] - offsets[i], logical_last_dim))
+                shape.append((first_dims_list[i], logical_last_dim))
         else:
+            offsets = [
+                i * logical_first_dim * logical_last_dim // num_tensors
+                for i in range(num_tensors + 1)
+            ]
             for i in range(num_tensors):
                 shape.append((logical_first_dim // num_tensors, logical_last_dim))
 
