@@ -305,9 +305,20 @@ def run_dpa_with_cp(
         x.requires_grad = True
 
     if config.attn_bias_type not in ["no_bias", "alibi"]:
-        attn_bias_shape = (1, 1, config.max_seqlen_q, config.max_seqlen_kv)
+        bias_shape_map = {
+            "1hss": (1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv),
+            "11ss": (1, 1, config.max_seqlen_q, config.max_seqlen_kv),
+            "b1ss": (config.batch_size, 1, config.max_seqlen_q, config.max_seqlen_kv),
+            "bhss": (config.batch_size, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv),
+            "111s": (1, 1, 1, config.max_seqlen_kv),
+        }
+        attn_bias_shape = bias_shape_map.get(config.bias_shape)
+        if attn_bias_shape is None:
+            assert False, f"cuDNN does not support {config.bias_shape=}"
         bias = torch.randn(*attn_bias_shape, dtype=dtypes[dtype]).cuda()
-        bias.requires_grad = True
+        # cuDNN does not support dbias calculation for 111s as of cuDNN 9.18
+        # TODO(KshitijLakhani): Set requires_grad to True for all shapes once 111s is supported
+        bias.requires_grad = True if config.bias_shape != "111s" else False
     else:
         bias = None
 
@@ -390,12 +401,30 @@ def run_dpa_with_cp(
         q_, k_, v_ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:
-        bias_ = bias_.view(
-            *bias_.shape[:-2], 2 * world_size, bias_.shape[-2] // (2 * world_size), bias_.shape[-1]
-        )
-        bias_ = bias_.index_select(2, seq_idx)
-        bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
-        bias_.requires_grad = True
+        ndim = bias_.ndim
+        seq_q_dim = ndim - 2
+        if qkv_format == "thd":
+            bias_seq_idx = seq_idx_q
+        else:
+            bias_seq_idx = seq_idx
+        shape_before_seq = bias_.shape[:seq_q_dim]
+        seq_q_size = bias_.shape[seq_q_dim]
+        seq_kv_size = bias_.shape[-1]
+        if seq_q_size == 1:
+            #TODO(KshitijLakhani): Set to True always once cuDNN supports dbias for 111s
+            bias_.requires_grad = False 
+            # Bias is broadcast, no need to partition along sequence dimension
+            pass
+        else:
+            bias_ = bias_.view(
+                *shape_before_seq,
+                2 * world_size,
+                seq_q_size // (2 * world_size),
+                seq_kv_size
+            )
+            bias_ = bias_.index_select(seq_q_dim, bias_seq_idx)
+            bias_ = bias_.view(*shape_before_seq, -1, seq_kv_size)
+            bias_.requires_grad = True
     # set up environment
     core_attn.set_context_parallel_group(
         cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
@@ -474,19 +503,26 @@ def run_dpa_with_cp(
             for x in [dq_, dk_, dv_, out_]
         ]
         if dbias is not None and dbias_ is not None:
+            ndim = dbias.ndim
+            # Query seq is at dim -2
+            seq_q_dim = ndim - 2 
+            shape_before_seq = dbias.shape[:seq_q_dim]
+            seq_q_size = dbias.shape[seq_q_dim]
+            seq_kv_size = dbias.shape[-1]
+            # Reshape to split seq_q dimension
             dbias = dbias.view(
-                dbias.shape[0],
-                dbias.shape[1],
+                *shape_before_seq,
                 2 * world_size,
-                dbias.shape[2] // (2 * world_size),
-                dbias.shape[3],
+                seq_q_size // (2 * world_size),
+                seq_kv_size
             )
-            # bias has fixed axis (2) as dbias shape: (1, 1, max_seqlen_q, max_seqlen_kv)
-            dbias = dbias.index_select(2, seq_idx)
-            # Flatten
-            dbias = dbias.view(dbias.shape[0], dbias.shape[1], -1, dbias.shape[-1])
+            # Index select on the newly created dimension (now at position seq_q_dim)
+            dbias = dbias.index_select(seq_q_dim, seq_idx)
             dbias_ = dbias_.view(
-                dbias_.shape[0], dbias_.shape[1], 2, dbias_.shape[2] // 2, dbias_.shape[3]
+                *shape_before_seq,
+                2,
+                dbias_.shape[seq_q_dim] // 2,
+                seq_kv_size
             )
 
     elif qkv_format == "thd":
@@ -546,9 +582,17 @@ def run_dpa_with_cp(
                     if names[i] == "dbias":
                         # After reshaping: (1, 1, 2, seq_q//2, seq_kv)
                         # Compare along dimension 2 (the split sequence dimension)
+                        ndim_bias = t.ndim
+                        seq_q_dim_bias = ndim_bias - 2  # Query sequence dimension
+                        # After reshaping both have shape: [..., 2, seq_q//2, seq_kv]
+                        # The split dimension is at seq_q_dim_bias
+                        slice_0 = [slice(None)] * ndim_bias
+                        slice_0[seq_q_dim_bias] = 0
+                        slice_1 = [slice(None)] * ndim_bias
+                        slice_1[seq_q_dim_bias] = 1
                         compare_and_assert(
-                            t[:, :, 0],  # First sequence chunk
-                            tensors_cp[i][:, :, 0],
+                            t[tuple(slice_0)],  # First sequence chunk
+                            tensors_cp[i][tuple(slice_0)],
                             names_no_cp[i],
                             names_cp[i],
                             atol,
@@ -557,8 +601,8 @@ def run_dpa_with_cp(
                             is_fp8,
                         )
                         compare_and_assert(
-                            t[:, :, 1],  # Second sequence chunk
-                            tensors_cp[i][:, :, 1],
+                            t[tuple(slice_1)],  # First sequence chunk
+                            tensors_cp[i][tuple(slice_1)],
                             names_no_cp[i],
                             names_cp[i],
                             atol,
@@ -595,9 +639,15 @@ def run_dpa_with_cp(
                     if names[i] == "dbias":
                         # After reshaping: (1, 1, 2, seq_q//2, seq_kv)
                         # Compare along dimension 2 (the split sequence dimension)
+                        ndim_bias = t.ndim
+                        seq_q_dim_bias = ndim_bias - 2
+                        slice_0 = [slice(None)] * ndim_bias
+                        slice_0[seq_q_dim_bias] = 0
+                        slice_1 = [slice(None)] * ndim_bias
+                        slice_1[seq_q_dim_bias] = 1
                         compare_and_assert(
-                            t[:, :, 0],  # First sequence chunk
-                            tensors_cp[i][:, :, 0],
+                            t[tuple(slice_0)],  # First sequence chunk
+                            tensors_cp[i][tuple(slice_0)],
                             names_no_cp[i],
                             names_cp[i],
                             atol,
@@ -606,8 +656,8 @@ def run_dpa_with_cp(
                             is_fp8,
                         )
                         compare_and_assert(
-                            t[:, :, 1],  # Second sequence chunk
-                            tensors_cp[i][:, :, 1],
+                            t[tuple(slice_1)],  # First sequence chunk
+                            tensors_cp[i][tuple(slice_1)],
                             names_no_cp[i],
                             names_cp[i],
                             atol,
