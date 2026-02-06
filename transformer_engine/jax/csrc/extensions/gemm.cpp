@@ -814,30 +814,30 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL) * n * out_dtype_bytes;
   cudaMemsetAsync(output->untyped_data() + _offset, 0, output->size_bytes() - _offset, stream);
 
-  std::vector<__bf16> debug_output(m * n);
-  cudaMemcpyAsync(debug_output.data(), output->untyped_data(), m * n * out_dtype_bytes,
-                  cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
+  // std::vector<__bf16> debug_output(m * n);
+  // cudaMemcpyAsync(debug_output.data(), output->untyped_data(), m * n * out_dtype_bytes,
+  //                 cudaMemcpyDeviceToHost, stream);
+  // cudaStreamSynchronize(stream);
 
-  size_t totalPrints = 0;
-  constexpr size_t MAX_PRINTS = 1;
-  for (size_t i_m = 0; i_m < m; i_m++) {
-    for (size_t i_n = 0; i_n < n; i_n++) {
-      size_t index = i_m * n + i_n;
-      if (isnan(static_cast<float>(debug_output[index])) ||
-          isinf(static_cast<float>(debug_output[index]))) {
-        printf("[gpu=%d] Output contains NaN or Inf at index [%zu, %zu] (flat index %zu)\n", i_m,
-               i_n, index);
-        totalPrints++;
-        if (totalPrints >= MAX_PRINTS) {
-          break;
-        }
-      }
-    }
-    if (totalPrints >= MAX_PRINTS) {
-      break;
-    }
-  }
+  // size_t totalPrints = 0;
+  // constexpr size_t MAX_PRINTS = 1;
+  // for (size_t i_m = 0; i_m < m; i_m++) {
+  //   for (size_t i_n = 0; i_n < n; i_n++) {
+  //     size_t index = i_m * n + i_n;
+  //     if (isnan(static_cast<float>(debug_output[index])) ||
+  //         isinf(static_cast<float>(debug_output[index]))) {
+  //       printf("[gpu=%d] Output contains NaN or Inf at index [%zu, %zu] (flat index %zu)\n", i_m,
+  //              i_n, index);
+  //       totalPrints++;
+  //       if (totalPrints >= MAX_PRINTS) {
+  //         break;
+  //       }
+  //     }
+  //   }
+  //   if (totalPrints >= MAX_PRINTS) {
+  //     break;
+  //   }
+  // }
 
   return ffi_with_cuda_error_check();
 }

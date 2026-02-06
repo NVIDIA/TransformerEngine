@@ -1549,7 +1549,7 @@ def make_ragged_dot_cls(quantization_recipe):
             kernel,
             group_sizes=group_sizes,
             contracting_dims=((1,), (1,)),
-            #   quantizer_set=quantizer_set
+            quantizer_set=quantizer_set
         )
 
         return out.reshape(target_out_shape)
