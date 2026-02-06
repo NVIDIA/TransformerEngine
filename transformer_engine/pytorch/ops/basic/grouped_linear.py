@@ -631,9 +631,7 @@ class GroupedLinear(BasicOperation):
                     if hasattr(weight_param, "__fsdp_param__"):
                         weight_param.main_grad = weight_param.get_main_grad()
                     grad_weights[group_idx] = weight_param.main_grad
-                accumulate_into_main_grad = not getattr(
-                    self.weight0, "overwrite_main_grad", False
-                )
+                accumulate_into_main_grad = not getattr(self.weight0, "overwrite_main_grad", False)
             else:
                 weight_shape = ws[0].size()
                 for group_idx in range(num_groups):

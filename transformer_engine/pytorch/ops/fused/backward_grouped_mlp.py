@@ -282,7 +282,9 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                     if hasattr(weight_param, "__fsdp_param__"):
                         weight_param.main_grad = weight_param.get_main_grad()
                     fc2_dws[group_idx] = weight_param.main_grad
-                accumulate_into_main_grad = not getattr(fc2_op.weight0, "overwrite_main_grad", False)
+                accumulate_into_main_grad = not getattr(
+                    fc2_op.weight0, "overwrite_main_grad", False
+                )
             else:
                 for group_idx in range(num_groups):
                     fc2_dws[group_idx] = torch.empty(
@@ -358,7 +360,9 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                     if hasattr(weight_param, "__fsdp_param__"):
                         weight_param.main_grad = weight_param.get_main_grad()
                     fc1_dws[group_idx] = weight_param.main_grad
-                accumulate_into_main_grad = not getattr(fc1_op.weight0, "overwrite_main_grad", False)
+                accumulate_into_main_grad = not getattr(
+                    fc1_op.weight0, "overwrite_main_grad", False
+                )
             else:
                 fc1_dws = [
                     torch.empty(fc1_weight_shape, dtype=dtype, device=device)
