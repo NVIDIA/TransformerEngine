@@ -168,6 +168,7 @@ list(APPEND transformer_engine_cuda_sources
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
+     activation/glu.cu
      activation/relu.cu
      activation/swiglu.cu
      cast/cast.cu
@@ -352,6 +353,7 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/glu.cu
                                           activation/relu.cu
                                           activation/swiglu.cu)
 endif()

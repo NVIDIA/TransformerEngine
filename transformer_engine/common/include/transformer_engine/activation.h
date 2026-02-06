@@ -31,6 +31,7 @@ extern "C" {
 enum class NVTE_Activation_Type {
   GELU,
   GEGLU,
+  GLU,
   SILU,
   SWIGLU,
   RELU,
@@ -151,6 +152,32 @@ void nvte_dqgelu(const NVTETensor grad, const NVTETensor input, NVTETensor outpu
  */
 void nvte_dsrelu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                  cudaStream_t stream);
+
+/*! \brief Computes the GLU (Gated Linear Unit) activation of the input.
+ *         GLU(a,b) = sigmoid(a) * b
+ *         See "Language Modeling with Gated Convolutional Networks" (arXiv:1612.08083)
+ *         and "GLU Variants Improve Transformer" (arXiv:2002.05202).
+ *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     input     Input tensor of shape [N, H * 2].
+ *  \param[in,out] output    Output tensor of shape [N, H].
+ *                           It computes sigmoid(input[N, :H]) x input[N, H:]
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_glu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
+
+/*! \brief Computes the GLU activation gradient.
+ *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     grad      Incoming gradient of shape [N, H].
+ *  \param[in]     input     Forward input tensor of shape [N, H * 2].
+ *  \param[in,out] output    Outgoing gradient of shape [N, H * 2].
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_dglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
+               cudaStream_t stream);
 
 /*! \brief Computes the gated GeLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
