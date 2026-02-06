@@ -133,6 +133,23 @@ struct Tensor {
 
   NVTEScalingMode scaling_mode;
   NVTETensor nvte_tensor;
+  /*! \brief Whether scaling factors are in format expected by GEMM
+   *
+   *  Only meaningful for MXFP8 and NVFP4.
+   */
+  bool with_gemm_swizzled_scales = false;
+
+  /*! Map from NVTETensorParam to parameter sizes */
+  static constexpr size_t attr_sizes[] = {
+      sizeof(NVTEBasicTensor),  // kNVTERowwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEColumnwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEScale
+      sizeof(NVTEBasicTensor),  // kNVTEAmax
+      sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
+      sizeof(uint8_t)           // kNVTEWithGEMMSwizzledScales
+  };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
 
@@ -146,6 +163,7 @@ struct Tensor {
     scale_inv.clear();
     columnwise_scale_inv.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+    with_gemm_swizzled_scales = false;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -389,22 +407,20 @@ struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
   NVTETensor noop_tensor = nullptr;
-  Float8BlockScaleTensorFormat float8_block_scale_tensor_format =
-      Float8BlockScaleTensorFormat::GEMM_READY;
   NVTETensor rng_state = nullptr;
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),                          // force_pow_2_scales
+      sizeof(uint8_t),                       // force_pow_2_scales
       sizeof(float),                         // amax_epsilon
       sizeof(NVTETensor),                    // noop_tensor
-      sizeof(Float8BlockScaleTensorFormat),  // float8_block_scale_tensor_format
+      sizeof(Float8BlockScaleTensorFormat),  // (deprecated)
       sizeof(NVTETensor),                    // rng_seed and offset
-      sizeof(bool),                          // nvfp4_2d_quantization
-      sizeof(bool),                          // stochastic_rounding
-      sizeof(bool)                           // use_fast_math
+      sizeof(uint8_t),                       // nvfp4_2d_quantization
+      sizeof(uint8_t),                       // stochastic_rounding
+      sizeof(uint8_t)                        // use_fast_math
   };
 };
 
