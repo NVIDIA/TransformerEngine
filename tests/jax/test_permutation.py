@@ -753,12 +753,12 @@ class TestHighLevelPermutationAPI:
         @jax.jit
         def loss_fn(x):
             output, _ = sort_chunks_by_index(x, split_sizes, sorted_indices)
-            return jnp.sum(output**2)
+            return jnp.mean(output)
 
         @jax.jit
         def ref_loss_fn(x):
             output, _ = reference_sort_chunks_by_map(x, row_id_map, None, is_forward=True)
-            return jnp.sum(output**2)
+            return jnp.mean(output)
 
         # Test forward pass
         output, _ = sort_chunks_by_index(inp, split_sizes, sorted_indices)

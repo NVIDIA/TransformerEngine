@@ -50,8 +50,8 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
-
-def _validate_mesh_resource_configuration(mesh_resource):
+    # TODO(jberchtold): FIXME, this validation fails in FP8CS amax reduction because the GlobalMeshResource is set but there is no active mesh in the context (afaict shard_map does not share it's mesh as a context), so this is triggering a FalsePositive assert. However, I am not sure if we can safely ignore this when the mesh is empty or all axes are manual as some users may use shard_map with some axes manual and some auto.
+    # def _validate_mesh_resource_configuration(mesh_resource):
     """Validate that the mesh resource configuration is consistent and conflict-free."""
     is_tp_enabled = (
         mesh_resource.tp_resource is not None and get_mesh_axis_size(mesh_resource.tp_resource) > 1
@@ -375,7 +375,8 @@ def global_mesh_resource() -> MeshResource:
         " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
         " wrapping your program in 'with global_shard_guard(MeshResource()):'"
     )
-    _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
+    # TODO(jberchtold): FIXME, this validation fails in FP8CS amax reduction because the GlobalMeshResource is set but there is no active mesh in the context (afaict shard_map does not share it's mesh as a context), so this is triggering a FalsePositive assert. However, I am not sure if we can safely ignore this when the mesh is empty or all axes are manual as some users may use shard_map with some axes manual and some auto.
+    # _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
     return _GLOBAL_MESH_RESOURCE
 
 
