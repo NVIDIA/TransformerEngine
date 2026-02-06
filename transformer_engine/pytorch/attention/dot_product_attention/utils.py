@@ -968,7 +968,9 @@ def get_attention_backend(
     ):
         # dbias calculation is not supported for 111s as of cuDNN 9.18. So, use fused attention backend only if bias does not require grad.
         if fu_core_attention_bias_requires_grad and fu_core_attention_bias_shape == "111s":
-            logger.warning("Disabling FusedAttention as dbias calculation is not supported for 111s")
+            logger.warning(
+                "Disabling FusedAttention as dbias calculation is not supported for 111s"
+            )
             use_fused_attention = False
         if not fu_core_attention_bias_requires_grad:
             # max512 backend will only support [1, h, s, s]

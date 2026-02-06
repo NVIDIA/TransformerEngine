@@ -309,7 +309,12 @@ def run_dpa_with_cp(
             "1hss": (1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv),
             "11ss": (1, 1, config.max_seqlen_q, config.max_seqlen_kv),
             "b1ss": (config.batch_size, 1, config.max_seqlen_q, config.max_seqlen_kv),
-            "bhss": (config.batch_size, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv),
+            "bhss": (
+                config.batch_size,
+                config.num_heads,
+                config.max_seqlen_q,
+                config.max_seqlen_kv,
+            ),
             "111s": (1, 1, 1, config.max_seqlen_kv),
         }
         attn_bias_shape = bias_shape_map.get(config.bias_shape)
@@ -411,16 +416,13 @@ def run_dpa_with_cp(
         seq_q_size = bias_.shape[seq_q_dim]
         seq_kv_size = bias_.shape[-1]
         if seq_q_size == 1:
-            #TODO(KshitijLakhani): Set to True always once cuDNN supports dbias for 111s
-            bias_.requires_grad = False 
+            # TODO(KshitijLakhani): Set to True always once cuDNN supports dbias for 111s
+            bias_.requires_grad = False
             # Bias is broadcast, no need to partition along sequence dimension
             pass
         else:
             bias_ = bias_.view(
-                *shape_before_seq,
-                2 * world_size,
-                seq_q_size // (2 * world_size),
-                seq_kv_size
+                *shape_before_seq, 2 * world_size, seq_q_size // (2 * world_size), seq_kv_size
             )
             bias_ = bias_.index_select(seq_q_dim, bias_seq_idx)
             bias_ = bias_.view(*shape_before_seq, -1, seq_kv_size)
@@ -505,25 +507,17 @@ def run_dpa_with_cp(
         if dbias is not None and dbias_ is not None:
             ndim = dbias.ndim
             # Query seq is at dim -2
-            seq_q_dim = ndim - 2 
+            seq_q_dim = ndim - 2
             shape_before_seq = dbias.shape[:seq_q_dim]
             seq_q_size = dbias.shape[seq_q_dim]
             seq_kv_size = dbias.shape[-1]
             # Reshape to split seq_q dimension
             dbias = dbias.view(
-                *shape_before_seq,
-                2 * world_size,
-                seq_q_size // (2 * world_size),
-                seq_kv_size
+                *shape_before_seq, 2 * world_size, seq_q_size // (2 * world_size), seq_kv_size
             )
             # Index select on the newly created dimension (now at position seq_q_dim)
             dbias = dbias.index_select(seq_q_dim, seq_idx)
-            dbias_ = dbias_.view(
-                *shape_before_seq,
-                2,
-                dbias_.shape[seq_q_dim] // 2,
-                seq_kv_size
-            )
+            dbias_ = dbias_.view(*shape_before_seq, 2, dbias_.shape[seq_q_dim] // 2, seq_kv_size)
 
     elif qkv_format == "thd":
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]

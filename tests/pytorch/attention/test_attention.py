@@ -162,13 +162,16 @@ def test_dot_product_attention(
         )
 
     # Get backends
-    # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s. 
+    # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
     # For all other shapes test fwd+bwd
     is_training = True
     # TODO(KshitijLakhani): Set is_training to True for all cases once cuDNN supports dbias for 111s.
     if config.bias_shape == "111s":
         is_training = False
-        logging.info(f"Setting is_training to False as cuDNN does not support dbias for {config.bias_shape=} ")
+        logging.info(
+            "Setting is_training to False as cuDNN does not support dbias for"
+            f" {config.bias_shape=} "
+        )
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,

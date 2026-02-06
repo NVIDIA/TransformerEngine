@@ -288,7 +288,7 @@ def get_available_attention_backends(
         and config.head_dim_qk <= 128
         and config.head_dim_v <= 128
     ):
-        #TODO(KshitijLakhani): Remove this guard when cuDNN starts support dbias calculation for bias shape 111s
+        # TODO(KshitijLakhani): Remove this guard when cuDNN starts support dbias calculation for bias shape 111s
         if core_attention_bias_shape != "111s":
             core_attention_bias_requires_grad = True
 
