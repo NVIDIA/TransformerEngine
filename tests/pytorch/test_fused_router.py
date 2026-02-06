@@ -152,8 +152,9 @@ def run_comparison(
     enable_bias,
 ):
     # Set some parameters
-    if score_function == "sigmoid":
-        # Construct the special logits to avoid inf in the sigmoid function
+    if score_function in ("sigmoid", "sqrtsoftplus"):
+        # Construct logits with a narrow range to avoid very small activation values,
+        # which would cause precision loss when adding/subtracting expert bias in float32.
         offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
         logits = (
             torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
@@ -326,8 +327,8 @@ def test_topk_softmax(
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
-    if score_function == "sigmoid":
-        # Construct the special logits to avoid inf in the sigmoid function
+    if score_function in ("sigmoid", "sqrtsoftplus"):
+        # Construct logits with a narrow range to avoid very small activation values
         offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
         logits = (
             torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
