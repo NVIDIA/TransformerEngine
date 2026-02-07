@@ -132,6 +132,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+  /* GLU (sigmoid gate) */
+  m.def("glu", transformer_engine::pytorch::glu, "GLU activation", py::arg("input"),
+        py::arg("quantizer"));
   /* GELU and variants*/
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
         py::arg("quantizer"));
@@ -158,6 +161,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
         "SwiGLU activation used in GPT OSS", py::arg("input"), py::arg("quantizer"),
         py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
+  /* Backward of GLU */
+  m.def("dglu", transformer_engine::pytorch::dglu, "Backward of GLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
   /* Backward of GELU and variants */
   m.def("dgelu", transformer_engine::pytorch::dgelu, "Backward of GeLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
