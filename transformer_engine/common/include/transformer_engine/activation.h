@@ -53,6 +53,16 @@ enum class NVTE_Activation_Type {
  */
 void nvte_gelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Computes the GeLU activation of the grouped input.
+ *         If the scaling mode of the grouped output tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_gelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
+
 /*! \brief Computes the SiLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -62,6 +72,16 @@ void nvte_gelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
+
+/*! \brief Computes the SiLU activation of the grouped input.
+ *         If the scaling mode of the grouped output tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
 
 /*! \brief Computes the ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -73,6 +93,16 @@ void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  */
 void nvte_relu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Computes the ReLU activation of the grouped input.
+ *         If the scaling mode of the grouped output tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_relu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
+
 /*! \brief Computes the Quick GeLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -83,6 +113,16 @@ void nvte_relu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  */
 void nvte_qgelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Computes the Quick GeLU activation of the grouped input.
+ *         If the scaling mode of the grouped output tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_qgelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
+
 /*! \brief Computes the Squared ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -92,6 +132,16 @@ void nvte_qgelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_srelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
+
+/*! \brief Computes the Squared ReLU activation of the grouped input.
+ *         If the scaling mode of the grouped output tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_srelu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream);
 
 /*! \brief Computes the GeLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -105,6 +155,18 @@ void nvte_srelu(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 void nvte_dgelu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                 cudaStream_t stream);
 
+/*! \brief Computes the GeLU activation gradient of the grouped input.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     grad      Incoming grouped gradient.
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_dgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                      NVTETensor output, cudaStream_t stream);
+
 /*! \brief Computes the SiLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -116,6 +178,18 @@ void nvte_dgelu(const NVTETensor grad, const NVTETensor input, NVTETensor output
  */
 void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                 cudaStream_t stream);
+
+/*! \brief Computes the SiLU activation gradient of the grouped input.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     grad      Incoming grouped gradient.
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_dsilu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                      NVTETensor output, cudaStream_t stream);
 
 /*! \brief Computes the ReLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -129,6 +203,18 @@ void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output
 void nvte_drelu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                 cudaStream_t stream);
 
+/*! \brief Computes the ReLU activation gradient of the grouped input.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     grad      Incoming grouped gradient.
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_drelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                      NVTETensor output, cudaStream_t stream);
+
 /*! \brief Computes the Quick GeLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -141,6 +227,18 @@ void nvte_drelu(const NVTETensor grad, const NVTETensor input, NVTETensor output
 void nvte_dqgelu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                  cudaStream_t stream);
 
+/*! \brief Computes the Quick GeLU activation gradient of the grouped input.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     grad      Incoming grouped gradient.
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_dqgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                       NVTETensor output, cudaStream_t stream);
+
 /*! \brief Computes the Squared ReLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
@@ -152,6 +250,18 @@ void nvte_dqgelu(const NVTETensor grad, const NVTETensor input, NVTETensor outpu
  */
 void nvte_dsrelu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
                  cudaStream_t stream);
+
+/*! \brief Computes the Squared ReLU activation gradient of the grouped input.
+ *         If the scaling mode of the output grouped tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *
+ *  \param[in]     grad      Incoming grouped gradient.
+ *  \param[in]     input     Input grouped tensor for activation.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_dsrelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
+                       NVTETensor output, cudaStream_t stream);
 
 /*! \brief Computes the GLU (Gated Linear Unit) activation of the input.
  *         GLU(a,b) = sigmoid(a) * b
