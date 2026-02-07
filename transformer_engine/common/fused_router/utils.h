@@ -112,6 +112,49 @@ __device__ inline void apply_sigmoid_bwd_on_float(DataType *grad, DataType *fwd_
   }
 }
 
+// sqrtsoftplus: y = sqrt(softplus(x)) = sqrt(log(1 + exp(x)))
+// We store the sqrtsoftplus output (y) in intermediate_output for backward
+template <typename DataType>
+__device__ inline void apply_sqrtsoftplus_on_float(DataType *scores, int data_size, int lane_id) {
+  for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
+    float x = static_cast<float>(scores[i]);
+    // softplus(x) = log(1 + exp(x)), numerically stable version
+    // Matches PyTorch's Softplus(beta=1.0, threshold=20.0)
+    float softplus_val;
+    if (x > 20.0f) {
+      softplus_val = x;  // for large x, softplus(x) ≈ x
+    } else {
+      softplus_val = log1pf(expf(x));
+    }
+    scores[i] = static_cast<DataType>(sqrtf(softplus_val));
+  }
+}
+
+// sqrtsoftplus backward:
+// y = sqrt(softplus(x))
+// Matches PyTorch's Softplus(beta=1.0, threshold=20.0)
+// We need the original logits (x) to compute the gradient
+template <typename DataType>
+__device__ inline void apply_sqrtsoftplus_bwd_on_float(DataType *grad, DataType *fwd_output,
+                                                       DataType *logits_buf, int data_size,
+                                                       int lane_id) {
+  for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
+    float x = static_cast<float>(logits_buf[i]);  // original logit
+    float y = static_cast<float>(fwd_output[i]);  // sqrtsoftplus output
+    float dy_dx;
+    if (x > 20.0f) {
+      // When softplus(x) = x, y = sqrt(x), dy/dx = 1/(2*y)
+      dy_dx = 1.0f / (2.0f * y + epsilon);
+    } else {
+      // When softplus(x) = log(1+exp(x)), dy/dx = sigmoid(x) / (2*y)
+      // where sigmoid(x) = 1 / (1 + exp(-x))
+      float sigmoid_x = 1.0f / (1.0f + expf(-x));
+      dy_dx = sigmoid_x / (2.0f * y + epsilon);
+    }
+    grad[i] = static_cast<DataType>(static_cast<float>(grad[i]) * dy_dx);
+  }
+}
+
 template <typename DataType>
 __device__ inline void apply_softmax_bwd_on_float(DataType *grad, DataType *fwd_output,
                                                   DataType *comp_buf, bool *mask, int data_size,
