@@ -194,7 +194,7 @@ def group_quantize_fp4(
     ]
 
     if use_tex_split_quantize:
-        outputs = tex.split_quantize(x, split_sections, nvfp4_quantizers)
+        outputs, _ = tex.split_quantize(x, split_sections, nvfp4_quantizers)
         qx_list = [output._rowwise_data.view(dtype=torch.uint8) for output in outputs]
         sx_list = [output._rowwise_scale_inv for output in outputs]
         qx_t_list = [output._columnwise_data.view(dtype=torch.uint8) for output in outputs]
