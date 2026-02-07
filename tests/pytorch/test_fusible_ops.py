@@ -1635,7 +1635,7 @@ class TestBasicOps:
             x = x_ref.reshape(*in_shape[:-1], 2, in_shape[-1] // 2)
             x = x.flip(-2)  # PyTorch GLU swaps gate and linear unit
             x = x.reshape(in_shape)
-            y_ref = torch.nn.glu(x)
+            y_ref = torch.nn.functional.glu(x)
         elif activation == "srelu":
             y_ref = torch.nn.functional.relu(x_ref) ** 2
         elif activation == "sreglu":
