@@ -86,6 +86,24 @@ void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
                                         int random_sign_mask, int random_sign_mask_t,
                                         cudaStream_t stream);
 
+/*! \brief Grouped-tensor amax with Hadamard transform (graph safe, device-managed grouping).
+ *
+ *  This function is experimental and the API is not stable.
+ *
+ *  This API assumes that the split info (grouping of tensors) is on device and unknown to the host;
+ *  therefore, this is a graph safe API and the grouped-tensor argument is passed as a single device structure.
+ *
+ *  \param[in]      input               NVTEGroupedTensor representing grouped input tensors.
+ *  \param[in,out]  output              NVTEGroupedTensor for output amax (row/col). Only the row-wise and
+ *                                      column-wise amaxes are updated.
+ *  \param[in]      random_sign_mask    16-bit sign mask for RHT.
+ *  \param[in]      random_sign_mask_t  16-bit sign mask for transposed RHT.
+ *  \param[in]      stream              CUDA stream used for the operation.
+ */
+void nvte_group_hadamard_transform_amax_graph_safe(const NVTEGroupedTensor input,
+                                                   NVTEGroupedTensor output, int random_sign_mask,
+                                                   int random_sign_mask_t, cudaStream_t stream);
+
 /*!
  * \brief Perform the grouped-tensor columnwise Hadamard transform cast fusion operation.
  *
@@ -123,6 +141,22 @@ void nvte_group_hadamard_transform_cast_fusion(const NVTETensor input, NVTETenso
                                                const size_t* split_sections, size_t num_tensors,
                                                const NVTEQuantizationConfig quant_config,
                                                NVTETensor quant_workspace, cudaStream_t stream);
+
+/*!
+ * \brief Perform the grouped-tensor Hadamard transform cast fusion operation in graph-safe mode.
+ *
+ *  This function is experimental and the API is not stable. Group_ prefix means contiguous input concatenated.
+ *
+ *  \param[in]      input             NVTEGroupedTensor representing grouped input tensors.
+ *  \param[in,out]  output            NVTEGroupedTensor for output (row/column-wise quantized results).
+ *  \param[in]      hadamard_matrix   Hadamard matrix to use for transformation.
+ *  \param[in]      quant_config      Quantization configuration.
+ *  \param[in]      quant_workspace   Workspace buffer. Must be at least 4 bytes.
+ *  \param[in]      stream            CUDA stream used for the operation.
+ */
+void nvte_group_hadamard_transform_cast_fusion_graph_safe(
+    const NVTEGroupedTensor input, NVTEGroupedTensor output, const NVTETensor hadamard_matrix,
+    const NVTEQuantizationConfig quant_config, NVTETensor quant_workspace, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
