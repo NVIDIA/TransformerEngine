@@ -197,9 +197,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         ).contiguous()  # Convert to swizzled layout
         fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
 
-        # Grad for SwiGLU post-scales
-        grad_scales = torch.zeros((scales.size(0), 1, 1), dtype=torch.float32, device=device)
-
         # Kernel scaling factors
         ones = torch.ones(num_groups, dtype=dtype, device=device)
 
@@ -214,7 +211,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             ones,  # alpha_tensor
             ones,  # beta_tensor
             scales.detach().reshape(-1, 1, 1),
-            grad_scales,
             norm_const_tensor=ones[:1],
             d_dtype=torch.float8_e4m3fn,
             cd_major="n",
@@ -246,6 +242,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc1_dy_col_scale = fc1_dy_col_scale.permute(5, 2, 4, 0, 1, 3)
         fc1_dy_col_scale = torch.split(fc1_dy_col_scale, [s // 128 for s in split_sizes_cpu], dim=2)
         fc1_dy_col_scale = [s.contiguous().view(-1, fc1_weight_shape[0]) for s in fc1_dy_col_scale]
+        grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
         grad_scales = grad_scales.view(-1).to(dtype=dtype)
 
         # Construct MXFP8 tensors for FC1
