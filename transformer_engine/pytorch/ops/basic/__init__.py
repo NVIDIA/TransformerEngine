@@ -14,8 +14,6 @@ from .activation import (
     SReLU,
     SReGLU,
     SiLU,
-    SwiGLU,
-    ClampedSwiGLU,
 )
 from .add_extra_input import AddExtraInput
 from .all_gather import AllGather
@@ -24,6 +22,7 @@ from .basic_linear import BasicLinear
 from .bias import Bias
 from .constant_scale import ConstantScale
 from .dropout import Dropout
+from .grouped_linear import GroupedLinear
 from .identity import Identity
 from .l2normalization import L2Normalization
 from .layer_norm import LayerNorm
@@ -32,3 +31,4 @@ from .quantize import Quantize
 from .reduce_scatter import ReduceScatter
 from .reshape import Reshape
 from .rmsnorm import RMSNorm
+from .swiglu import ClampedSwiGLU, ScaledSwiGLU, SwiGLU
