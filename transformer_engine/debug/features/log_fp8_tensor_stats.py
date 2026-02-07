@@ -6,6 +6,7 @@
 
 from typing import Dict, Optional, List, Tuple
 from contextlib import contextmanager
+import warnings
 
 import torch
 import nvdlfw_inspect.api as debug_api
@@ -298,15 +299,26 @@ class LogFp8TensorStats(BaseLogTensorStats):
         API call used to collect the data about the tensor after process_tensor()/quantization.
         """
         assert rowwise_quantized_tensor is columnwise_quantized_tensor
-        assert (
-            quantizer is not None
-        ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
+
+        # Skip logging if quantizer is None (layer runs in high precision)
+        if quantizer is None:
+            warnings.warn(
+                f"[LogFp8TensorStats] Skipping stats collection for layer '{layer_name}', "
+                f"tensor '{tensor_name}': layer runs in high precision (no quantizer)."
+            )
+            return
 
         quantized_tensor = rowwise_quantized_tensor
 
-        assert isinstance(
-            quantized_tensor, QuantizedTensor
-        ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats quantized_tensor must be a QuantizedTensor."
+        # Skip logging if quantized_tensor is not a QuantizedTensor (incompatible precision)
+        if not isinstance(quantized_tensor, QuantizedTensor):
+            warnings.warn(
+                f"[LogFp8TensorStats] Skipping stats collection for layer '{layer_name}', "
+                f"tensor '{tensor_name}': incompatible precision "
+                f"(expected QuantizedTensor, got {type(quantized_tensor).__name__})."
+            )
+            return
+
         recipe_name = _get_recipe_name(quantizer)
 
         for stat in config["stats"]:
