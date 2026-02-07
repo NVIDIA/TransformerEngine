@@ -447,16 +447,6 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
         )
 
 
-def assert_dim_for_all_gather(
-    tensor: torch.Tensor, with_all_gather: bool, quantizer: Quantizer
-) -> None:
-    """Assert that tensor dimensions are supported for all-gather"""
-    if with_all_gather:
-        assert quantizer.is_quantizable(tensor), (
-            "All-gather requires quantizable tensor for quantizer " + quantizer.__class__.__name__
-        )
-
-
 def is_bf16_compatible() -> bool:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
     check on device compute capability to enforce sm_80 or higher.
