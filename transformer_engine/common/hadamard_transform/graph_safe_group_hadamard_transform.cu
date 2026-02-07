@@ -206,9 +206,16 @@ __global__ void GraphSafeMultiZeroAmaxKernel(const size_t num_tensors, float* am
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
 
-  for (; tid < num_tensors; tid += stride) {
-    amax_rowwise_ptr[tid] = 0;
-    amax_colwise_ptr[tid] = 0;
+  // Assign each thread a range for rowwise and colwise independently
+  if (amax_rowwise_ptr != nullptr) {
+    for (int i = tid; i < num_tensors; i += stride) {
+      amax_rowwise_ptr[i] = 0.f;
+    }
+  }
+  if (amax_colwise_ptr != nullptr) {
+    for (int i = tid; i < num_tensors; i += stride) {
+      amax_colwise_ptr[i] = 0.f;
+    }
   }
 }
 
@@ -218,14 +225,11 @@ __global__ void GraphSafeMultiAmaxMemcpyD2DKernelPreRHT(const size_t num_tensors
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
 
-  for (; tid < num_tensors; tid += stride) {
-    float* output_pre_rht_amax_ptr = amax_rowwise_ptr + tid;
-    float* output_transpose_amax_ptr = amax_colwise_ptr + tid;
-    if (output_pre_rht_amax_ptr != nullptr) {
-      float pre_rht_amax = *output_pre_rht_amax_ptr;
-      if (output_transpose_amax_ptr != nullptr) {
-        *output_transpose_amax_ptr = pre_rht_amax;
-      }
+  if (amax_rowwise_ptr != nullptr && amax_colwise_ptr != nullptr) {
+    for (; tid < num_tensors; tid += stride) {
+      float* output_pre_rht_amax_ptr = amax_rowwise_ptr + tid;
+      float* output_transpose_amax_ptr = amax_colwise_ptr + tid;
+      *output_transpose_amax_ptr = *output_pre_rht_amax_ptr;
     }
   }
 }
