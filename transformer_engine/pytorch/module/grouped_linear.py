@@ -96,6 +96,12 @@ class _GroupedLinear(torch.autograd.Function):
             save_original_input,
             debug,
         ) = non_tensor_args
+        keep_backward_unquantized = fp8 and (
+            not FP8GlobalStateManager.get_fp8_recipe().quantize_backward
+        )
+        if keep_backward_unquantized:
+            # Note, NVTE_KEEP_BACKWARD_UNQUANTIZED is ignored when delayed scaling is used
+            save_original_input = True
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
@@ -286,6 +292,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            ctx.keep_backward_unquantized = keep_backward_unquantized
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
@@ -304,6 +311,17 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
 
+            # keep_backward_unquantized overrides
+            if keep_backward_unquantized:
+                ctx.fp8 = ctx.fp8 and not keep_backward_unquantized
+                ctx.ub_overlap_ag = False
+                ctx.ub_overlap_rs_dgrad = False
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_bulk_wgrad = False
+                ctx.grad_input_quantizer = None
+                ctx.grad_weight_quantizer = None
+                ctx.grad_output_quantizer = None
+
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
 
@@ -318,6 +336,7 @@ class _GroupedLinear(torch.autograd.Function):
             origin_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+            keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
 
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
@@ -395,13 +414,16 @@ class _GroupedLinear(torch.autograd.Function):
                     dtype=ctx.activation_dtype,
                     device=ctx.device,
                 )
+                weights_for_dgrad = weights
+                if keep_backward_unquantized:
+                    weights_for_dgrad = origin_weights
                 # Make sure weights are available in column-wise format
                 # for dgrad computation.
-                for weight in weights:
+                for weight in weights_for_dgrad:
                     if isinstance(weight, QuantizedTensorStorage):
                         weight.update_usage(columnwise_usage=True)
                 general_grouped_gemm(
-                    weights,
+                    weights_for_dgrad,
                     grad_output,
                     [dgrad],
                     ctx.grad_input_quantizers,

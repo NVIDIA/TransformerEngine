@@ -129,6 +129,12 @@ class _Linear(torch.autograd.Function):
             save_original_input,
             debug,
         ) = non_tensor_args
+        keep_backward_unquantized = fp8 and (
+            not FP8GlobalStateManager.get_fp8_recipe().quantize_backward
+        )
+        if keep_backward_unquantized:
+            # Note, NVTE_KEEP_BACKWARD_UNQUANTIZED is ignored when delayed scaling is used
+            save_original_input = True
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._Linear.forward"
@@ -443,6 +449,7 @@ class _Linear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            ctx.keep_backward_unquantized = keep_backward_unquantized
             ctx.input_quantizer = input_quantizer
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
@@ -485,6 +492,17 @@ class _Linear(torch.autograd.Function):
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
+
+            # keep_backward_unquantized overrides
+            if keep_backward_unquantized:
+                ctx.fp8 = ctx.fp8 and not keep_backward_unquantized
+                ctx.ub_overlap_ag = False
+                ctx.ub_overlap_rs_dgrad = False
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_bulk_wgrad = False
+                ctx.grad_input_quantizer = None
+                ctx.grad_weight_quantizer = None
+                ctx.grad_output_quantizer = None
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -535,6 +553,8 @@ class _Linear(torch.autograd.Function):
                 weight_fp8,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
+
+            keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
 
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
@@ -690,8 +710,10 @@ class _Linear(torch.autograd.Function):
                 # Make sure required data is available
                 if isinstance(grad_output, QuantizedTensorStorage):
                     grad_output.update_usage(rowwise_usage=True)
-                if ctx.weight_quantizer is not None and isinstance(
-                    weight_fp8, QuantizedTensorStorage
+                if (
+                    ctx.fp8
+                    and ctx.weight_quantizer is not None
+                    and isinstance(weight_fp8, QuantizedTensorStorage)
                 ):
                     weight_fp8.update_usage(columnwise_usage=True)
 
@@ -720,8 +742,11 @@ class _Linear(torch.autograd.Function):
                 # Note: dx = dy * w
 
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
+                weight_for_dgrad = weight_fp8
+                if keep_backward_unquantized:
+                    weight_for_dgrad = weight
                 gemm_out, *_, reduce_scatter_out = general_gemm(
-                    weight_fp8,
+                    weight_for_dgrad,
                     grad_output,
                     layout="NN",
                     grad=True,
