@@ -87,6 +87,13 @@ def setup_pytorch_extension(
         libraries.append("nvshmem_host")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
+    if bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0"))):
+        cusolvermp_home = Path(os.getenv("CUSOLVERMP_HOME", "/usr"))
+        include_dirs.append(cusolvermp_home / "include")
+        library_dirs.append(cusolvermp_home / "lib")
+        libraries.append("cusolverMp")
+        cxx_flags.append("-DNVTE_WITH_CUSOLVERMP")
+
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]
