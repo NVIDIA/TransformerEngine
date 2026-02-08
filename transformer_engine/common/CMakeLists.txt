@@ -227,6 +227,11 @@ list(APPEND transformer_engine_SOURCES
      comm_gemm/comm_gemm.cpp)
 endif()
 
+if (NVTE_WITH_CUSOLVERMP)
+list(APPEND transformer_engine_SOURCES
+     newton_schulz/newton_schulz.cpp)
+endif()
+
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -298,6 +303,19 @@ if (NVTE_WITH_CUBLASMP)
   target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${NVSHMEM_HOST_LIB})
   message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
   message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
+endif()
+
+option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
+if (NVTE_WITH_CUSOLVERMP)
+    target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
+    target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
+    find_library(CUSOLVERMP_LIB
+                 NAMES cusolverMp libcusolverMp
+                 PATHS ${CUSOLVERMP_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    target_link_libraries(transformer_engine PUBLIC ${CUSOLVERMP_LIB})
+    message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
 endif()
 
 # Hack to enable dynamic loading in cuDNN frontend

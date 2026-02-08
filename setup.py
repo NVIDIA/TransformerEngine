@@ -83,6 +83,11 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append(f"-DNVSHMEM_DIR={nvshmem_dir}")
         print("CMAKE_FLAGS:", cmake_flags[-2:])
 
+    if bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0"))):
+        cmake_flags.append("-DNVTE_WITH_CUSOLVERMP=ON")
+        cusolvermp_dir = os.getenv("CUSOLVERMP_HOME", "/usr")
+        cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
+
     # Add custom CMake arguments from environment variable
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
     if nvte_cmake_extra_args:
