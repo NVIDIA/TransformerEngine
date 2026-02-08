@@ -210,7 +210,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             split_points,
             ones,  # alpha_tensor
             ones,  # beta_tensor
-            scales.detach().reshape(-1, 1, 1),
+            scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1),
             norm_const_tensor=ones[:1],
             d_dtype=torch.float8_e4m3fn,
             cd_major="n",
