@@ -504,6 +504,17 @@ void nvshmem_finalize();
 void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at::Stream send_stream,
                                         at::Stream recv_stream);
 
+/***************************************************************************************************
+ * Newton-Schulz (cuSolverMp)
+ **************************************************************************************************/
+
+int64_t cusolvermp_ctx_create(int64_t nccl_comm_ptr, int nranks, int rank);
+
+void cusolvermp_ctx_destroy(int64_t ctx_ptr);
+
+void newton_schulz(int64_t ctx_ptr, at::Tensor x, int64_t num_iterations,
+                   std::vector<float> coefficients);
+
 }  // namespace transformer_engine::pytorch
 
 /***************************************************************************************************
