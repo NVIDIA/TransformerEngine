@@ -19,72 +19,61 @@ using namespace transformer_engine;
 
 namespace {
 
-template <typename HandlePtr, typename CreateFn, typename DestroyFn, typename... Args>
-auto CreateWithCudaCheck(CreateFn create_fn, DestroyFn destroy_fn, Args&&... args) {
-  using Handle = std::remove_pointer_t<HandlePtr>;
-  HandlePtr raw{};
-  NVTE_CHECK_CUDA(create_fn(&raw, std::forward<Args>(args)...));
-  return std::unique_ptr<Handle, DestroyFn>(raw, destroy_fn);
-}
+// RAII wrapper types for cuSolverMp handles
 
-using CudaStream =
-    std::unique_ptr<std::remove_pointer_t<cudaStream_t>, decltype(&cudaStreamDestroy)>;
+struct CusolverMpHandleDeleter {
+  void operator()(cusolverMpHandle_t handle) const { cusolverMpDestroy(handle); }
+};
+using CusolverMpHandle = std::unique_ptr<std::remove_pointer_t<cusolverMpHandle_t>,
+                                         CusolverMpHandleDeleter>;
 
-CudaStream CudaStreamCreate() {
-  return CreateWithCudaCheck<cudaStream_t>(cudaStreamCreate, cudaStreamDestroy);
-}
+struct CusolverMpGridDeleter {
+  void operator()(cusolverMpGrid_t grid) const { cusolverMpDestroyGrid(grid); }
+};
+using CusolverMpGrid = std::unique_ptr<std::remove_pointer_t<cusolverMpGrid_t>,
+                                       CusolverMpGridDeleter>;
 
-template <bool raw_last, typename HandlePtr, typename CreateFn, typename DestroyFn,
-          typename... Args>
-auto CreateWithCusolverMpCheck(CreateFn create_fn, DestroyFn destroy_fn, Args&&... args) {
-  using Handle = std::remove_pointer_t<HandlePtr>;
-  HandlePtr raw{};
-  if constexpr (raw_last) {
-    NVTE_CHECK_CUSOLVERMP(create_fn(std::forward<Args>(args)..., &raw));
-  } else {
-    NVTE_CHECK_CUSOLVERMP(create_fn(&raw, std::forward<Args>(args)...));
+struct CusolverMpMatrixDescDeleter {
+  void operator()(cusolverMpMatrixDescriptor_t desc) const { cusolverMpDestroyMatrixDesc(desc); }
+};
+using CusolverMpMatrixDesc = std::unique_ptr<std::remove_pointer_t<cusolverMpMatrixDescriptor_t>,
+                                             CusolverMpMatrixDescDeleter>;
+
+struct CusolverMpNSDescDeleter {
+  void operator()(cusolverMpNewtonSchulzDescriptor_t desc) const {
+    cusolverMpNewtonSchulzDescriptorDestroy(desc);
   }
-  return std::unique_ptr<Handle, DestroyFn>(raw, destroy_fn);
+};
+using CusolverMpNSDesc = std::unique_ptr<std::remove_pointer_t<cusolverMpNewtonSchulzDescriptor_t>,
+                                         CusolverMpNSDescDeleter>;
+
+CusolverMpHandle MakeCusolverMpHandle(int device_id, cudaStream_t stream) {
+  cusolverMpHandle_t raw{};
+  NVTE_CHECK_CUSOLVERMP(cusolverMpCreate(&raw, device_id, stream));
+  return CusolverMpHandle(raw);
 }
 
-using CusolverMp =
-    std::unique_ptr<std::remove_pointer_t<cusolverMpHandle_t>, decltype(&cusolverMpDestroy)>;
-
-CusolverMp CusolverMpCreate(cudaStream_t stream) {
-  return CreateWithCusolverMpCheck<false, cusolverMpHandle_t>(cusolverMpCreate, cusolverMpDestroy,
-                                                              stream);
+CusolverMpGrid MakeCusolverMpGrid(cusolverMpHandle_t handle, ncclComm_t comm,
+                                   int32_t nprow, int32_t npcol,
+                                   cusolverMpGridMapping_t mapping) {
+  cusolverMpGrid_t raw{};
+  NVTE_CHECK_CUSOLVERMP(cusolverMpCreateDeviceGrid(handle, &raw, comm, nprow, npcol, mapping));
+  return CusolverMpGrid(raw);
 }
 
-using CusolverMpGrid =
-    std::unique_ptr<std::remove_pointer_t<cusolverMpGrid_t>, decltype(&cusolverMpDestroyGrid)>;
-
-CusolverMpGrid CusolverMpGridCreate(int64_t nprow, int64_t npcol,
-                                     cusolverMpGridLayout_t layout, ncclComm_t comm) {
-  return CreateWithCusolverMpCheck<true, cusolverMpGrid_t>(
-      cusolverMpCreateDeviceGrid, cusolverMpDestroyGrid, nprow, npcol, layout, comm);
+CusolverMpMatrixDesc MakeCusolverMpMatrixDesc(cusolverMpGrid_t grid, cudaDataType_t dtype,
+                                               int64_t m, int64_t n, int64_t mb, int64_t nb,
+                                               uint32_t rsrc, uint32_t csrc, int64_t lld) {
+  cusolverMpMatrixDescriptor_t raw{};
+  NVTE_CHECK_CUSOLVERMP(
+      cusolverMpCreateMatrixDesc(&raw, grid, dtype, m, n, mb, nb, rsrc, csrc, lld));
+  return CusolverMpMatrixDesc(raw);
 }
 
-using CusolverMpMatrixDesc =
-    std::unique_ptr<std::remove_pointer_t<cusolverMpMatrixDescriptor_t>,
-                    decltype(&cusolverMpDestroyMatrixDesc)>;
-
-CusolverMpMatrixDesc CusolverMpMatrixDescCreate(int64_t m, int64_t n, int64_t mb, int64_t nb,
-                                                 int64_t rsrc, int64_t csrc, int64_t lld,
-                                                 cudaDataType_t type, cusolverMpGrid_t grid) {
-  return CreateWithCusolverMpCheck<true, cusolverMpMatrixDescriptor_t>(
-      cusolverMpCreateMatrixDesc, cusolverMpDestroyMatrixDesc, m, n, mb, nb, rsrc, csrc, lld, type,
-      grid);
-}
-
-using CusolverMpNSDesc =
-    std::unique_ptr<std::remove_pointer_t<cusolverMpNewtonSchulzDescriptor_t>,
-                    decltype(&cusolverMpNewtonSchulzDescriptorDestroy)>;
-
-CusolverMpNSDesc CusolverMpNSDescCreate(int64_t num_iterations, const float* coefficients,
-                                         int64_t num_coefficients) {
-  return CreateWithCusolverMpCheck<false, cusolverMpNewtonSchulzDescriptor_t>(
-      cusolverMpNewtonSchulzDescriptorCreate, cusolverMpNewtonSchulzDescriptorDestroy,
-      num_iterations, coefficients, num_coefficients);
+CusolverMpNSDesc MakeCusolverMpNSDesc() {
+  cusolverMpNewtonSchulzDescriptor_t raw{};
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulzDescriptorCreate(&raw));
+  return CusolverMpNSDesc(raw);
 }
 
 }  // namespace
@@ -93,29 +82,16 @@ struct NVTECusolverMpCtx {
   int64_t nranks;
   int64_t rank;
   ncclComm_t comm;
-  CudaStream stream;
-  CusolverMp cusolver_mp;
-  CusolverMpGrid grid;
   void* workspace;
   size_t workspace_size;
 };
 
 NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank) {
   NVTE_API_CALL(nvte_cusolvermp_ctx_create);
-  auto stream = CudaStreamCreate();
-  auto cusolver_mp = CusolverMpCreate(stream.get());
-
-  // 1D row partition: nranks x 1, column-major
-  auto grid =
-      CusolverMpGridCreate(nranks, 1, CUSOLVERMP_GRID_LAYOUT_COL_MAJOR, comm);
-
   return new NVTECusolverMpCtx{
       .nranks = nranks,
       .rank = rank,
       .comm = comm,
-      .stream = std::move(stream),
-      .cusolver_mp = std::move(cusolver_mp),
-      .grid = std::move(grid),
       .workspace = nullptr,
       .workspace_size = 0,
   };
@@ -124,7 +100,7 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
 void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
   NVTE_API_CALL(nvte_cusolvermp_ctx_destroy);
   if (ctx->workspace) {
-    NVTE_CHECK_CUDA(cudaFree(ctx->workspace));
+    cudaFree(ctx->workspace);
   }
   delete ctx;
 }
@@ -134,6 +110,17 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
                         int64_t num_coefficients, cudaStream_t stream) {
   NVTE_API_CALL(nvte_newton_schulz);
   const auto* t = convertNVTETensorCheck(x);
+
+  // Get current device
+  int device_id{};
+  NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+
+  // Create cuSolverMp handle bound to the caller's stream
+  auto handle = MakeCusolverMpHandle(device_id, stream);
+
+  // 1D row partition: nranks x 1, column-major
+  auto grid = MakeCusolverMpGrid(handle.get(), ctx->comm, ctx->nranks, 1,
+                                  CUSOLVERMP_GRID_MAPPING_COL_MAJOR);
 
   // Block size for ScaLAPACK-style distribution
   const int64_t mb = (m + ctx->nranks - 1) / ctx->nranks;
@@ -146,20 +133,17 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   const cudaDataType_t cuda_dtype = get_cuda_dtype(t->dtype());
 
   // Create matrix descriptor
-  auto mat_desc = CusolverMpMatrixDescCreate(m, n, mb, nb, 0, 0, lld, cuda_dtype, ctx->grid.get());
+  auto mat_desc = MakeCusolverMpMatrixDesc(grid.get(), cuda_dtype, m, n, mb, nb, 0, 0, lld);
 
   // Create Newton-Schulz descriptor
-  auto ns_desc = CusolverMpNSDescCreate(num_iterations, coefficients, num_coefficients);
-
-  // Set stream on the cuSolverMp handle
-  NVTE_CHECK_CUSOLVERMP(cusolverMpStreamSet(ctx->cusolver_mp.get(), stream));
+  auto ns_desc = MakeCusolverMpNSDesc();
 
   // Query workspace sizes
   size_t wrksp_size_device = 0;
   size_t wrksp_size_host = 0;
   NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz_bufferSize(
-      ctx->cusolver_mp.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(),
-      &wrksp_size_device, &wrksp_size_host));
+      handle.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
+      coefficients, CUDA_R_32F, &wrksp_size_device, &wrksp_size_host));
 
   // Allocate/grow device workspace
   if (ctx->workspace_size < wrksp_size_device) {
@@ -174,10 +158,14 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   std::vector<uint8_t> workspace_host(wrksp_size_host);
 
   // Execute Newton-Schulz
+  int info = 0;
   NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz(
-      ctx->cusolver_mp.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(),
-      ctx->workspace, ctx->workspace_size, workspace_host.data(), workspace_host.size()));
+      handle.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
+      coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, workspace_host.data(),
+      workspace_host.size(), &info));
 
   // Synchronize
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+
+  NVTE_CHECK(info == 0, "cusolverMpNewtonSchulz failed with info = ", info);
 }
