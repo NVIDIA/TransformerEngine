@@ -392,12 +392,12 @@ class TestGroupedTensor:
             offset += numel
 
         # Create MXFP8 output grouped tensor (rowwise only for easier validation)
-        quantizers = [MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3) for _ in range(num_tensors)]
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
 
         grouped_output = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizer=quantizers,
+            quantizer=quantizer,
             device="cuda",
         )
 

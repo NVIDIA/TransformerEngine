@@ -206,10 +206,9 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   py::handle quantizer = py::none();
   DType quantizer_dtype = DType::kNumTypes;
   NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
-  if (!tensor.attr("quantizers").is_none()) {
-    const auto quantizers = tensor.attr("quantizers").cast<py::list>();
-    quantizer = quantizers[0];
-    if (!quantizers.empty() && !quantizer.is_none()) {
+  if (!tensor.attr("quantizer").is_none()) {
+    const auto quantizer = tensor.attr("quantizer");
+    if (!quantizer.is_none()) {
       scaling_mode = ScalingModeFromQuantizer(quantizer);
       quantizer_dtype = quantizer.attr("dtype").cast<DType>();
     }
