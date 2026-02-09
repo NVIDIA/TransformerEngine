@@ -224,9 +224,7 @@ class DelayedScaling(Recipe):
         assert not (
             not self.quantize_forward and self.quantize_backward
         ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
-        assert (
-            not self.quantize_backward
-        ), "Delayed scaling does not support quantize_backward=False."
+        assert self.quantize_backward, "Delayed scaling does not support quantize_backward=False."
 
     def __repr__(self) -> str:
         return (
