@@ -91,8 +91,7 @@ if(NOT arch_120_index EQUAL -1)
 endif()
 
 if(CMAKE_VERSION VERSION_LESS 4.0.2)
-  if(CMAKE_CUDA_ARCHITECTURES)
-  else()
+  if(NOT CMAKE_CUDA_ARCHITECTURES)
     message(WARNING
             "CMAKE_CUDA_ARCHITECTURES is empty after replacing arch-specific targets. "
             "Please upgrade to CMake 4.0.2+ for native 'f' architecture support. "
@@ -216,8 +215,8 @@ list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_s
 foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
   set(arch_compile_options)
   foreach(arch IN LISTS NVTE_GENERIC_ARCHS)
-     list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
-   endforeach()
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
   if(arch_compile_options)
     set_property(
       SOURCE ${cuda_source}
@@ -230,7 +229,7 @@ endforeach()
 
 foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
   set(arch_compile_options)
-  foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS_TO_BUILD)
+  foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS)
     list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
   endforeach()
 
