@@ -283,7 +283,7 @@ endif()
 option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
-    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${NVSHMEM_DIR}/include)
+    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp
                  PATHS ${CUBLASMP_DIR}

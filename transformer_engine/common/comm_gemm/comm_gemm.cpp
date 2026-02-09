@@ -478,6 +478,10 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
 
 void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
   NVTE_API_CALL(nvte_comm_gemm_ctx_destroy);
+  if (ctx->workspace) {
+    NVTE_CHECK_CUBLASMP(cublasMpBufferDeregister(ctx->grid_row_major.get(), ctx->workspace));
+    NVTE_CHECK_CUBLASMP(cublasMpFree(ctx->grid_col_major.get(), ctx->workspace));
+  }
   delete ctx;
 }
 
