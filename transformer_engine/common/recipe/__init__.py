@@ -221,6 +221,12 @@ class DelayedScaling(Recipe):
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
+        assert (
+            not self.quantize_backward
+        ), "Delayed scaling does not support quantize_backward=False."
 
     def __repr__(self) -> str:
         return (
@@ -267,6 +273,9 @@ class Float8CurrentScaling(Recipe):
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
 
     def __repr__(self) -> str:
         return (
@@ -323,6 +332,9 @@ class MXFP8BlockScaling(Recipe):
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
 
     def __repr__(self) -> str:
         return (
@@ -400,6 +412,9 @@ class Float8BlockScaling(Recipe):
             not self.fp8_dpa and not self.fp8_mha
         ), "FP8 attention is not supported for Float8BlockScaling."
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
 
     def __repr__(self) -> str:
         return (
@@ -491,6 +506,9 @@ class NVFP4BlockScaling(Recipe):
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
         assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
