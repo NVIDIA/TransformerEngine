@@ -36,7 +36,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   endif()
 endif()
 
--# Process CMAKE_CUDA_ARCHITECTURES to separate generic and specific architectures
+# Process CMAKE_CUDA_ARCHITECTURES to separate generic and specific architectures
 set(NVTE_GENERIC_ARCHS)
 set(NVTE_SPECIFIC_ARCHS)
 
@@ -95,8 +95,9 @@ if(CMAKE_VERSION VERSION_LESS 4.0.2)
   else()
     message(WARNING
             "CMAKE_CUDA_ARCHITECTURES is empty after replacing arch-specific targets. "
-            "Please upgrade to CMake 4.0.2+ for native 'a'/'f' architecture support. "
-            "Falling back to sm_75 to avoid configuration errors.")
+            "Please upgrade to CMake 4.0.2+ for native 'f' architecture support. "
+            "Adding sm_75 target in addition to the specified target to avoid configuration "
+            "errors - this will result in longer build time, but does not affect correctness.")
     set(CMAKE_CUDA_ARCHITECTURES 75)
   endif()
 endif()
