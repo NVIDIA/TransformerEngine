@@ -512,8 +512,8 @@ int64_t cusolvermp_ctx_create(int64_t nccl_comm_ptr, int nranks, int rank);
 
 void cusolvermp_ctx_destroy(int64_t ctx_ptr);
 
-void newton_schulz(int64_t ctx_ptr, at::Tensor x, int64_t num_iterations,
-                   std::vector<float> coefficients);
+void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x,
+                   int64_t num_iterations, std::vector<float> coefficients);
 
 }  // namespace transformer_engine::pytorch
 

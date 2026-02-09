@@ -30,10 +30,8 @@ def _get_nccl_comm_ptr(group: dist.ProcessGroup) -> int:
         raise RuntimeError(
             f"newton_schulz requires NCCL backend, got '{backend}'"
         )
-    # Access the NCCL communicator via the internal _get_backend method
     nccl_backend = group._get_backend(torch.device("cuda"))
-    comm = nccl_backend.get_nccl_comm()
-    return comm
+    return nccl_backend._comm_ptr()
 
 
 def newton_schulz(
@@ -75,6 +73,6 @@ def newton_schulz(
 
     ctx_ptr = tex.cusolvermp_ctx_create(nccl_comm_ptr, nranks, rank)
     try:
-        tex.newton_schulz(ctx_ptr, x, num_iterations, coefficients)
+        tex.newton_schulz(ctx_ptr, m, n, x, num_iterations, coefficients)
     finally:
         tex.cusolvermp_ctx_destroy(ctx_ptr)
