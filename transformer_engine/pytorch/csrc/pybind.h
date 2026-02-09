@@ -43,6 +43,7 @@ extern PyTypeObject *Float8BlockwiseQuantizerClass;
 extern PyTypeObject *NVFP4TensorPythonClass;
 extern PyTypeObject *NVFP4TensorStoragePythonClass;
 extern PyTypeObject *NVFP4QuantizerClass;
+extern PyTypeObject *GroupedTensorStoragePythonClass;
 
 void init_extension();
 

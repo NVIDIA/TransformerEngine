@@ -52,7 +52,7 @@ class GroupedTensor:
     def __init__(
         self,
         num_tensors: int,
-        shape: List[Tuple[int, int]],
+        shape: Optional[List[Tuple[int, int]]] = None,
         quantizer: Optional[Quantizer] = None,
         dtype: Optional[torch.dtype] = None,
         data: Optional[torch.Tensor] = None,
@@ -113,9 +113,7 @@ class GroupedTensor:
         # Shape information (OPTIONAL - None if dimension is uniform across all tensors)
         # first_dims[i] = first dimension of tensor i (None if all tensors have same first dim)
         # last_dims[i] = last dimension of tensor i (None if all tensors have same last dim)
-        self.first_dims = (
-            first_dims  # Device pointer to int64_t array of length num_tensors (or None)
-        )
+        self.first_dims = first_dims  # Device pointer to int64_t array of length num_tensors (or None)
         self.last_dims = (
             last_dims  # Device pointer to int64_t array of length num_tensors (or None)
         )
@@ -124,9 +122,7 @@ class GroupedTensor:
         # tensor_offsets[i] = element offset to start of tensor i (cumulative sum of numel for tensors 0..i-1)
         # Usage: tensor_i_ptr = data.data_ptr() + tensor_offsets[i] * element_size
         # If None and all_same_shape(): offset[i] = i * M * N (where M, N are common dimensions)
-        self.tensor_offsets = (
-            tensor_offsets  # Device pointer to int64_t array of length num_tensors (or None)
-        )
+        self.tensor_offsets = tensor_offsets  # Device pointer to int64_t array of length num_tensors (or None)
         self.offsets = offsets  # Vector of integer offsets for each tensor.
 
         # Logical shape: conceptual 2D shape of the grouped data (REQUIRED)
@@ -245,6 +241,7 @@ class GroupedTensor:
         """
         Reset tensor data and clear all buffers.
         """
+        self.shape = None
         self.data = None
         self.columnwise_data = None
         self.scale_inv = None
@@ -319,12 +316,16 @@ class GroupedTensor:
         if uniform_first_dim:
             first_dims = None
         else:
-            first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device=device)
+            first_dims = torch.tensor(
+                [s[0] for s in shape], dtype=torch.int64, device=device
+            )
 
         # Last dim
         last_dim_list = [s[1] for s in shape]
         logical_last_dim = last_dim_list[0]
-        assert all(logical_last_dim == x for x in last_dim_list), "Last dims should be uniform"
+        assert all(
+            logical_last_dim == x for x in last_dim_list
+        ), "Last dims should be uniform"
 
         return GroupedTensor.make_grouped_tensor(
             num_tensors=num_tensors,
@@ -375,8 +376,12 @@ class GroupedTensor:
         all_same_last = last_dims is None
 
         assert all_same_last, "Last dim must be uniform for GroupedTensor"
-        assert logical_first_dim > 0, "Logical first dim must be positive for GroupedTensor"
-        assert logical_last_dim > 0, "Logical last dim must be positive for GroupedTensor"
+        assert (
+            logical_first_dim > 0
+        ), "Logical first dim must be positive for GroupedTensor"
+        assert (
+            logical_last_dim > 0
+        ), "Logical last dim must be positive for GroupedTensor"
 
         # assert (
         #     logical_first_dim % 128 == 0
@@ -432,14 +437,18 @@ class GroupedTensor:
         scale_inv_offsets = None
         columnwise_scale_inv_offsets = None
         if no_quantization:
-            assert dtype is not None, "dtype must be provided for unquantized GroupedTensor"
+            assert (
+                dtype is not None
+            ), "dtype must be provided for unquantized GroupedTensor"
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
                 data = torch.empty(total_elements, dtype=dtype, device=device)
 
             if columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
-                columnwise_data = torch.empty(total_elements, dtype=dtype, device=device)
+                columnwise_data = torch.empty(
+                    total_elements, dtype=dtype, device=device
+                )
         elif quantizer._get_compatible_recipe().mxfp8():
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
@@ -454,11 +463,15 @@ class GroupedTensor:
                     total_scale_elements += scale_elements
                     if i < num_tensors - 1:
                         scale_inv_offsets.append(total_scale_elements)
-                scale_inv = torch.empty(total_scale_elements, dtype=torch.uint8, device=device)
+                scale_inv = torch.empty(
+                    total_scale_elements, dtype=torch.uint8, device=device
+                )
 
             if columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
-                columnwise_data = torch.empty(total_elements, dtype=torch.uint8, device=device)
+                columnwise_data = torch.empty(
+                    total_elements, dtype=torch.uint8, device=device
+                )
                 # Columnwise scale inverse buffer
                 total_columnwise_scale_elements = 0
                 columnwise_scale_inv_offsets = [0]
@@ -467,7 +480,9 @@ class GroupedTensor:
                     columnwise_scale_elements = math.prod(scale_inv_shape)
                     total_columnwise_scale_elements += columnwise_scale_elements
                     if i < num_tensors - 1:
-                        columnwise_scale_inv_offsets.append(total_columnwise_scale_elements)
+                        columnwise_scale_inv_offsets.append(
+                            total_columnwise_scale_elements
+                        )
                 columnwise_scale_inv = torch.empty(
                     total_columnwise_scale_elements, dtype=torch.uint8, device=device
                 )
@@ -482,9 +497,13 @@ class GroupedTensor:
 
             if columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
-                columnwise_data = torch.empty(total_elements, dtype=torch.uint8, device=device)
+                columnwise_data = torch.empty(
+                    total_elements, dtype=torch.uint8, device=device
+                )
                 # Columnwise scale inverse - one per tensor
-                columnwise_scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
+                columnwise_scale_inv = torch.empty(
+                    num_tensors, dtype=torch.float32, device=device
+                )
                 # One scale per tensor, so offsets are simply 0, 1, 2, ..., num_tensors-1
                 columnwise_scale_inv_offsets = list(range(num_tensors))
 
@@ -494,7 +513,9 @@ class GroupedTensor:
 
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8, but FP4 packs 2 values per byte)
-                data = torch.empty((total_elements) // 2, dtype=torch.uint8, device=device)
+                data = torch.empty(
+                    (total_elements) // 2, dtype=torch.uint8, device=device
+                )
                 # Scale inverse buffer for NVFP4 - complex shape based on block scaling
                 # For simplicity, calculate total scale elements needed
                 total_scale_elements = 0
@@ -504,7 +525,9 @@ class GroupedTensor:
                     total_scale_elements += math.prod(scale_inv_shape)
                     if i < num_tensors - 1:
                         scale_inv_offsets.append(total_scale_elements)
-                scale_inv = torch.empty(total_scale_elements, dtype=torch.uint8, device=device)
+                scale_inv = torch.empty(
+                    total_scale_elements, dtype=torch.uint8, device=device
+                )
                 # Amax buffer - one per tensor
                 amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
 
@@ -518,14 +541,20 @@ class GroupedTensor:
                 columnwise_scale_inv_offsets = [0]
                 for i, s in enumerate(shape):
                     columnwise_scale_inv_shape = quantizer.get_scale_shape(s, True)
-                    total_columnwise_scale_elements += math.prod(columnwise_scale_inv_shape)
+                    total_columnwise_scale_elements += math.prod(
+                        columnwise_scale_inv_shape
+                    )
                     if i < num_tensors - 1:
-                        columnwise_scale_inv_offsets.append(total_columnwise_scale_elements)
+                        columnwise_scale_inv_offsets.append(
+                            total_columnwise_scale_elements
+                        )
                 columnwise_scale_inv = torch.empty(
                     total_columnwise_scale_elements, dtype=torch.uint8, device=device
                 )
                 # Columnwise amax buffer - one per tensor
-                columnwise_amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
+                columnwise_amax = torch.empty(
+                    num_tensors, dtype=torch.float32, device=device
+                )
         elif quantizer._get_compatible_recipe().float8_block_scaling():
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
@@ -539,19 +568,27 @@ class GroupedTensor:
                     total_scale_elements += math.prod(scale_inv_shape)
                     if i < num_tensors - 1:
                         scale_inv_offsets.append(total_scale_elements)
-                scale_inv = torch.empty(total_scale_elements, dtype=torch.float32, device=device)
+                scale_inv = torch.empty(
+                    total_scale_elements, dtype=torch.float32, device=device
+                )
 
             if columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
-                columnwise_data = torch.empty(total_elements, dtype=torch.uint8, device=device)
+                columnwise_data = torch.empty(
+                    total_elements, dtype=torch.uint8, device=device
+                )
                 # Columnwise scale inverse
                 total_columnwise_scale_elements = 0
                 columnwise_scale_inv_offsets = [0]
                 for i, s in enumerate(shape):
                     columnwise_scale_inv_shape = quantizer.get_scale_shape(s, True)
-                    total_columnwise_scale_elements += math.prod(columnwise_scale_inv_shape)
+                    total_columnwise_scale_elements += math.prod(
+                        columnwise_scale_inv_shape
+                    )
                     if i < num_tensors - 1:
-                        columnwise_scale_inv_offsets.append(total_columnwise_scale_elements)
+                        columnwise_scale_inv_offsets.append(
+                            total_columnwise_scale_elements
+                        )
                 columnwise_scale_inv = torch.empty(
                     total_columnwise_scale_elements, dtype=torch.float32, device=device
                 )
@@ -567,9 +604,13 @@ class GroupedTensor:
 
             if columnwise_usage:
                 # Allocate columnwise data buffer (1D flattened, uint8)
-                columnwise_data = torch.empty(total_elements, dtype=torch.uint8, device=device)
+                columnwise_data = torch.empty(
+                    total_elements, dtype=torch.uint8, device=device
+                )
                 # Columnwise scale inverse - one per tensor
-                columnwise_scale_inv = torch.empty(num_tensors, dtype=torch.float32, device=device)
+                columnwise_scale_inv = torch.empty(
+                    num_tensors, dtype=torch.float32, device=device
+                )
                 # One scale per tensor, so offsets are simply 0, 1, 2, ..., num_tensors-1
                 columnwise_scale_inv_offsets = list(range(num_tensors))
 
@@ -622,6 +663,9 @@ class GroupedTensor:
         result = []
 
         no_quantization = self.quantizer is None
+        assert (
+            self.shape is not None
+        ), "Shape must be set for splitting a GroupedTensor."
 
         # Case 1: No quantization - return regular torch tensors
         if no_quantization:
@@ -636,12 +680,14 @@ class GroupedTensor:
                     end_offset = start_offset + numel
 
                     if self.has_data():
-                        tensor_data = self.data[start_offset:end_offset].view(tensor_shape)
-                        result.append(tensor_data)
-                    elif self.has_columnwise_data():
-                        tensor_data = self.columnwise_data[start_offset:end_offset].view(
+                        tensor_data = self.data[start_offset:end_offset].view(
                             tensor_shape
                         )
+                        result.append(tensor_data)
+                    elif self.has_columnwise_data():
+                        tensor_data = self.columnwise_data[
+                            start_offset:end_offset
+                        ].view(tensor_shape)
                         result.append(tensor_data)
                     else:
                         raise RuntimeError("GroupedTensor has no data to split")
@@ -652,12 +698,14 @@ class GroupedTensor:
                     end_offset = start_offset + numel
 
                     if self.has_data():
-                        tensor_data = self.data[start_offset:end_offset].view(tensor_shape)
-                        result.append(tensor_data)
-                    elif self.has_columnwise_data():
-                        tensor_data = self.columnwise_data[start_offset:end_offset].view(
+                        tensor_data = self.data[start_offset:end_offset].view(
                             tensor_shape
                         )
+                        result.append(tensor_data)
+                    elif self.has_columnwise_data():
+                        tensor_data = self.columnwise_data[
+                            start_offset:end_offset
+                        ].view(tensor_shape)
                         result.append(tensor_data)
                     else:
                         raise RuntimeError("GroupedTensor has no data to split")
@@ -693,13 +741,17 @@ class GroupedTensor:
 
             if self.has_data():
                 if nvfp4:
-                    rowwise_tensor_shape = self.quantizer.convert_shape_for_fp4(tensor_shape)
+                    rowwise_tensor_shape = self.quantizer.convert_shape_for_fp4(
+                        tensor_shape
+                    )
                 else:
                     rowwise_tensor_shape = tensor_shape
                 rowwise_data = self.data[data_start:data_end].view(rowwise_tensor_shape)
 
             if self.has_columnwise_data():
-                columnwise_tensor_shape = self.quantizer.get_columnwise_shape(tensor_shape)
+                columnwise_tensor_shape = self.quantizer.get_columnwise_shape(
+                    tensor_shape
+                )
                 if nvfp4:
                     columnwise_tensor_shape = self.quantizer.convert_shape_for_fp4(
                         columnwise_tensor_shape
@@ -723,7 +775,9 @@ class GroupedTensor:
 
                     # Calculate expected scale shape for MXFP8
                     scale_shape = self.quantizer.get_scale_shape(tensor_shape, False)
-                    rowwise_scale_inv = self.scale_inv[scale_start:scale_end].view(scale_shape)
+                    rowwise_scale_inv = self.scale_inv[scale_start:scale_end].view(
+                        scale_shape
+                    )
 
                 if (
                     self.columnwise_scale_inv is not None
@@ -736,9 +790,9 @@ class GroupedTensor:
                         cscale_end = self.columnwise_scale_inv.numel()
 
                     cscale_shape = self.quantizer.get_scale_shape(tensor_shape, True)
-                    columnwise_scale_inv = self.columnwise_scale_inv[cscale_start:cscale_end].view(
-                        cscale_shape
-                    )
+                    columnwise_scale_inv = self.columnwise_scale_inv[
+                        cscale_start:cscale_end
+                    ].view(cscale_shape)
 
                 if self.quantizer.internal:
                     mxfp8_tensor_class = MXFP8TensorStorage
@@ -795,7 +849,9 @@ class GroupedTensor:
 
                     # Get scale shape from quantizer
                     scale_shape = self.quantizer.get_scale_shape(tensor_shape, False)
-                    rowwise_scale_inv = self.scale_inv[scale_start:scale_end].view(scale_shape)
+                    rowwise_scale_inv = self.scale_inv[scale_start:scale_end].view(
+                        scale_shape
+                    )
 
                 if (
                     self.columnwise_scale_inv is not None
@@ -809,9 +865,9 @@ class GroupedTensor:
 
                     # Get columnwise scale shape from quantizer
                     cscale_shape = self.quantizer.get_scale_shape(tensor_shape, True)
-                    columnwise_scale_inv = self.columnwise_scale_inv[cscale_start:cscale_end].view(
-                        cscale_shape
-                    )
+                    columnwise_scale_inv = self.columnwise_scale_inv[
+                        cscale_start:cscale_end
+                    ].view(cscale_shape)
 
                 # Compute is_2D_scaled and data_format from quantizer attributes
                 is_2D_scaled = self.quantizer.block_scaling_dim == 2
@@ -851,7 +907,9 @@ class GroupedTensor:
 
                     # Get scale shape from quantizer
                     scale_shape = self.quantizer.get_scale_shape(tensor_shape, False)
-                    rowwise_scale_inv = self.scale_inv[scale_start:scale_end].view(scale_shape)
+                    rowwise_scale_inv = self.scale_inv[scale_start:scale_end].view(
+                        scale_shape
+                    )
 
                 if (
                     self.columnwise_scale_inv is not None
@@ -865,9 +923,9 @@ class GroupedTensor:
 
                     # Get columnwise scale shape from quantizer
                     cscale_shape = self.quantizer.get_scale_shape(tensor_shape, True)
-                    columnwise_scale_inv = self.columnwise_scale_inv[cscale_start:cscale_end].view(
-                        cscale_shape
-                    )
+                    columnwise_scale_inv = self.columnwise_scale_inv[
+                        cscale_start:cscale_end
+                    ].view(cscale_shape)
 
                 # Extract amax - one per tensor
                 if self.amax is not None:
@@ -938,5 +996,7 @@ class GroupedTensor:
 
         quantized_tensors = self.split_into_quantized_tensors()
         for i in range(self.num_tensors):
-            self.quantizer.update_quantized(tensors[i], quantized_tensors[i], noop_flag=noop_flag)
+            self.quantizer.update_quantized(
+                tensors[i], quantized_tensors[i], noop_flag=noop_flag
+            )
         return quantized_tensors

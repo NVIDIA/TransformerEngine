@@ -80,19 +80,61 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
-py::object quantize_grouped(const py::handle &input, py::handle &output) {
+// py::object quantize_grouped(const py::handle &input, py::handle &output) {
+//   using namespace transformer_engine::pytorch::detail;
+//   init_extension();
+
+//   const auto &grouped_input_tensor = GroupedTensorFromPyTorchGroupedTensor(input);
+//   const auto &grouped_output_tensor = GroupedTensorFromPyTorchGroupedTensor(output);
+//   NVTE_SCOPED_GIL_RELEASE({
+//     nvte_quantize_grouped(grouped_input_tensor.data(), grouped_output_tensor.data(), at::cuda::getCurrentCUDAStream());
+//   });
+
+//   return py::reinterpret_borrow<py::object>(output);
+// }
+
+
+/*
+Inputs:
+  - tensor: PyTorch input tensor.
+  - quantizer: Quantizer for the output GroupedTensors.
+  - first_dims: PyTorch tensor representing the first dimensions of each of the output GroupedTensors.
+
+NOTE: Only supports varying first dim.
+*/
+py::object group_quantize(const at::tensor &tensor, py::handle quantizer, std::optional<at::Tensor> first_dims) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
-  const auto &grouped_input_tensor = GroupedTensorFromPyTorchGroupedTensor(input);
-  const auto &grouped_output_tensor = GroupedTensorFromPyTorchGroupedTensor(output);
+  NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+  const auto &logical_shape = tensor.shape();
+  const auto &num_tensors = first_dims.size(0);
+  const auto logical_first_dim = logical_shape[0];
+  const auto logical_last_dim = logical_shape[1];
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+
+  // Create input GroupedTensor.
+  auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
+  grouped_input_tensor.set_rowwise_data(tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+
+  // Create output GroupedTensor.
+  auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
+    num_tensors,
+    logical_shape,
+    GetTransformerEngineDType(tensor.scalar_type()),
+    first_dims,
+    logical_first_dim,
+    logical_last_dim
+  );
+
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor.data(),
-                        at::cuda::getCurrentCUDAStream());
+    nvte_quantize_grouped(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(), at::cuda::getCurrentCUDAStream());
   });
 
-  return py::reinterpret_borrow<py::object>(output);
+  return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
+
 
 py::object dequantize(const py::handle &input, transformer_engine::DType otype) {
   init_extension();
