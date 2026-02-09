@@ -28,16 +28,28 @@ class InspectPrimitive(BasePrimitive):
     @staticmethod
     def abstract(
         x_aval,
+        x_min_aval,
+        x_max_aval,
+        x_mean_aval,
+        x_std_aval,
     ):
         """
         inspect abstract
         """
+        assert x_min_aval.shape == () and x_min_aval.dtype == jnp.float32, "x_min must be a scalar with dtype float32"
+        assert x_max_aval.shape == () and x_max_aval.dtype == jnp.float32, "x_max must be a scalar with dtype float32"
+        assert x_mean_aval.shape == () and x_mean_aval.dtype == jnp.float32, "x_mean must be a scalar with dtype float32"
+        assert x_std_aval.shape == () and x_std_aval.dtype == jnp.float32, "x_std must be a scalar with dtype float32"
         return x_aval
 
     @staticmethod
     def lowering(
         ctx,
         x,
+        x_min,
+        x_max,
+        x_mean,
+        x_std,
     ):
         """
         inspect lowering rules
@@ -49,11 +61,19 @@ class InspectPrimitive(BasePrimitive):
         )(
             ctx,
             x,
+            x_min,
+            x_max,
+            x_mean,
+            x_std,
         )
 
     @staticmethod
     def impl(
         x,
+        x_min,
+        x_max,
+        x_mean,
+        x_std,
     ):
         """
         inspect implementation
@@ -61,12 +81,24 @@ class InspectPrimitive(BasePrimitive):
         assert InspectPrimitive.inner_primitive is not None
         (x) = InspectPrimitive.inner_primitive.bind(
             x,
+            x_min,
+            x_max,
+            x_mean,
+            x_std,
         )
         return x
 
 
 register_primitive(InspectPrimitive)
 
+def _inspect_array_inner(x: jnp.ndarray) -> jnp.ndarray:
+    return InspectPrimitive.outer_primitive.bind(
+        x,
+        jnp.min(x).astype(jnp.float32),
+        jnp.max(x).astype(jnp.float32),
+        jnp.mean(x.astype(jnp.float32)),
+        jnp.std(x.astype(jnp.float32)),
+    )
 
 @partial(jax.custom_vjp, nondiff_argnums=())
 def _inspect(
@@ -84,7 +116,7 @@ def _inspect_fwd_rule(
 ):
     """"""
     ctx = ()
-    x = InspectPrimitive.outer_primitive.bind(x)
+    x = _inspect_array_inner(x)
     return x, ctx
 
 
