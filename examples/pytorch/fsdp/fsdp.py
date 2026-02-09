@@ -18,7 +18,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import Format, DelayedScaling, MXFP8BlockScaling, NVFP4BlockScaling
 from transformer_engine.pytorch.distributed import prepare_te_modules_for_fsdp
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
@@ -66,6 +66,19 @@ def torch_dtype(d):
     if lowercase(d) not in typemap.keys():
         raise TypeError
     return typemap[lowercase(d)]
+
+
+def precision(d):
+    typemap = [
+        "fp32",
+        "fp16",
+        "fp8",
+        "mxfp8",
+        "nvfp4"
+    ]
+    if lowercase(d) not in typemap:
+        raise TypeError
+    return lowercase(d)
 
 
 te_layer_map = {
@@ -191,6 +204,12 @@ def parse_fsdp_args():
         default=torch.bfloat16,
         help="Data type for input tensor and Transformer Engine module parameters.",
     )
+    parser.add_argument(
+        "--precision",
+        type=precision,
+        default="fp8",
+        help="Precision to apply to model training (FP32, FP16, FP8, MXFP8, NVFP4)",
+    )
     return parser.parse_args()
 
 
@@ -209,6 +228,42 @@ def train(opts):
 
     # Construct a simple homogeneous model (only one layer type) with NO PARALLELISM
     layer_args, layer_kwargs = get_layer_args(opts)
+
+    # Determining the format and recipe for the training
+    precision_format = Format.HYBRID
+    recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+    no_fp8 = opts.no_fp8
+    dtype=opts.dtype
+
+    match opts.precision:
+        case "fp32":
+            dtype=torch.float32
+            no_fp8 = True
+        case "fp16":
+            dtype=torch.bfloat16
+            no_fp8 = True
+        case "fp8":
+            dtype=torch.bfloat16
+            precision_format = Format.HYBRID
+            recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+            no_fp8 = False
+        case "mxfp8":
+            dtype=torch.bfloat16
+            precision_format = Format.E4M3
+            recipe = MXFP8BlockScaling(fp8_format=precision_format)
+            no_fp8 = False
+        case "nvfp4":
+            dtype=torch.bfloat16 # RHT only supports bfloat16
+            recipe = NVFP4BlockScaling()
+            no_fp8 = False
+        case _:
+            dtype=torch.bfloat16
+            precision_format = Format.HYBRID
+            recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+            no_fp8 = opts.no_fp8
+
+    layer_kwargs["params_dtype"]=dtype
+
     if opts.num_layers > 1:
         te_layer_list = []
         for i in range(opts.num_layers):
@@ -258,10 +313,6 @@ def train(opts):
     dist_print(f"Post-FSDP memory use = {post_mem_use}MiB")
     dist_print(f"FSDP-Wrapped + Checkpointed TE Model:\n{te_model}")
 
-    # Fp8 setup for TE
-    fp8_format = Format.HYBRID
-    fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
-
     # Optimizer must be created after the model is wrapped in FSDP and the parameters are sharded
     optim = torch.optim.Adam(te_model.parameters(), lr=0.0001)
 
@@ -281,11 +332,11 @@ def train(opts):
             opts.seq_length,
             opts.batch_size,
             opts.num_heads * opts.head_dim,
-            dtype=opts.dtype,
+            dtype=dtype,
             device="cuda",
         )
         # autocast needs to be given the FSDP process group for amax reductions
-        with te.autocast(enabled=not opts.no_fp8, recipe=fp8_recipe, amax_reduction_group=all_gpus):
+        with te.autocast(enabled=not no_fp8, recipe=recipe, amax_reduction_group=all_gpus):
             y = te_model(x)
             loss = y.sum()
         # calculate gradient and take training step outside the autocast context
