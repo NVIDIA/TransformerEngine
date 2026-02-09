@@ -55,7 +55,7 @@ _quantization_params = [
 
 
 def make_quantizer(quantization: str, num_tensors: int, shape: List[Tuple[int, int]]) -> Quantizer:
-    """Create quantizers for given quantization scheme"""
+    """Create quantizer for given quantization scheme"""
 
     if quantization == "fp8_delayed_scaling":
         quantizer = Float8Quantizer(
@@ -203,12 +203,12 @@ class TestGroupedTensor:
         """Test split_into_quantized_tensors for quantized tensors"""
         num_tensors = 3
         shape = [(512, 512) for _ in range(num_tensors)]
-        quantizers = make_quantizer(quantization, num_tensors, shape)
+        quantizer = make_quantizer(quantization, num_tensors, shape)
 
         grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizer=quantizers,
+            quantizer=quantizer,
             device="cuda",
         )
 
@@ -260,12 +260,12 @@ class TestGroupedTensor:
         """Test that quantize is done in-place for all recipes"""
         num_tensors = 3
         shape = [(512, 512) for _ in range(num_tensors)]
-        quantizers = make_quantizer(quantization, num_tensors, shape)
+        quantizer = make_quantizer(quantization, num_tensors, shape)
 
         grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizer=quantizers,
+            quantizer=quantizer,
             device="cuda",
         )
 
@@ -300,12 +300,12 @@ class TestGroupedTensor:
         """Test quantize with varying shapes"""
         num_tensors = 3
         shape = [(256, 512), (512, 512), (768, 512)]
-        quantizers = make_quantizer(quantization, num_tensors, shape)
+        quantizer = make_quantizer(quantization, num_tensors, shape)
 
         grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=num_tensors,
             shape=shape,
-            quantizer=quantizers,
+            quantizer=quantizer,
             device="cuda",
         )
 
@@ -334,7 +334,7 @@ class TestGroupedTensor:
         """Test the static quantize method"""
         num_tensors = 3
         shape = [(512, 512) for _ in range(num_tensors)]
-        quantizers = make_quantizer(quantization, num_tensors, shape)
+        quantizer = make_quantizer(quantization, num_tensors, shape)
 
         # Create input tensors
         input_tensors = [torch.randn(s, dtype=torch.float32, device="cuda") for s in shape]
@@ -342,7 +342,7 @@ class TestGroupedTensor:
         # Use static quantize method
         grouped_tensor = GroupedTensor.create_and_quantize(
             tensors=input_tensors,
-            quantizer=quantizers,
+            quantizer=quantizer,
             device="cuda",
         )
 
@@ -406,7 +406,7 @@ class TestGroupedTensor:
         # Build expected output by quantizing each tensor independently
         expected_data = []
         expected_scale_inv = []
-        for tensor, quantizer in zip(input_tensors, quantizers):
+        for tensor in input_tensors:
             qtensor = quantizer(tensor)
             expected_data.append(qtensor._rowwise_data.reshape(-1))
             expected_scale_inv.append(qtensor._rowwise_scale_inv.reshape(-1))
