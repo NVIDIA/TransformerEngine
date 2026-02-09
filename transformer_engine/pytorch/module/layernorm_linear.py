@@ -615,8 +615,6 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
                 origin_weight.main_grad = main_grad
 
-            keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
-
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
             ub_obj_dgrad = None
@@ -760,7 +758,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: dx = dy * w
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
             weight_for_dgrad = weight
-            if keep_backward_unquantized:
+            if ctx.keep_backward_unquantized:
                 weight_for_dgrad = origin_weight
             gemm_out, *_, reduce_scatter_out = general_gemm(
                 weight_for_dgrad,

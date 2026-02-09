@@ -554,8 +554,6 @@ class _Linear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
 
-            keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
-
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
             ub_obj_dgrad = None
@@ -743,7 +741,7 @@ class _Linear(torch.autograd.Function):
 
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
                 weight_for_dgrad = weight_fp8
-                if keep_backward_unquantized:
+                if ctx.keep_backward_unquantized:
                     weight_for_dgrad = weight
                 gemm_out, *_, reduce_scatter_out = general_gemm(
                     weight_for_dgrad,
