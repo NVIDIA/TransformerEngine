@@ -89,6 +89,7 @@ all_boolean = [True, False]
 all_activations = [
     "gelu",
     "geglu",
+    "glu",
     "qgelu",
     "qgeglu",
     "relu",

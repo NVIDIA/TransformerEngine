@@ -113,6 +113,7 @@ batch_sizes_with_zero = [0, 1, 2]
 all_activations = [
     "gelu",
     "geglu",
+    "glu",
     "qgelu",
     "qgeglu",
     "relu",

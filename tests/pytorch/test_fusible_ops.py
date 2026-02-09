@@ -1655,6 +1655,7 @@ class TestBasicOps:
         make_op = dict(
             gelu=te_ops.GELU,
             geglu=te_ops.GEGLU,
+            glu=te_ops.GLU,
             qgelu=te_ops.QGELU,
             qgeglu=te_ops.QGEGLU,
             relu=te_ops.ReLU,
