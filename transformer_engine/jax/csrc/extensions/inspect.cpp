@@ -14,13 +14,9 @@
 namespace transformer_engine {
 namespace jax {
 
-Error_Type InspectFFI(cudaStream_t stream, 
-    Buffer_Type input_buf,
-    Buffer_Type min_buf,
-    Buffer_Type max_buf,
-    Buffer_Type mean_buf,
-    Buffer_Type std_buf,
-    Result_Type output_buf) {
+Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type min_buf,
+                      Buffer_Type max_buf, Buffer_Type mean_buf, Buffer_Type std_buf,
+                      Result_Type output_buf) {
   NVTE_CHECK(input_buf.untyped_data() != nullptr, "Input must be provided for inspect operation");
   NVTE_CHECK(output_buf->untyped_data() != nullptr,
              "Output must be provided for inspect operation");
@@ -34,7 +30,8 @@ Error_Type InspectFFI(cudaStream_t stream,
   float min_val{}, max_val{}, mean_val{}, std_val{};
   cudaMemcpyAsync(&min_val, min_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream);
   cudaMemcpyAsync(&max_val, max_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream);
-  cudaMemcpyAsync(&mean_val, mean_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream);
+  cudaMemcpyAsync(&mean_val, mean_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost,
+                  stream);
   cudaMemcpyAsync(&std_val, std_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream);
 
   cudaStreamSynchronize(stream);

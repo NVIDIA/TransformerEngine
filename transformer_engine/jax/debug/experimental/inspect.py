@@ -36,10 +36,18 @@ class InspectPrimitive(BasePrimitive):
         """
         inspect abstract
         """
-        assert x_min_aval.shape == () and x_min_aval.dtype == jnp.float32, "x_min must be a scalar with dtype float32"
-        assert x_max_aval.shape == () and x_max_aval.dtype == jnp.float32, "x_max must be a scalar with dtype float32"
-        assert x_mean_aval.shape == () and x_mean_aval.dtype == jnp.float32, "x_mean must be a scalar with dtype float32"
-        assert x_std_aval.shape == () and x_std_aval.dtype == jnp.float32, "x_std must be a scalar with dtype float32"
+        assert (
+            x_min_aval.shape == () and x_min_aval.dtype == jnp.float32
+        ), "x_min must be a scalar with dtype float32"
+        assert (
+            x_max_aval.shape == () and x_max_aval.dtype == jnp.float32
+        ), "x_max must be a scalar with dtype float32"
+        assert (
+            x_mean_aval.shape == () and x_mean_aval.dtype == jnp.float32
+        ), "x_mean must be a scalar with dtype float32"
+        assert (
+            x_std_aval.shape == () and x_std_aval.dtype == jnp.float32
+        ), "x_std must be a scalar with dtype float32"
         return x_aval
 
     @staticmethod
@@ -91,6 +99,7 @@ class InspectPrimitive(BasePrimitive):
 
 register_primitive(InspectPrimitive)
 
+
 def _inspect_array_inner(x: jnp.ndarray) -> jnp.ndarray:
     return InspectPrimitive.outer_primitive.bind(
         x,
@@ -99,6 +108,7 @@ def _inspect_array_inner(x: jnp.ndarray) -> jnp.ndarray:
         jnp.mean(x.astype(jnp.float32)),
         jnp.std(x.astype(jnp.float32)),
     )
+
 
 @partial(jax.custom_vjp, nondiff_argnums=())
 def _inspect(
