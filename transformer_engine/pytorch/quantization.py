@@ -842,11 +842,9 @@ def autocast(
                           are reduced at the end of each training step.
     """
 
-    fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
-    quantize_forward = getattr(fp8_recipe, "quantize_forward", True)
-    effective_enabled = enabled and quantize_forward
+    effective_enabled = enabled and getattr(recipe, "quantize_forward", True)
     if effective_enabled:
-        check_recipe_support(fp8_recipe)
+        check_recipe_support(recipe)
 
     # Save current state so we always restore it on exit.
     fp8_state = FP8GlobalStateManager.get_autocast_state()
@@ -854,7 +852,7 @@ def autocast(
     FP8GlobalStateManager.autocast_enter(
         enabled=effective_enabled,
         calibrating=calibrating,
-        fp8_recipe=fp8_recipe,
+        fp8_recipe=recipe,
         fp8_group=amax_reduction_group,
         _graph=_graph,
     )
