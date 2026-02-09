@@ -1020,11 +1020,7 @@ class BasicLinear(BasicOperation):
         # Save state for backward pass
         if ctx.requires_grad:
             saved_input = input_ if keep_backward_unquantized else x_local
-            if not weight_requires_grad:
-                saved_input = None
             saved_weight = self.weight if keep_backward_unquantized else w
-            if not input_requires_grad:
-                saved_weight = None
             if is_cpu_offload_enabled():
                 mark_activation_offload(saved_input)
             ctx.save_for_backward(saved_input, saved_weight)

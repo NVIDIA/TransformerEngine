@@ -57,11 +57,12 @@ class Quantize(BasicOperation):
         # Check if FP8 is enabled
         fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
         quantize_forward = fp8_enabled and self._quantize_forward
-        quantize_backward = (
-            fp8_enabled
-            and self._quantize_backward
-            and FP8GlobalStateManager.get_fp8_recipe().quantize_backward
-        )
+        quantize_backward = fp8_enabled and self._quantize_backward
+
+        # Recipe quantize overrides
+        if FP8GlobalStateManager.get_fp8_recipe() is not None:
+            quantize_forward = quantize_forward and FP8GlobalStateManager.get_fp8_recipe().quantize_forward
+            quantize_backward = quantize_backward and FP8GlobalStateManager.get_fp8_recipe().quantize_backward
 
         # Quantize if needed
         out = input_
