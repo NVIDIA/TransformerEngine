@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""JAX array inspection utilities."""
+"""Experimental JAX array inspection utilities."""
 
 from functools import partial
 
@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from jax import ffi
 
-from .cpp_extensions.base import BasePrimitive, register_primitive
+from transformer_engine.jax.cpp_extensions.base import BasePrimitive, register_primitive
 
 __all__ = ["inspect_array", "load_array_dump"]
 
