@@ -305,7 +305,7 @@ class GroupedLinear(BasicOperation):
                 weight = MXFP8Tensor(
                     shape=unpacked_shape,
                     dtype=dtype,
-                    fp8_dtype=dtype,
+                    fp8_dtype=tex.DType.kFloat8E4M3,
                     rowwise_data=rowwise_data[group_idx],
                     rowwise_scale_inv=rowwise_scales[group_idx],
                     columnwise_data=columnwise_data[group_idx],
