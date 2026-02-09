@@ -18,7 +18,12 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling, MXFP8BlockScaling, NVFP4BlockScaling
+from transformer_engine.common.recipe import (
+    Format,
+    DelayedScaling,
+    MXFP8BlockScaling,
+    NVFP4BlockScaling,
+)
 from transformer_engine.pytorch.distributed import prepare_te_modules_for_fsdp
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
@@ -69,13 +74,7 @@ def torch_dtype(d):
 
 
 def precision(d):
-    typemap = [
-        "fp32",
-        "fp16",
-        "fp8",
-        "mxfp8",
-        "nvfp4"
-    ]
+    typemap = ["fp32", "fp16", "fp8", "mxfp8", "nvfp4"]
     if lowercase(d) not in typemap:
         raise TypeError
     return lowercase(d)
@@ -231,38 +230,44 @@ def train(opts):
 
     # Determining the format and recipe for the training
     precision_format = Format.HYBRID
-    recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+    recipe = DelayedScaling(
+        fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
+    )
     no_fp8 = opts.no_fp8
-    dtype=opts.dtype
+    dtype = opts.dtype
 
     match opts.precision:
         case "fp32":
-            dtype=torch.float32
+            dtype = torch.float32
             no_fp8 = True
         case "fp16":
-            dtype=torch.bfloat16
+            dtype = torch.bfloat16
             no_fp8 = True
         case "fp8":
-            dtype=torch.bfloat16
+            dtype = torch.bfloat16
             precision_format = Format.HYBRID
-            recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+            recipe = DelayedScaling(
+                fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
+            )
             no_fp8 = False
         case "mxfp8":
-            dtype=torch.bfloat16
+            dtype = torch.bfloat16
             precision_format = Format.E4M3
             recipe = MXFP8BlockScaling(fp8_format=precision_format)
             no_fp8 = False
         case "nvfp4":
-            dtype=torch.bfloat16 # RHT only supports bfloat16
+            dtype = torch.bfloat16  # RHT only supports bfloat16
             recipe = NVFP4BlockScaling()
             no_fp8 = False
         case _:
-            dtype=torch.bfloat16
+            dtype = torch.bfloat16
             precision_format = Format.HYBRID
-            recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+            recipe = DelayedScaling(
+                fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
+            )
             no_fp8 = opts.no_fp8
 
-    layer_kwargs["params_dtype"]=dtype
+    layer_kwargs["params_dtype"] = dtype
 
     if opts.num_layers > 1:
         te_layer_list = []
