@@ -250,7 +250,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       fe::graph::SDPA_attributes sdpa_options;
       sdpa_options = fe::graph::SDPA_attributes()
                          .set_name("flash_attention")
-                         .set_generate_stats(true)
                          .set_generate_stats(generate_stats)
                          .set_causal_mask(is_causal)
                          .set_causal_mask_bottom_right(is_bottom_right)
