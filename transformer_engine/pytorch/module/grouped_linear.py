@@ -341,7 +341,6 @@ class _GroupedLinear(torch.autograd.Function):
             origin_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
-            keep_backward_unquantized = getattr(ctx, "keep_backward_unquantized", False)
 
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
@@ -423,7 +422,7 @@ class _GroupedLinear(torch.autograd.Function):
                     device=ctx.device,
                 )
                 weights_for_dgrad = weights
-                if keep_backward_unquantized:
+                if ctx.keep_backward_unquantized:
                     weights_for_dgrad = origin_weights
                 # Make sure weights are available in column-wise format
                 # for dgrad computation.
