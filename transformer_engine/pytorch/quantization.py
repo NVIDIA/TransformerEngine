@@ -87,21 +87,6 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     )
 
 
-def _validate_recipe_quantization_flags(recipe: Recipe) -> None:
-    """Validate forward/backward quantization flags on a recipe."""
-    quantize_forward = getattr(recipe, "quantize_forward", True)
-    quantize_backward = getattr(recipe, "quantize_backward", True)
-    if not quantize_forward and quantize_backward:
-        raise ValueError(
-            "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
-        )
-    if recipe.delayed() and not quantize_backward:
-        raise ValueError(
-            "Invalid recipe configuration: delayed scaling does not support "
-            "quantize_backward=False."
-        )
-
-
 def check_recipe_support(recipe: Recipe) -> None:
     """Check if the given recipe is supported."""
     recipe_supported = True
@@ -858,8 +843,6 @@ def autocast(
     """
 
     fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
-    if enabled or calibrating:
-        _validate_recipe_quantization_flags(fp8_recipe)
     quantize_forward = getattr(fp8_recipe, "quantize_forward", True)
     effective_enabled = enabled and quantize_forward
     if effective_enabled:
