@@ -11,11 +11,6 @@ from dataclasses import field
 from pydantic.dataclasses import dataclass
 
 
-def _default_quantize_backward() -> bool:
-    """Default backward quantization setting."""
-    return not bool(int(os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0")))
-
-
 class _FormatHelper(NamedTuple):
     """
     Stores max FP8 values for fprop and bprop a `Format`.
@@ -222,7 +217,7 @@ class DelayedScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     quantize_forward: bool = True
-    quantize_backward: bool = field(default_factory=_default_quantize_backward)
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
@@ -268,7 +263,7 @@ class Float8CurrentScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     quantize_forward: bool = True
-    quantize_backward: bool = field(default_factory=_default_quantize_backward)
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
@@ -324,7 +319,7 @@ class MXFP8BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     quantize_forward: bool = True
-    quantize_backward: bool = field(default_factory=_default_quantize_backward)
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
@@ -491,7 +486,7 @@ class NVFP4BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     quantize_forward: bool = True
-    quantize_backward: bool = field(default_factory=_default_quantize_backward)
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
@@ -567,7 +562,7 @@ class CustomRecipe(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     quantize_forward: bool = True
-    quantize_backward: bool = field(default_factory=_default_quantize_backward)
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __repr__(self) -> str:
         return (
