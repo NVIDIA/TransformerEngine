@@ -72,7 +72,7 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
   // Log the tensor metadata to the console
   printf("Tensor data written to %s (shape: [", filename.c_str());
   for (size_t i = 0; i < input_buf.dimensions().size(); ++i) {
-    printf("%ld", static_cast<long>(input_buf.dimensions()[i]));
+    printf("%zu", static_cast<size_t>(input_buf.dimensions()[i]));
     if (i < input_buf.dimensions().size() - 1) {
       printf(", ");
     }
