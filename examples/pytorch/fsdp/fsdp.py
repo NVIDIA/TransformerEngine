@@ -234,10 +234,11 @@ def dist_print(text, all_ranks=False, no_new_line=False):
 
 
 def train(opts):
+    import sys
 
     # Check which flags were explicitly set
-    dtype_explicitly_set = opts.dtype != torch.bfloat16
-    no_fp8_explicitly_set = opts.no_fp8 != False
+    dtype_explicitly_set = '--dtype' in sys.argv
+    no_fp8_explicitly_set = '--no-fp8' in sys.argv
     precision_is_non_default = opts.precision != "fp8"
 
     # Initialize torch.distributed global process group
@@ -264,7 +265,7 @@ def train(opts):
                 no_fp8 = True
             case "fp16":
                 dtype=torch.float16
-                
+
                 #set up, but not used by autocast with no-fp8 set to true
                 precision_format = Format.HYBRID
                 recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
