@@ -220,6 +220,12 @@ def dist_print(text, all_ranks=False, no_new_line=False):
 
 
 def train(opts):
+
+    # Check which flags were explicitly set
+    dtype_explicitly_set = opts.dtype != torch.bfloat16
+    no_fp8_explicitly_set = opts.no_fp8 != False
+    precision_is_non_default = opts.precision != "fp8"
+
     # Initialize torch.distributed global process group
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(LOCAL_RANK)
