@@ -126,6 +126,7 @@ def get_layer_args(opts):
 
 class StoreExplicitAction(argparse.Action):
     """Custom action that tracks whether an argument was explicitly set."""
+
     def __init__(self, option_strings, dest, type=None, **kwargs):
         super().__init__(option_strings, dest, **kwargs)
         self.type_converter = type  # Store the type converter
@@ -136,12 +137,10 @@ class StoreExplicitAction(argparse.Action):
             try:
                 values = self.type_converter(values)
             except (ValueError, TypeError) as e:
-                raise argparse.ArgumentTypeError(
-                    f"invalid {self.dest} value: {values}"
-                ) from e
+                raise argparse.ArgumentTypeError(f"invalid {self.dest} value: {values}") from e
 
         setattr(namespace, self.dest, values)
-        setattr(namespace, f'{self.dest}_explicitly_set', True)
+        setattr(namespace, f"{self.dest}_explicitly_set", True)
 
 
 class StoreTrueExplicitAction(argparse.Action):
