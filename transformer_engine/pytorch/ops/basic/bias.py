@@ -10,6 +10,7 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
+from ...quantization import FP8GlobalStateManager
 from ..op import BasicOperation, OperationContext
 from ...utils import canonicalize_device, canonicalize_dtype
 from ...tensor import Quantizer
@@ -123,7 +124,12 @@ class Bias(BasicOperation):
         b = self.bias.view([1] * (x.dim() - 1) + [self.local_size])
 
         if ctx.requires_grad:
-            ctx.grad_input_quantizer = prev_op_grad_output_quantizer
+            keep_backward_unquantized = FP8GlobalStateManager.is_fp8_enabled() and (
+                not FP8GlobalStateManager.get_fp8_recipe().quantize_backward
+            )
+            ctx.grad_input_quantizer = (
+                None if keep_backward_unquantized else prev_op_grad_output_quantizer
+            )
 
         return x + b
 
