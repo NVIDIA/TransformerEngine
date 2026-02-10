@@ -13,6 +13,8 @@ import math
 import torch
 from torch.utils._pytree import tree_map
 
+import transformer_engine_torch as tex
+
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
@@ -285,12 +287,23 @@ class Quantizer(abc.ABC):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
+        requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> QuantizedTensor:
         """Construct quantized tensor with uninitialized data"""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement make_empty function, "
-            "required for construction of unintialized quantized tensor"
+
+        if device is None:
+            device = torch.device("cuda")
+        result = tex.create_empty_quantized_tensor(
+            self,
+            list(shape),
+            dtype,
+            device,
+            pin_memory,
         )
+        if requires_grad:
+            result.requires_grad_(True)
+        return result
 
     def calibrate(self, tensor: torch.Tensor) -> None:
         """Calibrate quantizer state

@@ -112,48 +112,6 @@ class Float8Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def make_empty(
-        self,
-        shape: Iterable[int],
-        *,
-        dtype: torch.dtype = torch.float32,
-        device: Optional[torch.device] = None,
-        requires_grad: bool = False,
-        pin_memory: bool = False,
-    ) -> Float8Tensor:
-
-        # Canonicalize tensor attributes
-        if device is None:
-            device = torch.device("cuda")
-
-        # Allocate FP8 data
-        data = None
-        if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
-
-        # Allocate FP8 data transpose if needed
-        data_transpose = None
-        if self.columnwise_usage:
-            transpose_shape = [shape[-1]] + list(shape[:-1])
-            data_transpose = torch.empty(
-                transpose_shape,
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
-            )
-
-        # Construct FP8 tensor
-        return Float8Tensor(
-            shape=shape,
-            dtype=dtype,
-            data=data,
-            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device, pin_memory=pin_memory),
-            fp8_dtype=self.dtype,
-            requires_grad=requires_grad,
-            data_transpose=data_transpose,
-            quantizer=self,
-        )
-
     def calibrate(self, tensor: torch.Tensor) -> None:
         amin, amax = tensor.aminmax()
         self.amax.copy_(torch.max(-amin, amax))
@@ -332,47 +290,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
-
-    def make_empty(
-        self,
-        shape: Iterable[int],
-        *,
-        dtype: torch.dtype = torch.float32,
-        device: Optional[torch.device] = None,
-        requires_grad: bool = False,
-        pin_memory: bool = False,
-    ) -> Float8Tensor:
-
-        # Canonicalize tensor attributes
-        if device is None:
-            device = torch.device("cuda")
-
-        # Allocate FP8 data
-        data = None
-        if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
-
-        # Allocate FP8 data transpose if needed
-        data_transpose = None
-        if self.columnwise_usage:
-            transpose_shape = [shape[-1]] + list(shape[:-1])
-            data_transpose = torch.empty(
-                transpose_shape,
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
-            )
-        # Construct FP8 tensor
-        return Float8Tensor(
-            shape=shape,
-            dtype=dtype,
-            data=data,
-            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device, pin_memory=pin_memory),
-            fp8_dtype=self.dtype,
-            requires_grad=requires_grad,
-            data_transpose=data_transpose,
-            quantizer=self,
-        )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
         # current scaling don't need to calibrate
