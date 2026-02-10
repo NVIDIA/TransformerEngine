@@ -103,7 +103,7 @@ def get_layer_args(opts):
     hidden_size = opts.num_heads * opts.head_dim
     layer_args = (hidden_size,)
     layer_kwargs = {
-        "params_dtype": opts.dtype,
+        #"params_dtype": opts.dtype,
         "device": "cuda" if opts.no_defer_init else "meta",
         "get_rng_state_tracker": get_cuda_rng_tracker,
     }
@@ -130,6 +130,15 @@ class StoreExplicitAction(argparse.Action):
         setattr(namespace, self.dest, values)
         setattr(namespace, f'{self.dest}_explicitly_set', True)
 
+class StoreTrueExplicitAction(argparse.Action):
+    """Custom action for store_true that tracks whether flag was explicitly set."""
+    def __init__(self, option_strings, dest, default=False, required=False, help=None):
+        super().__init__(option_strings, dest, nargs=0, const=True,
+                        default=default, required=required, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, True)
+        setattr(namespace, f'{self.dest}_explicitly_set', True)
 
 def parse_fsdp_args():
     parser = argparse.ArgumentParser(
@@ -190,7 +199,7 @@ def parse_fsdp_args():
     )
     parser.add_argument(
         "--no-fp8",
-        action="store_true",
+        action=StoreTrueExplicitAction,  # Use custom action
         default=False,
         help="Disables the te.autocast() context. When set, FP8 training is disabled "
         + "and the model trains in standard precision (as specified by --dtype). "
@@ -246,7 +255,7 @@ def dist_print(text, all_ranks=False, no_new_line=False):
 def train(opts):
     # Check which flags were explicitly set
     dtype_explicitly_set = getattr(opts, 'dtype_explicitly_set', False)
-    no_fp8_explicitly_set = opts.no_fp8 != False
+    no_fp8_explicitly_set = getattr(opts, 'no_fp8_explicitly_set', False)  # Fixed
     precision_is_non_default = opts.precision != "fp8"
 
     # Initialize torch.distributed global process group
@@ -284,14 +293,14 @@ def train(opts):
 
                 no_fp8 = True
             case "fp8":
-                dtype = torch.float16
+                dtype = torch.bfloat16
                 precision_format = Format.HYBRID
                 recipe = DelayedScaling(
                     fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
                 )
                 no_fp8 = False
             case "mxfp8":
-                dtype = torch.float16
+                dtype = torch.bfloat16
                 precision_format = Format.E4M3
                 recipe = MXFP8BlockScaling(fp8_format=precision_format)
                 no_fp8 = False
@@ -300,7 +309,7 @@ def train(opts):
                 recipe = NVFP4BlockScaling()
                 no_fp8 = False
             case _:
-                dtype = torch.float16
+                dtype = torch.bfloat16
                 precision_format = Format.HYBRID
                 recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
                 no_fp8 = False
@@ -327,7 +336,7 @@ def train(opts):
 
     # Always log the final configuration being used
     dist_print(f"Training configuration: dtype={dtype}, FP8={'disabled' if no_fp8 else 'enabled'}")
-    if not no_fp8:
+    if not no_fp8 and recipe is not None:
         dist_print(f"Using FP8 recipe: {type(recipe).__name__}")
 
     layer_kwargs["params_dtype"] = dtype
@@ -362,7 +371,7 @@ def train(opts):
         process_group=all_gpus,
         use_orig_params=True,
         mixed_precision=MixedPrecision(
-            param_dtype=opts.dtype,
+            param_dtype=dtype,
             reduce_dtype=torch.float32,
         ),
         auto_wrap_policy=fsdp_wrap_policy,
