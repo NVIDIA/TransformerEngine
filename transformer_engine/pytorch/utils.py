@@ -12,7 +12,6 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 
-from .quantized_tensor import Quantizer
 from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
