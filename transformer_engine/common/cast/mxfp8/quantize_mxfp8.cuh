@@ -821,7 +821,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                 }
               }
 
-              if (use_2d_quantization) { 
+              if (use_2d_quantization) {
                 scaling_type = ScalingType::BIDIMENSIONAL;
                 NVTE_CHECK(scaling_type == ScalingType::BIDIMENSIONAL,
                            "Scaling type must be BIDIMENSIONAL when using 2D block scaling");
