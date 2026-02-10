@@ -256,9 +256,19 @@ def train(opts):
         match opts.precision:
             case "fp32":
                 dtype=torch.float32
+
+                #set up, but not used by autocast with no-fp8 set to true
+                precision_format = Format.HYBRID
+                recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+
                 no_fp8 = True
             case "fp16":
                 dtype=torch.float16
+                
+                #set up, but not used by autocast with no-fp8 set to true
+                precision_format = Format.HYBRID
+                recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+
                 no_fp8 = True
             case "fp8":
                 dtype=torch.float16
