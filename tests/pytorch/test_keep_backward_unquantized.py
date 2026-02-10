@@ -214,7 +214,9 @@ def _run_grouped_linear_single_step(
         y = module(x_run, m_splits)
     y.backward(dy)
     assert x_run.grad is not None
-    weight_grads = [getattr(module, f"weight{i}").grad.detach().clone() for i in range(module.num_gemms)]
+    weight_grads = [
+        getattr(module, f"weight{i}").grad.detach().clone() for i in range(module.num_gemms)
+    ]
     bias_grads: list[Optional[torch.Tensor]] = []
     for i in range(module.num_gemms):
         if module.use_bias:
@@ -257,7 +259,9 @@ def _run_fused_single_step(
     dy: torch.Tensor,
     fp8_recipe: Optional[recipe.Recipe],
     x2: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[
+    torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor]
+]:
     model.zero_grad(set_to_none=True)
     x1_run = x1.detach().clone().requires_grad_(True)
     x2_run = x2.detach().clone().requires_grad_(True) if x2 is not None else None
@@ -276,7 +280,9 @@ def _run_fused_single_step(
     bias_grad = None
     if getattr(model[0], "bias", None) is not None and model[0].bias.grad is not None:
         bias_grad = model[0].bias.grad.detach().clone()
-    x2_grad = x2_run.grad.detach().clone() if x2_run is not None and x2_run.grad is not None else None
+    x2_grad = (
+        x2_run.grad.detach().clone() if x2_run is not None and x2_run.grad is not None else None
+    )
     return y.detach().clone(), x1_run.grad.detach().clone(), x2_grad, weight_grad, bias_grad
 
 
@@ -355,7 +361,9 @@ def test_keep_backward_unquantized_matches_quantized_fprop_and_unquantized_grads
     y_keep_bwd_hp, dx_keep_bwd_hp, dw_keep_bwd_hp = _run_single_step(
         module_keep_bwd_hp, x, dy, keep_bwd_hp_recipe
     )
-    _, dx_unquantized_ref, dw_unquantized_ref = _run_single_step(module_unquantized_ref, x, dy, None)
+    _, dx_unquantized_ref, dw_unquantized_ref = _run_single_step(
+        module_unquantized_ref, x, dy, None
+    )
 
     # Forward pass should still match quantized reference when only backward is unquantized.
     torch.testing.assert_close(
@@ -457,6 +465,7 @@ def test_keep_backward_unquantized_grouped_linear_matches_quantized_fprop_and_un
             assert test_db is not None
             assert ref_db is not None
             torch.testing.assert_close(test_db, ref_db, rtol=0, atol=0)
+
 
 @pytest.mark.parametrize(
     "recipe_name",
@@ -589,13 +598,9 @@ def test_keep_backward_unquantized_fused_bias_activation_matches_masked_linear_b
     # keep-bwd mode should disable backward-activation+bias fusion, while quantized
     # reference should still use it.
     keep_bwd_backward_ops = model_keep_bwd_hp._module_groups[0]._backward_ops
-    assert not any(
-        isinstance(op, BackwardActivationBias) for op, _ in keep_bwd_backward_ops
-    )
+    assert not any(isinstance(op, BackwardActivationBias) for op, _ in keep_bwd_backward_ops)
     quantized_ref_backward_ops = model_quantized_ref._module_groups[0]._backward_ops
-    assert any(
-        isinstance(op, BackwardActivationBias) for op, _ in quantized_ref_backward_ops
-    )
+    assert any(isinstance(op, BackwardActivationBias) for op, _ in quantized_ref_backward_ops)
 
     torch.testing.assert_close(
         y_keep_bwd_hp,
@@ -606,7 +611,9 @@ def test_keep_backward_unquantized_fused_bias_activation_matches_masked_linear_b
     # In keep-backward-unquantized mode, backward should behave as high-precision linear backward
     # given the ReLU mask induced by quantized forward activations.
     dy_after_activation = dy * (y_keep_bwd_hp > 0).to(dy.dtype)
-    _, dx1_expected, dw_expected = _run_single_step(linear_unquantized_ref, x1, dy_after_activation, None)
+    _, dx1_expected, dw_expected = _run_single_step(
+        linear_unquantized_ref, x1, dy_after_activation, None
+    )
     db_expected = _extract_bias_grad(linear_unquantized_ref)
     assert db_keep_bwd_hp is not None
     assert db_expected is not None
@@ -625,7 +632,9 @@ def test_keep_backward_unquantized_autocast_respects_quantize_forward_flag():
     module_quantization_disabled = _make_linear_like_module(
         "linear", in_features, out_features, dtype, bias=True
     )
-    module_unquantized_ref = _make_linear_like_module("linear", in_features, out_features, dtype, bias=True)
+    module_unquantized_ref = _make_linear_like_module(
+        "linear", in_features, out_features, dtype, bias=True
+    )
     _copy_named_parameters(module_quantization_disabled, module_unquantized_ref)
 
     x = torch.randn(32, in_features, dtype=dtype, device="cuda")
