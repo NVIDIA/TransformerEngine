@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import math
 import os
 from typing import Optional
 
@@ -64,7 +65,9 @@ _quantized_numerics_recipe_list = [
 ]
 
 _shape_test_cases = [
+    pytest.param((1, 64), 64, id="2d_m1_k64_n64"),
     pytest.param((32, 64), 64, id="2d_m32_k64_n64"),
+    pytest.param((32, 1, 64), 64, id="3d_m32_s1_k64_n64"),
     pytest.param((8, 4, 64), 128, id="3d_m32_k64_n128"),
     pytest.param((16, 2, 128), 64, id="3d_m32_k128_n64"),
 ]
@@ -164,6 +167,46 @@ def _make_linear_like_module(
 def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: str) -> None:
     if module_type == "ops_linear" and recipe_name == "fp8_block_scaling":
         pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
+
+
+def _maybe_skip_unsupported_recipe_shape(
+    recipe_name: str,
+    input_shape: tuple[int, ...],
+    module_type: str,
+) -> None:
+    flat_first_dim = math.prod(input_shape[:-1])
+    last_dim = input_shape[-1]
+
+    # TE Linear / LayerNormLinear FP8 kernels require FP8-GEMM-compatible dimensions.
+    if module_type in ("linear", "layernorm_linear"):
+        if flat_first_dim % 8 != 0 or last_dim % 16 != 0:
+            pytest.skip(
+                "Linear/LayerNormLinear FP8 execution requires prod(shape[:-1]) divisible by 8 "
+                "and shape[-1] divisible by 16."
+            )
+        return
+
+    # te_ops.Linear (fusible ops) has stricter constraints for some block-scaled recipes.
+    if module_type == "ops_linear":
+        if recipe_name == "mxfp8" and (flat_first_dim % 32 != 0 or last_dim % 32 != 0):
+            pytest.skip(
+                "te_ops.Linear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible by 32."
+            )
+        if recipe_name == "nvfp4" and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
+            pytest.skip(
+                "te_ops.Linear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible by 16."
+            )
+
+
+def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]) -> None:
+    # Grouped GEMM paths enforce additional split-alignment constraints for block-scaled recipes.
+    non_empty_splits = [m for m in m_splits if m > 0]
+    if recipe_name == "mxfp8" and any(m % 32 != 0 for m in non_empty_splits):
+        pytest.skip("GroupedLinear + MXFP8 requires each non-empty m_split divisible by 32.")
+    if recipe_name == "fp8_block_scaling" and any(m % 4 != 0 for m in non_empty_splits):
+        pytest.skip(
+            "GroupedLinear + Float8BlockScaling requires each non-empty m_split divisible by 4."
+        )
 
 
 def _run_single_step(
@@ -333,6 +376,7 @@ def test_keep_backward_unquantized_matches_quantized_fprop_and_unquantized_grads
 ):
     reset_rng_states()
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, module_type)
+    _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
     dtype = torch.bfloat16
     in_features = input_shape[-1]
 
@@ -390,8 +434,8 @@ def test_keep_backward_unquantized_matches_quantized_fprop_and_unquantized_grads
 @pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
 @pytest.mark.parametrize(
     "m_splits",
-    ([32, 32, 32, 32], [64, 0, 32, 32]),
-    ids=("uniform_splits", "with_empty_split"),
+    ([32, 32, 32, 32], [64, 0, 32, 32], [1, 31, 0, 96]),
+    ids=("uniform_splits", "with_empty_split", "small_and_empty_splits"),
 )
 def test_keep_backward_unquantized_grouped_linear_matches_quantized_fprop_and_unquantized_grads(
     recipe_name: str,
@@ -400,6 +444,7 @@ def test_keep_backward_unquantized_grouped_linear_matches_quantized_fprop_and_un
 ):
     if recipe_name == "nvfp4":
         pytest.skip("NVFP4 not supported for grouped linear")
+    _maybe_skip_unsupported_grouped_splits(recipe_name, m_splits)
 
     reset_rng_states()
     dtype = torch.bfloat16
@@ -478,10 +523,12 @@ def test_keep_backward_unquantized_grouped_linear_matches_quantized_fprop_and_un
         ("scale_add", ForwardLinearScaleAdd),
     ),
 )
+@pytest.mark.parametrize("m", (1, 32), ids=("m1", "m32"))
 def test_keep_backward_unquantized_fused_linear_paths(
     recipe_name: str,
     fused_pattern: str,
     expected_fused_op: type,
+    m: int,
 ):
     # Fused linear op path is based on te_ops.Linear and shares its recipe constraints.
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
@@ -490,8 +537,7 @@ def test_keep_backward_unquantized_fused_linear_paths(
     dtype = torch.bfloat16
     in_features = 64
     out_features = 64
-    m = 32
-
+    _maybe_skip_unsupported_recipe_shape(recipe_name, (m, in_features), "ops_linear")
     model_quantized_ref = _make_fused_model(fused_pattern, in_features, out_features, dtype)
     model_keep_bwd_hp = _make_fused_model(fused_pattern, in_features, out_features, dtype)
     model_unquantized_ref = _make_fused_model(fused_pattern, in_features, out_features, dtype)
