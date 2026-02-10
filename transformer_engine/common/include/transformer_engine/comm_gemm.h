@@ -56,7 +56,7 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
  *
  *  \param[in]  ctx  Context to destroy.
  *
- *  It's the caller's respondibility to synchronize all streams involved before calling this function.
+ *  It's the caller's responsibility to synchronize all streams involved before calling this function.
  */
 void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx);
 
