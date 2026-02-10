@@ -703,6 +703,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     // }
     // printf("]\n");
 
+    NVTE_CHECK(false, "Grouped dense wgrad is not supported in TE/JAX currently.");
     NVTE_CHECK(lhs_is_trans && !rhs_is_trans,
                "For grouped dense wgrad, only TN GEMM is supported in TE/JAX currently.");
 
@@ -749,31 +750,23 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   //// RHS
   NVTEShape rhsShape{.data = {num_gemms * k, n}, .ndim = 2};
-  // rhs_is_trans = true;
-
   if (rhs_is_trans) {
     rhsShape.data[0] = num_gemms * n;
     rhsShape.data[1] = k;
-    // std::swap(rhsShape.data[0], rhsShape.data[1]);
   }
-  // NVTE_CHECK(!rhs_is_trans, "GroupedGemmFFI currently only supports rhs_is_trans=false");
   auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
+
+  NVTE_CHECK(!rhs_is_trans, "Transposed RHS is not supported.");
 
   //// LHS
   NVTEShape lhsShape{.data = {m, k}, .ndim = 2};
-  // NVTE_CHECK(lhs_is_trans, "GroupedGemmFFI currently only supports lhs_is_trans=true");
-  // lhs_is_trans = true;
-  if (!lhs_is_trans) {
+  if (lhs_is_trans) {
     std::swap(lhsShape.data[0], lhsShape.data[1]);
   }
-  // if (!lhs_is_trans) {
-  //   printf("GroupedGemmFFI: lhs_is_trans=false, m=%zu, k=%zu, n=%zu\n", m, k, n);
-  //   cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
-  //   return ffi_with_cuda_error_check();
-  // }
+  NVTE_CHECK(!lhs_is_trans, "Transposed LHS is not supported.");
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
   lhs_tensor.set_group_info(group_sizes, group_offset_lhs,
-                            lhs_is_trans ? kNVTEGroupedFirstDims : kNVTEGroupedLastDims);
+                            lhs_is_trans ? kNVTEGroupedLastDims : kNVTEGroupedFirstDims);
 
   //// OUTPUT
   NVTEShape outShape{.data = {m, n}, .ndim = 2};
@@ -781,38 +774,41 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                                         num_gemms, outShape);
   out_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims);
 
-  // printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
-  //        rhsShape.data[0], rhsShape.data[1],
-  //        lhsShape.data[0], lhsShape.data[1],
-  //        outShape.data[0], outShape.data[1]);
-
-  // printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
-
   // This memset is required because the group sizes may not fill the full buffer since we overallocate for the worst case. However, in theory unused space on the grouped axis should not be utilizied downstream, but it seems like somehow it is utilized.
   cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
+  // std::vector<uint8_t> debug_output(m * n * out_dtype_bytes, 0xFF);
+  // cudaMemcpyAsync(output->untyped_data(), debug_output.data(), m * n * out_dtype_bytes,
+  //                 cudaMemcpyHostToDevice, stream);
 
   std::vector<int64_t> host_group_sizes(num_gemms);
   cudaMemcpyAsync(host_group_sizes.data(), group_sizes.untyped_data(), num_gemms * sizeof(int32_t),
                   cudaMemcpyDeviceToHost, stream);
   cudaStreamSynchronize(stream);
 
-  // int currentDevice;
-  // cudaGetDevice(&currentDevice);
-  // printf("[gpu=%d] Group sizes[total_group_size=%zu, m=%zu]: ", currentDevice,
-  //        std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL), m);
-  // for (size_t i = 0; i < num_gemms; ++i) {
-  //   printf("%d, ", host_group_sizes[i]);
-  // }
-  // printf("\n");
+  int currentDevice;
+  cudaGetDevice(&currentDevice);
+  printf("[gpu=%d] Group sizes[total_group_size=%zu, m=%zu]: ", currentDevice,
+         std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL), m);
+  for (size_t i = 0; i < num_gemms; ++i) {
+    printf("%d, ", host_group_sizes[i]);
+  }
+  printf("\n");
 
-  nvte_grouped_gemm(lhs_tensor, lhs_is_trans, rhs_tensor, rhs_is_trans, nullptr, out_tensor,
-                    alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
-                    workspace_cublas.data(),
-                    nullptr,  // config (use defaults)
-                    stream);
-  size_t _offset =
-      std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL) * n * out_dtype_bytes;
-  cudaMemsetAsync(output->untyped_data() + _offset, 0, output->size_bytes() - _offset, stream);
+  nvte_grouped_gemm(
+    rhs_tensor, rhs_is_trans,
+    lhs_tensor, lhs_is_trans,
+    nullptr, out_tensor,
+    alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
+    workspace_cublas.data(),
+    nullptr,  // config (use defaults)
+    stream);
+
+  // size_t _offset =
+  //     std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL) * n * out_dtype_bytes;
+  // _offset = 0;
+  // cudaMemsetAsync(output->untyped_data() + _offset, 0, output->size_bytes() - _offset, stream);
+  // Why does zeroing the whole buffer here still produce NaNs? Is m, k, n not correctly mapping the shape of the tensor or does the grouped GEMM still overwrite beyond these buffers?
+
 
   // std::vector<__bf16> debug_output(m * n);
   // cudaMemcpyAsync(debug_output.data(), output->untyped_data(), m * n * out_dtype_bytes,
@@ -826,7 +822,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   //     size_t index = i_m * n + i_n;
   //     if (isnan(static_cast<float>(debug_output[index])) ||
   //         isinf(static_cast<float>(debug_output[index]))) {
-  //       printf("[gpu=%d] Output contains NaN or Inf at index [%zu, %zu] (flat index %zu)\n", i_m,
+  //       printf("[gpu=%d] Output contains NaN or Inf at index [%zu, %zu] (flat index %zu)\n", currentDevice, i_m,
   //              i_n, index);
   //       totalPrints++;
   //       if (totalPrints >= MAX_PRINTS) {
@@ -838,6 +834,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   //     break;
   //   }
   // }
+
+  cudaStreamSynchronize(stream);
 
   return ffi_with_cuda_error_check();
 }
