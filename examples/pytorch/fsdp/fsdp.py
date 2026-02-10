@@ -124,6 +124,13 @@ def get_layer_args(opts):
     return layer_args, layer_kwargs
 
 
+class StoreExplicitAction(argparse.Action):
+    """Custom action that tracks whether an argument was explicitly set."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, f'{self.dest}_explicitly_set', True)
+
+
 def parse_fsdp_args():
     parser = argparse.ArgumentParser(
         description="Run Transformer Engine modules with the "
@@ -205,6 +212,7 @@ def parse_fsdp_args():
         "--dtype",
         type=torch_dtype,
         default=torch.bfloat16,
+        action=StoreExplicitAction,  # Add custom action
         help="Data type for input tensor and Transformer Engine module parameters. "
         + "Supported values: fp32/float32, fp16/float16, bf16/bfloat16. "
         + "Takes precedence over --precision if both are specified. "
@@ -233,11 +241,9 @@ def dist_print(text, all_ranks=False, no_new_line=False):
 
 
 def train(opts):
-    import sys
-
     # Check which flags were explicitly set
-    dtype_explicitly_set = '--dtype' in sys.argv
-    no_fp8_explicitly_set = '--no-fp8' in sys.argv
+    dtype_explicitly_set = getattr(opts, 'dtype_explicitly_set', False)
+    no_fp8_explicitly_set = opts.no_fp8 != False
     precision_is_non_default = opts.precision != "fp8"
 
     # Initialize torch.distributed global process group
@@ -288,7 +294,7 @@ def train(opts):
                 dtype=torch.float16
                 precision_format = Format.HYBRID
                 recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
-                no_fp8 = opts.no_fp8
+                no_fp8 = False
     else:
         # dtype and/or no_fp8 were explicitly set - they take precedence
         dtype = opts.dtype
