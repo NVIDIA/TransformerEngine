@@ -286,7 +286,7 @@ class Quantizer(abc.ABC):
         shape: Iterable[int],
         *,
         dtype: torch.dtype = torch.float32,
-        device: Optional[torch.device] = None,
+        device: Optional[Union[torch.device, str]] = None,
         requires_grad: bool = False,
         pin_memory: bool = False,
     ) -> QuantizedTensor:
@@ -294,6 +294,8 @@ class Quantizer(abc.ABC):
 
         if device is None:
             device = torch.device("cuda")
+        # Handle the device passed as string
+        device = torch.device(device)
         result = tex.create_empty_quantized_tensor(
             self,
             list(shape),
