@@ -126,9 +126,10 @@ def get_layer_args(opts):
 
 class StoreExplicitAction(argparse.Action):
     """Custom action that tracks whether an argument was explicitly set."""
+
     def __call__(self, parser, namespace, values, option_string=None):
         setattr(namespace, self.dest, values)
-        setattr(namespace, f'{self.dest}_explicitly_set', True)
+        setattr(namespace, f"{self.dest}_explicitly_set", True)
 
 class StoreTrueExplicitAction(argparse.Action):
     """Custom action for store_true that tracks whether flag was explicitly set."""
@@ -139,6 +140,7 @@ class StoreTrueExplicitAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         setattr(namespace, self.dest, True)
         setattr(namespace, f'{self.dest}_explicitly_set', True)
+
 
 def parse_fsdp_args():
     parser = argparse.ArgumentParser(
@@ -311,7 +313,9 @@ def train(opts):
             case _:
                 dtype = torch.bfloat16
                 precision_format = Format.HYBRID
-                recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+                recipe = DelayedScaling(
+                    fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
+                )
                 no_fp8 = False
     else:
         # dtype and/or no_fp8 were explicitly set - they take precedence
