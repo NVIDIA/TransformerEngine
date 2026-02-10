@@ -135,7 +135,9 @@ class ForwardLinearBiasAdd(FusedOperation):
             linear_op_ctx.input_requires_grad = input_requires_grad
             linear_op_ctx.weight_requires_grad = weight_requires_grad
         if bias_op is not None and bias_op_ctx.requires_grad:
-            bias_op_ctx.grad_input_quantizer = linear_op.get_grad_output_quantizer()
+            bias_op_ctx.grad_input_quantizer = (
+                None if keep_backward_unquantized else linear_op.get_grad_output_quantizer()
+            )
 
         return output, [() for _ in range(len(self.basic_ops))]
 
