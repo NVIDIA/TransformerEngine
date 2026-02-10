@@ -42,22 +42,21 @@ std::vector<T> convert_shape_for_fp4(const std::vector<T>& shape) {
   return ret;
 }
 
-std::optional<at::Tensor> build_grouped_tensor_offsets(
-    const size_t num_tensors, const std::optional<at::Tensor>& first_dims,
-    const size_t logical_last_dim) {
+std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
+                                                       const std::optional<at::Tensor>& first_dims,
+                                                       const size_t logical_last_dim) {
   if (!first_dims.has_value()) {
     return std::nullopt;
   }
 
   const auto& first_dims_tensor = first_dims.value();
-  NVTE_CHECK(first_dims_tensor.scalar_type() == at::kLong,
-             "first_dims must have dtype int64.");
+  NVTE_CHECK(first_dims_tensor.scalar_type() == at::kLong, "first_dims must have dtype int64.");
   NVTE_CHECK(static_cast<size_t>(first_dims_tensor.numel()) == num_tensors,
              "first_dims must have length ", num_tensors, ".");
 
   const int64_t logical_last_dim_i64 = static_cast<int64_t>(logical_last_dim);
   auto scaled_first_dims = first_dims_tensor * logical_last_dim_i64;
-  
+
   // Single kernel needed for these ops.
   auto cumsum = at::cumsum(scaled_first_dims, 0);
   auto zero = at::zeros({1}, cumsum.options());
@@ -124,8 +123,8 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
     const size_t logical_first_dim, const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
-  const auto tensor_offsets = build_grouped_tensor_offsets(num_tensors, first_dims,
-                                                           logical_last_dim);
+  const auto tensor_offsets =
+      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -166,9 +165,8 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
       "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
       "last_dims"_a = py::none(),
       "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none(),
-      "logical_shape"_a =
-          std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                               static_cast<int64_t>(logical_last_dim)});
+      "logical_shape"_a = std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                               static_cast<int64_t>(logical_last_dim)});
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -275,8 +273,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
     const size_t logical_first_dim, const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
-  const auto tensor_offsets = build_grouped_tensor_offsets(num_tensors, first_dims,
-                                                           logical_last_dim);
+  const auto tensor_offsets =
+      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -330,9 +328,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
       "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
       "last_dims"_a = py::none(),
       "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none(),
-      "logical_shape"_a =
-          std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                               static_cast<int64_t>(logical_last_dim)});
+      "logical_shape"_a = std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                               static_cast<int64_t>(logical_last_dim)});
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -549,8 +546,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
     const size_t logical_first_dim, const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
-  const auto tensor_offsets = build_grouped_tensor_offsets(num_tensors, first_dims,
-                                                           logical_last_dim);
+  const auto tensor_offsets =
+      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -606,9 +603,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
       "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
       "last_dims"_a = py::none(),
       "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none(),
-      "logical_shape"_a =
-          std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                               static_cast<int64_t>(logical_last_dim)});
+      "logical_shape"_a = std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                               static_cast<int64_t>(logical_last_dim)});
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -867,8 +863,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
     const size_t logical_first_dim, const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
-  const auto tensor_offsets = build_grouped_tensor_offsets(num_tensors, first_dims,
-                                                           logical_last_dim);
+  const auto tensor_offsets =
+      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -926,9 +922,8 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
       "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
       "last_dims"_a = py::none(),
       "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none(),
-      "logical_shape"_a =
-          std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                               static_cast<int64_t>(logical_last_dim)});
+      "logical_shape"_a = std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                               static_cast<int64_t>(logical_last_dim)});
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -1241,8 +1236,8 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
     const size_t logical_first_dim, const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
-  const auto tensor_offsets = build_grouped_tensor_offsets(num_tensors, first_dims,
-                                                           logical_last_dim);
+  const auto tensor_offsets =
+      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -1299,9 +1294,8 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
       "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
       "last_dims"_a = py::none(),
       "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none(),
-      "logical_shape"_a =
-          std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                               static_cast<int64_t>(logical_last_dim)});
+      "logical_shape"_a = std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                               static_cast<int64_t>(logical_last_dim)});
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -1612,8 +1606,8 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     const size_t logical_first_dim, const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
-  const auto tensor_offsets = build_grouped_tensor_offsets(num_tensors, first_dims,
-                                                           logical_last_dim);
+  const auto tensor_offsets =
+      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
   NVTE_CHECK(total_elements % 2 == 0, "NVFP4 data size must be divisible by 2.");
@@ -1682,9 +1676,8 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
       "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
       "last_dims"_a = py::none(),
       "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none(),
-      "logical_shape"_a =
-          std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                               static_cast<int64_t>(logical_last_dim)});
+      "logical_shape"_a = std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                               static_cast<int64_t>(logical_last_dim)});
 
   return {std::move(out_cpp), std::move(out_py)};
 }

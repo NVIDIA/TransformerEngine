@@ -107,7 +107,8 @@ void init_nvfp4_extensions() {
 
 void init_grouped_tensor_extension() {
   if (GroupedTensorStoragePythonClass) return;
-  auto grouped_tensor_module = py::module_::import("transformer_engine.pytorch.tensor.storage.grouped_tensor");
+  auto grouped_tensor_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.grouped_tensor");
   GroupedTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(grouped_tensor_module.ptr(), "GroupedTensorStorage"));
   NVTE_CHECK(GroupedTensorStoragePythonClass != nullptr,
