@@ -310,6 +310,7 @@ def general_grouped_gemm(
 
     return out, bias, gelu_input
 
+
 def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
     """Return workspace size for grouped GEMM pointer setup.
     Must match GroupedGemmSetupWorkspace::required_setup_size in cublaslt_grouped_gemm.cu.
@@ -349,7 +350,8 @@ def general_grouped_gemm_for_grouped_tensor(
 
     num_tensors = A.num_tensors
     assert A.num_tensors == B.num_tensors == out.num_tensors, (
-        f"GroupedTensor num_tensors must match: A={A.num_tensors}, B={B.num_tensors}, out={out.num_tensors}"
+        f"GroupedTensor num_tensors must match: A={A.num_tensors}, B={B.num_tensors},"
+        f" out={out.num_tensors}"
     )
 
     if out.data is not None:

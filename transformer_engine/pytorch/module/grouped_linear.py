@@ -87,9 +87,7 @@ def _clone_grouped_tensor_with_data(
     )
 
 
-def _make_grouped_tensor_for_m_splits(
-    data: torch.Tensor, m_splits:  torch.Tensor
-) -> GroupedTensor:
+def _make_grouped_tensor_for_m_splits(data: torch.Tensor, m_splits: torch.Tensor) -> GroupedTensor:
     # Use data.shape[0] to avoid first_dims.sum().item() D2H copy (breaks CUDA graph)
     logical_first_dim = data.shape[0]
     grouped = GroupedTensor.make_grouped_tensor(
@@ -184,7 +182,7 @@ class _GroupedLinear(torch.autograd.Function):
         if output_quantizers[0] is not None:
             for output_quantizer in output_quantizers:
                 output_quantizer.set_usage(rowwise=True, columnwise=False)
-        no_quantization = (not fp8 and weight_quantizers[0] is None)
+        no_quantization = not fp8 and weight_quantizers[0] is None
 
         # Initialize input tensors
         in_features = module.in_features
@@ -199,7 +197,9 @@ class _GroupedLinear(torch.autograd.Function):
         inp_view_cast = None
         if m_splits_is_tensor and not no_quantization:
             # TODO: Support this path.
-            raise ValueError("GroupedGEMM with grouped tensor path with quantization is not supported yet.")
+            raise ValueError(
+                "GroupedGEMM with grouped tensor path with quantization is not supported yet."
+            )
         grouped_tensor_path = no_quantization and m_splits_is_tensor
 
         if fp8 and not debug:
@@ -218,7 +218,9 @@ class _GroupedLinear(torch.autograd.Function):
             )
         else:
             inp_view_cast = cast_if_needed(inp_view, activation_dtype)
-            inputmats = [inp_view_cast] if grouped_tensor_path else torch.split(inp_view_cast, m_splits)
+            inputmats = (
+                [inp_view_cast] if grouped_tensor_path else torch.split(inp_view_cast, m_splits)
+            )
 
         if cpu_offloading:
             start_offload(*inputmats)
@@ -354,7 +356,9 @@ class _GroupedLinear(torch.autograd.Function):
                 # the main_grad buffer lazily before backprop
                 if hasattr(weights[0], "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
-                    ctx.main_grad_funcs = [weights[i].get_main_grad for i in range(num_weight_params)]
+                    ctx.main_grad_funcs = [
+                        weights[i].get_main_grad for i in range(num_weight_params)
+                    ]
                 else:
                     ctx.main_grad_funcs = [
                         lambda j=i: weights[j].main_grad for i in range(num_weight_params)
@@ -467,9 +471,7 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.grouped_tensor_path:
                     out = cast_if_needed(grad_output_view, ctx.activation_dtype)
                     grad_output = [out]
-                    grouped_grad_output = _make_grouped_tensor_for_m_splits(
-                        out, m_splits
-                    )
+                    grouped_grad_output = _make_grouped_tensor_for_m_splits(out, m_splits)
                 else:
                     grad_output = torch.split(
                         cast_if_needed(grad_output_view, ctx.activation_dtype),
@@ -536,7 +538,9 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                 grouped_wgrad = None
                 if ctx.grouped_tensor_path and ctx.fuse_wgrad_accumulation:
-                    raise NotImplementedError("Fused wgrad accumulation is not supported with grouped tensor path.")
+                    raise NotImplementedError(
+                        "Fused wgrad accumulation is not supported with grouped tensor path."
+                    )
                 if ctx.grouped_tensor_path:
                     # Wgrad GEMM writes one output per group; use num_gemms (not num_weight_params).
                     num_wgrad_tensors = ctx.num_gemms
@@ -548,7 +552,7 @@ class _GroupedLinear(torch.autograd.Function):
                         device=ctx.device,
                     )
                     if ctx.single_weight:
-                        wgrad_list = [grouped_wgrad.data.view(-1)] 
+                        wgrad_list = [grouped_wgrad.data.view(-1)]
                     else:
                         wgrad_list = grouped_wgrad.split_into_quantized_tensors()
                 elif ctx.fuse_wgrad_accumulation:
@@ -591,10 +595,9 @@ class _GroupedLinear(torch.autograd.Function):
                             )
 
                 if ctx.grouped_tensor_path:
+
                     def grouped_gemm_wgrad_grouped_tensor(inputmat, grad_output, grouped_wgrad):
-                        grouped_input = _make_grouped_tensor_for_m_splits(
-                            inputmat, ctx.m_splits
-                        )
+                        grouped_input = _make_grouped_tensor_for_m_splits(inputmat, ctx.m_splits)
                         grouped_grad_output = _make_grouped_tensor_for_m_splits(
                             grad_output, ctx.m_splits
                         )
@@ -860,13 +863,12 @@ class GroupedLinear(TransformerEngineBaseModule):
             self.num_weight_params = 1
             num_tensors = 1
         else:
-            shape_weight = [
-                (self.out_features, self.in_features) for _ in range(self.num_gemms)
-            ]
+            shape_weight = [(self.out_features, self.in_features) for _ in range(self.num_gemms)]
             shape_bias = [self.out_features for _ in range(self.num_gemms)]
             num_tensors = self.num_gemms
-            param_names = [f"weight{i}" for i in range(self.num_gemms)]\
-                    + [f"bias{i}" for i in range(self.num_gemms)]
+            param_names = [f"weight{i}" for i in range(self.num_gemms)] + [
+                f"bias{i}" for i in range(self.num_gemms)
+            ]
             self.num_weight_params = self.num_gemms
 
         for i in range(num_tensors):
@@ -928,11 +930,12 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         if defer_init:
             return
-    
+
         if self.single_weight:
             weight = getattr(self, "weight0")
             logical_shape = (self.num_gemms * self.out_features, self.in_features)
-            self.grouped_weight_storage = GroupedTensor(num_tensors=self.num_gemms,
+            self.grouped_weight_storage = GroupedTensor(
+                num_tensors=self.num_gemms,
                 shape=[(self.out_features, self.in_features) for _ in range(self.num_gemms)],
                 quantizer=None,
                 dtype=self.params_dtype,
@@ -993,7 +996,9 @@ class GroupedLinear(TransformerEngineBaseModule):
             if self.use_bias:
                 for i in range(self.num_weight_params):
                     if self.parallel_mode == "row":
-                        setattr(getattr(self, f"bias{i}"), "sequence_parallel", self.sequence_parallel)
+                        setattr(
+                            getattr(self, f"bias{i}"), "sequence_parallel", self.sequence_parallel
+                        )
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, f"bias{i}"), True, 0, 1)
 

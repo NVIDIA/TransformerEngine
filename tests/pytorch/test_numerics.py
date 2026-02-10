@@ -2886,7 +2886,6 @@ def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tens
         offset += numel
 
 
-
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False])
 def test_grouped_gemm_grouped_tensor(layout, accumulate):
@@ -2941,6 +2940,7 @@ def test_grouped_gemm_grouped_tensor(layout, accumulate):
     )
 
     device = A[0].device
+
     def _make_grouped_tensor_from_splits(m_sizes, last_dim):
         first_dims = torch.tensor(m_sizes, device=device, dtype=torch.int64)
         return GroupedTensor.make_grouped_tensor(
@@ -2994,6 +2994,7 @@ def test_grouped_gemm_grouped_tensor(layout, accumulate):
     tols = dtype_tols(dtype)
     for o, o_ref in zip(out_grouped, out_ref):
         torch.testing.assert_close(o, o_ref, **tols)
+
 
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
