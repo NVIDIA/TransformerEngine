@@ -686,23 +686,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                             std::vector<size_t>{num_gemms},
                             convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
-  // printf("Num gemms: %zu, M: %zu, N: %zu, K: %zu, group_sizes: %zu, lhs_is_trans: %d, rhs_is_trans: %d, is_grouped_dense_wgrad: %d\n", num_gemms, m, n, k, group_sizes.dimensions()[0], lhs_is_trans, rhs_is_trans, is_grouped_dense_wgrad);
-
   if (is_grouped_dense_wgrad) {
-    // printf("GroupedGemmFFI: (lhs_is_trans=%d, rhs_is_trans=%d) m=%zu, k=%zu, n=%zu, rhs_shape=[", lhs_is_trans, rhs_is_trans, m, k, n);
-    // for (auto dim : rhs_data.dimensions()) {
-    //   printf("%zu, ", dim);
-    // }
-    // printf("], lhs_shape=[");
-    // for (auto dim : lhs_data.dimensions()) {
-    //   printf("%zu, ", dim);
-    // }
-    // printf("], out_shape=[");
-    // for (auto dim : output->dimensions()) {
-    //   printf("%zu, ", dim);
-    // }
-    // printf("]\n");
-
     NVTE_CHECK(lhs_is_trans && !rhs_is_trans,
                "For grouped dense wgrad, only TN GEMM is supported in TE/JAX currently.");
 
@@ -722,13 +706,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,
                                           num_gemms, outShape);
 
-    // printf("rhs_shape: [%zu, %zu], lhs_shape: [%zu, %zu], out_shape: [%zu, %zu]\n",
-    //        rhsShape.data[0], rhsShape.data[1],
-    //        lhsShape.data[0], lhsShape.data[1],
-    //        outShape.data[0], outShape.data[1]);
-
-    // printf("rhs_is_trans: %d, lhs_is_trans: %d\n", rhs_is_trans, lhs_is_trans);
-
     // Output needs to be zeroed in case any group sizes have size zero, meaning the expert weight isn't used in the fwd, meaning the corresponding output gradient should be zero. But using the grouped GEMM, the output buffer contains uninitialized data.
     // TODO(jberchtold): make this memset smaller by only zeroing the expert weights that correspond to groups with size zero.
     cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
@@ -741,8 +718,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       workspace_cublas.data(),
       nullptr,  // config (use defaults)
       stream);
-
-    cudaStreamSynchronize(stream);
 
     return ffi_with_cuda_error_check();
   }
@@ -774,23 +749,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   // This memset is required because the group sizes may not fill the full buffer since we overallocate for the worst case. However, in theory unused space on the grouped axis should not be utilizied downstream, but it seems like somehow it is utilized.
   cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
-  // std::vector<uint8_t> debug_output(m * n * out_dtype_bytes, 0xFF);
-  // cudaMemcpyAsync(output->untyped_data(), debug_output.data(), m * n * out_dtype_bytes,
-  //                 cudaMemcpyHostToDevice, stream);
-
-  std::vector<int64_t> host_group_sizes(num_gemms);
-  cudaMemcpyAsync(host_group_sizes.data(), group_sizes.untyped_data(), num_gemms * sizeof(int32_t),
-                  cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
-
-  int currentDevice;
-  cudaGetDevice(&currentDevice);
-  printf("[gpu=%d] Group sizes[total_group_size=%zu, m=%zu]: ", currentDevice,
-         std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL), m);
-  for (size_t i = 0; i < num_gemms; ++i) {
-    printf("%d, ", host_group_sizes[i]);
-  }
-  printf("\n");
 
   nvte_grouped_gemm(
     rhs_tensor, rhs_is_trans,
@@ -801,39 +759,12 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     nullptr,  // config (use defaults)
     stream);
 
-  // size_t _offset =
-  //     std::accumulate(host_group_sizes.begin(), host_group_sizes.end(), 0ULL) * n * out_dtype_bytes;
-  // _offset = 0;
-  // cudaMemsetAsync(output->untyped_data() + _offset, 0, output->size_bytes() - _offset, stream);
-  // Why does zeroing the whole buffer here still produce NaNs? Is m, k, n not correctly mapping the shape of the tensor or does the grouped GEMM still overwrite beyond these buffers?
-
-
-  // std::vector<__bf16> debug_output(m * n);
-  // cudaMemcpyAsync(debug_output.data(), output->untyped_data(), m * n * out_dtype_bytes,
-  //                 cudaMemcpyDeviceToHost, stream);
+  // std::vector<int64_t> host_group_sizes(num_gemms);
+  // cudaMemcpyAsync(host_group_sizes.data(), group_sizes.untyped_data(), num_gemms * sizeof(int32_t),
+  //                     cudaMemcpyDeviceToHost, stream);
   // cudaStreamSynchronize(stream);
 
-  // size_t totalPrints = 0;
-  // constexpr size_t MAX_PRINTS = 1;
-  // for (size_t i_m = 0; i_m < m; i_m++) {
-  //   for (size_t i_n = 0; i_n < n; i_n++) {
-  //     size_t index = i_m * n + i_n;
-  //     if (isnan(static_cast<float>(debug_output[index])) ||
-  //         isinf(static_cast<float>(debug_output[index]))) {
-  //       printf("[gpu=%d] Output contains NaN or Inf at index [%zu, %zu] (flat index %zu)\n", currentDevice, i_m,
-  //              i_n, index);
-  //       totalPrints++;
-  //       if (totalPrints >= MAX_PRINTS) {
-  //         break;
-  //       }
-  //     }
-  //   }
-  //   if (totalPrints >= MAX_PRINTS) {
-  //     break;
-  //   }
-  // }
-
-  cudaStreamSynchronize(stream);
+  // cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
   return ffi_with_cuda_error_check();
 }
