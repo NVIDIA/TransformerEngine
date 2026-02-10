@@ -409,6 +409,51 @@ class TestGroupedTensor:
         assert torch.equal(grouped_output.data, expected_data)
         assert torch.equal(grouped_output.scale_inv, expected_scale_inv)
 
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_quantize_cudagraph_capturable(self) -> None:
+        """Ensure group_quantize is CUDA graph capturable."""
+        num_tensors = 2
+        shape = [(512, 1024) for _ in range(num_tensors)]
+        input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
+        grouped_input = torch.cat(input_tensors, dim=0)
+
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        first_dims = torch.tensor(
+            [shape[0][0] for _ in range(num_tensors)],
+            dtype=torch.int64,
+            device="cuda",
+        )
+
+        torch.cuda.synchronize()
+        static_input = grouped_input.clone()
+        static_first_dims = first_dims.clone()
+
+        # Warmup to initialize kernels and allocator state
+        _ = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_output = tex.group_quantize(
+                static_input,
+                quantizer,
+                num_tensors,
+                static_first_dims,
+            )
+
+        fresh_input = torch.cat(
+            [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape],
+            dim=0,
+        )
+        static_input.copy_(fresh_input)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        expected = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
+        assert torch.equal(static_output.data, expected.data)
+        assert torch.equal(static_output.scale_inv, expected.scale_inv)
+
     def test_clear(self) -> None:
         """Test clear method"""
         num_tensors = 3
