@@ -154,6 +154,7 @@ def _initialize_distributed(args):
         num_devices_per_process=devices_per_process,
         process_id=args.process_id,
         tensor_parallel_size=args.tensor_parallel_size,
+        use_cublasmp=args.use_cublasmp,
     )
 
 
@@ -240,6 +241,12 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
     )
     parser.add_argument(
         "--enable-result-check", action="store_true", default=True, help="Enable result checking"
+    )
+    parser.add_argument(
+        "--use-cublasmp",
+        action="store_true",
+        default=False,
+        help="Use the cuBLASMp backend for overlapping collective operations with GEMM computation",
     )
 
     return parser

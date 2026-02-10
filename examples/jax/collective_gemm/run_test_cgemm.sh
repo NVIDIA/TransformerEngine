@@ -65,50 +65,63 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
   # Clear PIDs array for this test file
   PIDS=()
 
-  for i in $(seq 0 $(($NUM_GPUS - 1))); do
-    # Define output file for logs
-    LOG_FILE="${TEST_FILE}_gpu_${i}.log"
+  PYTEST_ARGS=(
+    "-vs"
+    "-c $TE_PATH/tests/jax/pytest.ini"
+    "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE"
+    "--num-processes=$NUM_GPUS"
+  )
 
-    if [ $i -eq 0 ]; then
-      # For process 0: show live output AND save to log file using tee
-      echo "=== Live output from process 0 ==="
-      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
-        -vs --junitxml=$XML_LOG_DIR/collective_gemm_${TEST_FILE}.xml \
-        "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
-        --num-processes=$NUM_GPUS \
-        --process-id=$i 2>&1 | tee "$LOG_FILE" &
-      PID=$!
-      PIDS+=($PID)
-    else
-      # For other processes: redirect to log files only
-      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
-        -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
-        --num-processes=$NUM_GPUS \
-        --process-id=$i > "$LOG_FILE" 2>&1 &
-      PID=$!
-      PIDS+=($PID)
-    fi
+  BACKENDS=("userbuffers" "cublasmp" )
+  for backend in "${BACKENDS[@]}"; do
+    for i in $(seq 0 $(($NUM_GPUS - 1))); do
+      # Define output file for logs
+      LOG_FILE="${TEST_FILE}_gpu_${i}_${backend}.log"
+
+      PYTEST_ARGS_FINAL=("${PYTEST_ARGS[@]}")
+      if [ ${backend} == "cublasmp" ]; then
+        PYTEST_ARGS_FINAL+=("--use-cublasmp")
+      fi
+
+      if [ $i -eq 0 ]; then
+        # For process 0: show live output AND save to log file using tee
+        echo "=== Live output from process 0 with ${backend} ==="
+        pytest --junitxml=$XML_LOG_DIR/collective_gemm_${TEST_FILE}_${backend}.xml \
+          "${PYTEST_ARGS_FINAL[@]}" \
+          --process-id=$i 2>&1 | tee "$LOG_FILE" &
+        PID=$!
+        PIDS+=($PID)
+      else
+        # For other processes: redirect to log files only
+        pytest "${PYTEST_ARGS_FINAL[@]}" \
+          --process-id=$i > "$LOG_FILE" 2>&1 &
+        PID=$!
+        PIDS+=($PID)
+      fi
+    done
   done
 
   # Wait for all processes to finish
   wait
 
   # Check and print the log content from process 0 (now has log file thanks to tee)
-  if grep -q "SKIPPED" "${TEST_FILE}_gpu_0.log"; then
-    echo "... $TEST_FILE SKIPPED"
-  elif grep -q "FAILED" "${TEST_FILE}_gpu_0.log"; then
-    echo "... $TEST_FILE FAILED"
-    HAS_FAILURE=1
-  elif grep -q "PASSED" "${TEST_FILE}_gpu_0.log"; then
-    echo "... $TEST_FILE PASSED"
-  else
-    echo "... $TEST_FILE INVALID"
-    HAS_FAILURE=1
-  fi
+  for backend in "${BACKENDS[@]}"; do
+    if grep -q "SKIPPED" "${TEST_FILE}_gpu_0_${backend}.log"; then
+      echo "... $TEST_FILE SKIPPED for ${backend} backend"
+    elif grep -q "FAILED" "${TEST_FILE}_gpu_0_${backend}.log"; then
+      echo "... $TEST_FILE FAILED for ${backend} backend"
+      HAS_FAILURE=1
+    elif grep -q "PASSED" "${TEST_FILE}_gpu_0_${backend}.log"; then
+      echo "... $TEST_FILE PASSED for ${backend} backend"
+    else
+      echo "... $TEST_FILE INVALID for ${backend} backend"
+      HAS_FAILURE=1
+    fi
 
-  # Remove the log files after processing them
-  wait
-  rm ${TEST_FILE}_gpu_*.log
+    # Remove the log files after processing them
+    wait
+    rm ${TEST_FILE}_gpu_*.log
+  done
 done
 
 wait

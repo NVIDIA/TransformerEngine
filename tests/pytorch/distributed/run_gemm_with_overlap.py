@@ -152,6 +152,9 @@ def _parse_args(argv=None, namespace=None):
         "--use-cuda-graphs", action="store_true", default=False, help="Use CUDA graphs."
     )
     parser.add_argument(
+        "--use-cublasmp", action="store_true", default=False, help="Use cuBLASMp backend."
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", default=False, help="Verbose info messages."
     )
     opts = parser.parse_args(argv, namespace)
@@ -203,6 +206,7 @@ def _main(opts):
         capture_output=True,
         text=True,
         shell=True,
+        check=False,
     )
 
     if result.stdout == "0":  # Extra checks for non-MNNVL platforms
@@ -323,24 +327,44 @@ def _main(opts):
     ):
         buffer_dtype = torch.uint8
     ub_obj = (
-        tex.CommOverlapP2P(
-            (outer_size, hidden_size),
-            buffer_dtype,
-            helper,
-            tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-            opts.comm_type,
-            set_sm_margin=opts.comm_type == tex.CommOverlapType.RS or opts.atomic,
-            atomic_gemm=opts.atomic,
-            aggregate=opts.aggregate,
-            use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
+        (
+            tex.CommOverlapP2P(
+                (outer_size, hidden_size),
+                buffer_dtype,
+                helper,
+                tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
+                opts.comm_type,
+                set_sm_margin=opts.comm_type == tex.CommOverlapType.RS or opts.atomic,
+                atomic_gemm=opts.atomic,
+                aggregate=opts.aggregate,
+                use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
+            )
+            if not opts.use_cublasmp
+            else tex.CommOverlapP2P(
+                helper,
+                tp_rank,
+                tp_size,
+                num_comm_sm=3,
+                atomic_gemm=opts.atomic,
+            )
         )
         if opts.p2p
-        else tex.CommOverlap(
-            (outer_size, hidden_size),
-            buffer_dtype,
-            helper,
-            tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-            atomic_gemm=opts.atomic,
+        else (
+            tex.CommOverlap(
+                (outer_size, hidden_size),
+                buffer_dtype,
+                helper,
+                tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
+                atomic_gemm=opts.atomic,
+            )
+            if not opts.use_cublasmp
+            else tex.CommOverlap(
+                helper,
+                tp_rank,
+                tp_size,
+                num_comm_sm=16,
+                atomic_gemm=opts.atomic,
+            )
         )
     )
 
@@ -348,22 +372,30 @@ def _main(opts):
     ub_obj2 = None
     if opts.atomic and opts.comm_type == tex.CommOverlapType.AG and opts.check_numerics:
         ub_obj2 = (
-            tex.CommOverlapP2P(
-                (outer_size, hidden_size),
-                torch.uint8 if opts.fp8_output else torch.bfloat16,
-                helper,
-                tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-                tex.CommOverlapType.RS,
-                set_sm_margin=True,
-                atomic_gemm=True,
+            (
+                tex.CommOverlapP2P(
+                    (outer_size, hidden_size),
+                    torch.uint8 if opts.fp8_output else torch.bfloat16,
+                    helper,
+                    tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
+                    tex.CommOverlapType.RS,
+                    set_sm_margin=True,
+                    atomic_gemm=True,
+                )
+                if not opts.use_cublasmp
+                else tex.CommOverlapP2P(helper, tp_rank, tp_size, num_comm_sm=16, atomic_gemm=True)
             )
             if opts.atomic_rs_p2p
-            else tex.CommOverlap(
-                (outer_size, hidden_size),
-                torch.uint8 if opts.fp8_output else torch.bfloat16,
-                helper,
-                tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-                atomic_gemm=True,
+            else (
+                tex.CommOverlap(
+                    (outer_size, hidden_size),
+                    torch.uint8 if opts.fp8_output else torch.bfloat16,
+                    helper,
+                    tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
+                    atomic_gemm=True,
+                )
+                if not opts.use_cublasmp
+                else tex.CommOverlap(helper, tp_rank, tp_size, num_comm_sm=3, atomic_gemm=True)
             )
         )
 
@@ -408,7 +440,7 @@ def _main(opts):
         mean=0.0,
         std=opts.std,
     )
-    if ub_obj2 is not None:
+    if opts.comm_type == tex.CommOverlapType.AG and ub_obj2 is not None:
         kernel2_t = torch.nn.init.normal_(
             torch.empty(local_kernel2_t_shape, dtype=torch.bfloat16, device="cuda"),
             mean=0.0,
