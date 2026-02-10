@@ -312,6 +312,10 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims);
 
+py::object create_empty_quantized_tensor(py::handle quantizer,
+                                         const std::vector<size_t> &shape, at::ScalarType dtype,
+                                         at::Device device, bool pin_memory);
+
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
 
