@@ -756,14 +756,11 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   }
   auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
 
-  NVTE_CHECK(!rhs_is_trans, "Transposed RHS is not supported.");
-
   //// LHS
   NVTEShape lhsShape{.data = {m, k}, .ndim = 2};
   if (lhs_is_trans) {
     std::swap(lhsShape.data[0], lhsShape.data[1]);
   }
-  NVTE_CHECK(!lhs_is_trans, "Transposed LHS is not supported.");
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
   lhs_tensor.set_group_info(group_sizes, group_offset_lhs,
                             lhs_is_trans ? kNVTEGroupedLastDims : kNVTEGroupedFirstDims);
