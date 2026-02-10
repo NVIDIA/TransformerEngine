@@ -503,8 +503,8 @@ class CustomRecipe(Recipe):
         Where `role` is one of the following strings for e.g. te.Linear
         (stable public contract):
 
-        - forward:  "linear_input", "linear_weight", "linear_output"
-        - backward: "linear_grad_output", "linear_grad_input"
+        - forward:  "linear:input", "linear:weight", "linear:output"
+        - backward: "linear:grad_output", "linear:grad_input"
     """
 
     qfactory: Callable[..., Any]

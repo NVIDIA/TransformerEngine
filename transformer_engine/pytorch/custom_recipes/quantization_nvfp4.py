@@ -23,21 +23,25 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
         with autocast(fp8_recipe=custom_recipe):
             output = model(input)
     """
-    if role == "linear_input":
+    if ":" not in role:
+        raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<tensor>'")
+    _, tensor_type = role.split(":", 1)
+
+    if tensor_type == "input":
         return NVFP4QuantizerRef(
             dtype=utils.Fp4Formats.E2M1,
             quant_tile_shape=(1, 16),
             pow_2_scales=False,
             with_rht=True,
         )
-    if role == "linear_weight":
+    if tensor_type == "weight":
         return NVFP4QuantizerRef(
             dtype=utils.Fp4Formats.E2M1,
             quant_tile_shape=(16, 16),
             pow_2_scales=False,
             with_rht=False,
         )
-    if role == "linear_grad_output":
+    if tensor_type == "grad_output":
         return NVFP4QuantizerRef(
             dtype=utils.Fp4Formats.E2M1,
             quant_tile_shape=(1, 16),
