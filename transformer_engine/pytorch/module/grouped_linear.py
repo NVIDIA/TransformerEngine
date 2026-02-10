@@ -762,10 +762,12 @@ class GroupedLinear(TransformerEngineBaseModule):
         )
 
         # Copy existing params into storage.
-        # TODO(ksivamani): Verify correctness of copy for all recipes.
         with torch.no_grad():
             for i in range(self.num_gemms):
-                grouped_weights.quantized_tensors[i].copy_(weights[i])
+                if self.primary_weights_in_fp8:
+                    grouped_weights.quantized_tensors[i].copy_from_storage(weights[i])
+                else:
+                    grouped_weights.quantized_tensors[i].copy_(weights[i])
 
         # Re-register the grouped weights as parameters.
         for i in range(self.num_gemms):
@@ -985,7 +987,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
-        if not self.fp8 and not self.fp8_calibration:
+        if not self.fp8 and not self.fp8_calibration and not self.primary_weights_in_fp8:
             return [None] * self.num_gemms
         weight_quantizers = [
             self.quantizers["scaling_fwd"][
@@ -994,7 +996,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             for i in range(self.num_gemms)
         ]
         for i in range(self.num_gemms):
-            weight_quantizers[i].internal = True
+            weight_quantizers[i].internal = not self.primary_weights_in_fp8
         return weight_quantizers
 
     def _get_quantizers(self):
