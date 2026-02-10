@@ -47,14 +47,32 @@ KERNEL_NAME_FLASH = "flash"
 
 model_configs = {
     # ModelConfig(batch_size, max_seqlen_q, num_heads, head_dim_qk, max_seqlen_kv, num_gqa_groups, ...)
-    "test_0": ModelConfig(2, 512, 16, 64, 512, 16, dropout_p=0.0, attn_mask_type="no_mask", attn_bias_type="no_bias"),  # short seq
-    "test_1": ModelConfig(2, 2048, 16, 128, 2048, 16, dropout_p=0.0, attn_mask_type="causal", attn_bias_type="no_bias"),  # longer seq, mask
-    "test_2": ModelConfig(2, 2048, 16, 128, 2048, 16, dropout_p=0.0, attn_mask_type="causal", attn_bias_type="post_scale_bias"),  # bias; FlashAttention does not support post_scale_bias, so only cuDNN runs
-    "test_3": ModelConfig(2, 8192, 32, 128, 8192, 4, dropout_p=0.0, attn_mask_type="causal", attn_bias_type="no_bias"),  # GQA
+    "test_0": ModelConfig(
+        2, 512, 16, 64, 512, 16, dropout_p=0.0, attn_mask_type="no_mask", attn_bias_type="no_bias"
+    ),  # short seq
+    "test_1": ModelConfig(
+        2, 2048, 16, 128, 2048, 16, dropout_p=0.0, attn_mask_type="causal", attn_bias_type="no_bias"
+    ),  # longer seq, mask
+    "test_2": ModelConfig(
+        2,
+        2048,
+        16,
+        128,
+        2048,
+        16,
+        dropout_p=0.0,
+        attn_mask_type="causal",
+        attn_bias_type="post_scale_bias",
+    ),  # bias; FlashAttention does not support post_scale_bias, so only cuDNN runs
+    "test_3": ModelConfig(
+        2, 8192, 32, 128, 8192, 4, dropout_p=0.0, attn_mask_type="causal", attn_bias_type="no_bias"
+    ),  # GQA
 }
 
 
-def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supported, append_csv=True):
+def benchmark_dot_product_attention(
+    model, fused_attn_supported, flash_attn_supported, append_csv=True
+):
     config = model_configs[model]
     if dtype == torch.bfloat16:
         tols = dict(atol=2.5e-2, rtol=2.5e-2)
@@ -229,7 +247,7 @@ def main():
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
-            #window_size=config.window_size,
+            # window_size=config.window_size,
             pad_between_seqs=pad_between_seqs,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
@@ -240,12 +258,14 @@ def main():
         )
 
         # Run benchmark in main process so times.csv always gets a row (works without nsys)
-        benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supported, append_csv=True)
+        benchmark_dot_product_attention(
+            model, fused_attn_supported, flash_attn_supported, append_csv=True
+        )
 
         # Optional: run under nsys to get kernel-level stats; subprocess must not append again
         bench_code = (
-            f"import benchmark_attention; "
-            f"benchmark_attention.benchmark_dot_product_attention("
+            "import benchmark_attention; "
+            "benchmark_attention.benchmark_dot_product_attention("
             f"'{model}', {fused_attn_supported}, {flash_attn_supported}, append_csv=False)"
         )
         prof_cmd = [
@@ -296,8 +316,8 @@ def main():
                 cwd=bench_dir,
             )
             parse_code = (
-                f"import benchmark_attention; "
-                f"benchmark_attention.parse_results("
+                "import benchmark_attention; "
+                "benchmark_attention.parse_results("
                 f"{num_kernels_cudnn}, {num_kernels_flash}, '{model}')"
             )
             parse_cmd = ["python", "-c", parse_code]
@@ -324,15 +344,11 @@ def main():
     # Speedup: flash/cudnn ratio (>1 means cuDNN faster). N/A when only one backend ran (e.g. test_2 has bias, flash not used).
     cudnn_ms = df_times[cudnn_col]
     flash_ms = df_times[flash_col]
-    speedup = np.where(
-        (cudnn_ms > 0) & (flash_ms > 0), flash_ms / cudnn_ms, np.nan
-    )
+    speedup = np.where((cudnn_ms > 0) & (flash_ms > 0), flash_ms / cudnn_ms, np.nan)
     a["cuDNN vs flash speedup"] = speedup
     # Show "N/A" instead of NaN when speedup not defined (only one backend ran)
     a_display = a.copy()
-    a_display["cuDNN vs flash speedup"] = [
-        f"{x:.4f}" if not pd.isna(x) else "N/A" for x in speedup
-    ]
+    a_display["cuDNN vs flash speedup"] = [f"{x:.4f}" if not pd.isna(x) else "N/A" for x in speedup]
     print()
     print(a_display)
 
