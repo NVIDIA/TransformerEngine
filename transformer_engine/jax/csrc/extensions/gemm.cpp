@@ -703,13 +703,11 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     // }
     // printf("]\n");
 
-    NVTE_CHECK(false, "Grouped dense wgrad is not supported in TE/JAX currently.");
     NVTE_CHECK(lhs_is_trans && !rhs_is_trans,
                "For grouped dense wgrad, only TN GEMM is supported in TE/JAX currently.");
 
     //// RHS
     NVTEShape rhsShape{.data = {k, n}, .ndim = 2};
-    // rhs_is_trans = true;
     auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
     rhs_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims);
 
@@ -735,11 +733,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     // TODO(jberchtold): make this memset smaller by only zeroing the expert weights that correspond to groups with size zero.
     cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
-    nvte_grouped_gemm(lhs_tensor, lhs_is_trans, rhs_tensor, rhs_is_trans, nullptr, out_tensor,
-                      alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
-                      workspace_cublas.data(),
-                      nullptr,  // config (use defaults)
-                      stream);
+    nvte_grouped_gemm(
+      rhs_tensor, rhs_is_trans,
+      lhs_tensor, lhs_is_trans,
+      nullptr, out_tensor,
+      alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
+      workspace_cublas.data(),
+      nullptr,  // config (use defaults)
+      stream);
 
     cudaStreamSynchronize(stream);
 
