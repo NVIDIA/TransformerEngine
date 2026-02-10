@@ -101,9 +101,10 @@ class Quantizer {
   virtual void set_quantization_params(TensorWrapper* tensor) const = 0;
 
   /*! @brief Construct a tensor with uninitialized data */
-  virtual std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype, at::Device device = torch::kCUDA,
-      bool pin_memory = false) const = 0;
+  virtual std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                             DType dtype,
+                                                             at::Device device = torch::kCUDA,
+                                                             bool pin_memory = false) const = 0;
 
   /*! @brief Construct a grouped tensor with uninitialized data */
   virtual std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
