@@ -291,7 +291,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // In 2D mode, save scale to shared memory for rowwise pass
       // Each warp (processing one 32x32 block) writes one scale via lane 0
-      if constexpr (kIs2DBlockScaling && ROWWISE_SCALING) {
+      if constexpr (kIs2DBlockScaling) {
+        static_assert(ROWWISE_SCALING, "ROWWISE_SCALING must be true when using 2D block scaling");
         if (thread_lane == 0) {
           block_scales_2d[threadIdx.x / THREADS_PER_WARP] = biased_exponent;
         }
@@ -448,7 +449,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 2. Compute E8M0 scaling factor
       e8m0_t biased_exponent;
-      if constexpr (kIs2DBlockScaling && COLWISE_SCALING) {
+      if constexpr (kIs2DBlockScaling) {
+        static_assert(COLWISE_SCALING, "COLWISE_SCALING must be true when using 2D block scaling");
         // In 2D mode with both scaling directions, use scale from colwise pass
         // Sync to ensure colwise writes to block_scales_2d are visible across warps
         __syncthreads();
@@ -819,7 +821,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                 }
               }
 
-              if (use_2d_quantization) { scaling_type = ScalingType::BIDIMENSIONAL; }
+              if (use_2d_quantization) { 
+                scaling_type = ScalingType::BIDIMENSIONAL;
+                NVTE_CHECK(scaling_type == ScalingType::BIDIMENSIONAL,
+                           "Scaling type must be BIDIMENSIONAL when using 2D block scaling");
+              }
 
               switch (scaling_type) {
                 case ScalingType::ROWWISE: {
