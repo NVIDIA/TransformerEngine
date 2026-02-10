@@ -215,12 +215,15 @@ def parse_fsdp_args():
         "--precision",
         type=precision,
         default="fp8",
-        help="Precision preset for model training. Supported values: FP32, FP16, FP8, MXFP8, NVFP4. "
+        help=(
+            "Precision preset for model training. Supported values: FP32, FP16, FP8, MXFP8, NVFP4. "
+        )
         + "This is a convenience flag that configures both dtype and FP8 settings automatically. "
         + "If --dtype or --no-fp8 are explicitly specified, they take precedence over this flag "
         + "and a warning will be issued. "
         + "Precedence: --dtype and --no-fp8 override --precision. "
-        + "Example: Use '--precision fp8' for quick setup, or '--dtype bf16 --no-fp8' for explicit control. "
+        + "Example: Use '--precision fp8' for quick setup, or '--dtype bf16 --no-fp8' for explicit"
+        " control. "
         + "Default: fp8.",
     )
     return parser.parse_args()
@@ -236,8 +239,8 @@ def train(opts):
     import sys
 
     # Check which flags were explicitly set
-    dtype_explicitly_set = '--dtype' in sys.argv
-    no_fp8_explicitly_set = '--no-fp8' in sys.argv
+    dtype_explicitly_set = "--dtype" in sys.argv
+    no_fp8_explicitly_set = "--no-fp8" in sys.argv
     precision_is_non_default = opts.precision != "fp8"
 
     # Initialize torch.distributed global process group
@@ -255,39 +258,47 @@ def train(opts):
 
         match opts.precision:
             case "fp32":
-                dtype=torch.float32
+                dtype = torch.float32
 
-                #set up, but not used by autocast with no-fp8 set to true
+                # set up, but not used by autocast with no-fp8 set to true
                 precision_format = Format.HYBRID
-                recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+                recipe = DelayedScaling(
+                    fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
+                )
 
                 no_fp8 = True
             case "fp16":
-                dtype=torch.float16
+                dtype = torch.float16
 
-                #set up, but not used by autocast with no-fp8 set to true
+                # set up, but not used by autocast with no-fp8 set to true
                 precision_format = Format.HYBRID
-                recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+                recipe = DelayedScaling(
+                    fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
+                )
 
                 no_fp8 = True
             case "fp8":
-                dtype=torch.float16
+                dtype = torch.float16
                 precision_format = Format.HYBRID
-                recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+                recipe = DelayedScaling(
+                    fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
+                )
                 no_fp8 = False
             case "mxfp8":
-                dtype=torch.float16
+                dtype = torch.float16
                 precision_format = Format.E4M3
                 recipe = MXFP8BlockScaling(fp8_format=precision_format)
                 no_fp8 = False
             case "nvfp4":
-                dtype=torch.bfloat16 # RHT only supports bfloat16
+                dtype = torch.bfloat16  # RHT only supports bfloat16
                 recipe = NVFP4BlockScaling()
                 no_fp8 = False
             case _:
-                dtype=torch.float16
+                dtype = torch.float16
                 precision_format = Format.HYBRID
-                recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+                recipe = DelayedScaling(
+                    fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
+                )
                 no_fp8 = opts.no_fp8
     else:
         # dtype and/or no_fp8 were explicitly set - they take precedence
@@ -297,11 +308,13 @@ def train(opts):
         # Set up default recipe for FP8 cases
         if not no_fp8:
             precision_format = Format.HYBRID
-            recipe = DelayedScaling(fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max")
+            recipe = DelayedScaling(
+                fp8_format=precision_format, amax_history_len=32, amax_compute_algo="max"
+            )
         else:
             recipe = None
 
-         # Warn if precision was also set to non-default (being overridden)
+        # Warn if precision was also set to non-default (being overridden)
         if precision_is_non_default:
             if dtype_explicitly_set:
                 dist_print(f"Warning: --dtype {dtype} overrides --precision {opts.precision}")
@@ -312,8 +325,8 @@ def train(opts):
     dist_print(f"Training configuration: dtype={dtype}, FP8={'disabled' if no_fp8 else 'enabled'}")
     if not no_fp8:
         dist_print(f"Using FP8 recipe: {type(recipe).__name__}")
-        
-    layer_kwargs["params_dtype"]=dtype
+
+    layer_kwargs["params_dtype"] = dtype
 
     if opts.num_layers > 1:
         te_layer_list = []
