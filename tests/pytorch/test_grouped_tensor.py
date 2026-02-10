@@ -372,37 +372,29 @@ class TestGroupedTensor:
         num_tensors = 2
         shape = [(512, 1024) for _ in range(num_tensors)]
 
-        # Create BF16 input tensors and pack into a grouped tensor
+        # Create BF16 input tensors and pack into a 2D tensor
         input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
         quantized_tensors = [
             MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(tensor) for tensor in input_tensors
         ]
-        grouped_input = GroupedTensor.make_grouped_tensor_with_shapes(
-            num_tensors=num_tensors,
-            shape=shape,
-            quantizer=None,
-            device="cuda",
-            dtype=torch.bfloat16,
-        )
-
-        offset = 0
-        for tensor in input_tensors:
-            numel = tensor.numel()
-            grouped_input.data[offset : offset + numel].copy_(tensor.reshape(-1))
-            offset += numel
+        grouped_input = torch.cat(input_tensors, dim=0)
 
         # Create MXFP8 output grouped tensor (rowwise only for easier validation)
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
-
-        grouped_output = GroupedTensor.make_grouped_tensor_with_shapes(
-            num_tensors=num_tensors,
-            shape=shape,
-            quantizer=quantizer,
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        first_dims = torch.tensor(
+            [shape[0][0] for _ in range(num_tensors)],
+            dtype=torch.int64,
             device="cuda",
         )
 
-        # Quantize using grouped API (handle both 2-arg and 3-arg bindings)
-        _ = tex.quantize_grouped(grouped_input, grouped_output)
+        # Quantize using grouped API
+        grouped_output = tex.group_quantize(
+            grouped_input,
+            quantizer,
+            num_tensors,
+            first_dims,
+        )
         # Build expected output by quantizing each tensor independently
         expected_data = []
         expected_scale_inv = []
