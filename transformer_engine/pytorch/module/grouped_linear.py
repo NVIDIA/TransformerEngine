@@ -759,6 +759,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             shape=[(self.out_features, self.in_features)] * self.num_gemms,
             quantizer=weight_quantizers[0],
             dtype=self.params_dtype,
+            device=weights[0].device,
         )
 
         # Copy existing params into storage.
