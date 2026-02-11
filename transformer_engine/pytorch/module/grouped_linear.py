@@ -942,11 +942,17 @@ class GroupedLinear(TransformerEngineBaseModule):
                 data=weight,
                 logical_shape=logical_shape,
             )
+        weight_quantizers = self._get_weight_quantizers()
+        recipe = (
+            weight_quantizers[0]._get_compatible_recipe()
+            if weight_quantizers and weight_quantizers[0] is not None
+            else None
+        )
+        if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
             self.set_tensor_parallel_attributes(defer_init=defer_init)
             return
 
         weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
-        weight_quantizers = self._get_weight_quantizers()
 
         # Create the weight storage.
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
@@ -954,14 +960,16 @@ class GroupedLinear(TransformerEngineBaseModule):
             shape=[(self.out_features, self.in_features)] * self.num_gemms,
             quantizer=weight_quantizers[0],
             dtype=self.params_dtype,
+            device=weights[0].device,
         )
         self.grouped_weight_storage = grouped_weights
-
         # Copy existing params into storage.
-        # TODO(ksivamani): Verify correctness of copy for all recipes.
         with torch.no_grad():
             for i in range(self.num_gemms):
-                grouped_weights.quantized_tensors[i].copy_(weights[i])
+                if self.primary_weights_in_fp8:
+                    grouped_weights.quantized_tensors[i].copy_from_storage(weights[i])
+                else:
+                    grouped_weights.quantized_tensors[i].copy_(weights[i])
 
         # Re-register the grouped weights as parameters.
         for i in range(self.num_gemms):
@@ -1127,8 +1135,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             del grad_biases_
             del wgrad_list
             del tensor_list
-            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-                wgrad_accumulation_and_reduce_hook()
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""
@@ -1180,7 +1187,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
-        if not self.fp8 and not self.fp8_calibration:
+        if not self.fp8 and not self.fp8_calibration and not self.primary_weights_in_fp8:
             return [None] * self.num_gemms
         weight_quantizers = [
             self.quantizers["scaling_fwd"][
@@ -1189,7 +1196,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             for i in range(self.num_weight_params)
         ]
         for i in range(self.num_weight_params):
-            weight_quantizers[i].internal = True
+            weight_quantizers[i].internal = not self.primary_weights_in_fp8
         return weight_quantizers
 
     def _get_quantizers(self):
