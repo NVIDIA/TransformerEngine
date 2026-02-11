@@ -253,7 +253,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         )
 
     def __repr__(self, *, tensor_contents=None):
-        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize(dtype=self.dtype)})"
+        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """

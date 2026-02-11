@@ -482,7 +482,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             "Float8Tensor("
             f"fp8_dtype={self._fp8_dtype}, "
             f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize(dtype=self.dtype)}"
+            f"data={self.dequantize()}"
             ")"
         )
 

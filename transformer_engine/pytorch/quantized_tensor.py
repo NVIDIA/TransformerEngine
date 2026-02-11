@@ -408,7 +408,7 @@ class QuantizedTensor(torch.Tensor):
         )
 
     def __repr__(self, *, tensor_contents=None) -> str:
-        return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
+        return f"{self.__class__.__name__}(data={self.dequantize()})"
 
     def float(self) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -511,7 +511,7 @@ class QuantizedTensor(torch.Tensor):
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
-                return arg.dequantize(dtype=arg.dtype)
+                return arg.dequantize()
             return arg
 
         def maybe_update_inplace(arg, new_arg, schema_arg):
