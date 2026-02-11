@@ -41,11 +41,11 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
 
   // Write the tensor data to a file as a binary blob
   std::string filename = "my_tensor_gpu" + std::to_string(device) + ".bin";
-  std::ofstream file(filename, std::ios::binary);
-  if (file.is_open()) {
-    file.write(reinterpret_cast<const char *>(input_data.data()), input_data.size());
-    file.close();
-  }
+  // std::ofstream file(filename, std::ios::binary);
+  // if (file.is_open()) {
+  //   file.write(reinterpret_cast<const char *>(input_data.data()), input_data.size());
+  //   file.close();
+  // }
 
   // Write out a metadata file
   std::string meta_filename = "my_tensor_gpu" + std::to_string(device) + "_meta.json";
