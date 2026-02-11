@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <numeric>
+#include <functional>
 #include <pybind.h>
 
 #include "common.h"
@@ -1306,8 +1308,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     if (rowwise_data) {
       auto expected_shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
       auto expected_shape_2d = compressShapeTo2D(expected_shape);
+      auto shape_2d = compressShapeTo2D(shape);
       NVTE_CHECK(shape == expected_shape_2d, "NVFP4 row-wise data (2D shape=", expected_shape_2d,
-                 ") and column-wise data (shape=", shape, ") do not match");
+                 ") and column-wise data (2D shape=", shape_2d, ") do not match");
       shape = expected_shape;
     }
   } else {  // Already checked columnwise_data_tensor == true
