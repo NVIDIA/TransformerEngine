@@ -564,7 +564,7 @@ def _make_chunk_sort_map_kernel(
     ).to(tl.int32)
     input_split_sizes_cumsum = tl.cumsum(input_split_sizes)
     
-    # CRITICAL FIX: Compute total valid tokens and skip phantom tokens.
+    # Compute total valid tokens and skip phantom/padding tokens.
     # When the input buffer is larger than sum(split_sizes), tokens beyond
     # the valid range should map to themselves (identity mapping) to avoid
     # corrupting valid output positions.

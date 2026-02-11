@@ -373,10 +373,10 @@ def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
         # Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
         alignment = 32 if scaling_mode.is_nvfp4_scaling else 16
 
-        # assert contracting_size % alignment == 0, (
-        #     f"cuBLAS GEMM {tensor_name} tensor's contracting dimension must be a multiple of"
-        #     f" {alignment} when using quantized inputs. Got contracting_size={contracting_size}"
-        # )
+        assert contracting_size % alignment == 0, (
+            f"cuBLAS GEMM {tensor_name} tensor's contracting dimension must be a multiple of"
+            f" {alignment} when using quantized inputs. Got contracting_size={contracting_size}"
+        )
 
 
 class GemmPrimitive(BasePrimitive):
