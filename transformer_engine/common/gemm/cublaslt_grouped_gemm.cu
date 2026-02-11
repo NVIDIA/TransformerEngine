@@ -119,42 +119,27 @@ struct GroupedGemmSetupWorkspace {
   int *d_cols;  // N (last dim) - also used for C
 
   // Initialize from workspace buffer
-  // Layout: all pointer arrays first (16-byte aligned for cuBLAS), then int arrays
+  // Layout: all pointer arrays first (8-byte aligned), then int arrays (4-byte aligned)
   static GroupedGemmSetupWorkspace from_buffers(char *setup_ws_ptr, size_t num_tensors) {
     GroupedGemmSetupWorkspace ws;
     size_t offset = 0;
     const size_t ptr_size = num_tensors * sizeof(void *);
     const size_t int_size = num_tensors * sizeof(int);
 
-    constexpr size_t kPtrAlignment = 16;  // cuBLAS requires 16-byte alignment for pointer arrays
-
-    // Helper to align offset to kPtrAlignment
-    auto align_offset = [&]() {
-      offset = (offset + kPtrAlignment - 1) / kPtrAlignment * kPtrAlignment;
-    };
-
-    // Pointer arrays first (all 16-byte aligned for cuBLAS grouped GEMM)
-    align_offset();
+    // Pointer arrays first (all 8-byte aligned)
     ws.A_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
     offset += ptr_size;
-    align_offset();
     ws.B_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
     offset += ptr_size;
-    align_offset();
     ws.C_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
     offset += ptr_size;
-    align_offset();
     ws.D_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
     offset += ptr_size;
-    align_offset();
     ws.alpha_ptrs = reinterpret_cast<float **>(setup_ws_ptr + offset);
     offset += ptr_size;
-    align_offset();
     ws.beta_ptrs = reinterpret_cast<float **>(setup_ws_ptr + offset);
     offset += ptr_size;
-
     // Int arrays for storage dimensions (4-byte aligned)
-    align_offset();
     ws.a_rows = reinterpret_cast<int *>(setup_ws_ptr + offset);
     offset += int_size;
     ws.a_cols = reinterpret_cast<int *>(setup_ws_ptr + offset);
@@ -174,11 +159,8 @@ struct GroupedGemmSetupWorkspace {
   static size_t required_setup_size(size_t num_tensors, size_t alignment) {
     const size_t ptr_size = num_tensors * sizeof(void *);
     const size_t int_size = num_tensors * sizeof(int);
-    constexpr size_t kPtrAlignment = 16;  // Must match from_buffers
-    // Layout: 8 ptr arrays (each 16-byte aligned), then 6 int arrays
-    // Each ptr array takes ptr_size bytes but needs to start at 16-byte boundary
-    auto aligned_ptr_size = ((ptr_size + kPtrAlignment - 1) / kPtrAlignment) * kPtrAlignment;
-    size_t size = 8 * aligned_ptr_size + 6 * int_size;
+    // Layout: 6 ptr arrays, then 6 int arrays
+    size_t size = 6 * ptr_size + 6 * int_size;
     size = ((size + alignment - 1) / alignment) * alignment;
     return size;
   }
@@ -401,10 +383,6 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
                                                    CUBLASLT_MATMUL_DESC_BETA_BATCH_STRIDE,
                                                    &alphabeta_batch_stride, sizeof(int64_t)));
-  // Fast accumulation mode: 0 = split accumulator (more accurate), 1 = fast accumulator
-  int8_t fastAccuMode = 0;  // Use split accumulator for accuracy
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
-                                                   &fastAccuMode, sizeof(fastAccuMode)));
 }
 
 inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,

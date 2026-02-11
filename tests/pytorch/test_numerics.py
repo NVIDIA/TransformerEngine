@@ -2018,7 +2018,7 @@ def test_grouped_linear_m_splits_tensor(single_weight):
     dtype = torch.bfloat16
     m_total = int(m_splits.sum().item())
 
-    reference = GroupedLinear(
+    reference_model = GroupedLinear(
         num_gemms,
         in_features,
         out_features,
@@ -2026,11 +2026,11 @@ def test_grouped_linear_m_splits_tensor(single_weight):
         params_dtype=dtype,
         device="cuda",
         single_weight=False,
-    ).eval()
+    )
     with torch.no_grad():
-        ref_weights = [getattr(reference, f"weight{i}") for i in range(num_gemms)]
+        ref_weights = [getattr(reference_model, f"weight{i}") for i in range(num_gemms)]
 
-    model_under_test = GroupedLinear(
+    test_model = GroupedLinear(
         num_gemms,
         in_features,
         out_features,
@@ -2038,26 +2038,26 @@ def test_grouped_linear_m_splits_tensor(single_weight):
         params_dtype=dtype,
         device="cuda",
         single_weight=single_weight,
-    ).eval()
+    )
     with torch.no_grad():
         if single_weight:
             for i, w in enumerate(
-                model_under_test.grouped_weight_storage.split_into_quantized_tensors()
+                test_model.grouped_weight_storage.split_into_quantized_tensors()
             ):
                 w.copy_(ref_weights[i])
         else:
             for i in range(num_gemms):
-                getattr(model_under_test, f"weight{i}").copy_(ref_weights[i])
+                getattr(test_model, f"weight{i}").copy_(ref_weights[i])
 
     inp = torch.randn(m_total, in_features, device="cuda", dtype=dtype, requires_grad=True)
     inp_ref = inp.detach().clone().requires_grad_()
 
     if single_weight:
-        out = model_under_test(inp, m_splits)
-        out_ref = reference(inp_ref, m_splits)
+        out = test_model(inp, m_splits)
+        out_ref = reference_model(inp_ref, m_splits)
     else:
-        out = model_under_test(inp, m_splits)
-        out_ref = model_under_test(inp_ref, m_splits_list)
+        out = test_model(inp, m_splits)
+        out_ref = reference_model(inp_ref, m_splits_list)
 
     torch.testing.assert_close(out, out_ref, **dtype_tols(dtype))
 
@@ -2067,10 +2067,10 @@ def test_grouped_linear_m_splits_tensor(single_weight):
     torch.testing.assert_close(inp.grad, inp_ref.grad, **dtype_tols(dtype))
     if single_weight:
         ref_wgrad = torch.cat(
-            [getattr(reference, f"weight{i}").grad.view(-1) for i in range(num_gemms)]
+            [getattr(reference_model, f"weight{i}").grad.view(-1) for i in range(num_gemms)]
         )
         torch.testing.assert_close(
-            getattr(model_under_test, "weight0").grad, ref_wgrad, **dtype_tols(dtype)
+            getattr(test_model, "weight0").grad, ref_wgrad, **dtype_tols(dtype)
         )
 
 
@@ -2802,15 +2802,10 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
     torch.manual_seed(0)
     z, m, k, n = shape
 
-    if z == 1:
-        m_splits = [m]
-    else:
-        split_points = torch.randperm(m - 1)[: z - 1] + 1
-        split_points = torch.sort(split_points).values.tolist()
-        m_splits = [split_points[0]]
-        m_splits += [b - a for a, b in zip(split_points[:-1], split_points[1:])]
-        m_splits.append(m - split_points[-1])
-        assert sum(m_splits) == m and len(m_splits) == z
+    dist = torch.sort(torch.randint(0, m, (z - 1,))).values.tolist()
+    m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+    assert m_splits.sum() == m and len(m_splits) == z
+    m_splits = m_splits.tolist()
 
     if layout == "TN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight

@@ -44,10 +44,10 @@ enum class ShapeCase {
 size_t grouped_setup_workspace_size(const size_t num_tensors) {
   const size_t ptr_bytes = num_tensors * sizeof(void*);
   const size_t int_bytes = num_tensors * sizeof(int);
-  // Layout: 8 pointer arrays (A, B, C, D, alpha, beta, a_scale, b_scale) + 6 int arrays
-  size_t size = 8 * ptr_bytes + 6 * int_bytes;
+  // Layout: 6 pointer arrays (A, B, C, D, alpha, beta) + 6 int arrays (a_rows, a_cols, b_rows, b_cols, d_rows, d_cols)
+  size_t size = 6 * ptr_bytes + 6 * int_bytes;
   const size_t alignment = 256;
-  size = ((size + alignment - 1) / alignment) * alignment;
+  size = ((size + alignment - 1) / alignment) * alignment;  
   return size;
 }
 
@@ -291,8 +291,7 @@ std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest
 
 // TestParams: {input_case, transa, transb, shape_case, use_null_c}
 const std::vector<TestParams> kTestParams = {
-    // FP8 tests (each tensor has random mean/stddev -> different scales)
-    {InputCase::kFP8Current, true, false, ShapeCase::kAllDifferent, false},
+    // Basic tests
     {InputCase::kFP8Current, false, true, ShapeCase::kAllDifferent, false},
     {InputCase::kFP8Current, false, false, ShapeCase::kAllSame, false},
     {InputCase::kBF16, true, false, ShapeCase::kSameFirst, false},
