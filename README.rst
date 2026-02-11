@@ -137,7 +137,7 @@ Flax
       for _ in range(10):
         loss, (param_grads, other_grads) = fwd_bwd_fn(params, other_variables, inp)
 
-For a more comprehensive tutorial, check out our the `Getting Started Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/getting_started.html>`.
+For a more comprehensive tutorial, check out our `Getting Started Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/getting_started.html>`_.
 
 .. overview-end-marker-do-not-remove
 
