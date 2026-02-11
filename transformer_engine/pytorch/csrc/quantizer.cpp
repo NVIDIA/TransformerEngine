@@ -1306,7 +1306,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       auto expected_shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
       auto expected_shape_2d = compressShapeTo2D(expected_shape);
       auto shape_2d = compressShapeTo2D(shape);
-      NVTE_CHECK(shape == expected_shape_2d, "NVFP4 row-wise data (2D shape=", expected_shape_2d,
+      NVTE_CHECK(shape_2d == expected_shape_2d, "NVFP4 row-wise data (2D shape=", expected_shape_2d,
                  ") and column-wise data (2D shape=", shape_2d, ") do not match");
       shape = expected_shape;
     }
