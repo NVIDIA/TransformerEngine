@@ -1810,7 +1810,7 @@ void fused_attn_fp8_fwd_impl_v1(
       fe::graph::SDPA_fp8_attributes sdpa_options;
       sdpa_options = fe::graph::SDPA_fp8_attributes()
                          .set_name("sdpa_fp8")
-                         .set_is_inference(false)
+                         .set_generate_stats(true)
                          .set_causal_mask(is_causal)
                          .set_attn_scale(attn_scale);
 
