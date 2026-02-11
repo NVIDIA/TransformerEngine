@@ -218,20 +218,17 @@ def parse_fsdp_args():
         action=StoreTrueExplicitAction,
         default=False,
         help=(
-            "Disables the te.autocast() context. When set, FP8 training is disabled "
-            "and the model trains in standard precision (as specified by --dtype). "
-            "PRECEDENCE: This flag is incompatible with FP8-based --precision presets. "
-            "BEHAVIOR: "
-            "- Without --precision: Disables FP8 training (original behavior) "
-            "- With --precision fp32/fp16: Redundant but harmless (already non-FP8) "
-            "- With --precision fp8/mxfp8/nvfp4: RAISES ERROR (incompatible flags) "
-            "RATIONALE: FP8 presets explicitly request FP8 training, so disabling FP8 "
-            "would contradict the user's intent. Use --precision fp32/fp16 instead for non-FP8 training. "
-            "EXAMPLES: "
-            "'--no-fp8' disables FP8 (original behavior). "
-            "'--precision fp8 --no-fp8' raises ValueError (incompatible). "
-            "'--precision fp16' is the correct way to request non-FP8 training. "
-            "Default: False (FP8 enabled based on configuration)."
+            "Disables the te.autocast() context. When set, FP8 training is disabled and the model"
+            " trains in standard precision (as specified by --dtype). PRECEDENCE: This flag is"
+            " incompatible with FP8-based --precision presets. BEHAVIOR: - Without --precision:"
+            " Disables FP8 training (original behavior) - With --precision fp32/fp16: Redundant but"
+            " harmless (already non-FP8) - With --precision fp8/mxfp8/nvfp4: RAISES ERROR"
+            " (incompatible flags) RATIONALE: FP8 presets explicitly request FP8 training, so"
+            " disabling FP8 would contradict the user's intent. Use --precision fp32/fp16 instead"
+            " for non-FP8 training. EXAMPLES: '--no-fp8' disables FP8 (original behavior)."
+            " '--precision fp8 --no-fp8' raises ValueError (incompatible). '--precision fp16' is"
+            " the correct way to request non-FP8 training. Default: False (FP8 enabled based on"
+            " configuration)."
         ),
     )
     parser.add_argument(
@@ -250,17 +247,14 @@ def parse_fsdp_args():
         default=torch.bfloat16,
         action=StoreExplicitAction,
         help=(
-            "Data type for input tensor and Transformer Engine module parameters. "
-            "Supported values: fp32/float32, fp16/float16, bf16/bfloat16. "
-            "PRECEDENCE: When explicitly set, this flag overrides the dtype from --precision preset. "
-            "BEHAVIOR: "
-            "- Without --precision: Controls parameter dtype directly "
-            "- With --precision: Overrides preset's dtype but preserves FP8 recipe selection "
-            "EXAMPLES: "
-            "'--dtype bf16' uses bfloat16 parameters (original behavior). "
-            "'--precision mxfp8 --dtype fp16' uses fp16 parameters with MXFP8BlockScaling recipe. "
-            "A warning is issued when overriding --precision dtype. "
-            "Default: bfloat16."
+            "Data type for input tensor and Transformer Engine module parameters. Supported values:"
+            " fp32/float32, fp16/float16, bf16/bfloat16. PRECEDENCE: When explicitly set, this flag"
+            " overrides the dtype from --precision preset. BEHAVIOR: - Without --precision:"
+            " Controls parameter dtype directly - With --precision: Overrides preset's dtype but"
+            " preserves FP8 recipe selection EXAMPLES: '--dtype bf16' uses bfloat16 parameters"
+            " (original behavior). '--precision mxfp8 --dtype fp16' uses fp16 parameters with"
+            " MXFP8BlockScaling recipe. A warning is issued when overriding --precision dtype."
+            " Default: bfloat16."
         ),
     )
     parser.add_argument(
@@ -268,20 +262,17 @@ def parse_fsdp_args():
         type=precision,
         default=None,
         help=(
-            "Precision preset for model training. Supported values: fp32, fp16, fp8, mxfp8, nvfp4. "
-            "This is a convenience flag that configures both dtype and FP8 settings automatically. "
-            "- fp32/fp16: Non-FP8 training with specified dtype "
-            "- fp8: FP8 training with DelayedScaling recipe (bf16 parameters) "
-            "- mxfp8: FP8 training with MXFP8BlockScaling recipe (bf16 parameters) "
-            "- nvfp4: FP8 training with NVFP4BlockScaling recipe (bf16 parameters) "
-            "PRECEDENCE RULES: "
-            "- If --dtype is explicitly set, it overrides the dtype from this preset (with warning) "
-            "- If --no-fp8 is set with fp8/mxfp8/nvfp4 presets, an error is raised (incompatible) "
-            "- If this flag is not set, original behavior is used (--dtype and --no-fp8 control training) "
-            "EXAMPLES: "
-            "'--precision mxfp8' enables MXFP8 FP8 training with bf16 parameters. "
-            "'--precision fp8 --dtype fp16' uses fp16 parameters but keeps DelayedScaling recipe. "
-            "Default: None (backward compatible mode)."
+            "Precision preset for model training. Supported values: fp32, fp16, fp8, mxfp8, nvfp4."
+            " This is a convenience flag that configures both dtype and FP8 settings automatically."
+            " - fp32/fp16: Non-FP8 training with specified dtype - fp8: FP8 training with"
+            " DelayedScaling recipe (bf16 parameters) - mxfp8: FP8 training with MXFP8BlockScaling"
+            " recipe (bf16 parameters) - nvfp4: FP8 training with NVFP4BlockScaling recipe (bf16"
+            " parameters) PRECEDENCE RULES: - If --dtype is explicitly set, it overrides the dtype"
+            " from this preset (with warning) - If --no-fp8 is set with fp8/mxfp8/nvfp4 presets, an"
+            " error is raised (incompatible) - If this flag is not set, original behavior is used"
+            " (--dtype and --no-fp8 control training) EXAMPLES: '--precision mxfp8' enables MXFP8"
+            " FP8 training with bf16 parameters. '--precision fp8 --dtype fp16' uses fp16"
+            " parameters but keeps DelayedScaling recipe. Default: None (backward compatible mode)."
         ),
     )
     return parser.parse_args()
@@ -292,9 +283,10 @@ def dist_print(text, all_ranks=False, no_new_line=False):
         end = "" if no_new_line else "\n"
         print(f"[GPU-{LOCAL_RANK}] " + text, end=end)
 
+
 def get_precision_preset(precision_value):
     """Get dtype, no_fp8, and recipe based on precision preset.
-    
+
     Returns:
         tuple: (dtype, no_fp8, recipe)
     """
@@ -324,10 +316,10 @@ def get_precision_preset(precision_value):
 
 def get_recipe_for_precision(precision_value):
     """Get FP8 recipe based on precision preset (when FP8 is enabled).
-    
+
     Args:
         precision_value: The precision preset string
-        
+
     Returns:
         Recipe object for FP8 training
     """
@@ -341,6 +333,7 @@ def get_recipe_for_precision(precision_value):
             return DelayedScaling(
                 fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
             )
+
 
 def train(opts):
     # Check which flags were explicitly set
@@ -359,40 +352,42 @@ def train(opts):
         # Use original behavior with dtype and no_fp8 flags
         dtype = opts.dtype
         no_fp8 = opts.no_fp8
-        
+
         # Set up recipe if FP8 is enabled
         if not no_fp8:
             recipe = DelayedScaling(
                 fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
             )
         else:
-            recipe = None        
+            recipe = None
     else:
         # Case 2: Precision preset was explicitly specified
         # Start with precision preset values
         preset_dtype, preset_no_fp8, preset_recipe = get_precision_preset(opts.precision)
-        
+
         # Check for incompatible flag combinations
         # Error if user requests FP8-based precision but also sets --no-fp8
         if opts.precision in ["fp8", "mxfp8", "nvfp4"] and no_fp8_explicitly_set and opts.no_fp8:
             raise ValueError(
                 f"Cannot use --no-fp8 with --precision {opts.precision}. "
-                f"These flags are incompatible. "
+                "These flags are incompatible. "
                 f"Either remove --no-fp8 to use {opts.precision} training, "
-                f"or use --precision fp32/fp16 for non-FP8 training."
+                "or use --precision fp32/fp16 for non-FP8 training."
             )
-        
+
         dtype = preset_dtype
         no_fp8 = preset_no_fp8
         recipe = preset_recipe
-        
+
         dist_print(f"Using precision preset: {opts.precision}")
-        
+
         # Apply explicit dtype override with warning
         if dtype_explicitly_set:
             dtype = opts.dtype
-            dist_print(f"Warning: --dtype {dtype} overrides --precision {opts.precision} dtype setting")
-            
+            dist_print(
+                f"Warning: --dtype {dtype} overrides --precision {opts.precision} dtype setting"
+            )
+
             # If FP8 is still enabled, keep recipe based on precision
             # (dtype only affects parameter storage, not FP8 recipe)
             if not no_fp8:
