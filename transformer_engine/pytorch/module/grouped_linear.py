@@ -750,8 +750,17 @@ class GroupedLinear(TransformerEngineBaseModule):
         if defer_init:
             return
 
-        weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
         weight_quantizers = self._get_weight_quantizers()
+        recipe = (
+            weight_quantizers[0]._get_compatible_recipe()
+            if weight_quantizers and weight_quantizers[0] is not None
+            else None
+        )
+        if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
+            self.set_tensor_parallel_attributes(defer_init=defer_init)
+            return
+
+        weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
 
         # Create the weight storage.
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
