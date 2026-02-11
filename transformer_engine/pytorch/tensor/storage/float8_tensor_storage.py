@@ -75,14 +75,16 @@ class Float8TensorStorage(QuantizedTensorStorage):
         data: Optional[torch.Tensor],
         fp8_scale_inv: torch.Tensor,
         fp8_dtype: TE_DType,
+        fake_dtype: Optional[torch.dtype] = None,
         data_transpose: Optional[torch.Tensor] = None,
         quantizer: Optional[Quantizer] = None,
         **kwargs,
     ):
         if cls is Float8TensorStorage:
             instance = object.__new__(cls)
+            instance._dtype = fake_dtype if fake_dtype is not None else torch.float32
         else:
-            instance = super().__new__(cls, *args, **kwargs)
+            instance = super().__new__(cls, *args, fake_dtype=fake_dtype, **kwargs)
         instance._data = data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._fp8_dtype = fp8_dtype
@@ -141,8 +143,10 @@ class Float8TensorStorage(QuantizedTensorStorage):
             return self._transpose
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
-    def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Dequantize to a higher precision."""
+        if dtype is None:
+            dtype = self._dtype
         return _FromFloat8Func.forward(None, self, dtype)
 
     def size(self, *args, **kwargs):
@@ -165,6 +169,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
             data=out_data,
             fp8_scale_inv=self._scale_inv,
             fp8_dtype=self._fp8_dtype,
+            fake_dtype=self._dtype,
             data_transpose=out_transpose,
             quantizer=self._quantizer,
         )

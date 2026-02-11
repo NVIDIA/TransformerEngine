@@ -242,6 +242,7 @@ class SplitAlongDim(torch.autograd.Function):
                     fp8_dtype=mixed_x_layer._fp8_dtype,
                     data=x.squeeze(split_dim) if squeeze else x,
                     shape=x.squeeze(split_dim).shape if squeeze else x.shape,
+                    fake_dtype=mixed_x_layer._dtype,
                     quantizer=mixed_x_layer._quantizer,
                 )
                 for x in torch.split(

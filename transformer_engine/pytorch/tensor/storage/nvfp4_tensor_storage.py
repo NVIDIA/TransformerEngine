@@ -106,10 +106,14 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
+        fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
-
-        instance = super().__new__(cls, *args, **kwargs)
+        if cls is NVFP4TensorStorage:
+            instance = object.__new__(cls)
+            instance._dtype = fake_dtype if fake_dtype is not None else torch.float32
+        else:
+            instance = super().__new__(cls, *args, fake_dtype=fake_dtype, **kwargs)
 
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
@@ -184,8 +188,10 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         """Get this Tensor's data."""
         return self._rowwise_data, self._columnwise_data
 
-    def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Dequantize to a higher precision."""
+        if dtype is None:
+            dtype = self._dtype
         return _FromNVFP4Func.forward(None, self, dtype)
 
     def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:
@@ -266,6 +272,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             quantizer=self._quantizer,
             fp4_dtype=self._fp4_dtype,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
+            fake_dtype=self._dtype,
         )
 
     def __repr__(self):
