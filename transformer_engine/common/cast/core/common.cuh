@@ -89,30 +89,25 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
 
 template <int nvec, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK)
-    group_reduce_dbias_kernel(const ShapeRepresentation shape_rep,
-                              const size_t num_tensors,
-                              const size_t first_logical_dim,
-                              const size_t last_logical_dim,
-                              const int64_t *const offsets_ptr,
-                              const int64_t *const first_dims_ptr,
-                              const int64_t *const last_dims_ptr,
-                              OType *const dbias_output,
-                              const float *dbias_partial,
-                              const size_t chunk_dim_Y) {
+    group_reduce_dbias_kernel(const ShapeRepresentation shape_rep, const size_t num_tensors,
+                              const size_t first_logical_dim, const size_t last_logical_dim,
+                              const int64_t *const offsets_ptr, const int64_t *const first_dims_ptr,
+                              const int64_t *const last_dims_ptr, OType *const dbias_output,
+                              const float *dbias_partial, const size_t chunk_dim_Y) {
   using ComputeVec = Vec<float, nvec>;
   using OutputVec = Vec<OType, nvec>;
 
   const size_t tensor_id = blockIdx.y;
   const size_t tensor_rows = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS)
-                             ? (first_logical_dim / num_tensors)
-                             : first_dims_ptr[tensor_id];
-  
+                                 ? (first_logical_dim / num_tensors)
+                                 : first_dims_ptr[tensor_id];
+
   const size_t rows = tensor_rows / chunk_dim_Y;
   const size_t cols = last_logical_dim;
 
   const size_t dbias_in_offset_Y = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS)
-                                   ? (tensor_id * (tensor_rows / chunk_dim_Y))
-                                   : (offsets_ptr[tensor_id] / cols / chunk_dim_Y);
+                                       ? (tensor_id * (tensor_rows / chunk_dim_Y))
+                                       : (offsets_ptr[tensor_id] / cols / chunk_dim_Y);
 
   const size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -160,16 +155,12 @@ void reduce_dbias(const float *workspace_ptr, Tensor *dbias, const size_t rows, 
 }
 
 template <typename IType>
-void grouped_reduce_dbias(const ShapeRepresentation shape_rep,
-                          const size_t num_tensors,
-                          const size_t first_logical_dim,
-                          const size_t last_logical_dim,
+void grouped_reduce_dbias(const ShapeRepresentation shape_rep, const size_t num_tensors,
+                          const size_t first_logical_dim, const size_t last_logical_dim,
                           const int64_t *const data_tensor_offsets_ptr,
                           const int64_t *const data_tensor_first_dims_ptr,
-                          const int64_t *const data_tensor_last_dims_ptr,
-                          GroupedTensor *dbias,
-                          const float *workspace_ptr,
-                          const size_t chunk_dim_Y,
+                          const int64_t *const data_tensor_last_dims_ptr, GroupedTensor *dbias,
+                          const float *workspace_ptr, const size_t chunk_dim_Y,
                           cudaStream_t stream) {
   using namespace kernel;
   constexpr size_t reduce_dbias_store_bytes = 8;  // stg.64
@@ -181,11 +172,10 @@ void grouped_reduce_dbias(const ShapeRepresentation shape_rep,
   const size_t blocks_Y = num_tensors;
   const dim3 grid(blocks_X, blocks_Y);
 
-  group_reduce_dbias_kernel<reduce_dbias_nvec, IType>
-      <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
-         shape_rep, num_tensors, first_logical_dim, last_logical_dim,
-         data_tensor_offsets_ptr, data_tensor_first_dims_ptr, data_tensor_last_dims_ptr,
-         reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, chunk_dim_Y);
+  group_reduce_dbias_kernel<reduce_dbias_nvec, IType><<<grid, THREADS_PER_BLOCK, 0, stream>>>(
+      shape_rep, num_tensors, first_logical_dim, last_logical_dim, data_tensor_offsets_ptr,
+      data_tensor_first_dims_ptr, data_tensor_last_dims_ptr,
+      reinterpret_cast<IType *>(dbias->data.dptr), workspace_ptr, chunk_dim_Y);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
