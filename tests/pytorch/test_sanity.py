@@ -615,7 +615,8 @@ def test_sanity_grouped_linear(
 
     # Verify that weights are stored in contiguous GroupedTensor storage.
     weights = [getattr(te_grouped_linear, f"weight{i}") for i in range(num_gemms)]
-    check_grouped_tensor_pointers(weights, fp8_recipe)
+    if fp8_recipe is None or not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
+        check_grouped_tensor_pointers(weights, fp8_recipe)
 
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True

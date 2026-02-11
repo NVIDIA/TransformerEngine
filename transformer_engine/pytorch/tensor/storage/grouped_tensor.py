@@ -342,7 +342,7 @@ class GroupedTensor:
     def make_grouped_tensor(
         num_tensors: int,
         first_dims: Optional[torch.Tensor],
-        last_dims: Optional[torch.tensor],
+        last_dims: Optional[torch.Tensor],
         logical_first_dim: int,
         logical_last_dim: int,
         quantizer: Optional[Quantizer] = None,
@@ -623,6 +623,7 @@ class GroupedTensor:
         result = []
 
         no_quantization = self.quantizer is None
+
         assert self.shape is not None, "Shape must be set for splitting a GroupedTensor."
 
         # Case 1: No quantization - return regular torch tensors

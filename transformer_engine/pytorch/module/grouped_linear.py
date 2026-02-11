@@ -750,8 +750,17 @@ class GroupedLinear(TransformerEngineBaseModule):
         if defer_init:
             return
 
-        weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
         weight_quantizers = self._get_weight_quantizers()
+        recipe = (
+            weight_quantizers[0]._get_compatible_recipe()
+            if weight_quantizers and weight_quantizers[0] is not None
+            else None
+        )
+        if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
+            self.set_tensor_parallel_attributes(defer_init=defer_init)
+            return
+
+        weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
 
         # Create the weight storage.
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
@@ -759,6 +768,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             shape=[(self.out_features, self.in_features)] * self.num_gemms,
             quantizer=weight_quantizers[0],
             dtype=self.params_dtype,
+            device=weights[0].device,
         )
 
         # Copy existing params into storage.
@@ -934,8 +944,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             del grad_biases_
             del wgrad_list
             del tensor_list
-            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-                wgrad_accumulation_and_reduce_hook()
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""
