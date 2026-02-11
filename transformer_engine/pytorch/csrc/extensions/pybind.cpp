@@ -329,7 +329,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_topk_with_score_function_bwd",
         &transformer_engine::pytorch::fused_topk_with_score_function_bwd, py::arg("num_tokens"),
         py::arg("num_experts"), py::arg("routing_map"), py::arg("intermediate_output"),
-        py::arg("grad_probs"), py::arg("topk"), py::arg("use_pre_softmax"),
+        py::arg("grad_probs"), py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
         py::arg("scaling_factor"), py::arg("score_function"), "Fused topk with score function bwd");
   m.def("fused_score_for_moe_aux_loss_fwd",
         &transformer_engine::pytorch::fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
@@ -337,7 +337,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_score_for_moe_aux_loss_bwd",
         &transformer_engine::pytorch::fused_score_for_moe_aux_loss_bwd, py::arg("num_tokens"),
         py::arg("num_experts"), py::arg("intermediate_output"), py::arg("grad_scores"),
-        py::arg("topk"), py::arg("score_function"), "Fused aux loss with score function bwd");
+        py::arg("grad_logits"), py::arg("topk"), py::arg("score_function"),
+        "Fused aux loss with score function bwd");
   m.def("fused_moe_aux_loss_fwd", &transformer_engine::pytorch::fused_moe_aux_loss_fwd,
         py::arg("probs"), py::arg("tokens_per_expert"), py::arg("total_num_tokens"),
         py::arg("num_experts"), py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"),
