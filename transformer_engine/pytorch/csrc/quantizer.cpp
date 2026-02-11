@@ -4,9 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <numeric>
-#include <functional>
 #include <pybind.h>
+
+#include <functional>
+#include <numeric>
 
 #include "common.h"
 #include "pybind.h"
