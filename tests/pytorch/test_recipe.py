@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -29,7 +29,6 @@ from transformer_engine.pytorch.quantization import (
 )
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
-import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)

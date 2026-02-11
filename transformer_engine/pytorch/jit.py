@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,7 +8,7 @@ from functools import wraps
 from typing import Callable, Optional, Tuple
 import torch
 
-from . import torch_version
+from .torch_version import torch_version
 from .export import is_in_onnx_export_mode
 from .utils import gpu_autocast_ctx
 
@@ -46,17 +46,35 @@ if torch_version() >= (2, 2, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"
 
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
-no_torch_dynamo = lambda recursive=True: lambda func: func
 if torch.__version__ >= "2":
     import torch._dynamo
 
-    if torch.__version__ >= "2.1":
-        no_torch_dynamo = lambda recursive=True: lambda f: (
-            f if is_in_onnx_export_mode() else torch._dynamo.disable(f, recursive=recursive)
-        )
-    else:
-        # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
-        no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
+    def no_torch_dynamo(recursive=True):
+        """Decorator to disable Torch Dynamo, except during ONNX export."""
+
+        def decorator(f):
+            # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
+            disabled_f = (
+                torch._dynamo.disable(f, recursive=recursive)
+                if torch.__version__ >= "2.1"
+                else torch._dynamo.disable(f)
+            )
+
+            @wraps(f)
+            def wrapper(*args, **kwargs):
+                if is_in_onnx_export_mode():
+                    return f(*args, **kwargs)
+                return disabled_f(*args, **kwargs)
+
+            return wrapper
+
+        return decorator
+
+else:
+    # Fallback for PyTorch < 2.0: no-op decorator
+    def no_torch_dynamo(recursive=True):  # pylint: disable=unused-argument
+        """No-op decorator for PyTorch < 2.0."""
+        return lambda func: func
 
 
 def set_jit_fusion_options() -> None:

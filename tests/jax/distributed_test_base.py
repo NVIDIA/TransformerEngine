@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 import operator
@@ -8,11 +8,11 @@ from itertools import product
 import pytest
 
 import jax
-from jax.experimental.pjit import pjit, _UNSPECIFIED
+from jax._src.sharding_impls import UNSPECIFIED as _UNSPECIFIED
 
 from transformer_engine.jax.sharding import MeshResource
 
-from utils import assert_allclose, is_devices_enough
+from utils import assert_allclose, is_devices_enough, is_devices_equal
 
 
 def generate_configs():
@@ -49,7 +49,11 @@ def generate_context_parallel_configs_for_attn():
     TP_sizes = (1, 2)
     for dp, cp, tp in product(DP_sizes, CP_sizes, TP_sizes):
         ndev = cp * tp * dp
-        if is_devices_enough(ndev):
+        # Run only those dp,cp,tp combinations which require exactly ndev GPUs.
+        # For e.g., if num_GPUs is 8 and ndev=8 , all the dp,cp,tp combinations fulfilling ndev = cp * tp * dp are picked.
+        # However, if num_GPUs is 8 and ndev=4, then all the dp,cp,tp combinations fulfilling ndev = cp * tp * dp are ignored.
+        # To explicitly pick combinations associated with ndev=4, one can set CUDA_VISIBLE_DEVICES=0,1,2,3, thereby forcing num_GPUs to 4 instead of 8.
+        if is_devices_equal(ndev):
             # Do not run cp1 case in L1 as that is already covered in TestDistributedSelfAttn and TestDistributedCrossAttn (as these do not have any cp combinations)
             if cp != 1:
                 configsL1.append(
@@ -154,13 +158,15 @@ def compare_ops(
         grad_args = tuple(range(len(inputs)))
 
     target_grad_func = jax.value_and_grad(target_func, argnums=grad_args)
-    target_pjitter = pjit(target_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
-    target_fwd, target_grads = target_pjitter(*inputs, **kwargs)
-    target_hlo = target_pjitter.lower(*inputs, **kwargs).compile().as_text()
+    target_jitter = jax.jit(
+        target_grad_func, in_shardings=in_shardings, out_shardings=out_shardings
+    )
+    target_fwd, target_grads = target_jitter(*inputs, **kwargs)
+    target_hlo = target_jitter.lower(*inputs, **kwargs).compile().as_text()
 
     ref_grad_func = jax.value_and_grad(ref_func, argnums=grad_args)
-    ref_pjitter = pjit(ref_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
-    ref_fwd, ref_grads = ref_pjitter(*inputs, **kwargs)
+    ref_jitter = jax.jit(ref_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
+    ref_fwd, ref_grads = ref_jitter(*inputs, **kwargs)
 
     assert_allclose(target_fwd, ref_fwd, dtype=metric_fwd_dtype)
 

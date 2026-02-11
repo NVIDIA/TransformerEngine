@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -72,10 +72,15 @@ class TELlamaDecoderLayer(te.pytorch.TransformerLayer):
         forward pass of the `TransformerLayer`. Also, make sure the output
         format matches the output of the HF's `LlamaDecoderLayer`.
         """
-        return (
-            super().forward(
-                hidden_states, attention_mask=attention_mask, rotary_pos_emb=self.te_rope_emb
-            ),
+        # Handle case where hidden_states might be a tuple (from previous layer output)
+        # This can happen with older versions of HuggingFace transformers
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+
+        # Return tensor directly for HuggingFace transformers >= 4.57
+        # (older versions wrapped output in tuple and extracted with layer_outputs[0])
+        return super().forward(
+            hidden_states, attention_mask=attention_mask, rotary_pos_emb=self.te_rope_emb
         )
 
 
@@ -162,7 +167,7 @@ def replace_params(hf_state_dict, te_state_dict, config):
     # collect all layer prefixes to update
     all_layer_prefixes = set()
     for param_key in hf_state_dict.keys():
-        layer_prefix_pat = "model.layers.\d+."
+        layer_prefix_pat = r"model.layers.\d+."
         m = re.match(layer_prefix_pat, param_key)
         if m is not None:
             all_layer_prefixes.add(m.group())

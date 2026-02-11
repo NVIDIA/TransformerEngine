@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -7,7 +7,12 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <map>
 #include <optional>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "common.h"
 
@@ -76,37 +81,33 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right);
-
-std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
-                                                      const std::vector<size_t> &shape, DType dtype,
-                                                      bool create_hp_tensor_for_cs,
-                                                      std::optional<at::Tensor> data);
+    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic);
 
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
     bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    const std::vector<int64_t> window_size, const at::Tensor cu_seqlens_q,
-    const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
-    const at::ScalarType fake_dtype, const std::optional<at::Tensor> cu_seqlens_q_padded,
+    const std::vector<int64_t> window_size, bool bottom_right_diagonal,
+    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
+    const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
+    const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded,
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
     py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
     const std::optional<at::Tensor> SoftmaxOffset, const std::optional<at::Generator> rng_gen,
-    size_t rng_elts_per_thread);
+    size_t rng_elts_per_thread, bool return_max_logit, bool cuda_graph);
 
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size, bool deterministic,
-    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
-    const py::handle K, const py::handle V, const py::handle O, const py::handle dO,
-    const at::ScalarType fake_dtype, const DType dqkv_type,
+    NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
+    bool bottom_right_diagonal, bool deterministic, const at::Tensor cu_seqlens_q,
+    const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
+    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype, const DType dqkv_type,
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle dp_quantizer, py::handle dqkv_quantizer);
+    py::handle dp_quantizer, py::handle dqkv_quantizer, bool cuda_graph);
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
@@ -253,8 +254,9 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
                                               std::vector<py::handle> quantizer_list);
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
-                                       const std::vector<int> &split_sections,
-                                       std::vector<py::handle> quantizer_list);
+                                       const std::vector<size_t> &split_sections,
+                                       std::vector<py::handle> quantizer_list,
+                                       bool disable_bulk_allocation = false);
 
 /***************************************************************************************************
  * Bias gradient fusions
@@ -335,6 +337,15 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
                                     size_t h, size_t w, size_t start_offset, size_t block_len,
                                     const DType out_dtype);
 
+void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
+                                        at::Tensor amax_colwise, int rows, int cols,
+                                        size_t start_offset);
+
+void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwise,
+                                at::Tensor output_colwise, const at::Tensor &scale_inv_rowwise,
+                                const at::Tensor &scale_inv_colwise, int rows, int cols,
+                                size_t start_offset);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/
@@ -346,6 +357,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
                               const int cp_rank);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
+                               const std::optional<at::Tensor> start_positions,
                                const NVTE_QKV_Format qkv_format, const bool interleaved,
                                const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                                const int cp_rank);
@@ -450,6 +462,9 @@ void multi_tensor_compute_scale_and_scale_inv_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     float max_fp8, bool force_pow_2_scales, float epsilon);
 
+void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, const py::object &dummy,
+                                              std::vector<std::vector<at::Tensor>> tensor_lists);
+
 /***************************************************************************************************
  * padding
  **************************************************************************************************/
@@ -461,6 +476,13 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
 void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
                                std::vector<size_t> input_row_list,
                                std::vector<size_t> unpadded_input_row_list);
+
+/***************************************************************************************************
+ * Scale swizzling for GEMM
+ **************************************************************************************************/
+
+void inplace_swizzle_scale_for_gemm(py::handle &tensor);
+
 /***************************************************************************************************
  * NVSHMEM APIs
  **************************************************************************************************/
@@ -526,6 +548,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
   ~CommOverlap() {}
 
+  using transformer_engine::CommOverlapCore::copy_into_buffer;
   void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
   at::Tensor get_buffer(bool local_chunk = false,
@@ -547,6 +570,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
 
   ~CommOverlapP2P() {}
 
+  using transformer_engine::CommOverlapP2PBase::copy_into_buffer;
   void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
   at::Tensor get_buffer(bool local_chunk = false,

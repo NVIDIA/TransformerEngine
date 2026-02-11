@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -35,6 +35,8 @@ __device__ inline OType sigmoid(const IType val, const Empty&) {
   const float cval = val;
   return 1.f / (1.f + expf(-cval));
 }
+
+__device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
 
 template <typename OType, typename IType>
 __device__ inline OType dsigmoid(const IType val, const Empty& e) {

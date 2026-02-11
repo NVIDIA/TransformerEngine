@@ -1,34 +1,8 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Randomized Hadamard Transform (RHT) utilities for JAX."""
 import jax.numpy as jnp
-
-from .scaling_modes import ScalingMode
-
-
-def should_use_rht(scaling_mode, is_colwise=None, q_layout=None) -> bool:
-    """Determine if RHT (Randomized Hadamard Transform) should be used.
-
-    Args:
-        scaling_mode: The scaling mode of the tensor.
-        is_colwise: Whether the tensor is column-wise. Only one of is_colwise or q_layout should be provided.
-        q_layout: The quantization layout of the tensor. Only one of is_colwise or q_layout should be provided.
-
-    Returns:
-        bool: True if RHT should be used, False otherwise.
-    """
-    # Delayed import to avoid circular dependencies
-    from .quantizer import QuantizeLayout
-
-    assert (is_colwise is None) != (
-        q_layout is None
-    ), "Exactly one of is_colwise or q_layout must be provided."
-
-    if q_layout is not None:
-        is_colwise = q_layout in {QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE}
-
-    return scaling_mode == ScalingMode.NVFP4_1D_SCALING and is_colwise
 
 
 def get_wgrad_sign_vector() -> list[int]:

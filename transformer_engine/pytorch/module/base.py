@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -10,16 +10,15 @@ import pickle
 import warnings
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 from contextlib import contextmanager
-import logging
 from types import MethodType
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe
 
 from ._common import _ParameterInitMeta, noop_cat
 from ..quantization import (
@@ -38,13 +37,21 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
-from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
+from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
+from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
+from ..utils import (
+    is_non_tn_fp8_gemm_supported,
+    torch_get_autocast_gpu_dtype,
+    get_nvtx_range_context,
+    nvtx_range_push,
+    nvtx_range_pop,
+)
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
@@ -56,11 +63,8 @@ __all__ = ["initialize_ub", "destroy_ub", "UserBufferQuantizationMode"]
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
-_multi_stream_cublas_workspace = []
 _dummy_wgrads = {}
-_cublas_workspace = None
 _ub_communicators = None
-_NUM_MAX_UB_STREAMS = 3
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
 
@@ -72,35 +76,6 @@ class UserBufferQuantizationMode(Enum):
 
     NONE = "none"
     FP8 = "fp8"
-
-
-def get_cublas_workspace_size_bytes() -> None:
-    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
-        # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
-        return 32 * 1024 * 1024 + 1024
-    return 4_194_304
-
-
-def get_workspace() -> torch.Tensor:
-    """Returns workspace for cublas."""
-    global _cublas_workspace
-    if _cublas_workspace is None:
-        _cublas_workspace = torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        )
-    return _cublas_workspace
-
-
-def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
-    """Returns workspace for multi-stream cublas."""
-    global _multi_stream_cublas_workspace
-    if not _multi_stream_cublas_workspace:
-        for _ in range(tex.get_num_cublas_streams()):
-            _multi_stream_cublas_workspace.append(
-                torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
-            )
-    return _multi_stream_cublas_workspace
 
 
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
@@ -130,55 +105,55 @@ def initialize_ub(
 ) -> None:
     r"""
     Initialize the Userbuffers communicator for overlapping tensor-parallel communications with
-    GEMM compute in te.Linear, te.LayerNormLinear and te.LayerNormMLP modules.
+    GEMM compute in ``te.Linear``, ``te.LayerNormLinear`` and ``te.LayerNormMLP`` modules.
 
     Parameters
     ----------
     shape : list
             shape of the communication buffer, typically set to be the same as the global shape of
-            the input tensor to a te.TransformerLayer forward pass, with the sequence and batch
-            dimensions collapsed together -- i.e.: `(sequence_length * batch_size, hidden_size)`
+            the input tensor to a ``te.TransformerLayer`` forward pass, with the sequence and batch
+            dimensions collapsed together -- i.e.: ``(sequence_length * batch_size, hidden_size)``
     tp_size : int
               number of GPUs in the tensor-parallel process group
     use_fp8 : bool = False
               allocate the communication buffer for FP8 GEMM inputs/outputs.
-              DEPRECATED: Please use `quantization_modes` instead.
+              DEPRECATED: Please use ``quantization_modes`` instead.
     quantization_modes : List[UserBufferQuantizationMode] = None
               if a list of UserBufferQuantizationMode is provided, a UB communicator is created for each quantization setting in the list.
-              falls back to the legacy `use_fp8` parameter if `None` is provided.
+              falls back to the legacy ``use_fp8`` parameter if ``None`` is provided.
     dtype : torch.dtype = torch.bfloat16
-            non-FP8 data type of the communication buffer when `use_fp8 = False`
-    ub_cfgs: dict = None
-             Configuration dictionary with the structure
-             ```
-             {
-                <gemm_name> : {
-                    "method": <"ring_exchange" or "pipeline">,
-                    "is_reduce_scatter": bool,
-                    "num_sm": int,
-                    "cga_size": int,
-                    "set_sm_margin": bool,
-                    "num_splits": int,
-                    "aggregate": bool,
-                    "atomic_gemm": bool,
-                    "use_ce": bool,
-                    "fp8_buf": bool,
-                }
-             }
-             ```
-             for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
+            non-FP8 data type of the communication buffer when ``use_fp8 = False``
+    ub_cfgs : dict = None
+             Configuration dictionary with the structure::
+
+                 {
+                    <gemm_name> : {
+                        "method": <"ring_exchange" or "pipeline">,
+                        "is_reduce_scatter": bool,
+                        "num_sm": int,
+                        "cga_size": int,
+                        "set_sm_margin": bool,
+                        "num_splits": int,
+                        "aggregate": bool,
+                        "atomic_gemm": bool,
+                        "use_ce": bool,
+                        "fp8_buf": bool,
+                    }
+                 }
+
+             for ``te.TransformerLayer`` GEMM layers in ``["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
-             "fc2_fprop", "fc2_wgrad"]`.
-             a list may be provided to specify different overlap configurations for different the quantization settings in `quantization_modes`
+             "fc2_fprop", "fc2_wgrad"]``.
+             a list may be provided to specify different overlap configurations for different the quantization settings in ``quantization_modes``
     bootstrap_backend : str = None
-                        `torch.distributed` communication backend for the all-gather, broadcast and
+                        ``torch.distributed`` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
                         valid for every cluster configuration and distributed launch method even if
                         they are available in PyTorch. When left unset, the initialization prefers
                         to use the MPI backend, falling back first on Gloo and then NCCL if MPI is
-                        not available. Setting `NVTE_UB_WITH_MPI=1` when building TE overrides this
+                        not available. Setting ``NVTE_UB_WITH_MPI=1`` when building TE overrides this
                         option and always initializes Userbuffers with direct MPI calls in C++,
-                        which also requires `MPI_HOME=/path/to/mpi/root` to be set at compile time.
+                        which also requires ``MPI_HOME=/path/to/mpi/root`` to be set at compile time.
     """
     if not tex.device_supports_multicast():
         assert bool(int(os.getenv("UB_SKIPMC", "0"))), (
@@ -274,16 +249,6 @@ def initialize_ub(
                 end="",
                 flush=True,
             )
-
-    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls
-    global _cublas_workspace
-    if _cublas_workspace is None:
-        _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
-    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS:
-        # This ensures we don't do `.repeat()` on an already expanded workspace
-        _cublas_workspace = torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        ).repeat(_NUM_MAX_UB_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
@@ -596,6 +561,8 @@ def fill_userbuffers_buffer_for_all_gather(
                 "Userbuffers requires MXFP8 tensor dims that are divisible by 128, "
                 f"but got MXFP8 tensor with shape={tuple(local_shape)}"
             )
+        if local_tensor._with_gemm_swizzled_scales:
+            raise ValueError("Userbuffers assumes MXFP8 tensors have unswizzled scales")
         local_scale_inv = (
             local_tensor._rowwise_scale_inv
             if with_rowwise_data
@@ -628,6 +595,7 @@ def fill_userbuffers_buffer_for_all_gather(
             columnwise_scale_inv=columnwise_scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
             quantizer=quantizer,
+            with_gemm_swizzled_scales=False,
         )
         return global_tensor, local_tensor
 
@@ -638,10 +606,10 @@ def fill_userbuffers_buffer_for_all_gather(
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
-    def __init__(self) -> None:
+    def __init__(self, name: Optional[str] = None) -> None:
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
-        self.name = None
+        self.name = name
         self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False
         self.fp8 = False
@@ -662,29 +630,26 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
+        self.wgrad_store = None
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
+        self._validate_name()
 
-    # Names of attributes that can be set quickly (see __setattr__
-    # method)
-    _fast_setattr_names: Set[str] = {
-        "activation_dtype",
-        "fp8",
-        "fp8_initialized",
-        "fp8_calibration",
-        "fp8_parameters",
-    }
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """
+        Fast version of the Module's set attribute function.
+        Should be used for regular attributes, but not properties nor parameters/buffers.
+        """
+        self.__dict__[name] = value
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name in TransformerEngineBaseModule._fast_setattr_names:
-            # torch.nn.Module has a custom __setattr__ that handles
-            # modules, parameters, and buffers. This is unnecessary
-            # overhead when setting plain attrs.
-            self.__dict__[name] = value
-        else:
-            # Default case
-            super().__setattr__(name, value)
+    def module_setattr(self, name: str, value: Any) -> None:
+        """
+        Regular version of the Module's set attribute function.
+        Should be used only when the fast version cannot be used - for the properties,
+        parameters and buffers.
+        """
+        super().__setattr__(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """
@@ -805,7 +770,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.set_meta_tensor(True, recipe)
         self.set_meta_tensor(False, recipe)
 
-        self.fp8_meta_tensors_initialized = True
+        self.fast_setattr("fp8_meta_tensors_initialized", True)
 
     def get_fp8_meta_tensors(self) -> None:
         """Get scales and amaxes."""
@@ -962,7 +927,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch_get_autocast_gpu_dtype()
+            self.fast_setattr("activation_dtype", torch_get_autocast_gpu_dtype())
             return
 
         # All checks after this have already been performed once, thus skip
@@ -977,7 +942,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         "Data types for parameters must match when outside of autocasted region. "
                         f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
                     )
-        self.activation_dtype = dtype
+        self.fast_setattr("activation_dtype", dtype)
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
@@ -986,11 +951,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         Parameters
         ----------
-        tp_group : ProcessGroup, default = `None`
+        tp_group : ProcessGroup, default = None
                   tensor parallel process group.
         """
-        self.tp_group = tp_group
-        self.tp_group_initialized = True
+        self.fast_setattr("tp_group", tp_group)
+        self.fast_setattr("tp_group_initialized", True)
 
     def _get_fp8_params(self) -> Union[List[torch.Tensor], None]:
         """returns the FP8 weights."""
@@ -1006,48 +971,51 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     # assume FP8 execution.
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
-        _original_recipe = self.fp8_meta.get("recipe", None)
+        meta = self.fp8_meta
 
-        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
-        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
-        fp8_enabled = self.fp8 or self.fp8_calibration
-        self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+        fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
+        fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        self.fast_setattr("fp8_parameters", fp8_parameters)
+        self.fast_setattr("fp8", fp8)
+        self.fast_setattr("fp8_calibration", fp8_calibration)
+        fp8_enabled = fp8 or fp8_calibration
+        meta["fp8_checkpoint"] = fp8_enabled
 
-        if self.fp8_parameters or fp8_enabled:
-            if (
-                self.fp8_initialized
-                and FP8GlobalStateManager.get_fp8_recipe() == self.fp8_meta["recipe"]
-            ):
+        _original_recipe = None
+
+        if fp8_parameters or fp8_enabled:
+            _original_recipe = meta.get("recipe", None)
+            if self.fp8_initialized and FP8GlobalStateManager.get_fp8_recipe() == _original_recipe:
                 # FP8 init has already been run and recipe is the same, don't do anything.
                 return
-            self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
         else:
             # If fp8 isn't enabled, turn off and return.
-            self.fp8_initialized = False
+            self.fast_setattr("fp8_initialized", False)
             return
 
-        if self.fp8_parameters and not self.fp8_initialized:
-            self.fp8_meta["num_gemms"] = num_gemms
-            self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
+        if fp8_parameters and not self.fp8_initialized:
+            meta["num_gemms"] = num_gemms
+            self.init_fp8_meta_tensors(meta["recipe"])
 
         if fp8_enabled:
             # Set FP8 and other FP8 metadata
-            self.fp8_meta["num_gemms"] = num_gemms
-            self.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
+            meta["num_gemms"] = num_gemms
+            meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
             # Set FP8_MAX per tensor according to recipe
-            if hasattr(self.fp8_meta["recipe"], "fp8_format"):
-                self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-                self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+            if hasattr(meta["recipe"], "fp8_format"):
+                meta["fp8_max_fwd"] = meta["recipe"].fp8_format.value.max_fwd
+                meta["fp8_max_bwd"] = meta["recipe"].fp8_format.value.max_bwd
 
             # Allocate scales and amaxes
-            self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
-            self.fp8_initialized = True
+            self.init_fp8_meta_tensors(meta["recipe"])
+            self.fast_setattr("fp8_initialized", True)
 
-            self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
 
-        _current_recipe = self.fp8_meta["recipe"]
+        _current_recipe = meta["recipe"]
         if _original_recipe is not None and not (
             issubclass(_current_recipe.__class__, _original_recipe.__class__)
             or issubclass(_original_recipe.__class__, _current_recipe.__class__)
@@ -1060,24 +1028,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
 
-    @contextmanager
     def prepare_forward(
         self,
         inp: torch.Tensor,
         num_gemms: int = 1,
         allow_non_contiguous: bool = False,
         allow_different_data_and_param_types: bool = False,
-    ) -> Generator[torch.Tensor, None, None]:
-        """Checks and prep for FWD.
-        The context manager is needed because there isn't a way for a module to know
-        if it's the last FP8 module in the forward autocast. It is useful
-        to setup the forward aggregated amax reduction for every module
-        just in case. The autocast exit will pick up the most recent one.
-        """
-        self.allow_different_data_and_param_types = allow_different_data_and_param_types
-        self.forwarded_at_least_once = True
+    ) -> torch.Tensor:
+        """Checks and prepares for FWD execution."""
+        self.fast_setattr(
+            "allow_different_data_and_param_types", allow_different_data_and_param_types
+        )
+        self.fast_setattr("forwarded_at_least_once", True)
+
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
+            delayed_scaling_recipe = self.fp8_meta["recipe"].delayed()
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
             assert inp.is_cuda, "TransformerEngine needs CUDA."
@@ -1089,26 +1055,52 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.init_fp8_metadata(num_gemms=num_gemms)
             self._check_weight_tensor_recipe_correspondence()
 
-            if self.fp8 and self.sequence_parallel and self.fp8_meta["recipe"].delayed():
-                assert self.fp8_meta["recipe"].reduce_amax, (
-                    "Amax reduction across tensor parallel group is "
-                    "necessary when using sequence parallelism with FP8."
-                )
+            delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+            if delayed_scaling_recipe:
+                if self.sequence_parallel:
+                    assert self.fp8_meta["recipe"].reduce_amax, (
+                        "Amax reduction across tensor parallel group is "
+                        "necessary when using sequence parallelism with FP8."
+                    )
 
-            if self.fp8 and not FP8GlobalStateManager.fp8_graph_capturing():
-                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
+                if not FP8GlobalStateManager.fp8_graph_capturing():
+                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
-            # Activation recomputation is used and this is the first forward phase.
-            if self.fp8 and self.training and is_fp8_activation_recompute_enabled():
-                FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+                # Activation recomputation is used and this is the first forward phase.
+                if self.training and is_fp8_activation_recompute_enabled():
+                    FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
-        with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
-            if not allow_non_contiguous and not inp.is_contiguous():
-                inp = inp.contiguous()
-            yield inp
+        nvtx_range_push(self.__class__.__name__ + " forward")
+        if not allow_non_contiguous and not inp.is_contiguous():
+            inp = inp.contiguous()
+        return inp
 
-        if self.fp8 and in_fp8_activation_recompute_phase():
+    def end_forward(self):
+        """
+        Required to be called at the end of the forward function to properly handle
+        DelayedScaling metadata handling and the NVTX ranges.
+        """
+        delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+        if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
+        nvtx_range_pop()
+
+    @contextmanager
+    def prepare_forward_ctx(
+        self,
+        inp: torch.Tensor,
+        num_gemms: int = 1,
+        allow_non_contiguous: bool = False,
+        allow_different_data_and_param_types: bool = False,
+    ) -> Generator[torch.Tensor, None, None]:
+        """Checks and prepares for FWD execution."""
+        inp = self.prepare_forward(
+            inp, num_gemms, allow_non_contiguous, allow_different_data_and_param_types
+        )
+        try:
+            yield inp
+        finally:
+            self.end_forward()
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
@@ -1196,18 +1188,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # bgrad only if wgrad is in FP8, otherwise it is fused with wgrad and we return None
         if ctx.debug:
             grad_output_ = quantizer(grad_output)
-            if (
-                isinstance(
-                    grad_output_.get_tensor(True),
-                    (
-                        QuantizedTensor,
-                        Float8TensorStorage,
-                        MXFP8TensorStorage,
-                        Float8BlockwiseQTensorStorage,
-                    ),
-                )
-                and ctx.use_bias
-            ):
+            if ctx.use_bias:
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
                 grad_bias = None
@@ -1243,7 +1224,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         metedata used in deferred initialization.
         """
         super().register_parameter(name, param)
-        self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
+        # Initialize param_init_meta exactly once during the init. FSDP2 can call
+        # register parameter again to change parameters to DTensors. And it calls
+        # it without custom fp8 specific kwargs that we need. And so we dont want
+        # to reset/loose our fp8 init attributes.
+        if hasattr(self, "param_init_meta") and name not in self.param_init_meta:
+            self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
 
     def reset_parameters(self, defer_init: Optional[bool] = False) -> None:
         """
@@ -1255,10 +1241,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         for name, param in self.named_parameters(recurse=False):
+            # Check if parameter is a DTensor (FSDP2) or regular tensor
+            is_dtensor = isinstance(param, DTensor)
+            dtensor_param = param if is_dtensor else None
+            # Need to update/quantize local tensor in case of DTensor
+            param = param._local_tensor if is_dtensor else param
             # Ensure parameter is on a real device
             if param.device == torch.device("meta"):
                 param = torch.empty_like(param, device="cuda")
-
             # Initialize the parameter values on device
             init_fn = self.param_init_meta[name].init_fn
             get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker
@@ -1287,7 +1277,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
-
+                if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
+                    device_mesh = dtensor_param.device_mesh
+                    amax_reduction_group = (
+                        device_mesh.get_group(mesh_dim="shard")
+                        if device_mesh.ndim > 1
+                        else device_mesh.get_group()
+                    )
+                    quantizer.amax_reduction_group = amax_reduction_group
+                    quantizer.with_amax_reduction = True
                 # Quantize parameter
                 param = quantizer(param)
 
@@ -1295,7 +1293,18 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
-            param = torch.nn.Parameter(param)
+            if is_dtensor:
+                # recreate the DTensor from the parameter.
+                dtensor_param = DTensor.from_local(
+                    param,
+                    device_mesh=dtensor_param.device_mesh,
+                    placements=dtensor_param.placements,
+                    shape=dtensor_param.size(),
+                    stride=dtensor_param.stride(),
+                )
+                dtensor_param = torch.nn.Parameter(dtensor_param)
+            else:
+                param = torch.nn.Parameter(param)
 
             # Keep high-precision values on CPU if needed
             if high_precision_init_val is not None:
@@ -1323,8 +1332,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 param._high_precision_init_val = high_precision_init_val
                 param.get_high_precision_init_val = MethodType(get, param)
                 param.clear_high_precision_init_val = MethodType(clear, param)
+                # Update the parameter based on its type
 
-            setattr(self, name, param)
+            if not is_dtensor:
+                self.module_setattr(name, param)
+            else:
+                self.module_setattr(name, dtensor_param)
 
     @abstractmethod
     def forward(self):
@@ -1355,7 +1368,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             workspace is being constructed or updated.
         cache_name: str, optional
             Key for caching.
-        update_workspace: bool, default = `True`
+        update_workspace: bool, default = True
             Update workspace with values from `tensor`.
         skip_update_flag: torch.Tensor, optional
             GPU flag to skip updating the workspace. Take precedence
@@ -1395,6 +1408,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 ):
                     reset_cache = True
             elif isinstance(out, MXFP8TensorStorage):
+                if quantizer.rowwise_usage and out._rowwise_data is None:
+                    reset_cache = True
+                elif quantizer.columnwise_usage and out._columnwise_data is None:
+                    reset_cache = True
+            elif isinstance(out, NVFP4TensorStorage):
                 if quantizer.rowwise_usage and out._rowwise_data is None:
                     reset_cache = True
                 elif quantizer.columnwise_usage and out._columnwise_data is None:
@@ -1481,14 +1499,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         self.wgrad_accumulation_and_reduce_hooks.append(wgrad_accumulation_and_reduce_hook)
 
+    def need_backward_dw(self):
+        """
+        Check if this module needs to execute the delayed weight gradient computation.
+        This method should be used at the beginning of self.backward_dw() to determine if it
+        should actually be executed or just return without doing anything.
+        User can also manually call this method to check that before calling into backward_dw().
+        """
+        return self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
+
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
+        if not self.need_backward_dw():
             return
-        with torch.cuda.nvtx.range(f"_{self.__class__.__name__}_wgrad"):
+        with get_nvtx_range_context(f"_{self.__class__.__name__}_wgrad"):
             (wgrad, bgrad), _ = self.wgrad_store.pop()
             if not self.fuse_wgrad_accumulation:
                 weight_tensor = noop_cat(self._get_weight_tensors())
@@ -1499,8 +1526,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
             del wgrad
             del bgrad
-            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-                wgrad_accumulation_and_reduce_hook()
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
+
+    def _trigger_wgrad_accumulation_and_reduce_hooks(self):
+        """
+        Trigger the wgrad accumulation and reduce hooks.
+        """
+        for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+            wgrad_accumulation_and_reduce_hook()
 
     def is_debug_iter(self) -> bool:
         """
@@ -1509,7 +1542,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         debug = TEDebugState.debug_enabled
         if not debug:
             return False
-        self._validate_name()
 
         # If layer is run first time in new iteration,
         # we need to check if the debug should be enabled for this layer -
@@ -1523,7 +1555,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 debug = False
             else:
                 debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
-        self.debug_last_iteration = TEDebugState.get_iteration()
+            self.fast_setattr("debug_last_iteration", TEDebugState.get_iteration())
+            self.fast_setattr("debug_enabled_in_this_iteration", debug)
+        else:
+            # If this is the same iteration as previous invocation of the module,
+            # we use the debug value from the first invocation in the iteration.
+            debug = self.debug_enabled_in_this_iteration
+
+        self.fast_setattr("debug_last_iteration", TEDebugState.get_iteration())
+
+        if self.wgrad_store is not None:
+            if debug and self.wgrad_store.delay_wgrad_compute():
+                raise RuntimeError("Delayed wgrad compute is not supported in debug mode.")
+
         return debug
 
     def no_debug_features_active(self, quantizers):
@@ -1534,7 +1578,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Sometimes features inform that they will not be enabled for particular layer
         # for multiple next iterations.
-        self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
+        self.fast_setattr(
+            "next_iter_when_debug_should_be_run", next_iter_when_debug_should_be_run(quantizers)
+        )
 
         if not run_current:
             return True
@@ -1546,22 +1592,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def _validate_name(self):
         """
         Validate name passed to the module.
-        This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
-        If no name is assigned, it creates a default name with layer count as the variable.
+        It creates a default name with layer count as the variable
+        which may be changed by the user of the module.
         """
         if self.name is not None:
             return
-        assert TEDebugState.debug_enabled
-        import nvdlfw_inspect.api as debug_api
 
-        if self.name is None:
-            debug_api.log_message(
-                "Names are not provided to debug modules. ",
-                "Creating and using generic names. Pass names to debug modules for better"
-                " insight. ",
-                level=logging.WARNING,
-            )
-            self.name = f"Layer_{TEDebugState.get_layer_count()}"
+        self.name = f"Layer_{TEDebugState.get_layer_count()}"
 
     def _check_weight_tensor_recipe_correspondence(self) -> None:
         """
@@ -1578,6 +1615,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         but the weight tensor is MXFP8Tensor (MXFP8BlockScaling is set in quantized_model_init()).
         """
         if not self.fp8 and not self.fp8_calibration:
+            return
+        if not self.primary_weights_in_fp8:
             return
         if not hasattr(self, "weight_names") or not self.weight_names:
             return

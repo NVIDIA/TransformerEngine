@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,7 +8,9 @@ This operation-based API is experimental and subject to change.
 
 """
 
-from transformer_engine.pytorch.ops.basic import *
-from transformer_engine.pytorch.ops.linear import Linear
-from transformer_engine.pytorch.ops.op import FusibleOperation
-from transformer_engine.pytorch.ops.sequential import Sequential
+from .basic import *
+from .fuser import register_backward_fusion, register_forward_fusion
+from .linear import Linear
+from .op import BasicOperation, FusedOperation, FusibleOperation
+from .sequential import Sequential
+from . import fused

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """MNIST training on single GPU"""
@@ -22,7 +22,13 @@ from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMo
 
 DIR = str(Path(__file__).resolve().parents[1])
 sys.path.append(str(DIR))
-from encoder.common import is_bf16_supported, get_quantization_recipe_from_name_string
+from encoder.common import (
+    is_bf16_supported,
+    get_quantization_recipe_from_name_string,
+    unpack_cached_datasets_if_available,
+)
+
+unpack_cached_datasets_if_available()
 
 IMAGE_H = 28
 IMAGE_W = 28
@@ -140,7 +146,7 @@ def eval_model(state, test_ds, batch_size, var_collect):
 
 def get_datasets():
     """Load MNIST train and test datasets into memory."""
-    train_ds = load_dataset("mnist", split="train", trust_remote_code=True)
+    train_ds = load_dataset("ylecun/mnist", split="train", trust_remote_code=True)
     train_ds.set_format(type="np")
     batch_size = train_ds["image"].shape[0]
     shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)
@@ -148,7 +154,7 @@ def get_datasets():
         "image": train_ds["image"].astype(np.float32).reshape(shape) / 255.0,
         "label": train_ds["label"],
     }
-    test_ds = load_dataset("mnist", split="test", trust_remote_code=True)
+    test_ds = load_dataset("ylecun/mnist", split="test", trust_remote_code=True)
     test_ds.set_format(type="np")
     batch_size = test_ds["image"].shape[0]
     shape = (batch_size, IMAGE_H, IMAGE_W, IMAGE_C)

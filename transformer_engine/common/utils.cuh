@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -16,6 +16,7 @@
 #endif
 
 #if !defined(__CUDACC_RTC__)
+#include <cassert>
 #include <cstdint>
 #else
 // Importing C++ standard headers is a pain with NVRTC

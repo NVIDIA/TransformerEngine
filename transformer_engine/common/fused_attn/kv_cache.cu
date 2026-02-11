@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -278,7 +278,7 @@ void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, in
 /***************************************************************************************************
  * KV Cache: Copy new KV tokens to the KV cache
  *   1. new_k and new_v are in qkv_format; k_cache and v_cache are in 'bshd' format
- *   2. cu_new_lens and cu_cached_lens are in shape [b + 1]; cu_cached_lens include the added lens
+ *   2. cu_new_lens and cu_cached_lens are of shape [b + 1]; cu_cached_lens include the added lens
  *      in current step
  *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1] and
  *      max_pages_per_seq = 1. We use the same underlying kernel for both non-paged and paged.

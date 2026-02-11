@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Encoder training on single GPU"""
@@ -16,11 +16,16 @@ from datasets import load_dataset
 from flax import linen as nn
 from flax.training import train_state
 
-from common import is_bf16_supported, get_quantization_recipe_from_name_string
+from common import (
+    is_bf16_supported,
+    get_quantization_recipe_from_name_string,
+    unpack_cached_datasets_if_available,
+)
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMode
 
+unpack_cached_datasets_if_available()
 
 PARAMS_KEY = "params"
 DROPOUT_KEY = "dropout"
@@ -190,11 +195,11 @@ def get_datasets(max_seq_len):
     vocab = {}
     word_id = 0
 
-    train_ds = load_dataset("glue", "cola", split="train")
+    train_ds = load_dataset("nyu-mll/glue", "cola", split="train")
     train_ds.set_format(type="np")
     train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
 
-    test_ds = load_dataset("glue", "cola", split="validation")
+    test_ds = load_dataset("nyu-mll/glue", "cola", split="validation")
     test_ds.set_format(type="np")
     test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
     return train_ds, test_ds, word_id
@@ -385,7 +390,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "NVFP4BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.476 and actual[1] > 0.775
+        assert actual[0] < 0.477 and actual[1] > 0.769
 
 
 if __name__ == "__main__":

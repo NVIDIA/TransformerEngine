@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,6 +11,7 @@ add_executable(test_operator
                test_cast_mxfp8_gated_swiglu.cu
                test_qdq.cu
                test_cast_mxfp8.cu
+               test_cast_mxfp8_grouped.cu
                test_cast_nvfp4_transpose.cu
                test_cast_float8blockwise.cu
                test_dequantize_mxfp8.cu
@@ -30,13 +31,8 @@ add_executable(test_operator
                test_causal_softmax.cu
                test_swizzle.cu
                test_swap_first_dims.cu
+               test_grouped_gemm.cu
                ../test_common.cu)
-
-# Add profiling and debug flags for CUDA compilation
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")                   # Generate line info for device code  
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -g")                          # Add debug symbols for host code
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --ptxas-options=-v")          # Add info about registers usage
-# Note: Using -lineinfo instead of -G to avoid conflicts and get line mapping
 
 # Find required packages
 find_package(OpenMP REQUIRED)

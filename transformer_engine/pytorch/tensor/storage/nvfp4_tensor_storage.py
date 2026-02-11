@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -13,13 +13,12 @@ import warnings
 
 import torch
 
-# import transformer_engine_torch as tex
+import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from ..quantized_tensor import QuantizedTensorStorage
+from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-# from ...constants import TE_DType as torch_to_transformer_engine_dtype
-from ..quantized_tensor import Quantizer
+from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from ...utils import _empty_tensor
 
 
@@ -46,34 +45,7 @@ class _FromNVFP4Func(torch.autograd.Function):
 
         # Dequantize row-wise data
         if tensor._rowwise_data is not None:
-            ### TODO(tmoon): Debug dequantize kernel and remove unfused impl
-            # return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
-
-            # Tensor properties
-            shape = list(tensor._rowwise_data.size())
-            shape[-1] *= 2
-            device = tensor._rowwise_data.device
-
-            # Convert FP4E2M1 values to FP32
-            data = tensor._rowwise_data.view(torch.uint8).to(torch.int32)
-            data = torch.stack((data & 0x0F, data >> 4), dim=-1).reshape(shape)
-            data = _fp4_e2m1_vals(device, dtype=torch.float32)[data]
-            data = data.to(torch.float32).contiguous()
-
-            # Convert FP8E4M3 block scales to FP32
-            block_scales = tensor._rowwise_scale_inv
-            block_scales = block_scales.reshape(-1, block_scales.size(-1))
-            block_scales = block_scales[: math.prod(shape[:-1]), : shape[-1] // 16]
-            block_scales = block_scales.view(torch.float8_e4m3fn).to(torch.float32)
-
-            # Convert amax to FP32 tensor scale
-            tensor_scale = tensor._amax_rowwise / (6.0 * 448.0)  # Scale by FP4E2M1 and FP8E4M3 max
-
-            # Apply scales
-            block_data = data.view(-1, 16)
-            block_data *= tensor_scale.view(()) * block_scales.reshape(-1, 1)
-
-            return data.to(dtype)
+            return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
 
         if tensor._columnwise_data is not None:
             raise NotImplementedError("Dequantizing column-wise NVFP4 data is not implemented yet!")
@@ -99,14 +71,28 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
     """
 
+    # Row-scaled FP4 data
     _rowwise_data: Optional[torch.Tensor]
+    # Column-scaled FP4 data
     _columnwise_data: Optional[torch.Tensor]
-    _quantizer: Optional[Quantizer]
+    # Block scaling factors for row-scaled FP4 data
     _rowwise_scale_inv: torch.Tensor
+    # Block scaling factors for column-scaled FP4 data
     _columnwise_scale_inv: torch.Tensor
-    _fp4_dtype: TE_DType
+    # Input absolute maximum value (used to compute tensor scale for
+    # row-scaled FP4 data)
     _amax_rowwise: torch.Tensor
+    # Input absolute maximum value (used to compute tensor scale for
+    # column-scaled FP4 data)
     _amax_columnwise: torch.Tensor
+
+    # Builder class for casting to MXFP8
+    _quantizer: Optional[Quantizer]
+    # FP4 data type
+    _fp4_dtype: TE_DType
+    # Whether scaling factors are in the swizzled format expected by
+    # GEMM
+    _with_gemm_swizzled_scales: bool
 
     def __new__(
         cls,
@@ -118,6 +104,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         amax_columnwise: torch.Tensor,
         fp4_dtype: TE_DType,
         quantizer: Optional[Quantizer],
+        with_gemm_swizzled_scales: bool,
         *args,
         **kwargs,
     ):
@@ -132,6 +119,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._amax_rowwise = amax_rowwise
         instance._amax_columnwise = amax_columnwise
+        instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
         return instance
 
@@ -159,6 +147,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "amax_columnwise": self._amax_columnwise,
             "fp4_dtype": self._fp4_dtype,
             "quantizer": self._quantizer,
+            "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], NVFP4TensorStorage]:
@@ -276,6 +265,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             amax_columnwise=self._amax_columnwise,
             quantizer=self._quantizer,
             fp4_dtype=self._fp4_dtype,
+            with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
         )
 
     def __repr__(self):

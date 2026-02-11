@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,8 +8,8 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.experimental.quantization_nvfp4 import NVFP4QuantizerRef
-from transformer_engine.pytorch.experimental import utils
+from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes import utils
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -122,8 +122,15 @@ def check_nvfp4_gemm_versus_reference(
     )
 
     # Create reference quantized tensors needed by reference GEMM
-    x_nvfp4_ref = ref_quantizer.quantize(x)
-    w_nvfp4_ref = ref_quantizer.quantize(w)
+    # Reference GEMM is only rowwise.
+    if x_columnwise:
+        x_nvfp4_ref = ref_quantizer.quantize(x.t().contiguous())
+    else:
+        x_nvfp4_ref = ref_quantizer.quantize(x)
+    if w_columnwise:
+        w_nvfp4_ref = ref_quantizer.quantize(w.t().contiguous())
+    else:
+        w_nvfp4_ref = ref_quantizer.quantize(w)
 
     # Reference GEMM using quantizer's qgemm method
     y_ref = ref_quantizer.qgemm(
@@ -155,6 +162,10 @@ def check_nvfp4_gemm_versus_reference(
     use_grad = False
     use_split_accumulator = False
 
+    if x_columnwise:
+        x_nvfp4_native.update_usage(rowwise_usage=False)
+    if w_columnwise:
+        w_nvfp4_native.update_usage(rowwise_usage=False)
     # Native cuBLAS GEMM
     # return type is out, bias_grad, gelu_input, extra_output
     # We are just capturing out.
@@ -212,11 +223,11 @@ def check_nvfp4_gemm_versus_reference(
 @pytest.mark.parametrize(
     "is_x_columnwise, is_w_columnwise",
     [
-        (False, False),  # Only rowwise x rowwise is supported by reference GEMM
-        # Note: Reference GEMM expects inputs as (M,K) x (N,K) with rowwise quantization
-        # Columnwise layouts are not supported by the reference implementation
+        (False, False),  # TN
+        (True, False),  # NN
+        (True, True),  # NT
     ],
-    ids=["rowxrow"],
+    ids=["rowxrow", "colxrow", "colxcol"],
 )
 def test_nvfp4_gemm_versus_reference(
     M: int,

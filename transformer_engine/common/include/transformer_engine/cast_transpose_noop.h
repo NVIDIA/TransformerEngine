@@ -1,11 +1,11 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file transpose_with_noop.h
- *  \brief Functions handling transposes with no-op.
+/*! \file cast_transpose_noop.h
+ *  \brief Transpose functions with no-op flag.
  */
 
 #ifndef TRANSFORMER_ENGINE_CAST_TRANSPOSE_WITH_NOOP_H_

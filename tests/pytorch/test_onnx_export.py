@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -68,7 +68,7 @@ if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
 fp8_recipes.append(None)
 
-supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "clamped_swiglu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -713,6 +713,14 @@ def test_export_layernorm_mlp_activation(seed_default_rng, activation):
     _test_export_layernorm_mlp(activation=activation)
 
 
+# Quantization recipes with fp8_dpa=True for attention emulation export test
+dpa_quantization_recipes = [None]  # None = no quantization
+if fp8_available:
+    dpa_quantization_recipes.append(recipe.DelayedScaling(fp8_dpa=True))
+    dpa_quantization_recipes.append(recipe.Float8CurrentScaling(fp8_dpa=True))
+
+
+@pytest.mark.parametrize("fp8_recipe", dpa_quantization_recipes)
 @pytest.mark.parametrize(
     "precision,      use_mask, attn_mask_type",
     [
@@ -730,6 +738,7 @@ def test_export_core_attention(
     precision: torch.dtype,
     use_mask: bool,
     attn_mask_type: str,
+    fp8_recipe: recipe.Recipe,
 ):
     # Set dimensions (these are arbitrary).
     seq_len, batch_size, num_attention_heads, kv_channels = (64, 4, 1, 64)
@@ -749,22 +758,25 @@ def test_export_core_attention(
 
     mask_str = get_attn_mask_str(use_mask, attn_mask_type)
     high_prec_str = dtype2str(precision)
-    fname = f"te.core_attention{mask_str}{high_prec_str}.onnx"
+    fp8_str = "_fp8_dpa" if fp8_recipe is not None else ""
+    fname = f"te.core_attention{fp8_str}{mask_str}{high_prec_str}.onnx"
+
+    is_fp8 = fp8_recipe is not None
 
     model = te.attention.DotProductAttention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
-        attention_dropout=0.5,
         qkv_format=qkv_format,
         attn_mask_type=attn_mask_type,
     ).to(device="cuda")
-    do_export(model, inp, fname, input_names=input_names, fp8_recipe=None)
-    te_outputs = te_infer(model, inp, is_fp8=False, fp8_recipe=None)
+    do_export(model, inp, fname, input_names=input_names, fp8_recipe=fp8_recipe)
+    te_outputs = te_infer(model, inp, is_fp8=is_fp8, fp8_recipe=fp8_recipe)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16,):
         return
+    atol = 5e-1 if is_fp8 else 1e-2
     validate_result(
-        fname, inp, model, is_fp8=True, atol=1e-2, input_names=input_names, te_outputs=te_outputs
+        fname, inp, model, is_fp8=True, atol=atol, input_names=input_names, te_outputs=te_outputs
     )
 
 
