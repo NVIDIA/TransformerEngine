@@ -1263,19 +1263,15 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_unquantized_tensor_w
 }
 
 std::vector<size_t> compressShapeTo2D(const std::vector<size_t>& data) {
-    // If 2 or fewer elements, return as-is
-    if (data.size() <= 2) {
-        return data;
-    }
-    // Multiply all elements except the last
-    size_t product = std::accumulate(
-        data.begin(),
-        data.end() - 1,
-        static_cast<size_t>(1),
-        std::multiplies<size_t>()
-    );
-    // Return new vector of size 2: {product, last}
-    return std::vector<size_t>{ product, data.back() };
+  // If 2 or fewer elements, return as-is
+  if (data.size() <= 2) {
+    return data;
+  }
+  // Multiply all elements except the last
+  size_t product = std::accumulate(data.begin(), data.end() - 1, static_cast<size_t>(1),
+                                   std::multiplies<size_t>());
+  // Return new vector of size 2: {product, last}
+  return std::vector<size_t>{product, data.back()};
 }
 
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
