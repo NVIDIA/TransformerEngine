@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusible operation for bias."""
+"""Fusible operation for grouped linear layer."""
 
 from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
@@ -36,6 +36,8 @@ from ..op import BasicOperation, OperationContext
 
 class GroupedLinear(BasicOperation):
     r"""Apply multiple linear transformations: :math:``y_i = x_i W_i^T + b_i``
+
+    This feature is experimental and subject to change.
 
     This is equivalent to splitting the input tensor along its first
     dimension, applying a separate ``torch.nn.Linear`` to each split,

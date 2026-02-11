@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fusible operation for multiplying with extra input tensor."""
+"""Fusible operation for SwiGLU and variants."""
 
 from __future__ import annotations
 from collections.abc import Iterable
@@ -28,7 +28,7 @@ class SwiGLU(BasicOperation):
 
     .. math::
 
-       \text{GEGLU}(a,b) = \text{SiLU}(a) * b
+       \text{SwiGLU}(a,b) = \text{SiLU}(a) * b
 
     where
 
@@ -46,8 +46,22 @@ class SwiGLU(BasicOperation):
 
     The Sigmoid Linear Unit (SiLU) gating function is also known as
     the swish function. See
-    ``GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>``__
-    and ``Gaussian Error Linear Units (GELUs)<https://arxiv.org/abs/1606.08415>``__.
+    ``GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>``__.
+
+    Parameters
+    ----------
+    cache_quantized_input : bool, default = False
+        Quantize input tensor when caching for use in the backward
+        pass. This will typically reduce memory usage but require
+        extra compute and increase numerical error. This feature is
+        highly experimental.
+    glu_interleave_size : int, optional
+        When set, the GLU activations will use a block interleaved
+        format. Instead of interpreting the input tensor as a
+        concatenation of gates and linear units, it will be
+        interpreted as alternating blocks of gates and linear units.
+        This data format is experimental and primarily intended to
+        enable advanced fused kernels.
 
     """
 
