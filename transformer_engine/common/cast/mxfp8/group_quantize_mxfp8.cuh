@@ -145,7 +145,8 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
       NVTE_DEVICE_ERROR("Tensor data pointer must be 16B aligned");
     }
     if (global_dim_X % CHUNK_DIM_X != 0) {
-      NVTE_DEVICE_ERROR("The grouped tensor must be divisible by 128x128 tiles without a tail tile.");
+      NVTE_DEVICE_ERROR(
+          "The grouped tensor must be divisible by 128x128 tiles without a tail tile.");
     }
 
     asm volatile(
@@ -999,9 +1000,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
           if constexpr (IS_DBIAS) {
             common::grouped_reduce_dbias<IType>(
-              shape_rep, num_tensors, first_logical_dim, last_logical_dim,
-              offsets_ptr, first_dims_ptr, last_dims_ptr,
-              dbias, workspace_ptr, CHUNK_DIM_Y, stream);
+                shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
+                first_dims_ptr, last_dims_ptr, dbias, workspace_ptr, CHUNK_DIM_Y, stream);
           }
 
               NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)

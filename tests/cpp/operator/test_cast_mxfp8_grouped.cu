@@ -288,7 +288,7 @@ void performTest(const ProcessingMethod processing_method,
         rowwise_sfs_num += rowwise_sfs;
         colwise_sfs_num += colwise_sfs;
         sum_of_last_dims += K;
-        
+
         rowwise_scales_offset[t+1] = rowwise_sfs_num;
         colwise_scales_offset[t+1] = colwise_sfs_num;
         dbias_offsets[t+1] = sum_of_last_dims;
@@ -370,7 +370,7 @@ void performTest(const ProcessingMethod processing_method,
     cudaMemcpy(offsets_d, offsets_h.data(), offsets_size, cudaMemcpyHostToDevice);
 
     NVTEShape logical_shape_ = nvte_make_shape(logical_shape_vec.data(), logical_shape_vec.size());
-    
+
     std::vector<size_t> dbias_logical_shape_vec= {num_tensors, cols};
     NVTEShape dbias_logical_shape_ = nvte_make_shape(dbias_logical_shape_vec.data(),
                                                      dbias_logical_shape_vec.size());
