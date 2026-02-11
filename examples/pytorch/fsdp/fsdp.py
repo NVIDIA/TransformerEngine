@@ -306,12 +306,6 @@ def get_precision_preset(precision_value):
         case "nvfp4":
             recipe = NVFP4BlockScaling()
             return torch.bfloat16, False, recipe
-        case _:
-            # Default to fp8 behavior
-            recipe = DelayedScaling(
-                fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
-            )
-            return torch.bfloat16, False, recipe
 
 
 def get_recipe_for_precision(precision_value):
@@ -395,8 +389,6 @@ def train(opts):
 
     # Always log the final configuration being used
     dist_print(f"Training configuration: dtype={dtype}, FP8={'disabled' if no_fp8 else 'enabled'}")
-    if not no_fp8 and recipe is not None:
-        dist_print(f"Using FP8 recipe: {type(recipe).__name__}")
 
     # Construct a simple homogeneous model (only one layer type) with NO PARALLELISM
     layer_args, layer_kwargs = get_layer_args(opts)
