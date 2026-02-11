@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 300" width="100%" style="max-width: 700px;">
+  <style>
+    .tensor-fill { fill: #87CEEB; stroke: #444; stroke-width: 2; }
+    .scale-fill { fill: #FFA500; stroke: #444; stroke-width: 2; }
+    .grid-line { stroke: #444; stroke-width: 2; fill: none; }
+    .dots-text { font: bold 24px sans-serif; fill: #333; text-anchor: middle; }
+    .label { font: 12px sans-serif; fill: #333; text-anchor: middle; }
+  </style>
+  
+  <!-- Left tensor (128x128 blocks) - FP8 tensor -->
+  <!-- Main rectangle with white background -->
+  <rect x="60" y="40" width="260" height="240" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
+  
+  <!-- Blue grid area (upper-left) -->
+  <rect x="60" y="40" width="180" height="180" fill="#87CEEB" stroke="#444" stroke-width="2"/>
+  
+  <!-- Grid lines for 3x3 blocks -->
+  <line x1="120" y1="40" x2="120" y2="220" class="grid-line"/>
+  <line x1="180" y1="40" x2="180" y2="220" class="grid-line"/>
+  <line x1="60" y1="100" x2="240" y2="100" class="grid-line"/>
+  <line x1="60" y1="160" x2="240" y2="160" class="grid-line"/>
+  
+  <!-- Dots in white area (right side) -->
+  <text x="280" y="90" class="dots-text">…</text>
+  <text x="280" y="150" class="dots-text">…</text>
+  <text x="280" y="210" class="dots-text">…</text>
+  
+  <!-- Dots in white area (bottom) -->
+  <text x="90" y="260" class="dots-text">⋮</text>
+  <text x="150" y="260" class="dots-text">⋮</text>
+  <text x="210" y="260" class="dots-text">⋮</text>
+  <text x="280" y="260" class="dots-text">⋱</text>
+  
+  <!-- Label -->
+  <text x="190" y="20" class="label">FP8 Tensor (128×128 blocks)</text>
+  
+  
+  <!-- Right tensor (128x4 blocks) - Scaling factors (orange) -->
+  <!-- Main rectangle with white background -->
+  <rect x="480" y="40" width="120" height="240" fill="#FFFFFF" stroke="#444" stroke-width="2"/>
+  
+  <!-- Orange grid area (upper-left) -->
+  <rect x="480" y="40" width="60" height="180" fill="#FFA500" stroke="#444" stroke-width="2"/>
+  
+  <!-- Grid lines for narrow blocks (3 columns x 3 rows) -->
+  <line x1="500" y1="40" x2="500" y2="220" class="grid-line"/>
+  <line x1="520" y1="40" x2="520" y2="220" class="grid-line"/>
+  <line x1="480" y1="100" x2="540" y2="100" class="grid-line"/>
+  <line x1="480" y1="160" x2="540" y2="160" class="grid-line"/>
+  
+  <!-- Dots in white area (right side) -->
+  <text x="565" y="90" class="dots-text">…</text>
+  <text x="565" y="150" class="dots-text">…</text>
+  <text x="565" y="210" class="dots-text">…</text>
+  
+  <!-- Dots in white area (bottom) -->
+  <text x="500" y="260" class="dots-text">⋮</text>
+  <text x="530" y="260" class="dots-text">⋮</text>
+  <text x="565" y="260" class="dots-text">⋱</text>
+  
+  <!-- Label -->
+  <text x="540" y="20" class="label">Scaling Factors (128×4 blocks)</text>
+</svg>

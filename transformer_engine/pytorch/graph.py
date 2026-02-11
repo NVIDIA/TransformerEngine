@@ -860,11 +860,21 @@ def _make_graphed_callables(
         return functionalized
 
     def make_graphed_attribute_functions(graph_idx):
+        # Get te modules for current graph
+        te_modules = visited_te_modules.get(graph_idx, set())
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
             if need_bwd_dw_graph.get(graph_idx, False):
                 bwd_dw_graphs[graph_idx].replay()
+
+                # Trigger the grad accumulation hook for wgrad graphs.
+                for module in te_modules:
+                    if (
+                        isinstance(module, TransformerEngineBaseModule)
+                        and module.need_backward_dw()
+                    ):
+                        module._trigger_wgrad_accumulation_and_reduce_hooks()
 
         # Attach reset as an attribute to the graphed callable.
         def reset():

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 420">
+  <defs>
+    <style>
+      /* Common styles loaded from diagram-colors.css: .hp, .fp8, .quantize, .amax, .text, .title, .label, .box-orange, .box-dashed */
+      /* Diagram-specific styles for arrows */
+      .arrow {
+        stroke: #616161;
+        stroke-width: 2;
+        fill: none;
+        marker-end: url(#arrowhead);
+      }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 10 3, 0 6" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- Current Scaling Section -->
+  <text x="250" y="30" class="title">Current Scaling</text>
+  
+  <!-- Tensor box -->
+  <rect x="150" y="60" width="200" height="60" class="hp" rx="5"/>
+  <text x="250" y="95" class="text">Tensor</text>
+  
+  <!-- Arrow to amax computation -->
+  <path d="M 250 120 L 250 160" class="arrow"/>
+  
+  <!-- Amax computation box -->
+  <rect x="150" y="160" width="200" height="60" class="amax" rx="5"/>
+  <text x="250" y="195" class="text">Amax Computation</text>
+  
+  <!-- Arrow to quantization -->
+  <path d="M 250 220 L 250 260" class="arrow"/>
+  
+  <!-- Quantization box -->
+  <rect x="125" y="260" width="250" height="60" class="quantize" rx="5"/>
+  <text x="250" y="285" class="text">Quantization</text>
+  <text x="250" y="305" class="label">(uses tensor + amax)</text>
+  
+  <!-- Arrow to FP8 tensor -->
+  <path d="M 250 320 L 250 360" class="arrow"/>
+  
+  <!-- FP8 Tensor result -->
+  <rect x="150" y="360" width="200" height="40" class="fp8" rx="5"/>
+  <text x="250" y="385" class="text">FP8 Tensor</text>
+  
+  
+  <!-- Delayed Scaling Section -->
+  <text x="750" y="30" class="title">Delayed Scaling</text>
+  
+  <!-- Tensor box with amax history subbox -->
+  <rect x="650" y="60" width="200" height="80" class="hp" rx="5"/>
+  <text x="750" y="90" class="text">Tensor</text>
+  
+  <!-- Amax history subbox (below tensor) -->
+  <rect x="660" y="110" width="180" height="25" class="box-orange box-dashed" rx="3"/>
+  <text x="750" y="127" class="label">amax history</text>
+  
+  <!-- Arrow to quantization -->
+  <path d="M 750 140 L 750 180" class="arrow"/>
+  <text x="820" y="162" class="small-text" style="text-anchor: start;">read amax</text>
+  
+  <!-- Quantization box -->
+  <rect x="625" y="180" width="250" height="80" class="quantize" rx="5"/>
+  <text x="750" y="210" class="text">Quantization</text>
+  <text x="750" y="230" class="label">(uses tensor + amax from history)</text>
+  <text x="750" y="250" class="label">(updates amax history)</text>
+  
+  <!-- Arrow back to history (curved) -->
+  <path d="M 625 220 Q 590 220 590 127 L 660 127" class="arrow"/>
+  <text x="565" y="175" class="small-text" style="text-anchor: end;">update amax</text>
+  
+  <!-- Arrow to FP8 tensor -->
+  <path d="M 750 260 L 750 300" class="arrow"/>
+  
+  <!-- FP8 Tensor result -->
+  <rect x="650" y="300" width="200" height="40" class="fp8" rx="5"/>
+  <text x="750" y="325" class="text">FP8 Tensor</text>
+  
+</svg>
+
