@@ -710,14 +710,11 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     // TODO(jberchtold): make this memset smaller by only zeroing the expert weights that correspond to groups with size zero.
     cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
-    nvte_grouped_gemm(
-      rhs_tensor, rhs_is_trans,
-      lhs_tensor, lhs_is_trans,
-      nullptr, out_tensor,
-      alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
-      workspace_cublas.data(),
-      nullptr,  // config (use defaults)
-      stream);
+    nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
+                      alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
+                      workspace_cublas.data(),
+                      nullptr,  // config (use defaults)
+                      stream);
 
     return ffi_with_cuda_error_check();
   }
@@ -750,14 +747,11 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   // This memset is required because the group sizes may not fill the full buffer since we overallocate for the worst case. However, in theory unused space on the grouped axis should not be utilizied downstream, but it seems like somehow it is utilized.
   cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
-  nvte_grouped_gemm(
-    rhs_tensor, rhs_is_trans,
-    lhs_tensor, lhs_is_trans,
-    nullptr, out_tensor,
-    alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
-    workspace_cublas.data(),
-    nullptr,  // config (use defaults)
-    stream);
+  nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
+                    alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
+                    workspace_cublas.data(),
+                    nullptr,  // config (use defaults)
+                    stream);
 
   // std::vector<int64_t> host_group_sizes(num_gemms);
   // cudaMemcpyAsync(host_group_sizes.data(), group_sizes.untyped_data(), num_gemms * sizeof(int32_t),

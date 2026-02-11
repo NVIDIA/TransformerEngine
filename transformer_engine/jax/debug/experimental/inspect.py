@@ -152,6 +152,7 @@ def inspect_array(x: jnp.ndarray, name: str) -> jnp.ndarray:
     # TODO: Handle the name of the tensor in the primitive and output files
     return _inspect(x)
 
+
 def compare(a: jnp.ndarray, b: jnp.ndarray, name: str) -> jnp.ndarray:
     """Utility function to compare two JAX arrays and print their differences.
 
@@ -165,13 +166,23 @@ def compare(a: jnp.ndarray, b: jnp.ndarray, name: str) -> jnp.ndarray:
     """
     # a, b = b, a
 
-    diff = a-b
-    jax.debug.print("Comparing arrays {name}: min={min}, max={max}, mean={mean}, std={std}", name=name, min=jnp.min(diff), max=jnp.max(diff), mean=jnp.mean(diff), std=jnp.std(diff))
+    diff = a - b
+    jax.debug.print(
+        "Comparing arrays {name}: min={min}, max={max}, mean={mean}, std={std}",
+        name=name,
+        min=jnp.min(diff),
+        max=jnp.max(diff),
+        mean=jnp.mean(diff),
+        std=jnp.std(diff),
+    )
 
     return a
 
-    out_f32 = inspect_array(a.astype(jnp.float32) - b.astype(jnp.float32), name) + b.astype(jnp.float32)
+    out_f32 = inspect_array(a.astype(jnp.float32) - b.astype(jnp.float32), name) + b.astype(
+        jnp.float32
+    )
     return out_f32.astype(a.dtype)
+
 
 def load_array_dump(filename: str, shape: tuple, dtype: jnp.dtype) -> jnp.ndarray:
     """Utility function to load a JAX array from a dumped binary file.
