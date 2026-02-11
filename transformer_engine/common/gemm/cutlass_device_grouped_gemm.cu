@@ -13,6 +13,7 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <cstdlib>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -83,7 +84,8 @@ void generic_moe_gemm_kernelLauncher(ElementInput *A, ElementSF *SFA, const void
                                      const void **ptr_SFB_list, ElementC *D,
                                      const int64_t *gemm_m_per_expert, int gemm_n, int gemm_k,
                                      int num_experts, size_t workspaceSize, void *workspace,
-                                     cudaStream_t stream, int *kernel_occupancy = nullptr) {
+                                     cudaStream_t stream, int math_sm_count,
+                                     int *kernel_occupancy = nullptr) {
   static_assert(cute::is_same_v<ElementInput, cutlass::float_e4m3_t> ||
                     cute::is_same_v<ElementInput, cutlass::float_e5m2_t>,
                 "Unsupported input type. Expected e4m3 or e5m2.");
@@ -120,7 +122,7 @@ void generic_moe_gemm_kernelLauncher(ElementInput *A, ElementSF *SFA, const void
   using StageCountType = cutlass::gemm::collective::StageCountAuto;
 
   // Runtime Cluster Shape
-  using ClusterShape = Shape<int32_t, int32_t, _1>;
+  using ClusterShape = cute::conditional_t<DGrad, Shape<_2, _2, _1>, Shape<_2, _2, _1>>;
 
   struct MMA2SMConfig {
     using MmaTileShape =
@@ -222,12 +224,11 @@ void generic_moe_gemm_kernelLauncher(ElementInput *A, ElementSF *SFA, const void
   fusion_args.beta_ptr_array = nullptr;
   fusion_args.dBeta = {_0{}, _0{}, 0};
 
-  cutlass::KernelHardwareInfo hw_info;
-  // Change device_id to another value if you are running on a machine with multiple GPUs and wish
-  // to use a GPU other than that with device ID 0.
-  hw_info.device_id = 0;
-  hw_info.sm_count =
-      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+  int sm_count = std::getenv("NVTE_EXT_MARGIN_SM") != nullptr ? math_sm_count : 0;
+  cutlass::KernelHardwareInfo hw_info =
+      cutlass::KernelHardwareInfo::make_kernel_hardware_info<GemmKernel2SM>(
+          0 /* device_id */, sm_count /* sm_count: 0 means auto-query */,
+          0 /* max_active_clusters: auto-query */, stream);
 
   if (!is_static_v<ClusterShape>) {
     hw_info.cluster_shape = DGrad ? dim3(2, 2, 1) : dim3(4, 4, 1);
@@ -338,21 +339,25 @@ void nvte_device_cutlass_grouped_gemm(const void **A_and_SF_addrs, const NVTETen
       if (grad) {
         generic_moe_gemm_kernelLauncher<ABType, ABSFType, DType, true, true>(
             inputB_ptr, inputB_SF_ptr, A_and_SF_addrs, A_and_SF_addrs + num_gemms, outputD_ptr,
-            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
+            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream,
+            math_sm_count);
       } else {
         generic_moe_gemm_kernelLauncher<ABType, ABSFType, DType, false, true>(
             inputB_ptr, inputB_SF_ptr, A_and_SF_addrs, A_and_SF_addrs + num_gemms, outputD_ptr,
-            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
+            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream,
+            math_sm_count);
       }
     } else {
       if (grad) {
         generic_moe_gemm_kernelLauncher<ABType, ABSFType, DType, true, false>(
             inputB_ptr, inputB_SF_ptr, A_and_SF_addrs, A_and_SF_addrs + num_gemms, outputD_ptr,
-            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
+            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream,
+            math_sm_count);
       } else {
         generic_moe_gemm_kernelLauncher<ABType, ABSFType, DType, false, false>(
             inputB_ptr, inputB_SF_ptr, A_and_SF_addrs, A_and_SF_addrs + num_gemms, outputD_ptr,
-            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream);
+            m_splits, gemm_m, gemm_k, num_gemms, workspaceSize, workspace_ptr, stream,
+            math_sm_count);
       }
     }
   };
@@ -569,7 +574,7 @@ void generic_moe_gemm_wgrad_kernelLauncher(ElementInput *A, ElementSF *SFA, Elem
                                            int gemm_n, const int64_t *gemm_k_per_expert,
                                            int total_gemm_k, int num_experts, bool accumulate,
                                            bool *accumulate_mask, size_t workspaceSize,
-                                           void *workspace, cudaStream_t stream,
+                                           void *workspace, cudaStream_t stream, int math_sm_count,
                                            int *kernel_occupancy = nullptr) {
   static_assert(cute::is_same_v<ElementInput, cutlass::float_e4m3_t> ||
                     cute::is_same_v<ElementInput, cutlass::float_e5m2_t>,
@@ -606,7 +611,7 @@ void generic_moe_gemm_wgrad_kernelLauncher(ElementInput *A, ElementSF *SFA, Elem
   using StageCountType = cutlass::gemm::collective::StageCountAuto;
 
   // Runtime Cluster Shape
-  using ClusterShape = Shape<int32_t, int32_t, _1>;
+  using ClusterShape = Shape<_2, _2, _1>;
 
   struct MMA2SMConfig {
     using MmaTileShape = Shape<_256, _128, _128>;
@@ -758,12 +763,11 @@ void generic_moe_gemm_wgrad_kernelLauncher(ElementInput *A, ElementSF *SFA, Elem
   fusion_args.beta_ptr_array = beta_ptr_list;
   fusion_args.dBeta = {_0{}, _0{}, 1};
 
-  cutlass::KernelHardwareInfo hw_info;
-  // Change device_id to another value if you are running on a machine with multiple GPUs and wish
-  // to use a GPU other than that with device ID 0.
-  hw_info.device_id = 0;
-  hw_info.sm_count =
-      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+  int sm_count = std::getenv("NVTE_EXT_MARGIN_SM") != nullptr ? math_sm_count : 0;
+  cutlass::KernelHardwareInfo hw_info =
+      cutlass::KernelHardwareInfo::make_kernel_hardware_info<GemmKernel2SM>(
+          0 /* device_id */, sm_count /* sm_count: 0 means auto-query */,
+          0 /* max_active_clusters: auto-query */, stream);
 
   if (!is_static_v<ClusterShape>) {
     hw_info.cluster_shape = dim3(2, 2, 1);
@@ -889,12 +893,12 @@ void nvte_device_cutlass_grouped_gemm_wgrad(
       generic_moe_gemm_wgrad_kernelLauncher<ABType, ABSFType, OutType, true>(
           inputA_ptr, inputA_SF_ptr, inputB_ptr, inputB_SF_ptr, outputD_ptr_list, gemm_m, gemm_n,
           m_splits, total_gemm_k, num_gemms, accumulate, accumulate_mask, workspaceSize,
-          workspace_ptr, stream);
+          workspace_ptr, stream, math_sm_count);
     } else {
       generic_moe_gemm_wgrad_kernelLauncher<ABType, ABSFType, OutType, false>(
           inputA_ptr, inputA_SF_ptr, inputB_ptr, inputB_SF_ptr, outputD_ptr_list, gemm_m, gemm_n,
           m_splits, total_gemm_k, num_gemms, accumulate, accumulate_mask, workspaceSize,
-          workspace_ptr, stream);
+          workspace_ptr, stream, math_sm_count);
     }
   };
   auto dispatch_output_dtype = [&](auto ab_dtype) {
