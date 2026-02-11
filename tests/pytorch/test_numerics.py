@@ -2041,9 +2041,7 @@ def test_grouped_linear_m_splits_tensor(single_weight):
     )
     with torch.no_grad():
         if single_weight:
-            for i, w in enumerate(
-                test_model.grouped_weight_storage.split_into_quantized_tensors()
-            ):
+            for i, w in enumerate(test_model.grouped_weight_storage.split_into_quantized_tensors()):
                 w.copy_(ref_weights[i])
         else:
             for i in range(num_gemms):
