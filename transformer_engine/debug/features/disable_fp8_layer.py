@@ -2,17 +2,27 @@
 #
 # See LICENSE for license information.
 
-"""DisableFP8Layer Feature support for nvidia-dlframework-inspect"""
+"""DisableFP8Layer Feature support for nvidia-dlframework-inspect
 
-import nvdlfw_inspect.api as debug_api
-from nvdlfw_inspect.registry import Registry, api_method
+DEPRECATED: This is a backward compatibility alias for DisableQuantizationLayer.
+New code should use DisableQuantizationLayer instead, which works with all quantization formats.
+"""
+
+import warnings
+
+from nvdlfw_inspect.registry import Registry
+from transformer_engine.debug.features.disable_quantization_layer import DisableQuantizationLayer
 
 
 @Registry.register_feature(namespace="transformer_engine")
-class DisableFP8Layer:
+class DisableFP8Layer(DisableQuantizationLayer):
     """
     Disables all FP8 GEMMs in the layer.
 
+    .. deprecated::
+        Use :class:`DisableQuantizationLayer` instead. This class is maintained for
+        backward compatibility only. DisableQuantizationLayer works with all quantization
+        formats (FP8, NVFP4, etc.), not just FP8.
 
     Example
     -------
@@ -20,36 +30,19 @@ class DisableFP8Layer:
 
         example_disable_fp8_layer:
             enabled: True
-        layers:
-            layer_types: [fc1]
-        transformer_engine:
-            DisableFP8Layer:
-                enabled: True
+            layers:
+                layer_types: [fc1]
+            transformer_engine:
+                DisableFP8Layer:  # Deprecated: use DisableQuantizationLayer
+                    enabled: True
     """
 
-    @api_method
-    def fp8_gemm_enabled(
-        self, config, layer_name: str, gemm: str, iteration: int
-    ):  # pylint: disable=unused-argument
-        """API call responsible for selecting between high-precision and FP8 GEMM execution."""
-        for key in config:
-            if key not in ["enabled", "gemm"]:
-                raise ValueError(f'[NVTORCH INSPECT ERROR] Unexpected key in config: "{key}".')
-        # If FP8 training, disable FP8 for the selected layers if this feature is enabled in config.
-        debug_api.log_message("FP8 Disabled", layer_name)
-
-        # If this feature is invoked, then FP8 GEMM is disabled.
-        # If not, then default behavior in TransformerEngineAPI
-        # is that fp8_gemm() API call returns True.
-        return False, iteration + 1
-
-    def parse_config_and_api(self, config, **_kwargs):
-        """Determines whether to run the API
-        DisableFP8Layer is the only feature provided by the Transformer Engine
-        which does not inherit from TEConfigAPIMapper - this mapper is primarly responsible for
-        parsing gemms and tensors fields from the config, which are not needed for this feature.
-
-        Explanation of the parse_config_and_api can be found in the
-        nvidia-dlframework-inspect documentation.
-        """
-        return config["enabled"], None
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "DisableFP8Layer is deprecated. "
+            "Use DisableQuantizationLayer instead, which works with all quantization "
+            "formats (FP8, NVFP4, etc.).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)
