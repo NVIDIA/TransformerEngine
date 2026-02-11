@@ -451,7 +451,9 @@ def _make_graphed_callables(
                 if is_training:
                     inputs = tuple(i for i in static_input_surface if i.requires_grad)
                     with _none_grad_context_wrapper(inputs):
-                        outputs_requiring_grad = tuple(o for o in outputs if o is not None and o.requires_grad)
+                        outputs_requiring_grad = tuple(
+                            o for o in outputs if o is not None and o.requires_grad
+                        )
                         torch.autograd.backward(
                             outputs_requiring_grad,
                             grad_tensors=tuple(torch.empty_like(o) for o in outputs_requiring_grad),
