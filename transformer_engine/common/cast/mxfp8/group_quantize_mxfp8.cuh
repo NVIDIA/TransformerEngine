@@ -28,18 +28,13 @@ namespace dispatch {
 namespace mxfp8 {
 namespace group_quantize_kernel {
 
+using namespace dispatch::common;
+
 constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
 __device__ alignas(128) CUtensorMap g_tensor_maps_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 __device__ alignas(128) CUtensorMap g_tensor_maps_act_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_rowwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-
-enum ShapeRepresentation {
-  SAME_BOTH_DIMS = 0,
-  VARYING_FIRST_DIM = 1,
-  VARYING_LAST_DIM = 2,
-  VARYING_BOTH_DIMS = 3
-};
 
 constexpr size_t SCALE_DIM_Y = 32;
 constexpr size_t SCALE_DIM_X = 32;
@@ -144,10 +139,13 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
   if constexpr (is_blackwell) {
     const size_t global_stride_bytes = global_dim_X * data_type_size_bytes;
     if (global_stride_bytes % TMA_GMEM_ALIGNMENT != 0) {
-      NVTE_DEVICE_ERROR("Shape not supported, as data stride must be 16B aligned.");
+      NVTE_DEVICE_ERROR("Shape not supported. Data stride must be 16B aligned.");
     }
     if (global_data_ptr % TMA_GMEM_ALIGNMENT != 0) {
       NVTE_DEVICE_ERROR("Tensor data pointer must be 16B aligned");
+    }
+    if (global_dim_X % CHUNK_DIM_X != 0) {
+      NVTE_DEVICE_ERROR("The grouped tensor must be divisible by 128x128 tiles without a tail tile.");
     }
 
     asm volatile(
@@ -782,8 +780,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void group_quantize(const GroupedTensor *input, const GroupedTensor *activations,
-                    const Tensor *noop, GroupedTensor *output, Tensor *dbias, Tensor *workspace,
-                    cudaStream_t stream) {
+                    const Tensor *noop, GroupedTensor *output, GroupedTensor *dbias,
+                    Tensor *workspace, cudaStream_t stream) {
   using namespace group_quantize_kernel;
 
   checkCuDriverContext(stream);
@@ -834,23 +832,14 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
   const size_t num_tensors = input->num_tensors;
 
-  size_t blocks_X = 0;
-  size_t blocks_Y = 0;
-
-  if (is_single_tensor) {
-    blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
-    blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
-  } else {
-    NVTE_CHECK(num_tensors < MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+  if (!is_single_tensor) {
+    NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
                "Number of tensors in a group is larger than "
                "the MAX number of supported descriptors (64).");
-    // Only full tiles supported
-    NVTE_CHECK(last_logical_dim % CHUNK_DIM_X == 0,
-               "Last dimension of a grouped tensor should be divisible by 128.");
-    blocks_Y = 1;
-    blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
   }
-  const dim3 grid(blocks_X, blocks_Y);
+
+  NVTE_CHECK(elts_total % ELTS_PER_CHUNK == 0, "Only full-tile grouped tensors supported.");
+  const dim3 grid(elts_total / ELTS_PER_CHUNK);
   const size_t block_size = THREADS_PER_CHUNK;
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
@@ -879,18 +868,20 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     NVTE_CHECK(scales_colwise_ptr != nullptr, "Columnwise scaling tensor must be allocated");
   }
 
-  const size_t dbias_rows = DIVUP(first_logical_dim, CHUNK_DIM_Y);
-  const size_t dbias_cols = last_logical_dim;
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(is_single_tensor,
                "DBias is only supported for tensors with the const last dimension.");
     NVTE_CHECK(dbias->data.dtype == input->dtype(),
                "DBias must have the same type as input_tensor.");
-    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{last_logical_dim}, "Wrong shape of DBias.");
-    NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
 
+    std::vector<size_t> expected_shape_dbias_tensor = {num_tensors, last_logical_dim};
+    NVTE_CHECK(dbias->data.shape == expected_shape_dbias_tensor, "Wrong shape of DBias.");
+
+    NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
+    const size_t dbias_workspace_rows = DIVUP(first_logical_dim, CHUNK_DIM_Y);
+    const size_t dbias_workspace_cols = last_logical_dim;
     if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {dbias_rows, dbias_cols};
+      workspace->data.shape = {dbias_workspace_rows, dbias_workspace_cols};
       workspace->data.dtype = DType::kFloat32;
       return;
     }
@@ -1006,9 +997,12 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                   last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
                   scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr);
 
-              if constexpr (IS_DBIAS) {
-                common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
-              }
+          if constexpr (IS_DBIAS) {
+            common::grouped_reduce_dbias<IType>(
+              shape_rep, num_tensors, first_logical_dim, last_logical_dim,
+              offsets_ptr, first_dims_ptr, last_dims_ptr,
+              dbias, workspace_ptr, CHUNK_DIM_Y, stream);
+          }
 
               NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
       );                                              // NOLINT(*)
