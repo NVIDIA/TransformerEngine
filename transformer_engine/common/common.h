@@ -313,6 +313,9 @@ struct GroupedTensor {
   SimpleTensor columnwise_amax;
   SimpleTensor scale;  // for FP8-DS only
 
+  NVTEScalingMode scaling_mode;
+  size_t num_tensors;
+
   // Shape information (OPTIONAL - empty if dimension is uniform across all tensors)
   // first_dims[i] = first dimension of tensor i (empty if all tensors have same first dim)
   // last_dims[i] = last dimension of tensor i (empty if all tensors have same last dim)
@@ -330,8 +333,6 @@ struct GroupedTensor {
   // Always 2D with positive dimensions
   NVTEShape logical_shape;
 
-  NVTEScalingMode scaling_mode;
-  size_t num_tensors;
   NVTEGroupedTensor nvte_tensor;
 
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
@@ -342,12 +343,12 @@ struct GroupedTensor {
         amax(),
         columnwise_amax(),
         scale(),
+        scaling_mode(scaling_mode),
         num_tensors(num_tensors),
         first_dims(nullptr, std::vector<size_t>{0}, DType::kInt64),
         last_dims(nullptr, std::vector<size_t>{0}, DType::kInt64),
         tensor_offsets(nullptr, std::vector<size_t>{0}, DType::kInt64),
         logical_shape(nvte_make_shape(nullptr, 1)),
-        scaling_mode(scaling_mode),
         nvte_tensor(0) {}
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
