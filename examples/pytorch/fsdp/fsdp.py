@@ -310,8 +310,9 @@ def get_precision_preset(precision_value):
             # Fail loudly if validation is bypassed or new preset added without updating this function
             raise ValueError(
                 f"Invalid precision preset: {precision_value}. "
-                f"Supported values: fp32, fp16, fp8, mxfp8, nvfp4"
+                "Supported values: fp32, fp16, fp8, mxfp8, nvfp4"
             )
+
 
 def get_recipe_for_precision(precision_value):
     """Get FP8 recipe based on precision preset (when FP8 is enabled).
