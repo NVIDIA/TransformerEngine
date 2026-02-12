@@ -1570,7 +1570,19 @@ class TestBasicOps:
 
     @pytest.mark.parametrize(
         "activation",
-        ("gelu", "geglu", "qgelu", "qgeglu", "relu", "reglu", "srelu", "sreglu", "silu", "swiglu"),
+        (
+            "gelu",
+            "geglu",
+            "qgelu",
+            "qgeglu",
+            "relu",
+            "reglu",
+            "glu",
+            "srelu",
+            "sreglu",
+            "silu",
+            "swiglu",
+        ),
     )
     @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (32, 1, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -1590,7 +1602,7 @@ class TestBasicOps:
 
         # Tensor dimensions
         in_shape = list(out_shape)
-        if activation in ("geglu", "qgeglu", "reglu", "sreglu", "swiglu"):
+        if activation in ("geglu", "glu", "qgeglu", "reglu", "sreglu", "swiglu"):
             in_shape[-1] *= 2
 
         # Skip invalid configurations
@@ -1630,6 +1642,13 @@ class TestBasicOps:
         elif activation == "reglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.relu(x1) * x2
+        elif activation == "sigmoid":
+            y_ref = torch.nn.functional.sigmoid(x_ref)
+        elif activation == "glu":
+            x = x_ref.reshape(*in_shape[:-1], 2, in_shape[-1] // 2)
+            x = x.flip(-2)  # PyTorch GLU swaps gate and linear unit
+            x = x.reshape(in_shape)
+            y_ref = torch.nn.functional.glu(x)
         elif activation == "srelu":
             y_ref = torch.nn.functional.relu(x_ref) ** 2
         elif activation == "sreglu":
@@ -1649,6 +1668,7 @@ class TestBasicOps:
         make_op = dict(
             gelu=te_ops.GELU,
             geglu=te_ops.GEGLU,
+            glu=te_ops.GLU,
             qgelu=te_ops.QGELU,
             qgeglu=te_ops.QGEGLU,
             relu=te_ops.ReLU,

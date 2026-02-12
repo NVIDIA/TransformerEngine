@@ -20,6 +20,7 @@ from .._common import maybe_dequantize
 __all__ = [
     "GELU",
     "GEGLU",
+    "GLU",
     "QGELU",
     "QGEGLU",
     "ReLU",
@@ -160,6 +161,38 @@ class GELU(_ActivationOperation):
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.dgelu(*args, **kwargs)
+
+
+class GLU(_ActivationOperation):
+    r"""Gated Linear Unit
+
+    The input tensor is split into chunks :math:`a` and :math:`b`
+    along the last dimension and the following is computed:
+
+    .. math::
+
+       \text{GLU}(a,b) = \sigma(a) * b
+
+    where :math:`\sigma` is the sigmoid function.
+
+    .. warning::
+
+       Transformer Engine's gated activations and PyTorch's GLU
+       activation follow opposite conventions for :math:`a` and
+       :math:`b`. Transformer Engine applies the gating function to
+       the first half of the input tensor, while PyTorch applies it to
+       the second half.
+
+    See `Language Modeling with Gated Convolutional Networks<https://arxiv.org/abs/1612.08083>`__
+    and `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
+
+    """
+
+    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.glu(*args, **kwargs)
+
+    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.dglu(*args, **kwargs)
 
 
 class GEGLU(_ActivationOperation):
