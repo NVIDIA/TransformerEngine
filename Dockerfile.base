@@ -1,7 +1,9 @@
 ARG FROM_IMAGE_NAME=gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel
 ARG FROM_SCRIPTS_IMAGE=gitlab-master.nvidia.com:5005/dl/devops/build-scripts:main
 ARG FRAMEWORK=pytorch
+ARG CCACHE_IMAGE=scratch
 
+FROM ${CCACHE_IMAGE} AS ccache-state
 FROM ${FROM_SCRIPTS_IMAGE} AS build-scripts
 FROM scratch as transformerengine
 COPY 3rdparty/ 3rdparty/
@@ -38,7 +40,17 @@ RUN pip3 install ninja pybind11 nvidia-mathdx==25.1.1
 
 # Install google logging lib for paddle ci as a hotfix.
 # TODO (ksivamai): fix in TE build
-RUN apt-get update && apt-get install -y libgoogle-glog-dev
+RUN apt-get update && apt-get install -y libgoogle-glog-dev ccache
+
+RUN --mount=from=ccache-state,target=/ccache-state <<"EOF" bash -e
+  mkdir -p /ccache
+  if [ -d /ccache-state/ccache ]; then
+    cp -a /ccache-state/ccache/. /ccache/
+    echo "Restored ccache state from cache image"
+  else
+    echo "No ccache state found, starting with empty cache"
+  fi
+EOF
 
 RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts <<"EOF" bash -e
   export CUBLASMP_VERSION=0.8.0.2023
@@ -57,6 +69,10 @@ EOF
 
 # Install Transformer Engine
 RUN <<"EOF" bash -e
+  export CCACHE_DIR=/ccache
+  export CCACHE_MAXSIZE=10G
+  export NVTE_USE_CCACHE=1
+
   [[ "${FRAMEWORK}" =~ pytorch|all ]] \
   && export NVTE_WITH_USERBUFFERS=1 \
   && export MPI_HOME=/usr/local/mpi \
@@ -71,6 +87,8 @@ RUN <<"EOF" bash -e
   NVTE_WITH_CUBLASMP=1 \
   CUBLASMP_HOME=/usr \
   pip3 install --verbose --verbose --no-build-isolation .[test]
+
+  ccache --show-stats
 
   rm -rf transformer_engine.egg-info dist build
 EOF

@@ -70,6 +70,7 @@ PULL=1
 VIRTUAL=0
 DOCKER_IMG="${CI_REGISTRY_IMAGE:-mxlocal}"
 ARCH=amd64
+CCACHE_IMAGE=""
 
 # Parse options
 while [[ $# -gt 0 ]]; do
@@ -156,6 +157,11 @@ while [[ $# -gt 0 ]]; do
     --arch)
       valcheck "$key" "$val"
       ARCH="$val"
+      shift $((val_separate+1))
+      ;;
+    --ccache-image)
+      valcheck "$key" "$val"
+      CCACHE_IMAGE="$val"
       shift $((val_separate+1))
       ;;
     --help|-h)
@@ -306,6 +312,11 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
       TAGS="-t ${IMAGE_NAME_ROOT}-base-${ARCH} ${TAGS}"
   fi
 
+  CCACHE_BUILD_ARG=""
+  if [[ -n "${CCACHE_IMAGE}" ]]; then
+    CCACHE_BUILD_ARG="--build-arg CCACHE_IMAGE=${CCACHE_IMAGE}"
+  fi
+
   export DOCKER_CLI_EXPERIMENTAL=enabled
   docker buildx create --name buildkit --node node_${CI_RUNNER_ID} --config dlfw-ci/buildkitd.toml \
     --driver-opt env.BUILDKIT_STEP_LOG_MAX_SIZE=10485760 --driver-opt env.BUILDKIT_STEP_LOG_MAX_SPEED=10485760 --use
@@ -319,6 +330,7 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
       --provenance=false \
       $FROM_IMAGE_ARG \
       $FRAMEWORK_ARG \
+      ${CCACHE_BUILD_ARG} \
       -f Dockerfile.base ${PUSH_ARG} .
   RV=$?
   echo "exit code from the previous command -> $RV"

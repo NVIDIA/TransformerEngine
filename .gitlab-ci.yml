@@ -275,6 +275,16 @@ create_branch:
     script:
     - !reference [.setup-docker ]
     - echo ${JOB_START_STRING}
+    # Check if a ccache image exists for this framework/arch combination
+    - export CCACHE_IMAGE_NAME="${CI_REGISTRY_IMAGE}:ccache-${FRAMEWORK}-${ARCH}"
+    - |
+      export CCACHE_ARG=""
+      if DOCKER_CLI_EXPERIMENTAL=enabled docker manifest inspect "${CCACHE_IMAGE_NAME}" > /dev/null 2>&1; then
+        echo "Found ccache image: ${CCACHE_IMAGE_NAME}"
+        export CCACHE_ARG="--ccache-image=${CCACHE_IMAGE_NAME}"
+      else
+        echo "No ccache image found at ${CCACHE_IMAGE_NAME}, building with empty cache"
+      fi
     - bash docker-build.sh --pyver=${PYVER}
                            --mode=b --push
                            $(test "$VIRTUAL" -eq 1 && echo "--virtual")
@@ -283,6 +293,29 @@ create_branch:
                            $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
                            $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
                            --arch $ARCH
+                           ${CCACHE_ARG}
+    # Update ccache image on main branch builds
+    - |
+      if [[ "${CI_COMMIT_BRANCH}" =~ ^test_main_[0-9]+_CI$ ]]; then
+        echo "Main branch build detected, updating ccache image..."
+        BASE_IMAGE="${BASE_IMAGE_NAME_VERSIONED}-${ARCH}"
+        CONTAINER_NAME="ccache-extract-${CI_JOB_ID}"
+        docker pull "${BASE_IMAGE}"
+        docker create --name "${CONTAINER_NAME}" "${BASE_IMAGE}" /bin/true
+        rm -rf /tmp/ccache-export
+        mkdir -p /tmp/ccache-export
+        docker cp "${CONTAINER_NAME}:/ccache" /tmp/ccache-export/ccache || true
+        docker rm "${CONTAINER_NAME}"
+        if [ -d /tmp/ccache-export/ccache ]; then
+          printf 'FROM scratch\nCOPY ccache/ /ccache/\n' > /tmp/ccache-export/Dockerfile
+          docker build -t "${CCACHE_IMAGE_NAME}" /tmp/ccache-export
+          docker push "${CCACHE_IMAGE_NAME}"
+          echo "Pushed updated ccache image: ${CCACHE_IMAGE_NAME}"
+        else
+          echo "No /ccache directory found in built image, skipping ccache image update"
+        fi
+        rm -rf /tmp/ccache-export
+      fi
     - echo ${JOB_END_STRING}
     tags:
     - builder
