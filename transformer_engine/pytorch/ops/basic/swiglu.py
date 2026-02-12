@@ -58,15 +58,22 @@ class SwiGLU(BasicOperation):
     glu_interleave_size : int, optional
         When set, the GLU activations will use a block interleaved
         format. Instead of interpreting the input tensor as a
-        concatenation of gates and linear units, it will be
-        interpreted as alternating blocks of gates and linear units.
-        This data format is experimental and primarily intended to
-        enable advanced fused kernels.
+        concatenation of gates and linear units (e.g.
+        :math:``[a_1, a_2, a_3, a_4, b_1, b_2, b_3, b_4]``
+        in the above notation), it will be interpreted
+        as alternating blocks of gates and linear units (e.g.
+        :math:``[a_1, a_2, b_1, b_2, a_3, a_4, b_3, b_4]``
+        when the interleave size is 2). This data format is highly
+        experiental and is primarily intended to support some advanced
+        fused kernels.
 
     """
 
     def __init__(
-        self, *, cache_quantized_input: bool = False, glu_interleave_size: Optional[int] = None
+        self,
+        *,
+        cache_quantized_input: bool = False,
+        glu_interleave_size: Optional[int] = None,
     ):
         super().__init__()
         self.cache_quantized_input: bool = cache_quantized_input
@@ -199,15 +206,26 @@ class ClampedSwiGLU(BasicOperation):
         The scaling factor for the sigmoid function used in the activation.
     cache_quantized_input : bool, default = ``False``
         Quantize input tensor when caching for use in the backward pass.
+    glu_interleave_size : int, optional
+        When set, the GLU activations will use an experimental block
+        interleaved format. See the corresponding option in the SwiGLU
+        operation for more details.
+
     """
 
     def __init__(
-        self, *, limit: float = 7.0, alpha: float = 1.702, cache_quantized_input: bool = False
+        self,
+        *,
+        limit: float = 7.0,
+        alpha: float = 1.702,
+        cache_quantized_input: bool = False,
+        glu_interleave_size: Optional[int] = None,
     ):
         super().__init__()
         self.limit: float = limit
         self.alpha: float = alpha
         self.cache_quantized_input: bool = cache_quantized_input
+        self.glu_interleave_size: Optional[int] = glu_interleave_size
 
     def op_forward(
         self,
@@ -229,9 +247,22 @@ class ClampedSwiGLU(BasicOperation):
         # Check input tensor
         x = maybe_dequantize(input_.contiguous(), dtype)
 
+        # Remove interleaving if needed
+        swiglu_in = input_
+        if self.glu_interleave_size is not None:
+            shape = swiglu_in.size()
+            swiglu_in = swiglu_in.reshape(
+                -1,
+                shape[-1] // (2 * self.glu_interleave_size),
+                2,
+                self.glu_interleave_size,
+            )
+            swiglu_in = swiglu_in.transpose(1, 2).contiguous()
+            swiglu_in = swiglu_in.view(shape)
+
         # Launch kernel
-        y = tex.clamped_swiglu(
-            x,
+        out = tex.clamped_swiglu(
+            swiglu_in,
             next_op_input_quantizer,
             limit=self.limit,
             alpha=self.alpha,
@@ -251,7 +282,7 @@ class ClampedSwiGLU(BasicOperation):
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
-        return y
+        return out
 
     def op_backward(
         self,
@@ -266,14 +297,45 @@ class ClampedSwiGLU(BasicOperation):
         x = maybe_dequantize(input_.contiguous(), ctx.dtype)
         dy = maybe_dequantize(grad_output.contiguous(), ctx.dtype)
 
+        # Remove interleaving if needed
+        swiglu_in = x
+        if self.glu_interleave_size is not None:
+            shape = swiglu_in.size()
+            swiglu_in = swiglu_in.reshape(
+                -1,
+                shape[-1] // (2 * self.glu_interleave_size),
+                2,
+                self.glu_interleave_size,
+            )
+            swiglu_in = swiglu_in.transpose(1, 2).contiguous()
+            swiglu_in = swiglu_in.view(shape)
+
+        # Quantizer for grad input
+        quantizer = ctx.prev_op_grad_output_quantizer
+        if self.glu_interleave_size is not None:
+            quantizer = None
+
         # Launch kernel
-        dx = tex.clamped_dswiglu(
+        grad_swiglu_in = tex.clamped_dswiglu(
             dy,
-            x,
-            ctx.prev_op_grad_output_quantizer,
+            swiglu_in,
+            quantizer,
             limit=self.limit,
             alpha=self.alpha,
         )
+
+        # Apply interleaving if needed
+        dx = grad_swiglu_in
+        if self.glu_interleave_size is not None:
+            shape = dx.size()
+            dx = dx.reshape(
+                -1,
+                2,
+                shape[-1] // (2 * self.glu_interleave_size),
+                self.glu_interleave_size,
+            )
+            dx = dx.transpose(1, 2).contiguous()
+            dx = dx.view(shape)
 
         # Clear input tensor if possible
         clear_tensor_data(input_)
@@ -282,11 +344,18 @@ class ClampedSwiGLU(BasicOperation):
 
 
 class ScaledSwiGLU(BasicOperation):
-    r"""SwiGLU with post-scaling
+    r"""SwiGLU with post-scaling.
 
     If the SwiGLU output has shape ``(d_1, ..., d_n)``, it is
     multiplied with an extra input tensor of shape
     ``(d_1, ..., d_{n-1})``.
+
+    Parameters
+    ----------
+    glu_interleave_size : int, optional
+        When set, the GLU activations will use an experimental block
+        interleaved format. See the corresponding option in the SwiGLU
+        operation for more details.
 
     """
 

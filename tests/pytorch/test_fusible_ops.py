@@ -1755,6 +1755,7 @@ class TestBasicOps:
         assert_close_grads(x_test, x_ref, **tols)
 
     def test_interleaved_swiglu(self):
+        """SwiGLU with block interleaved input format"""
         self.test_swiglu(
             out_shape=(32, 192),
             dtype=torch.float32,
@@ -1772,6 +1773,7 @@ class TestBasicOps:
         self,
         *,
         out_shape: Iterable[int] = (32, 32),
+        glu_interleave_size: Optional[int] = None,
         dtype: torch.dtype,
         device: torch.device = "cuda",
         quantization: Optional[str],
@@ -1780,7 +1782,7 @@ class TestBasicOps:
         limit: float = 0.75,
         alpha: float = 1.702,
     ):
-        # Test SwiGLU variant used in GPT OSS.
+        """SwiGLU variant used in GPT-OSS"""
         # Tensor dimensions
         in_shape = list(out_shape)
         in_shape[-1] *= 2
@@ -1805,7 +1807,17 @@ class TestBasicOps:
         )
 
         # Plain PyTorch implementation
-        x_glu, x_linear = x_ref.chunk(2, dim=-1)
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(
+                *in_shape[:-1],
+                in_shape[-1] // (2 * glu_interleave_size),
+                2,
+                glu_interleave_size,
+            )
+            x = x.transpose(-3, -2)
+            x = x.reshape(in_shape)
+        x_glu, x_linear = x.chunk(2, dim=-1)
         x_glu = x_glu.clamp(min=None, max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
@@ -1817,7 +1829,11 @@ class TestBasicOps:
 
         forward = te_ops.Sequential(
             te_ops.Quantize(forward=False, backward=quantize_backward),
-            te_ops.ClampedSwiGLU(limit=limit, alpha=alpha),
+            te_ops.ClampedSwiGLU(
+                limit=limit,
+                alpha=alpha,
+                glu_interleave_size=glu_interleave_size,
+            ),
             te_ops.Quantize(forward=quantize_forward, backward=False),
         )
         with te.autocast(enabled=quantized_compute, recipe=recipe):
@@ -1833,10 +1849,19 @@ class TestBasicOps:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
 
         # Check results
-        y_test = y_test.to(dtype=torch.float64, device="cpu")
-        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        torch.testing.assert_close(y_test, y_ref, **tols)
-        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    def test_interleaved_clamped_swiglu(self):
+        """GPT-OSS SwiGLU with block interleaved input format"""
+        self.test_clamped_swiglu(
+            out_shape=(32, 192),
+            dtype=torch.float32,
+            quantization=None,
+            quantize_forward=False,
+            quantize_backward=False,
+            glu_interleave_size=32,
+        )
 
     @pytest.mark.parametrize("scale", (1, 0, -2.5, 3.5))
     @pytest.mark.parametrize("shape", ((), (1, 13), (4, 4, 2)))
@@ -2104,20 +2129,19 @@ class TestBasicOps:
                     assert b_test.grad is None
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
-    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
     def test_scaled_swiglu(
         self,
         *,
         in_shape: Iterable[int],
-        glu_interleave_size: Optional[int],
+        glu_interleave_size: Optional[int] = None,
         dtype: torch.dtype = torch.float32,
         device: torch.device = "cuda",
         input_requires_grad: bool,
         scales_requires_grad: bool,
     ) -> None:
-        """Multiply two tensors"""
+        """SwiGLU with post-scale"""
 
         # Tensor dims
         out_shape = list(in_shape)
@@ -2169,17 +2193,18 @@ class TestBasicOps:
         # Check results
         tols = dtype_tols(dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
-        torch.testing.assert_close(y_test, y_ref, **tols)
-        if input_requires_grad:
-            dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-            torch.testing.assert_close(dx_test, x_ref.grad, **tols)
-        else:
-            assert x_test.grad is None
-        if scales_requires_grad:
-            ds_test = scales_test.grad.to(dtype=torch.float64, device="cpu")
-            torch.testing.assert_close(ds_test, scales_ref.grad, **tols)
-        else:
-            assert scales_test.grad is None
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(scales_test, scales_ref, **tols)
+
+    def test_interleaved_scaled_swiglu(self):
+        """SwiGLU with post-scale and block interleaved input format"""
+        self.test_scaled_swiglu(
+            in_shape=(32, 192),
+            glu_interleave_size=32,
+            input_requires_grad=True,
+            scales_requires_grad=True,
+        )
 
 
 class TestFusedOps:
