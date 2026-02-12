@@ -223,16 +223,16 @@ if __name__ == "__main__":
                         current_file_path / "transformer_engine",
                     )
                 )
-            # if "jax" in frameworks:
-            #     from build_tools.jax import setup_jax_extension
+            if "jax" in frameworks:
+                from build_tools.jax import setup_jax_extension
 
-            #     ext_modules.append(
-            #         setup_jax_extension(
-            #             "transformer_engine/jax/csrc",
-            #             current_file_path / "transformer_engine" / "jax" / "csrc",
-            #             current_file_path / "transformer_engine",
-            #         )
-            #     )
+                ext_modules.append(
+                    setup_jax_extension(
+                        "transformer_engine/jax/csrc",
+                        current_file_path / "transformer_engine" / "jax" / "csrc",
+                        current_file_path / "transformer_engine",
+                    )
+                )
 
     # Configure package
     setuptools.setup(
