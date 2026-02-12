@@ -998,11 +998,11 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                   last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
                   scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr);
 
-          if constexpr (IS_DBIAS) {
-            common::grouped_reduce_dbias<IType>(
-                shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
-                first_dims_ptr, last_dims_ptr, dbias, workspace_ptr, CHUNK_DIM_Y, stream);
-          }
+              if constexpr (IS_DBIAS) {
+                common::grouped_reduce_dbias<IType>(
+                    shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
+                    first_dims_ptr, last_dims_ptr, dbias, workspace_ptr, CHUNK_DIM_Y, stream);
+              }
 
               NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
       );                                              // NOLINT(*)
