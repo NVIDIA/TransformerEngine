@@ -163,6 +163,11 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = st
  * Activations
  **************************************************************************************************/
 
+/* GLU (sigmoid gate) */
+py::object glu(const at::Tensor &input, py::handle quantizer);
+
+py::object dglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+
 /* GELU and variants*/
 py::object gelu(const at::Tensor &input, py::handle quantizer);
 
