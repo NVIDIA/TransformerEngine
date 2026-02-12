@@ -77,6 +77,8 @@ class _NoopCatFunc(torch.autograd.Function):
         # Check first tensor
         if not tensors:
             raise ValueError("Attempted to concatenate 0 tensors")
+
+        # Check concat dim
         num_dims = tensors[0].dim()
         if not -num_dims <= dim < num_dims:
             raise ValueError(
@@ -109,21 +111,11 @@ class _NoopCatFunc(torch.autograd.Function):
         ctx.dim = dim
         ctx.split_ranges = split_ranges
 
-        # Out-of-place concatenation if needed
+        # Tensor properties from first tensor
         dtype = tensors[0].dtype
         device = tensors[0].device
         strides = tensors[0].stride()
         data_ptr_stride = strides[dim] * tensors[0].element_size()
-        data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
-        for tensor in tensors[1:]:
-            if (
-                tensor.dtype != dtype
-                or tensor.device != device
-                or tensor.stride() != strides
-                or tensor.data_ptr() != data_ptr
-            ):
-                return torch.cat(tensors, dim=dim)
-            data_ptr += tensor.size(dim) * data_ptr_stride
 
         # Out-of-place concatenation when view tensors have different storage
         # Note: This works around an edge case with the split_quantize
@@ -135,6 +127,18 @@ class _NoopCatFunc(torch.autograd.Function):
         # thinks we are accessing out-of-bounds memory.
         if tensors[0].untyped_storage().nbytes() < out_shape[dim] * data_ptr_stride:
             return torch.cat(tensors, dim=dim)
+
+        # Out-of-place concatenation if tensor properties do not match
+        data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
+        for tensor in tensors[1:]:
+            if (
+                tensor.dtype != dtype
+                or tensor.device != device
+                or tensor.stride() != strides
+                or tensor.data_ptr() != data_ptr
+            ):
+                return torch.cat(tensors, dim=dim)
+            data_ptr += tensor.size(dim) * data_ptr_stride
 
         # No-op concatenation
         out = tensors[0].as_strided(out_shape, strides)
