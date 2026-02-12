@@ -103,7 +103,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   }
 
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  bool generate_stats = !return_max_logit;
+  bool generate_stats = true; // Always return stats
   try {
     FADescriptor_v1 descriptor{
         b,
@@ -331,7 +331,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         sdpa_options.set_sink_token(softmax_offset);
       }
 
-      std::shared_ptr<fe::graph::Tensor_attributes> Max, Sum_Exp;
+      std::shared_ptr<fe::graph::Tensor_attributes> Max;
       if (is_ragged_q && cudnn_runtime_version >= 90600) {
         offset_stats =
             mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -345,19 +345,12 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                     .set_name("Max")
                                     .set_dim({b, h, s_q, 1})
                                     .set_data_type(fe::DataType_t::FLOAT));
-        Sum_Exp = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                        .set_name("Sum_Exp")
-                                        .set_dim({b, h, s_q, 1})
-                                        .set_data_type(fe::DataType_t::FLOAT));
         if (is_ragged_q && cudnn_runtime_version >= 90600) {
           Max->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
-          Sum_Exp->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
         } else {
           Max->set_stride({h * s_q, s_q, 1, 1});
-          Sum_Exp->set_stride({h * s_q, s_q, 1, 1});
         }
         sdpa_options.set_logit_max(Max);
-        sdpa_options.set_score_sum_exp(Sum_Exp);
       }
 
       auto [O, Stats] = mha_graph->sdpa(Q, K, V, std::move(sdpa_options));
@@ -375,13 +368,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         O->set_ragged_offset(offset_o);
       }
 
-      if (!return_max_logit) {
-        Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
-        if (is_ragged_q && cudnn_runtime_version >= 90600) {
-          Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
-        } else {
-          Stats->set_stride({h * s_q, s_q, 1, 1});
-        }
+      Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
+      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+        Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
+      } else {
+        Stats->set_stride({h * s_q, s_q, 1, 1});
       }
 
       std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
@@ -391,7 +382,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                  std::shared_ptr<fe::graph::Tensor_attributes>>  // O
           key_tensors_tuple = std::make_tuple(Q, K, V, attn_scale, O);
       auto Stats_tuple =
-          generate_stats ? std::make_tuple(Stats, nullptr) : std::make_tuple(Max, Sum_Exp);
+          return_max_logit ? std::make_tuple(Stats, Max) : std::make_tuple(Stats, nullptr);
       auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
       auto softmax_offset_tuple =
           is_softmax_offset ? std::make_tuple(softmax_offset) : std::make_tuple(nullptr);
@@ -1116,6 +1107,16 @@ void fused_attn_arbitrary_seqlen_fwd(
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
     const auto cudnn_runtime_version = cudnnGetVersion();
+
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    output_S->data.dptr = nullptr;
+    if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
+      output_S->data.shape = {num_tokens_q, num_attn_heads, 1};
+    } else {
+      output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+    }
+    output_S->data.dtype = DType::kFloat32;
+
     if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_Max->data.dptr = nullptr;
@@ -1125,23 +1126,6 @@ void fused_attn_arbitrary_seqlen_fwd(
         output_Max->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
       }
       output_Max->data.dtype = DType::kFloat32;
-      Tensor *output_Sum_Exp = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-      output_Sum_Exp->data.dptr = nullptr;
-      if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
-        output_Sum_Exp->data.shape = {num_tokens_q, num_attn_heads, 1};
-      } else {
-        output_Sum_Exp->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
-      }
-      output_Sum_Exp->data.dtype = DType::kFloat32;
-    } else {
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-      output_S->data.dptr = nullptr;
-      if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
-        output_S->data.shape = {num_tokens_q, num_attn_heads, 1};
-      } else {
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
     }
 
     Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -1165,14 +1149,12 @@ void fused_attn_arbitrary_seqlen_fwd(
 
     Aux_CTX_Tensors->size = i;
   } else if (Aux_CTX_Tensors->size >= 2) {
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    devPtrS1 = output_S->data.dptr;
+
     if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       devPtrS1 = output_Max->data.dptr;
-      Tensor *output_Sum_Exp = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-      devPtrS2 = output_Sum_Exp->data.dptr;
-    } else {
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-      devPtrS1 = output_S->data.dptr;
     }
     Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = rng_state->data.dptr;
