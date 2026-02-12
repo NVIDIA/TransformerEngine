@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import functools
 import io
 import math
 import random
@@ -37,7 +38,14 @@ from transformer_engine.pytorch import (
 import transformer_engine_torch as tex
 
 # Import utility functions
-from utils import dtype_tols, make_recipe, quantization_tols, reset_rng_states
+from utils import (
+    assert_close,
+    assert_close_grads,
+    dtype_tols,
+    make_recipe,
+    quantization_tols,
+    reset_rng_states,
+)
 
 # Check for supported quantization schemes
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -108,6 +116,9 @@ def maybe_skip_quantization(
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
+    *,
+    min: float = 0.0,
+    max: float = 1.0,
     quantization: Optional[str] = None,
     ref_dtype: torch.dtype = torch.float64,
     ref_device: torch.device = "cpu",
@@ -128,7 +139,8 @@ def make_reference_and_test_tensors(
     """
 
     # Random reference tensor
-    ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
+    ref = torch.empty(shape, dtype=ref_dtype, device=ref_device)
+    ref.uniform_(min, max)
 
     # Construct test tensor from reference tensor
     test = ref.to(device=test_device, dtype=test_dtype)
@@ -171,29 +183,6 @@ def make_reference_and_test_tensors(
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
     return ref, test
-
-
-def assert_close(
-    a: Optional[torch.Tensor],
-    b: Optional[torch.Tensor],
-    *,
-    rtol: float,
-    atol: float,
-) -> None:
-    """Assert that two tensors are close."""
-    if a is None and b is None:
-        return
-    assert a is not None
-    assert b is not None
-    a = a.detach()
-    b = b.detach()
-    if isinstance(a, QuantizedTensor):
-        a = a.dequantize()
-    if isinstance(b, QuantizedTensor):
-        b = b.dequantize()
-    a = a.to(dtype=torch.float64, device="cpu")
-    b = b.to(dtype=torch.float64, device="cpu")
-    torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
 
 class TestSequentialContainer:
@@ -1763,9 +1752,10 @@ class TestBasicOps:
 
         # Check results
         assert_close(y_test, y_ref, **tols)
-        assert_close(x_test.grad, x_ref.grad, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
 
     def test_interleaved_swiglu(self):
+        """SwiGLU with block interleaved input format"""
         self.test_swiglu(
             out_shape=(32, 192),
             dtype=torch.float32,
@@ -1783,6 +1773,7 @@ class TestBasicOps:
         self,
         *,
         out_shape: Iterable[int] = (32, 32),
+        glu_interleave_size: Optional[int] = None,
         dtype: torch.dtype,
         device: torch.device = "cuda",
         quantization: Optional[str],
@@ -1791,7 +1782,7 @@ class TestBasicOps:
         limit: float = 0.75,
         alpha: float = 1.702,
     ):
-        # Test SwiGLU variant used in GPT OSS.
+        """SwiGLU variant used in GPT-OSS"""
         # Tensor dimensions
         in_shape = list(out_shape)
         in_shape[-1] *= 2
@@ -1816,7 +1807,17 @@ class TestBasicOps:
         )
 
         # Plain PyTorch implementation
-        x_glu, x_linear = x_ref.chunk(2, dim=-1)
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(
+                *in_shape[:-1],
+                in_shape[-1] // (2 * glu_interleave_size),
+                2,
+                glu_interleave_size,
+            )
+            x = x.transpose(-3, -2)
+            x = x.reshape(in_shape)
+        x_glu, x_linear = x.chunk(2, dim=-1)
         x_glu = x_glu.clamp(min=None, max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
@@ -1828,7 +1829,11 @@ class TestBasicOps:
 
         forward = te_ops.Sequential(
             te_ops.Quantize(forward=False, backward=quantize_backward),
-            te_ops.ClampedSwiGLU(limit=limit, alpha=alpha),
+            te_ops.ClampedSwiGLU(
+                limit=limit,
+                alpha=alpha,
+                glu_interleave_size=glu_interleave_size,
+            ),
             te_ops.Quantize(forward=quantize_forward, backward=False),
         )
         with te.autocast(enabled=quantized_compute, recipe=recipe):
@@ -1844,10 +1849,19 @@ class TestBasicOps:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
 
         # Check results
-        y_test = y_test.to(dtype=torch.float64, device="cpu")
-        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        torch.testing.assert_close(y_test, y_ref, **tols)
-        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    def test_interleaved_clamped_swiglu(self):
+        """GPT-OSS SwiGLU with block interleaved input format"""
+        self.test_clamped_swiglu(
+            out_shape=(32, 192),
+            dtype=torch.float32,
+            quantization=None,
+            quantize_forward=False,
+            quantize_backward=False,
+            glu_interleave_size=32,
+        )
 
     @pytest.mark.parametrize("scale", (1, 0, -2.5, 3.5))
     @pytest.mark.parametrize("shape", ((), (1, 13), (4, 4, 2)))
@@ -2115,20 +2129,19 @@ class TestBasicOps:
                     assert b_test.grad is None
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
-    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
     def test_scaled_swiglu(
         self,
         *,
         in_shape: Iterable[int],
-        glu_interleave_size: Optional[int],
+        glu_interleave_size: Optional[int] = None,
         dtype: torch.dtype = torch.float32,
         device: torch.device = "cuda",
         input_requires_grad: bool,
         scales_requires_grad: bool,
     ) -> None:
-        """Multiply two tensors"""
+        """SwiGLU with post-scale"""
 
         # Tensor dims
         out_shape = list(in_shape)
@@ -2180,17 +2193,18 @@ class TestBasicOps:
         # Check results
         tols = dtype_tols(dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
-        torch.testing.assert_close(y_test, y_ref, **tols)
-        if input_requires_grad:
-            dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-            torch.testing.assert_close(dx_test, x_ref.grad, **tols)
-        else:
-            assert x_test.grad is None
-        if scales_requires_grad:
-            ds_test = scales_test.grad.to(dtype=torch.float64, device="cpu")
-            torch.testing.assert_close(ds_test, scales_ref.grad, **tols)
-        else:
-            assert scales_test.grad is None
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(scales_test, scales_ref, **tols)
+
+    def test_interleaved_scaled_swiglu(self):
+        """SwiGLU with post-scale and block interleaved input format"""
+        self.test_scaled_swiglu(
+            in_shape=(32, 192),
+            glu_interleave_size=32,
+            input_requires_grad=True,
+            scales_requires_grad=True,
+        )
 
 
 class TestFusedOps:
@@ -3235,12 +3249,16 @@ class TestSequentialModules:
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
             in_shape,
+            min=-0.25,
+            max=0.25,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
+            min=-0.25,
+            max=0.25,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
@@ -3258,12 +3276,16 @@ class TestSequentialModules:
         for _ in range(group_size):
             fc1_w_ref, fc1_w_test = make_reference_and_test_tensors(
                 (2 * hidden_size, hidden_size),
+                min=-0.25,
+                max=0.25,
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
             )
             fc2_w_ref, fc2_w_test = make_reference_and_test_tensors(
                 (hidden_size, hidden_size),
+                min=-0.25,
+                max=0.25,
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
@@ -3273,11 +3295,15 @@ class TestSequentialModules:
             if bias:
                 fc1_b_ref, fc1_b_test = make_reference_and_test_tensors(
                     (2 * hidden_size,),
+                    min=-0.5,
+                    max=0.5,
                     test_dtype=dtype,
                     test_device=device,
                 )
                 fc2_b_ref, fc2_b_test = make_reference_and_test_tensors(
                     (hidden_size,),
+                    min=-0.5,
+                    max=0.5,
                     test_dtype=dtype,
                     test_device=device,
                 )
@@ -3289,16 +3315,6 @@ class TestSequentialModules:
             fc2_bs_ref.append(fc2_b_ref)
             fc2_ws_test.append(fc2_w_test)
             fc2_bs_test.append(fc2_b_test)
-        with torch.no_grad():
-            for t in fc1_ws_ref + fc1_ws_test + fc2_ws_ref + fc2_ws_test:
-                t -= 0.5
-                t *= 1 / 2
-            for t in (x_ref, x_test, dy_ref, dy_test):
-                t -= 0.5
-                t *= 1 / 2
-            if bias:
-                for t in fc1_bs_ref + fc1_bs_test + fc2_bs_ref + fc2_bs_test:
-                    t -= 0.5
 
         # Reference implementation
         xs = torch.split(x_ref, split_sizes.tolist())
@@ -3386,25 +3402,19 @@ class TestSequentialModules:
             )
 
         # Loose tols for sanity checking
-        tols = {"rtol": 0.25, "atol": 0.5}
+        tols = {"rtol": 0.125, "atol": 0.25}
         if quantization == "nvfp4":
-            tols = {"rtol": 0.5, "atol": 1}
+            tols = {"rtol": 0.25, "atol": 0.5}
 
         # Check values
         assert_close(y_test, y_ref, **tols)
-        assert_close(x_test.grad, x_ref.grad, **tols)
-        assert_close(probs_test.grad, probs_ref.grad, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(probs_test, probs_ref, **tols)
         for group_idx in range(group_size):
-            assert_close(
-                getattr(fc2, f"weight{group_idx}").grad,
-                fc2_ws_ref[group_idx].grad,
-                **tols,
-            )
-            assert_close(
-                getattr(fc1, f"weight{group_idx}").grad,
-                fc1_ws_ref[group_idx].grad,
-                **tols,
-            )
+            assert_close_grads(getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
 
 
 class TestCustomOps:
