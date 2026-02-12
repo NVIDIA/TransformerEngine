@@ -11,7 +11,7 @@ from jax import ffi
 
 from transformer_engine.jax.cpp_extensions.base import BasePrimitive, register_primitive
 
-__all__ = ["inspect_array", "load_array_dump"]
+__all__ = ["compare", "compare_vjp", "inspect_array", "load_array_dump"]
 
 
 class InspectPrimitive(BasePrimitive):
@@ -152,7 +152,6 @@ def inspect_array(x: jnp.ndarray, name: str) -> jnp.ndarray:
     # TODO: Handle the name of the tensor in the primitive and output files
     return _inspect(x)
 
-
 def compare(a: jnp.ndarray, b: jnp.ndarray, name: str) -> jnp.ndarray:
     """Utility function to compare two JAX arrays and print their differences.
 
@@ -182,6 +181,66 @@ def compare(a: jnp.ndarray, b: jnp.ndarray, name: str) -> jnp.ndarray:
         jnp.float32
     )
     return out_f32.astype(a.dtype)
+
+def compare_vjp(f1: callable, f2: callable, name: str) -> callable:
+    """Utility function to compare the outputs of two functions and in the forward and backward passes.
+
+    Handles non-differentiable arguments (e.g., integer arrays) gracefully by
+    detecting float0 gradients and passing them through without comparison.
+
+    Args:
+        f1 (callable): The first function to compare.
+        f2 (callable): The second function to compare.
+        name (str): The name of the comparison for identification in the output.
+
+    Returns:
+        callable: A new function that compares the outputs of `f1` and `f2` when called and returns the result of `f1`.
+    """
+
+    @jax.custom_vjp
+    def _f(*args):
+        return _f_fwd_rule(*args)[0]
+    
+    def _f_fwd_rule(*args):
+        out1, f1_vjp_func = jax.vjp(f1, *args)
+        out2, f2_vjp_func = jax.vjp(f2, *args)
+        out = compare(out1, out2, name + "_fwd")
+        return out, (f1_vjp_func, f2_vjp_func)
+    
+    def _has_float0(x):
+        """Check if a pytree leaf or structure contains float0 dtypes."""
+        leaves = jax.tree_util.tree_leaves(x)
+        return any(
+            hasattr(leaf, "dtype") and leaf.dtype == jax.dtypes.float0
+            for leaf in leaves
+        )
+
+    def _f_bwd_rule(res, g):
+        f1_vjp_func, f2_vjp_func = res
+        f1_grads = f1_vjp_func(g)
+        f2_grads = f2_vjp_func(g)
+        out_grads = []
+        for i, (g1, g2) in enumerate(zip(f1_grads, f2_grads)):
+            # Integer/non-differentiable arguments produce float0 gradients
+            # which don't support arithmetic. Pass them through without comparison.
+            if _has_float0(g1):
+                out_grads.append(g1)
+            elif isinstance(g1, jnp.ndarray):
+                out_grads.append(compare(g1, g2, name + f"_grad_{i}"))
+            else:
+                # g1 is a pytree of arrays — compare leaf by leaf
+                g1_flat, tree_def = jax.tree_util.tree_flatten(g1)
+                g2_flat, _ = jax.tree_util.tree_flatten(g2)
+                compared = [
+                    compare(a, b, name + f"_grad_{i}_{j}")
+                    for j, (a, b) in enumerate(zip(g1_flat, g2_flat))
+                ]
+                out_grads.append(jax.tree_util.tree_unflatten(tree_def, compared))
+        return tuple(out_grads)
+    
+    _f.defvjp(_f_fwd_rule, _f_bwd_rule)
+
+    return _f
 
 
 def load_array_dump(filename: str, shape: tuple, dtype: jnp.dtype) -> jnp.ndarray:
