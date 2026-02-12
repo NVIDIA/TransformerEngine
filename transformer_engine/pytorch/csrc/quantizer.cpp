@@ -155,10 +155,10 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   py::object out_py;
   if (internal) {
     py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass));
-    out_py = Float8TensorClass("data"_a = data_py, "fp8_scale_inv"_a = *scale_inv,
-                               "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
-                               "quantizer"_a = this->quantizer,
-                               "fake_dtype"_a = GetATenDType(dtype));
+    out_py =
+        Float8TensorClass("data"_a = data_py, "fp8_scale_inv"_a = *scale_inv,
+                          "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
+                          "quantizer"_a = this->quantizer, "fake_dtype"_a = GetATenDType(dtype));
   } else {
     py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorPythonClass));
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
@@ -361,10 +361,10 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   py::object transpose_py = with_transpose ? py::cast(transpose_tensor) : py::none();
   if (internal) {
     py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass));
-    out_py = Float8TensorClass("data"_a = data_py, "fp8_scale_inv"_a = scale_inv_tensor,
-                               "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
-                               "quantizer"_a = this->quantizer,
-                               "fake_dtype"_a = GetATenDType(dtype));
+    out_py =
+        Float8TensorClass("data"_a = data_py, "fp8_scale_inv"_a = scale_inv_tensor,
+                          "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
+                          "quantizer"_a = this->quantizer, "fake_dtype"_a = GetATenDType(dtype));
   } else {
     py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorPythonClass));
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
@@ -626,8 +626,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         "rowwise_data"_a = data_rowwise, "columnwise_data"_a = data_colwise,
         "rowwise_scale_inv"_a = scale_inv_rowwise, "columnwise_scale_inv"_a = scale_inv_colwise,
         "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer,
-        "is_2D_scaled"_a = (block_scaling_dim == 2),
-        "fake_dtype"_a = GetATenDType(dtype));
+        "is_2D_scaled"_a = (block_scaling_dim == 2), "fake_dtype"_a = GetATenDType(dtype));
   } else {
     py::handle Float8BlockwiseQTensorClass(
         reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass));
@@ -914,8 +913,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass));
     out_py = MXFP8TensorClass(rowwise_data_py, rowwise_scale_inv_py, columnwise_data_py,
                               columnwise_scale_inv_py, this->dtype, this->quantizer,
-                              with_gemm_swizzled_scales,
-                              "fake_dtype"_a = GetATenDType(dtype));
+                              with_gemm_swizzled_scales, "fake_dtype"_a = GetATenDType(dtype));
   } else {
     py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass));
     out_py = MXFP8TensorClass(
