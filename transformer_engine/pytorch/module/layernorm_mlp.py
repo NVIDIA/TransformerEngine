@@ -97,6 +97,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
+            "glu": (tex.glu, tex.dglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
             "relu": (tex.relu, tex.drelu, None),
@@ -113,6 +114,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
         return {
             "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
             "geglu": (tex.geglu, tex.dgeglu, None),
+            "glu": (tex.glu, tex.dglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
             "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
@@ -135,6 +137,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
+            "glu": (tex.glu, tex.dglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
             "relu": (tex.relu, tex.drelu, None),
@@ -1663,7 +1666,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
-          Options: ``'gelu'``, ``'geglu'``, ``'qgelu'``, ``'qgeglu'``, ``'relu'``, ``'reglu'``, ``'srelu'``, ``'sreglu'``,
+          Options: ``'gelu'``, ``'geglu'``, ``'glu'``, ``'qgelu'``, ``'qgeglu'``, ``'relu'``, ``'reglu'``, ``'srelu'``, ``'sreglu'``,
           ``'silu'``, ``'swiglu'``, and ``'clamped_swiglu'``.
     activation_params : dict, default = None
                         Additional parameters for the activation function.
@@ -1882,7 +1885,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.layer_norm_bias = None
 
         # FC1 init
-        if self.activation in ["geglu", "qgeglu", "reglu", "sreglu", "swiglu", "clamped_swiglu"]:
+        if self.activation in [
+            "geglu",
+            "glu",
+            "qgeglu",
+            "reglu",
+            "sreglu",
+            "swiglu",
+            "clamped_swiglu",
+        ]:
             fc1_output_features = 2 * self.size_per_partition
         else:
             fc1_output_features = self.size_per_partition
@@ -2306,6 +2317,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         activation_map = {
             "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
             "geglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "glu": lambda x: torch.sigmoid(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
             "qgelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
             "qgeglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0], approximate="tanh")
             * x.chunk(2, -1)[1],
@@ -2504,5 +2516,4 @@ class LayerNormMLP(TransformerEngineBaseModule):
             del fc2_wgrad
             del fc1_wgrad
             del fc1_bias_grad
-            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-                wgrad_accumulation_and_reduce_hook()
+            self._trigger_wgrad_accumulation_and_reduce_hooks()

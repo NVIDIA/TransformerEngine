@@ -168,15 +168,18 @@ list(APPEND transformer_engine_cuda_sources
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
+     activation/glu.cu
      activation/relu.cu
      activation/swiglu.cu
      cast/cast.cu
      gemm/cutlass_grouped_gemm.cu
      hadamard_transform/group_hadamard_transform.cu
+     hadamard_transform/graph_safe_group_hadamard_transform.cu
      hadamard_transform/hadamard_transform.cu
      hadamard_transform/hadamard_transform_cast_fusion.cu
      hadamard_transform/group_hadamard_transform_cast_fusion.cu
      hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+     hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
      transpose/quantize_transpose_square_blockwise.cu
@@ -352,6 +355,7 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/glu.cu
                                           activation/relu.cu
                                           activation/swiglu.cu)
 endif()
