@@ -1154,7 +1154,7 @@ void fused_attn_arbitrary_seqlen_fwd(
 
     if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-      devPtrS1 = output_Max->data.dptr;
+      devPtrS2 = output_Max->data.dptr;
     }
     Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = rng_state->data.dptr;
