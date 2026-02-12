@@ -400,12 +400,14 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
       _add = _graph.tensor(fe::graph::Tensor_attributes()
                                .set_name("add")
                                .set_dim({batch_dim, hidden_dim, 1, 1})
-                               .set_stride({hidden_dim, 1, hidden_dim, hidden_dim}));
+                               .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
+                               .set_data_type(get_cudnn_fe_dtype(itype)));
       auto add_options = fe::graph::Pointwise_attributes()
                              .set_mode(fe::PointwiseMode_t::ADD)
                              .set_compute_data_type(get_cudnn_fe_dtype(ctype));
       auto _dx_with_add = _graph.pointwise(_dx, _add, add_options);
-      _dx->set_output(false);
+      _dx_with_add->set_data_type(get_cudnn_fe_dtype(itype));
+      _dx->set_output(false).set_data_type(get_cudnn_fe_dtype(itype));
       _dx = _dx_with_add;
     }
     _dx->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
