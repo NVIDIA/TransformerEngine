@@ -3,6 +3,15 @@
 # See LICENSE for license information.
 """
 Fused functions used in the MoE router
+
+Precision Notes:
+- FP64 is currently not supported.
+- Inputs are casted into FP32 when loading from global memory.
+- All the math/calculations/accumulations are in FP32 in the kernels.
+- "scores" is always in FP32 (match the MCore implementation).
+- "intermediate_output" is always in FP32 for better backward precision.
+- Only cast to low-precision when necessary and the casting only happens in writing to
+  global memory. For example, the gradient is required to have the same dtype as the input.
 """
 from typing import Optional
 
