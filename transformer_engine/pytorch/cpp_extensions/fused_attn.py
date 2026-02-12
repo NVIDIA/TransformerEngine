@@ -343,7 +343,7 @@ def fused_attn_fwd(
         # bshd: output_tensors: out [b, sq, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
         # sbhd: output_tensors: out [sq, b, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
 
-        aux_ctx_tensors = [output_tensors[1]] # "Stats"
+        aux_ctx_tensors = [output_tensors[1]]  # "Stats"
         amax_dims = (0, 2) if qkv_format == "thd" else (0, 2, 3)
         # Max -> max_logit [h]
         max_logit = torch.amax(output_tensors[2], dim=amax_dims).to(dtype=output_tensors[0].dtype)
