@@ -8,18 +8,27 @@ from pathlib import Path
 
 import setuptools
 
-from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
+from .utils import (
+    all_files_in_dir,
+    cuda_version,
+    get_cuda_include_dirs,
+    debug_build_enabled,
+    get_requirements_from_github,
+)
 from typing import List
 
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
-    return ["torch>=2.1", "einops", "onnxscript", "onnx", "packaging", "pydantic", "nvdlfw-inspect"]
+    deps = ["torch>=2.1", "einops", "onnxscript", "onnx", "packaging", "pydantic", "nvdlfw-inspect"]
+    if bool(int(os.getenv("NVTE_USE_SONIC_MOE", "0"))):
+        deps.extend(get_requirements_from_github("Dao-AILab/sonic-moe", module_name="sonicmoe"))
+    return deps
 
 
 def test_requirements() -> List[str]:
     """Test dependencies for TE/PyTorch extensions."""
-    return [
+    deps = [
         "numpy",
         "torchvision",
         "transformers",
@@ -27,6 +36,9 @@ def test_requirements() -> List[str]:
         "onnxruntime",
         "onnxruntime_extensions",
     ]
+    if bool(int(os.getenv("NVTE_USE_SONIC_MOE", "0"))):
+        deps.extend(get_requirements_from_github("Dao-AILab/sonic-moe", module_name="sonicmoe"))
+    return deps
 
 
 def setup_pytorch_extension(
