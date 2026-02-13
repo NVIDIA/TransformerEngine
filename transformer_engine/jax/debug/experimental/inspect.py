@@ -152,6 +152,7 @@ def inspect_array(x: jnp.ndarray, name: str) -> jnp.ndarray:
     # TODO: Handle the name of the tensor in the primitive and output files
     return _inspect(x)
 
+
 def compare(a: jnp.ndarray, b: jnp.ndarray, name: str) -> jnp.ndarray:
     """Utility function to compare two JAX arrays and print their differences.
 
@@ -181,6 +182,7 @@ def compare(a: jnp.ndarray, b: jnp.ndarray, name: str) -> jnp.ndarray:
         jnp.float32
     )
     return out_f32.astype(a.dtype)
+
 
 def _tensor_to_image(tensor, value_range=None):
     import numpy as np
@@ -215,7 +217,10 @@ def _tensor_to_image(tensor, value_range=None):
     img = Image.fromarray(normalized_uint8, mode="L")
     return img
 
+
 _count = 0
+
+
 def _tensor_diff_to_image(out, ref):
     import os
     import math
@@ -226,12 +231,16 @@ def _tensor_diff_to_image(out, ref):
 
     if _count > 50:
         return
-    
+
     out = out.reshape((math.prod(out.shape[:-1]), out.shape[-1])).astype(jnp.float32)
     ref = ref.reshape((math.prod(ref.shape[:-1]), ref.shape[-1])).astype(jnp.float32)
 
-    _tensor_to_image(out, value_range=(jnp.min(ref), jnp.max(ref))).save(f"debug_outputs/output_te_{_count}.png")
-    _tensor_to_image(ref, value_range=(jnp.min(ref), jnp.max(ref))).save(f"debug_outputs/output_ref_{_count}.png")
+    _tensor_to_image(out, value_range=(jnp.min(ref), jnp.max(ref))).save(
+        f"debug_outputs/output_te_{_count}.png"
+    )
+    _tensor_to_image(ref, value_range=(jnp.min(ref), jnp.max(ref))).save(
+        f"debug_outputs/output_ref_{_count}.png"
+    )
     diff = jnp.abs(out.astype(jnp.float32) - ref.astype(jnp.float32))
     _tensor_to_image(
         diff,
@@ -241,6 +250,7 @@ def _tensor_diff_to_image(out, ref):
     ).save(f"debug_outputs/output_diff_{_count}.png")
 
     _count += 1
+
 
 def compare_vjp(f1: callable, f2: callable, name: str) -> callable:
     """Utility function to compare the outputs of two functions and in the forward and backward passes.
@@ -260,20 +270,17 @@ def compare_vjp(f1: callable, f2: callable, name: str) -> callable:
     @jax.custom_vjp
     def _f(*args):
         return _f_fwd_rule(*args)[0]
-    
+
     def _f_fwd_rule(*args):
         out1, f1_vjp_func = jax.vjp(f1, *args)
         out2, f2_vjp_func = jax.vjp(f2, *args)
         out = compare(out1, out2, name + "_fwd")
         return out, (f1_vjp_func, f2_vjp_func, args[2])
-    
+
     def _has_float0(x):
         """Check if a pytree leaf or structure contains float0 dtypes."""
         leaves = jax.tree_util.tree_leaves(x)
-        return any(
-            hasattr(leaf, "dtype") and leaf.dtype == jax.dtypes.float0
-            for leaf in leaves
-        )
+        return any(hasattr(leaf, "dtype") and leaf.dtype == jax.dtypes.float0 for leaf in leaves)
 
     def _f_bwd_rule(res, g):
         f1_vjp_func, f2_vjp_func, group_sizes = res
@@ -302,7 +309,7 @@ def compare_vjp(f1: callable, f2: callable, name: str) -> callable:
                 ]
                 out_grads.append(jax.tree_util.tree_unflatten(tree_def, compared))
         return tuple(out_grads)
-    
+
     _f.defvjp(_f_fwd_rule, _f_bwd_rule)
 
     return _f
