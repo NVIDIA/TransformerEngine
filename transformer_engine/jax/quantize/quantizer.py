@@ -68,7 +68,7 @@ def compute_scale_from_amax(
     sf = jnp.where(amax > 0.0, sf, scale)
     sf = jnp.where(jnp.isfinite(amax), sf, scale)
     assert sf.shape == (1,), f"Expected sf.shape == (1,), but got {sf.shape}"
-    return sf
+    return sf.astype(jnp.float32)
 
 
 @register_pytree_node_class

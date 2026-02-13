@@ -487,9 +487,8 @@ __global__ void setup_grouped_gemm_kernel(
   a_cols[idx] = static_cast<int>(a_first);
   b_rows[idx] = static_cast<int>(b_last);
   b_cols[idx] = static_cast<int>(b_first);
-  // For OUTPUTS (D, C): cuBLAS writes in column-major, so rows=first (M), cols=last (N).
-  d_rows[idx] = static_cast<int>(d_first);
-  d_cols[idx] = static_cast<int>(d_last);
+  d_rows[idx] = static_cast<int>(d_last);
+  d_cols[idx] = static_cast<int>(d_first);
 
   // Fill alpha/beta pointers (per-matrix)
   alpha_ptrs[idx] = alpha_ptr + idx;
