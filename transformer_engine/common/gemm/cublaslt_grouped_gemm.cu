@@ -11,6 +11,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
+#include <vector>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
@@ -138,7 +139,6 @@ struct GroupedGemmSetupWorkspace {
     offset += ptr_size;
     ws.beta_ptrs = reinterpret_cast<float **>(setup_ws_ptr + offset);
     offset += ptr_size;
-
     // Int arrays for storage dimensions (4-byte aligned)
     ws.a_rows = reinterpret_cast<int *>(setup_ws_ptr + offset);
     offset += int_size;
@@ -487,9 +487,9 @@ __global__ void setup_grouped_gemm_kernel(
   a_cols[idx] = static_cast<int>(a_first);
   b_rows[idx] = static_cast<int>(b_last);
   b_cols[idx] = static_cast<int>(b_first);
-  // For OUTPUTS (D, C): cuBLAS writes in column-major, so rows=first (M), cols=last (N).
-  d_rows[idx] = static_cast<int>(d_first);
-  d_cols[idx] = static_cast<int>(d_last);
+
+  d_rows[idx] = static_cast<int>(d_last);
+  d_cols[idx] = static_cast<int>(d_first);
 
   // Fill alpha/beta pointers (per-matrix)
   alpha_ptrs[idx] = alpha_ptr + idx;

@@ -5,6 +5,7 @@
 """Python interface for GEMM extensions"""
 
 from typing import Iterable, Optional, Tuple, Union, List
+import ctypes
 import os
 import functools
 import torch
@@ -14,6 +15,7 @@ from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.grouped_tensor import GroupedTensor
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
@@ -22,6 +24,7 @@ from ...debug.pytorch.debug_quantization import DebugQuantizer
 __all__ = [
     "general_gemm",
     "general_grouped_gemm",
+    "general_grouped_gemm_for_grouped_tensor",
 ]
 
 
@@ -306,3 +309,94 @@ def general_grouped_gemm(
     )
 
     return out, bias, gelu_input
+
+
+def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
+    """Return workspace size for grouped GEMM pointer setup.
+    Must match GroupedGemmSetupWorkspace::required_setup_size in cublaslt_grouped_gemm.cu.
+    """
+    ptr_bytes = ctypes.sizeof(ctypes.c_void_p)
+    int_bytes = ctypes.sizeof(ctypes.c_int)
+    ptr_size = num_tensors * ptr_bytes
+    int_size = num_tensors * int_bytes
+    k_ptr_alignment = 16
+    aligned_ptr_size = ((ptr_size + k_ptr_alignment - 1) // k_ptr_alignment) * k_ptr_alignment
+    size = 8 * aligned_ptr_size + 6 * int_size
+    alignment = 256
+    return ((size + alignment - 1) // alignment) * alignment
+
+
+def general_grouped_gemm_for_grouped_tensor(
+    A,
+    B,
+    out,
+    *,
+    layout: str = "TN",
+    accumulate: bool = False,
+    alpha: Optional[torch.Tensor] = None,
+    beta: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Grouped GEMM using GroupedTensor inputs.
+
+    This uses nvte_grouped_gemm and supports different per-matrix shapes.
+
+    The caller must ensure that GroupedTensor metadata is already compatible with the
+    underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
+    """
+    assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+
+    num_tensors = A.num_tensors
+    assert A.num_tensors == B.num_tensors == out.num_tensors, (
+        f"GroupedTensor num_tensors must match: A={A.num_tensors}, B={B.num_tensors},"
+        f" out={out.num_tensors}"
+    )
+
+    if out.data is not None:
+        device = out.data.device
+    elif out.columnwise_data is not None:
+        device = out.columnwise_data.device
+    else:
+        raise ValueError("Output GroupedTensor must have allocated data.")
+
+    if alpha is None:
+        alpha = torch.ones(num_tensors, dtype=torch.float32, device=device)
+    if beta is None:
+        if accumulate:
+            beta = torch.ones(num_tensors, dtype=torch.float32, device=device)
+        else:
+            beta = torch.zeros(num_tensors, dtype=torch.float32, device=device)
+
+    if not alpha.is_cuda or not beta.is_cuda:
+        raise ValueError("alpha and beta must be CUDA tensors.")
+
+    workspace_setup = torch.empty(
+        get_grouped_gemm_setup_workspace_size(num_tensors),
+        dtype=torch.uint8,
+        device=device,
+    )
+    workspace_cublas = torch.empty(
+        get_cublas_workspace_size_bytes(),
+        dtype=torch.uint8,
+        device=device,
+    )
+
+    sm_count = get_sm_count()
+    sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
+
+    C = out
+    return tex.te_general_grouped_gemm_for_grouped_tensor(
+        A,
+        transa,
+        B,
+        transb,
+        C,
+        out,
+        alpha,
+        beta,
+        workspace_setup,
+        workspace_cublas,
+        sm_count,
+    )
