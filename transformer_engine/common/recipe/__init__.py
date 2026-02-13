@@ -188,6 +188,11 @@ class DelayedScaling(Recipe):
             `LayerNormLinear (BF16 output) -> (cast to FP8 ) FP8 DPA (cast to BF16) -> Linear`.
             When `fp8_mha = True, fp8_dpa = True`, it becomes
             `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
+    quantize_forward : bool, default = True
+            Whether to quantize tensors in the forward pass.
+    quantize_backward : bool, default = True
+            Whether to quantize tensors in the backward pass. Delayed scaling
+            always quantizes backward; setting this to False is not supported.
 
     Notes
     -----
@@ -211,9 +216,15 @@ class DelayedScaling(Recipe):
     reduce_amax: bool = True
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    quantize_forward: bool = True
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
+        assert self.quantize_backward, "Delayed scaling does not support quantize_backward=False."
 
     def __repr__(self) -> str:
         return (
@@ -223,7 +234,9 @@ class DelayedScaling(Recipe):
             f"amax_history_len={self.amax_history_len}, "
             f"reduce_amax={self.reduce_amax}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha}"
+            f"fp8_mha={self.fp8_mha}, "
+            f"quantize_forward={self.quantize_forward}, "
+            f"quantize_backward={self.quantize_backward}"
         )
 
 
@@ -237,6 +250,10 @@ class Float8CurrentScaling(Recipe):
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
                 Controls the FP8 data format used during forward and backward
                 pass.
+    quantize_forward : bool, default = True
+            Whether to quantize tensors in the forward pass.
+    quantize_backward : bool, default = True
+            Whether to quantize tensors in the backward pass.
     """
 
     use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
@@ -249,9 +266,14 @@ class Float8CurrentScaling(Recipe):
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    quantize_forward: bool = True
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
 
     def __repr__(self) -> str:
         return (
@@ -264,7 +286,9 @@ class Float8CurrentScaling(Recipe):
             f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha}"
+            f"fp8_mha={self.fp8_mha}, "
+            f"quantize_forward={self.quantize_forward}, "
+            f"quantize_backward={self.quantize_backward}"
         )
 
 
@@ -291,21 +315,32 @@ class MXFP8BlockScaling(Recipe):
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
                 Controls the FP8 data format used during forward and backward
                 pass.
+    quantize_forward : bool, default = True
+            Whether to quantize tensors in the forward pass.
+    quantize_backward : bool, default = True
+            Whether to quantize tensors in the backward pass.
     """
 
     margin: int = 0
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    quantize_forward: bool = True
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
 
     def __repr__(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
-            f"format={str(self.fp8_format).split('.')[1]}"
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"quantize_forward={self.quantize_forward}, "
+            f"quantize_backward={self.quantize_backward}"
         )
 
 
@@ -334,6 +369,10 @@ class Float8BlockScaling(Recipe):
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
                 Controls the FP8 data format used during forward and backward
                 pass.
+    quantize_forward : bool, default = True
+            Whether to quantize tensors in the forward pass.
+    quantize_backward : bool, default = True
+            Whether to quantize tensors in the backward pass.
     """
 
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
@@ -350,6 +389,8 @@ class Float8BlockScaling(Recipe):
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    quantize_forward: bool = True
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __post_init__(self) -> None:
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
@@ -371,6 +412,9 @@ class Float8BlockScaling(Recipe):
             not self.fp8_dpa and not self.fp8_mha
         ), "FP8 attention is not supported for Float8BlockScaling."
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
 
     def __repr__(self) -> str:
         return (
@@ -386,7 +430,9 @@ class Float8BlockScaling(Recipe):
             f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha}"
+            f"fp8_mha={self.fp8_mha}, "
+            f"quantize_forward={self.quantize_forward}, "
+            f"quantize_backward={self.quantize_backward}"
         )
 
 
@@ -435,6 +481,10 @@ class NVFP4BlockScaling(Recipe):
              If set to `True`, stochastic rounding is disabled during quantization for all tensors.
     disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
+    quantize_forward : bool, default = True
+            Whether to quantize tensors in the forward pass.
+    quantize_backward : bool, default = True
+            Whether to quantize tensors in the backward pass.
     """
 
     # Configuration envvars
@@ -450,10 +500,15 @@ class NVFP4BlockScaling(Recipe):
     # Not applying quantization to attention for now
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    quantize_forward: bool = True
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
         assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
+        assert not (
+            not self.quantize_forward and self.quantize_backward
+        ), "Invalid recipe configuration: quantize_backward=True requires quantize_forward=True."
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -481,6 +536,8 @@ class NVFP4BlockScaling(Recipe):
             f"fp8_format={str(self.fp8_format).split('.')[1]}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
+            f"quantize_forward={self.quantize_forward}, "
+            f"quantize_backward={self.quantize_backward}, "
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
@@ -512,12 +569,23 @@ class CustomRecipe(Recipe):
 
         - forward:  "linear_input", "linear_weight", "linear_output"
         - backward: "linear_grad_output", "linear_grad_input"
+    quantize_forward : bool, default = True
+        Whether to quantize tensors in the forward pass.
+    quantize_backward : bool, default = True
+        Whether to quantize tensors in the backward pass.
     """
 
     qfactory: Callable[..., Any]
 
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    quantize_forward: bool = True
+    quantize_backward: bool = not (os.getenv("NVTE_KEEP_BACKWARD_UNQUANTIZED", "0") == "1")
 
     def __repr__(self) -> str:
-        return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"qfactory={self.qfactory}, "
+            f"quantize_forward={self.quantize_forward}, "
+            f"quantize_backward={self.quantize_backward}"
+        )
