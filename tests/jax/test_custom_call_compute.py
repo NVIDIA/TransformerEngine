@@ -1934,7 +1934,8 @@ class TestDebugInspectFFI:
             jnp.float16,
             # Note: fp4 currently doesn't work
             # jnp.float4_e2m1fn
-        ] + ([jnp.float8_e4m3fn, jnp.float8_e5m2] if is_fp8_supported else [])
+        ]
+        + ([jnp.float8_e4m3fn, jnp.float8_e5m2] if is_fp8_supported else []),
     )
     def test_debug_inspect_ffi(self, shape, dtype):
         from transformer_engine.jax.debug.experimental import inspect_array, load_array_dump
