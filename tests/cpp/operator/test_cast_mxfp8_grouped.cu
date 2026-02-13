@@ -647,6 +647,8 @@ std::vector<std::vector<size_t>> input_config = {
     {SAME_BOTH_DIMS,        1,      128,128},
     {SAME_BOTH_DIMS,        2,      256,128},
     {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
+    {VARYING_FIRST_DIM,     3,      1024,144,                   128,384,512},
+    {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
     {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
     {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
     {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
@@ -712,26 +714,31 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
             }
         }
         offsets[t+1] = offsets[t] + first_dims[t] * last_dims[t];
-        // Skips tests if tensor shape is not as required by the kernel
-        if (first_dims[t] % 128 != 0) {
+        // Skip tests when the tensor shape is incompatible with the kernel.
+        // The TMA engine requires strides to be 16-byte aligned.
+        if ((first_dims[t] % 128 != 0) || (last_dims[t] % 16 != 0)) {
             GTEST_SKIP();
         }
-        if (!is_single_tensor && (last_dims[t] % 128 != 0)) {
+        // If a grouped tensor has a varying last dimension, it must be a multiple of 128.
+        // Otherwise, computing the grid size adds runtime overhead in the non-persistent kernel,
+        // since the relevant tensor metadata resides in device memory.
+        constexpr size_t CHUNK_DIM_X = 128;
+        if (!is_single_tensor && (last_dims[t] % CHUNK_DIM_X != 0)) {
             GTEST_SKIP();
         }
     }
-    // Skips DBias tests if last dimension of tensors variates
+    // Skip dBias tests when tensors in the group have different last dimensions.
     if ((processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT)
         && !is_single_tensor) {
         GTEST_SKIP();
     }
 
-    // Skips non Act tests if the Activation type is not an identity
+    // Skip non-activation tests when the activation type is not Identity.
     if ((processing_method == ProcessingMethod::CAST_ONLY || processing_method == ProcessingMethod::CAST_DBIAS)
         && activation != ActivationKind::Identity) {
         GTEST_SKIP();
     }
-    // Skips Act tests if the Activation is an identity
+    // Skip activation tests when the activation type is Identity.
     if ((processing_method == ProcessingMethod::CAST_DBIAS_DACT
         || processing_method == ProcessingMethod::CAST_DACT
         || processing_method == ProcessingMethod::CAST_ACT) && (activation == ActivationKind::Identity)) {

@@ -106,6 +106,9 @@ __device__ __forceinline__ size_t get_tensor_rows_num(
       rows_num = static_cast<size_t>(first_dims_ptr[tensor_id]);
       break;
   }
+  if (rows_num % 128 != 0) {
+    NVTE_DEVICE_ERROR("First dimension of each tensor in a group must be divisible by 128.");
+  }
   return rows_num;
 }
 
@@ -143,10 +146,6 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
     }
     if (global_data_ptr % TMA_GMEM_ALIGNMENT != 0) {
       NVTE_DEVICE_ERROR("Tensor data pointer must be 16B aligned");
-    }
-    if (global_dim_X % CHUNK_DIM_X != 0) {
-      NVTE_DEVICE_ERROR(
-          "The grouped tensor must be divisible by 128x128 tiles without a tail tile.");
     }
 
     asm volatile(
@@ -833,22 +832,28 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
   const size_t num_tensors = input->num_tensors;
 
-  if (!is_single_tensor) {
+  size_t blocks = 0;
+  if (is_single_tensor) {
+    const size_t blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
+    const size_t blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
+    blocks = blocks_Y * blocks_X;
+  } else {
     NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
                "Number of tensors in a group is larger than "
                "the MAX number of supported descriptors (64).");
+    // Only full tiles supported
+    NVTE_CHECK(elts_total % ELTS_PER_CHUNK == 0, "Only full-tile grouped tensors supported.");
+    blocks = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
   }
-
-  NVTE_CHECK(elts_total % ELTS_PER_CHUNK == 0, "Only full-tile grouped tensors supported.");
-  const dim3 grid(elts_total / ELTS_PER_CHUNK);
   const size_t block_size = THREADS_PER_CHUNK;
+  const dim3 grid(blocks);
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
 
   // Logical shape of a tensor with varying all dims is [1, M*K]
   if (shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS) {
     NVTE_CHECK(first_logical_dim % 128 == 0,
-               "First dimension of a grouped tensor should be divisible by 128.");
+               "First logical dimension of a grouped tensor must be divisible by 128.");
   }
 
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
