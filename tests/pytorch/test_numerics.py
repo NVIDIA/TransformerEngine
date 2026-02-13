@@ -89,6 +89,7 @@ all_boolean = [True, False]
 all_activations = [
     "gelu",
     "geglu",
+    "glu",
     "qgelu",
     "qgeglu",
     "relu",
@@ -479,6 +480,7 @@ class TorchGroupedLinearWithPadding(nn.Module):
 _supported_act = {
     "gelu": nn.GELU(approximate="tanh"),
     "geglu": nn.GELU(approximate="tanh"),
+    "glu": nn.Sigmoid(),
     "qgelu": TorchQuickGELU(),
     "qgeglu": TorchQuickGELU(),
     "relu": nn.ReLU(),
