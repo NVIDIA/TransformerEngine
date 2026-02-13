@@ -1169,7 +1169,35 @@ class MXFP8BlockScalingRecipeState(RecipeState):
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
         from .tensor.mxfp8_tensor import MXFP8Quantizer
 
-        return [MXFP8Quantizer(self.dtype) for i in range(self.num_quantizers)]
+        if self.mode == "forward":
+
+            def _make_quantizer(idx: int) -> MXFP8Quantizer:
+                qparams = (
+                    self.recipe.fp8_quant_fwd_weight
+                    if idx % 3 == 1
+                    else self.recipe.fp8_quant_fwd_inp
+                )
+                return MXFP8Quantizer(
+                    fp8_dtype=self.dtype,
+                    rowwise=True,
+                    columnwise=True,
+                    with_2d_quantization=qparams.mxfp8_2d_quantization,
+                )
+
+            return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
+
+        if self.mode == "backward":
+            return [
+                MXFP8Quantizer(
+                    fp8_dtype=self.dtype,
+                    rowwise=True,
+                    columnwise=True,
+                    with_2d_quantization=self.recipe.fp8_quant_bwd_grad.mxfp8_2d_quantization,
+                )
+                for _ in range(self.num_quantizers)
+            ]
+
+        raise ValueError(f"Unknown mode: {self.mode}")
 
 
 class Float8BlockScalingRecipeState(RecipeState):
