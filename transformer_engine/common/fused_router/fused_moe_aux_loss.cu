@@ -18,7 +18,7 @@
 namespace transformer_engine {
 
 // Using Double to hanld all the calculations
-using CompType = double;
+using CompType = float;
 
 template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
@@ -98,7 +98,7 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
                     * Section: Compute the aux_loss
                     */
         float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
-        aux_loss[0] = static_cast<DataType>(static_cast<double>(intermediate_result) * C_coeff);
+        aux_loss[0] = static_cast<DataType>(intermediate_result * C_coeff);
         Const_buf[0] = C_coeff;
       }
     }
@@ -154,7 +154,7 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
              * Section: Compute the aux_loss
              */
       float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
-      aux_loss[0] = static_cast<DataType>(static_cast<double>(intermediate_result) * C_coeff);
+      aux_loss[0] = static_cast<DataType>(intermediate_result * C_coeff);
       Const_buf[0] = C_coeff;
     }
   }
@@ -229,8 +229,8 @@ __global__ void fused_moe_aux_loss_backward_kernel(const float* Const_buf,
   // Loop: for all positions in each row
   for (int i = lane_id; i < num_cols; i += kThreadsPerWarp) {
     float C_coeff = Const_buf[0];
-    double tokens_per_expert_i = static_cast<double>(tokens_per_expert[i]);
-    double grad_aux_loss_value = static_cast<double>(grad_aux_loss[0]);
+    CompType tokens_per_expert_i = static_cast<CompType>(tokens_per_expert[i]);
+    CompType grad_aux_loss_value = static_cast<CompType>(grad_aux_loss[0]);
     // Loop: for all rows
     for (int j = global_warp_id; j < num_rows; j += global_warp_num) {
       grad_probs[j * num_cols + i] = C_coeff * tokens_per_expert_i * grad_aux_loss_value;
