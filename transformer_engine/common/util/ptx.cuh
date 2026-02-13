@@ -31,11 +31,15 @@ struct ArchSpecific {
   template <int CurrentArch, int ArchSpecific, int FamilySpecific>
   constexpr static bool compatible() {
     if constexpr (CurrentArch == id) {
+#if !defined(NVTE_HAS_ARCH_SPECIFIC_TARGETS)
       static_assert(ArchSpecific == CurrentArch,
                     "Compiled for the generic architecture, while utilizing arch-specific "
                     "features. Please compile for smXXXa architecture instead of smXXX "
                     "architecture.");
       return true;
+#else
+      return ArchSpecific == CurrentArch;
+#endif
     } else {
       return false;
     }
@@ -49,11 +53,15 @@ struct FamilySpecific {
   template <int CurrentArch, int ArchSpecific, int FamilySpecific>
   constexpr static bool compatible() {
     if constexpr ((CurrentArch / 100) == (id / 100)) {
+#if !defined(NVTE_HAS_ARCH_SPECIFIC_TARGETS)
       static_assert(FamilySpecific == CurrentArch,
                     "Compiled for the generic architecture, while utilizing family-specific "
                     "features. Please compile for smXXXf architecture instead of smXXX "
                     "architecture.");
       return true;
+#else
+      return FamilySpecific == CurrentArch;
+#endif
     } else {
       return false;
     }
