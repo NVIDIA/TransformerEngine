@@ -380,13 +380,13 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
   NVTEScalingMode scaling_mode = nvte_grouped_tensor_scaling_mode(output);
 
   const NVTEGroupedTensor activation = nullptr;
-  NVTETensor dbias = nullptr;
+  NVTEGroupedTensor dbias = nullptr;
   NVTETensor workspace = nullptr;
 
   const GroupedTensor *input_tensor = convertNVTEGroupedTensorCheck(input);
   GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
   const GroupedTensor *activations_tensor = convertNVTEGroupedTensor(activation);
-  Tensor *dbias_tensor = convertNVTETensor(dbias);
+  GroupedTensor *dbias_tensor = convertNVTEGroupedTensor(dbias);
   Tensor *workspace_tensor = convertNVTETensor(workspace);
 
   // Quantization config
@@ -417,8 +417,9 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
 
 template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
-                               NVTEGroupedTensor output, NVTETensor dbias, NVTETensor workspace,
-                               const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+                               NVTEGroupedTensor output, NVTEGroupedTensor dbias,
+                               NVTETensor workspace, const NVTEQuantizationConfig quant_config,
+                               cudaStream_t stream) {
   using namespace detail;
 
   NVTEScalingMode scaling_mode = nvte_grouped_tensor_scaling_mode(output);
@@ -426,7 +427,7 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
   const GroupedTensor *grad_tensor = convertNVTEGroupedTensorCheck(grad);
   const GroupedTensor *input_tensor = convertNVTEGroupedTensor(input);
   GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
-  Tensor *dbias_tensor = convertNVTETensor(dbias);
+  GroupedTensor *dbias_tensor = convertNVTEGroupedTensor(dbias);
   Tensor *workspace_tensor = convertNVTETensor(workspace);
 
   // Quantization config
