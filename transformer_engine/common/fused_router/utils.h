@@ -184,8 +184,8 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
   for (int k = 0; k < topk; k++) {
     // Find the max value and its index
     double val = (lane_id < data_size && !is_masked(k, lane_id))
-                    ? static_cast<double>(scores[lane_id])
-                    : -std::numeric_limits<double>::infinity();
+                     ? static_cast<double>(scores[lane_id])
+                     : -std::numeric_limits<double>::infinity();
     int index = (lane_id < data_size) ? lane_id : 0;
     // Some value is hanlded in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
