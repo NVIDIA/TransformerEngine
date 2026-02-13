@@ -585,10 +585,19 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
+@pytest.mark.parametrize("single_param", all_boolean)
 @pytest.mark.parametrize("empty_split", ["first", "last", "middle"])
 @pytest.mark.parametrize("num_gemms", [4])
 def test_sanity_grouped_linear(
-    dtype, bs, model, fp8_recipe, fp8_model_params, use_bias, num_gemms, empty_split
+    dtype,
+    bs,
+    model,
+    fp8_recipe,
+    fp8_model_params,
+    use_bias,
+    single_param,
+    num_gemms,
+    empty_split,
 ):
     if NVTE_TEST_NVINSPECT_ENABLED and fp8_model_params:
         pytest.skip("FP8 model parameters are not supported in debug mode.")
@@ -597,6 +606,9 @@ def test_sanity_grouped_linear(
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
+
+    if single_param:
+        os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -617,7 +629,8 @@ def test_sanity_grouped_linear(
     # Verify that weights are stored in contiguous GroupedTensor storage.
     weights = [getattr(te_grouped_linear, f"weight{i}") for i in range(num_gemms)]
     if fp8_recipe is None or not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
-        check_grouped_tensor_pointers(weights, fp8_recipe)
+        if single_param:
+            check_grouped_tensor_pointers(weights, fp8_recipe)
 
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
@@ -635,6 +648,9 @@ def test_sanity_grouped_linear(
     loss = out.sum()
     loss.backward()
     assert out.shape == (num_tokens, ffn_hidden_size)
+
+    if single_param:
+        del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
 
 
 @pytest.mark.parametrize("dtype", param_types)
