@@ -2152,7 +2152,7 @@ def grouped_gemm(
         )  # Offset is by number of elements total, not number of rows
         # HACK: this _out is really the rhs in this case
         group_offset_out = (
-            group_offset * 1
+            group_offset * N
         )  # Offset is by number of elements total, not number of rows
     else:
         group_offset_lhs = (

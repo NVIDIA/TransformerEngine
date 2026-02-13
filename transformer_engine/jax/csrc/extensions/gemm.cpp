@@ -696,10 +696,26 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     rhs_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims);
 
     //// LHS
-    NVTEShape lhsShape{.data = {m, k}, .ndim = 2};
+    NVTEShape lhsShape{.data = {k, m}, .ndim = 2};
     lhs_is_trans = true;
     auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-    lhs_tensor.set_group_info(group_sizes, group_offset_lhs, kNVTEGroupedLastDims);
+    lhs_tensor.set_group_info(group_sizes, group_offset_lhs, kNVTEGroupedFirstDims);
+
+    printf("LHS shape: ");
+    for (auto dim : lhs_data.dimensions()) {
+      printf("%zu, ", dim);
+    }
+    printf("\n");
+    printf("RHS shape: ");
+    for (auto dim : rhs_data.dimensions()) {
+      printf("%zu, ", dim);
+    }
+    printf("\n");
+    printf("Output shape: ");
+    for (auto dim : output->dimensions()) {
+      printf("%zu, ", dim);
+    }
+    printf("\n");
 
     //// OUTPUT
     NVTEShape outShape{.data = {num_gemms * m, n}, .ndim = 2};
