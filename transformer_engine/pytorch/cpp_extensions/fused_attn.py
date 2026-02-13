@@ -339,9 +339,9 @@ def fused_attn_fwd(
 
     if return_max_logit:
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
-        # thd:  output_tensors: out [tq, h, d],    Max [tq, h, 1],    Sum_Exp [tq, h, 1]
-        # bshd: output_tensors: out [b, sq, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
-        # sbhd: output_tensors: out [sq, b, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
+        # thd:  output_tensors: out [tq, h, d],    Stats [tq, h, 1],    Max [tq, h, 1]
+        # bshd: output_tensors: out [b, sq, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]
+        # sbhd: output_tensors: out [sq, b, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1] (there's no typo here)
 
         aux_ctx_tensors = [output_tensors[1]] # "Stats"
         amax_dims = (0, 2) if qkv_format == "thd" else (0, 2, 3)
