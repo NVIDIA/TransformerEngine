@@ -179,10 +179,13 @@ def run_dpa_with_cp(
     fp8_mha="False",
     scaling_mode="delayed",
     f16_O="False",
+    is_training="True",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
     logging.root.setLevel(log_level)
+    # When is_training is False, gradient outputs are None.
+    is_training = is_training == "True"
 
     # set up environment variables and config
     fp8_bwd = fp8_bwd == "True" and dtype == "fp8"
@@ -257,7 +260,9 @@ def run_dpa_with_cp(
         softmax_type=config.softmax_type,
         return_max_logit=config.return_max_logit,
     ).cuda()
-    if config.softmax_type != "vanilla":
+    if not is_training:
+        core_attn.eval()
+    if is_training and config.softmax_type != "vanilla":
         core_attn.softmax_offset.requires_grad = True
 
     # generate attention inputs
@@ -350,15 +355,20 @@ def run_dpa_with_cp(
         )
         if config.return_max_logit:
             out, max_logit = out
-        if fp8_bwd and fp8_mha:
-            dout_fp8 = dout_quantizer(dout)
-            out.backward(dout_fp8)
-        else:
-            out.backward(dout)
-    dq, dk, dv, dbias = q.grad, k.grad, v.grad, bias.grad if bias is not None else None
-    d_softmax_offset = None
-    if config.softmax_type != "vanilla":
-        d_softmax_offset = core_attn.softmax_offset.grad
+        if is_training:
+            if fp8_bwd and fp8_mha:
+                dout_fp8 = dout_quantizer(dout)
+                out.backward(dout_fp8)
+            else:
+                out.backward(dout)
+    if is_training:
+        dq, dk, dv, dbias = q.grad, k.grad, v.grad, bias.grad if bias is not None else None
+        d_softmax_offset = (
+            core_attn.softmax_offset.grad if config.softmax_type != "vanilla" else None
+        )
+    else:
+        dq, dk, dv, dbias = None, None, None, None
+        d_softmax_offset = None
 
     ############ run with CP ############
     logging.info(f"[Rank {rank}] Run with context parallelism")
@@ -404,7 +414,8 @@ def run_dpa_with_cp(
         dout_quantizer.amax.fill_(0.0)
     if fp8_mha:
         q_, k_, v_ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
-    q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
+    if is_training:
+        q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:
         ndim = bias_.ndim
         seq_q_dim = ndim - 2
@@ -461,15 +472,27 @@ def run_dpa_with_cp(
         )
         if config.return_max_logit:
             out_, max_logit_ = out_
-        if fp8_bwd and fp8_mha:
-            dout_fp8_ = dout_quantizer(dout_)
-            out_.backward(dout_fp8_)
-        else:
-            out_.backward(dout_)
-    dq_, dk_, dv_, dbias_ = q_.grad, k_.grad, v_.grad, bias_.grad if bias_ is not None else None
-    d_softmax_offset_ = None
-    if config.softmax_type != "vanilla":
-        d_softmax_offset_ = core_attn.softmax_offset.grad.clone()
+        if is_training:
+            if fp8_bwd and fp8_mha:
+                dout_fp8_ = dout_quantizer(dout_)
+                out_.backward(dout_fp8_)
+            else:
+                out_.backward(dout_)
+    if is_training:
+        dq_, dk_, dv_, dbias_ = (
+            q_.grad,
+            k_.grad,
+            v_.grad,
+            bias_.grad if bias_ is not None else None,
+        )
+        d_softmax_offset_ = (
+            core_attn.softmax_offset.grad.clone()
+            if config.softmax_type != "vanilla"
+            else None
+        )
+    else:
+        dq_, dk_, dv_, dbias_ = None, None, None, None
+        d_softmax_offset_ = None
 
     # get outputs
     tensors = [out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_]
@@ -490,75 +513,99 @@ def run_dpa_with_cp(
 
     ############  compare results between CP and no-CP ############
     if qkv_format == "bshd" or qkv_format == "sbhd":
-        dq, dk, dv, out = [
-            x.view(
-                *x.shape[:seq_dim],
+        if is_training:
+            dq, dk, dv, out = [
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                for x in [dq, dk, dv, out]
+            ]
+            dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
+            dq_, dk_, dv_, out_ = [
+                x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
+                for x in [dq_, dk_, dv_, out_]
+            ]
+            if dbias is not None and dbias_ is not None:
+                ndim = dbias.ndim
+                # Query seq is at dim -2
+                seq_q_dim = ndim - 2
+                shape_before_seq = dbias.shape[:seq_q_dim]
+                seq_q_size = dbias.shape[seq_q_dim]
+                seq_kv_size = dbias.shape[-1]
+                # Reshape to split seq_q dimension
+                dbias = dbias.view(
+                    *shape_before_seq, 2 * world_size, seq_q_size // (2 * world_size), seq_kv_size
+                )
+                # Index select on the newly created dimension (now at position seq_q_dim)
+                dbias = dbias.index_select(seq_q_dim, seq_idx)
+                dbias_ = dbias_.view(
+                    *shape_before_seq, 2, dbias_.shape[seq_q_dim] // 2, seq_kv_size
+                )
+        else:
+            # Forward-only: reshape only out/out_ for comparison
+            out = out.view(
+                *out.shape[:seq_dim],
                 2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
+                out.shape[seq_dim] // (2 * world_size),
+                *out.shape[(seq_dim + 1) :],
             )
-            for x in [dq, dk, dv, out]
-        ]
-        dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
-        dq_, dk_, dv_, out_ = [
-            x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
-            for x in [dq_, dk_, dv_, out_]
-        ]
-        if dbias is not None and dbias_ is not None:
-            ndim = dbias.ndim
-            # Query seq is at dim -2
-            seq_q_dim = ndim - 2
-            shape_before_seq = dbias.shape[:seq_q_dim]
-            seq_q_size = dbias.shape[seq_q_dim]
-            seq_kv_size = dbias.shape[-1]
-            # Reshape to split seq_q dimension
-            dbias = dbias.view(
-                *shape_before_seq, 2 * world_size, seq_q_size // (2 * world_size), seq_kv_size
+            out = out.index_select(seq_dim, seq_idx)
+            out_ = out_.view(
+                *out_.shape[:seq_dim], 2, out_.shape[seq_dim] // 2, *out_.shape[(seq_dim + 1) :]
             )
-            # Index select on the newly created dimension (now at position seq_q_dim)
-            dbias = dbias.index_select(seq_q_dim, seq_idx)
-            dbias_ = dbias_.view(*shape_before_seq, 2, dbias_.shape[seq_q_dim] // 2, seq_kv_size)
 
     elif qkv_format == "thd":
-        dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
-        dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
-        dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
-        cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
-        cu_seqlens_q = get_cu_seqlens_on_cp_rank(
-            cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
-        )
-        cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
-        num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
-        for x in [dq, out, dq_, out_]:
-            assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
-            for b in range(config.batch_size):
-                assert (
-                    num_pads_q[b] == 0
-                    or torch.count_nonzero(
-                        x[(cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[b + 1]]
-                    ).item()
-                    == 0
-                )
-        cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
-        cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
-            cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
-        )
-        cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
-        num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
-        for x in [dk, dv, dk_, dv_]:
-            assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
-            for b in range(config.batch_size):
-                assert (
-                    num_pads_kv[b] == 0
-                    or torch.count_nonzero(
-                        x[
-                            (cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]) : cu_seqlens_kv_padded[
-                                b + 1
+        if is_training:
+            dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
+            dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
+            dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
+            cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
+            cu_seqlens_q = get_cu_seqlens_on_cp_rank(
+                cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
+            )
+            cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
+            num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
+            for x in [dq, out, dq_, out_]:
+                assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
+                for b in range(config.batch_size):
+                    assert (
+                        num_pads_q[b] == 0
+                        or torch.count_nonzero(
+                            x[
+                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
+                                    b + 1
+                                ]
                             ]
-                        ]
-                    ).item()
-                    == 0
-                )
+                        ).item()
+                        == 0
+                    )
+            cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
+            cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
+                cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
+            )
+            cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
+            num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
+            for x in [dk, dv, dk_, dv_]:
+                assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
+                for b in range(config.batch_size):
+                    assert (
+                        num_pads_kv[b] == 0
+                        or torch.count_nonzero(
+                            x[
+                                (cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]) : cu_seqlens_kv_padded[
+                                    b + 1
+                                ]
+                            ]
+                        ).item()
+                        == 0
+                    )
+        else:
+            # Forward-only: reshape only out/out_ for comparison
+            out = out.index_select(0, seq_idx_q).contiguous()
+            out_ = out_
 
     atol, rtol, rmse_tol = get_tols(config, dtype)
     tensors_cp = [out_, dq_, dk_, dv_, dbias_, d_softmax_offset_, max_logit_]

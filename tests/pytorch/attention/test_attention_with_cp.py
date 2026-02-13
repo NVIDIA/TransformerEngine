@@ -181,6 +181,7 @@ model_configs_fused_attn = {
         attn_mask_type="causal",
         attn_bias_type="post_scale_bias",
         bias_shape="111s",
+        return_max_logit=True
     ),  # GQA
     "cp_2_5": ModelConfig(
         2, 4096, 12, 128, num_gqa_groups=2, attn_bias_type="post_scale_bias"
@@ -286,10 +287,6 @@ def test_cp_with_fused_attention(
         pytest.skip("FP8 attention cannot work with sliding window yet!")
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
-    if "p2p" in cp_comm_type and config.attn_bias_type != "no_bias" and config.bias_shape == "111s":
-        pytest.skip(
-            f"CP implementation with KV P2P requires bias sequence dim to be divisible by 2"
-        )
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
         pytest.skip("CP implementation with KV all-gather does not support bias yet!")
     if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
@@ -357,12 +354,15 @@ def test_cp_with_fused_attention(
             Float8CurrentScaling(fp8_dpa=True),
             DelayedScaling(fp8_dpa=True),
         ]
+    # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
+    is_training = False if config.bias_shape == "111s" else True
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
         qkv_layout="_".join([qkv_format] * 3),
         fp8=fp8,
         fp8_meta=fp8_meta,
+        is_training=is_training,
     )
     _, fused_attn_supported, _ = available_backends
     if not fused_attn_supported:
@@ -381,6 +381,7 @@ def test_cp_with_fused_attention(
             fp8_mha=fp8_mha,
             scaling_mode=scaling_mode,
             f16_O=f16_O,
+            is_training=is_training,
             log_level=pytest_logging_level,
         ),
         check=True,
