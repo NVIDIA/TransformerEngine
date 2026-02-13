@@ -58,18 +58,17 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
   for (size_t i = 0; i < input_buf.dimensions().size(); ++i) {
     meta_file << input_buf.dimensions()[i];
     if (i < input_buf.dimensions().size() - 1) {
-        meta_file << ", ";
-      }
+      meta_file << ", ";
     }
-    meta_file << "], ";
-    meta_file << "\"dtype\": " << static_cast<int>(input_buf.element_type());
-    meta_file << ", \"min\": " << min_val;
-    meta_file << ", \"max\": " << max_val;
-    meta_file << ", \"mean\": " << mean_val;
-    meta_file << ", \"std\": " << std_val;
-    meta_file << "}";
-    meta_file.close();
   }
+  meta_file << "], ";
+  meta_file << "\"dtype\": " << static_cast<int>(input_buf.element_type());
+  meta_file << ", \"min\": " << min_val;
+  meta_file << ", \"max\": " << max_val;
+  meta_file << ", \"mean\": " << mean_val;
+  meta_file << ", \"std\": " << std_val;
+  meta_file << "}";
+  meta_file.close();
 
   // Log the tensor metadata to the console
   printf("[gpu%d]: Tensor data written to %s (shape: [", device, filename.c_str());
