@@ -43,6 +43,8 @@ std::string to_string(const DType type) {
       return "Float16";
     case DType::kFloat32:
       return "Float32";
+    case DType::kFloat64:
+      return "Float64";
     case DType::kFloat8E4M3:
       return "Float8E4M3";
     case DType::kFloat8E5M2:
