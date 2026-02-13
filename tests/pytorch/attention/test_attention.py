@@ -8,7 +8,9 @@ import pathlib
 from typing import Any, Dict, Tuple, Union
 
 import pytest
+import math
 import torch
+import torch.nn.functional as F
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, get_fp8_te_dtype
 from transformer_engine.common import recipe
@@ -891,6 +893,63 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
         test_dot_product_attention(
             dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
         )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
+@pytest.mark.skipif(
+    get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
+)
+@pytest.mark.parametrize("dtype", param_types_lean)
+def test_dpa_thd_qv_head_dim_mismatch(dtype):
+    """Test THD DotProductAttention when Q/V head dims differ."""
+    seq_len = 32
+    num_heads = 4
+    head_dim_qk = 128
+    head_dim_v = 64
+
+    q = torch.randn(seq_len, num_heads, head_dim_qk, device="cuda", dtype=dtype, requires_grad=True)
+    k = torch.randn(seq_len, num_heads, head_dim_qk, device="cuda", dtype=dtype, requires_grad=True)
+    v = torch.randn(seq_len, num_heads, head_dim_v, device="cuda", dtype=dtype, requires_grad=True)
+
+    cu_seqlens = torch.tensor([0, seq_len], device="cuda", dtype=torch.int32)
+
+    dpa = DotProductAttention(
+        num_heads,
+        (head_dim_qk, head_dim_v),
+        qkv_format="thd",
+        attn_mask_type="padding_causal",
+    ).to(device="cuda", dtype=dtype)
+
+    out = dpa(
+        q,
+        k,
+        v,
+        qkv_format="thd",
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        max_seqlen_q=seq_len,
+        max_seqlen_kv=seq_len,
+        attn_mask_type="padding_causal",
+    )
+
+    assert out.shape == (seq_len, num_heads * head_dim_v)
+    out.sum().backward()
+    assert q.grad is not None
+    assert k.grad is not None
+    assert v.grad is not None
+
+    # Reference attention (causal) in float32 for numerical check.
+    q_ref = q.detach().float()
+    k_ref = k.detach().float()
+    v_ref = v.detach().float()
+    scores = torch.einsum("thd,shd->ths", q_ref, k_ref) / math.sqrt(head_dim_qk)
+    causal_mask = torch.triu(
+        torch.ones(seq_len, seq_len, device="cuda", dtype=torch.bool), diagonal=1
+    )
+    scores = scores.masked_fill(causal_mask.unsqueeze(1), float("-inf"))
+    probs = F.softmax(scores, dim=-1)
+    ref = torch.einsum("ths,shd->thd", probs, v_ref).reshape(seq_len, -1)
+    torch.testing.assert_close(out.detach().float(), ref, rtol=5e-2, atol=5e-2)
 
 
 def _run_dot_product_attention(
