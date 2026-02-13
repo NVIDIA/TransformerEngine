@@ -101,6 +101,7 @@ register_primitive(InspectPrimitive)
 
 
 def _inspect_array_inner(x: jnp.ndarray) -> jnp.ndarray:
+    assert InspectPrimitive.outer_primitive is not None, "InspectPrimitive FFI is not registered. Please ensure the C++ extension is properly built and registered."
     return InspectPrimitive.outer_primitive.bind(
         x,
         jnp.min(x).astype(jnp.float32),

@@ -45,20 +45,19 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
   // Write the tensor data to a file as a binary blob
   std::string filename = "my_tensor_gpu" + std::to_string(device) + ".bin";
   std::ofstream file(filename, std::ios::binary);
-  if (file.is_open()) {
-    file.write(reinterpret_cast<const char *>(input_data.data()), input_data.size());
-    file.close();
-  }
+  NVTE_CHECK(file.is_open(), "Failed to create file: ", filename);
+  file.write(reinterpret_cast<const char *>(input_data.data()), input_data.size());
+  file.close();
 
   // Write out a metadata file
   std::string meta_filename = "my_tensor_gpu" + std::to_string(device) + "_meta.json";
   std::ofstream meta_file(meta_filename);
-  if (meta_file.is_open()) {
-    meta_file << "{";
-    meta_file << "\"shape\": [";
-    for (size_t i = 0; i < input_buf.dimensions().size(); ++i) {
-      meta_file << input_buf.dimensions()[i];
-      if (i < input_buf.dimensions().size() - 1) {
+  NVTE_CHECK(meta_file.is_open(), "Failed to create file: ", meta_filename);
+  meta_file << "{";
+  meta_file << "\"shape\": [";
+  for (size_t i = 0; i < input_buf.dimensions().size(); ++i) {
+    meta_file << input_buf.dimensions()[i];
+    if (i < input_buf.dimensions().size() - 1) {
         meta_file << ", ";
       }
     }
