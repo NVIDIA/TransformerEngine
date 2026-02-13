@@ -1445,6 +1445,7 @@ def make_dot_general_cls(quantization_recipe):
 
 def make_ragged_dot_cls(quantization_recipe):
     assert quantization_recipe is None, "Ragged dot grouped GEMM does not support quantization yet"
+
     def te_grouped_dot_general(generate_quantizer_set, x, kernel, group_sizes, **kwargs):
         num_groups = group_sizes.shape[0]
         quantizer_set = generate_quantizer_set(n_groups=num_groups)
@@ -1454,7 +1455,7 @@ def make_ragged_dot_cls(quantization_recipe):
             kernel,
             group_sizes=group_sizes,
             contracting_dims=((1,), (1,)),
-            quantizer_set=quantizer_set
+            quantizer_set=quantizer_set,
         )
         return out
 

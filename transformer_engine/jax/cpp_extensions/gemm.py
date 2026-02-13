@@ -1953,7 +1953,9 @@ def grouped_gemm(
     """
 
     assert group_offset is None, "group_offset is not yet implemented"
-    assert jax.config.jax_enable_x64, "Grouped GEMM currently requires jax_enable_x64 to be True for correct behavior"
+    assert (
+        jax.config.jax_enable_x64
+    ), "Grouped GEMM currently requires jax_enable_x64 to be True for correct behavior"
 
     # TODO(Phuong): implement the precision
     del precision
