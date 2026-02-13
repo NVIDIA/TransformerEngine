@@ -182,6 +182,7 @@ class Float8Quantizer(Quantizer):
                 data=data,
                 fp8_scale_inv=1 / self.scale,
                 fp8_dtype=self.dtype,
+                fake_dtype=fake_dtype,
                 requires_grad=requires_grad,
                 data_transpose=None,
                 quantizer=self,
@@ -401,6 +402,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 data=data,
                 fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=data.device),
                 fp8_dtype=self.dtype,
+                fake_dtype=fake_dtype,
                 requires_grad=requires_grad,
                 data_transpose=None,
                 quantizer=self,
@@ -492,7 +494,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             "Float8Tensor("
             f"fp8_dtype={self._fp8_dtype}, "
             f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize(dtype=self.dtype)}"
+            f"data={self.dequantize()}"
             ")"
         )
 

@@ -443,7 +443,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         return instance
 
     def __repr__(self, *, tensor_contents=None):
-        return f"NVFP4Tensor, data={self.dequantize(dtype=self.dtype)})"
+        return f"NVFP4Tensor, data={self.dequantize()})"
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
