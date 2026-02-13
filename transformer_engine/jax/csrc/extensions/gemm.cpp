@@ -580,7 +580,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   NVTE_CHECK(group_sizes.dimensions().size() == 1);
   size_t num_gemms = group_sizes.dimensions()[0];
 
-  NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING, "Only non-quantized grouped GEMM is supported in current implementation.");
+  NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
+             "Only non-quantized grouped GEMM is supported in current implementation.");
 
   // It is weird that TE/Common GEMM only use colwise for MXFP8
   const bool is_fp8_gemm = is_fp8_dtype(lhs_dtype);
@@ -774,7 +775,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<bool>("has_bias")
                                   .Attr<bool>("is_grouped_dense_wgrad")
                                   .Attr<bool>("use_async_d2h_group_sizes"),
-                                FFI_CudaGraph_Traits);
+                              FFI_CudaGraph_Traits);
 
 }  // namespace jax
 }  // namespace transformer_engine
