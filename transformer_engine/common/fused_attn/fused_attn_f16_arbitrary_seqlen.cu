@@ -103,7 +103,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   }
 
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  bool generate_stats = true; // Always return stats
+  bool generate_stats = true;  // Always return stats
   try {
     FADescriptor_v1 descriptor{
         b,
