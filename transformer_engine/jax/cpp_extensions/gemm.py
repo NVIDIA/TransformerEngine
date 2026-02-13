@@ -583,27 +583,27 @@ class GemmPrimitive(BasePrimitive):
         )
 
         lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
-        lhs_contracting_size = (
-            reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
-            if lhs_transposed
-            else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            lhs_contracting_size,
-            "LHS",
-        )
-        rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
-        rhs_contracting_size = (
-            reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
-            if rhs_transposed
-            else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            rhs_contracting_size,
-            "RHS",
-        )
+        # lhs_contracting_size = (
+        #     reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
+        #     if lhs_transposed
+        #     else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
+        # )
+        # assert_cublas_requirements(
+        #     scaling_mode,
+        #     lhs_contracting_size,
+        #     f"LHS {lhs_aval.shape} with contracting dims {lhs_cdims}",
+        # )
+        # rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
+        # rhs_contracting_size = (
+        #     reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
+        #     if rhs_transposed
+        #     else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
+        # )
+        # assert_cublas_requirements(
+        #     scaling_mode,
+        #     rhs_contracting_size,
+        #     f"RHS {rhs_aval.shape} with contracting dims {rhs_cdims}",
+        # )
 
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta)
         kwargs = {
@@ -936,7 +936,15 @@ class GemmPrimitive(BasePrimitive):
 
             # Non-contracting dims of RHS always needs to be gathered along the FSDP axis
             rhs_non_cspecs = tuple(
-                None if spec is not None and spec == gsr.fsdp_resource else spec
+                (
+                    None
+                    if spec is not None
+                    and (
+                        spec == gsr.fsdp_resource
+                        or (isinstance(spec, tuple) and gsr.fsdp_resource in spec)
+                    )
+                    else spec
+                )
                 for spec in rhs_non_cspecs
             )
 
@@ -1420,7 +1428,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     name = "te_grouped_gemm_ffi"
     multiple_results = True
-    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    impl_static_args = (10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
     inner_primitive = None
     outer_primitive = None
 
@@ -1432,7 +1440,10 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv_aval,
         bias_aval,
         group_sizes_aval,
-        group_offset_aval,
+        group_offset_lhs_aval,
+        group_offset_out_aval,
+        alpha,
+        beta,
         *,
         M,
         N,
@@ -1470,7 +1481,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         Returns:
             A jnp.ndarray containing the result of the grouped GEMM operation
         """
-        del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
+        del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_out_aval
         del K, lhs_is_trans, rhs_is_trans, has_bias, use_async_d2h_group_sizes
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
@@ -1492,11 +1503,16 @@ class GroupedGemmPrimitive(BasePrimitive):
             # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
             workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
             workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
+
+        workspace_size += (
+            1024 * 1024
+        )  # HACK: properly make a workspace_setup buffer in addition to the workspace_cublas buffer
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         out_shape = (M, N)
         if is_grouped_dense_wgrad:
-            out_shape = (group_sizes_aval.size, M, N)
+            num_tensors = group_sizes_aval.size
+            out_shape = (num_tensors, M, N)
         out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
         return (out_aval, workspace_aval)
 
@@ -1543,7 +1559,10 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset,
+        group_offset_lhs,
+        group_offset_out,
+        alpha,
+        beta,
         M,
         N,
         K,
@@ -1563,7 +1582,10 @@ class GroupedGemmPrimitive(BasePrimitive):
             rhs_scale_inv,
             bias,
             group_sizes,
-            group_offset,
+            group_offset_lhs,
+            group_offset_out,
+            alpha,
+            beta,
             M=M,
             N=N,
             K=K,
@@ -1929,8 +1951,9 @@ def grouped_gemm(
         lhs: [M, K] or [K, N]
         rhs: [G, N, K] or [G, K, N] or [G * K, N] or [N, G * K]
     """
-    # TODO(Phuong): implement the group_offset
-    group_offset = group_offset or jnp.zeros((1,), jnp.int32)
+
+    assert group_offset is None, "group_offset is not yet implemented"
+    assert jax.config.jax_enable_x64, "Grouped GEMM currently requires jax_enable_x64 to be True for correct behavior"
 
     # TODO(Phuong): implement the precision
     del precision
@@ -2066,12 +2089,35 @@ def grouped_gemm(
     else:
         assert group_sizes.size == rhs_shape[0]
 
-    assert group_offset.size == 1
-
     has_bias = bias is not None
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
+    # TODO(jberchtold): move the int64 and offset computation to C++ side in a kernel to avoid needing JAX to support int64
+    group_sizes = group_sizes.astype(jnp.int64)
+    # Compute group_offset as cumulative sum of group_sizes, starting with 0
+    group_offset = jnp.concatenate(
+        [jnp.array([0], dtype=jnp.int64), jnp.cumsum(group_sizes, dtype=jnp.int64)[:-1]]
+    )
+    if is_grouped_dense_wgrad:
+        group_offset_lhs = (
+            group_offset * M
+        )  # Offset is by number of elements total, not number of rows
+        # HACK: this _out is really the rhs in this case
+        group_offset_out = (
+            group_offset * N
+        )  # Offset is by number of elements total, not number of rows
+    else:
+        group_offset_lhs = (
+            group_offset * K_lhs
+        )  # Offset is by number of elements total, not number of rows
+        group_offset_out = (
+            group_offset * N
+        )  # Offset is by number of elements total, not number of rows
+
+    num_gemms = group_sizes.shape[0]  # Due to interlaced zeros to support int64
+    alpha = jnp.ones((num_gemms,), jnp.float32)
+    beta = jnp.zeros((num_gemms,), jnp.float32)
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
         lhs_scale_inv,
@@ -2079,7 +2125,10 @@ def grouped_gemm(
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset,
+        group_offset_lhs,
+        group_offset_out,
+        alpha,
+        beta,
         M=M,
         N=N,
         K=K_lhs,
