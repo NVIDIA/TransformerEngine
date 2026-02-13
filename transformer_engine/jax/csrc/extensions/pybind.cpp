@@ -81,6 +81,12 @@ pybind11::dict Registrations() {
       pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
       pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
 
+  // Fused TopK with Score Function
+  dict["te_fused_topk_with_score_function_forward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionForwardHandler);
+  dict["te_fused_topk_with_score_function_backward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionBackwardHandler);
+
   return dict;
 }
 
