@@ -6,8 +6,6 @@
 This API is experimental and may change or be removed without deprecation in future releases.
 """
 
-import .experimental
-
 __all__ = [
         "experimental",
 ]
