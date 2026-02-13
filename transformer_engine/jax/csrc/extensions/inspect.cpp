@@ -24,15 +24,18 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
              "Input and output must point to the same buffer for inspect operation");
 
   std::vector<uint8_t> input_data(input_buf.size_bytes());
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(input_data.data(), input_buf.untyped_data(), input_buf.size_bytes(),
-                  cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(input_data.data(), input_buf.untyped_data(),
+                                  input_buf.size_bytes(), cudaMemcpyDeviceToHost, stream));
 
   float min_val{}, max_val{}, mean_val{}, std_val{};
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(&min_val, min_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream));
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(&max_val, max_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream));
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(&mean_val, mean_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost,
-                  stream));
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(&std_val, std_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&min_val, min_buf.untyped_data(), sizeof(float),
+                                  cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&max_val, max_buf.untyped_data(), sizeof(float),
+                                  cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&mean_val, mean_buf.untyped_data(), sizeof(float),
+                                  cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&std_val, std_buf.untyped_data(), sizeof(float),
+                                  cudaMemcpyDeviceToHost, stream));
 
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
