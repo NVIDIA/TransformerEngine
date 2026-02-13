@@ -24,20 +24,20 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
              "Input and output must point to the same buffer for inspect operation");
 
   std::vector<uint8_t> input_data(input_buf.size_bytes());
-  cudaMemcpyAsync(input_data.data(), input_buf.untyped_data(), input_buf.size_bytes(),
-                  cudaMemcpyDeviceToHost, stream);
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(input_data.data(), input_buf.untyped_data(), input_buf.size_bytes(),
+                  cudaMemcpyDeviceToHost, stream));
 
   float min_val{}, max_val{}, mean_val{}, std_val{};
-  cudaMemcpyAsync(&min_val, min_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream);
-  cudaMemcpyAsync(&max_val, max_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream);
-  cudaMemcpyAsync(&mean_val, mean_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost,
-                  stream);
-  cudaMemcpyAsync(&std_val, std_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream);
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&min_val, min_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&max_val, max_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&mean_val, mean_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost,
+                  stream));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&std_val, std_buf.untyped_data(), sizeof(float), cudaMemcpyDeviceToHost, stream));
 
-  cudaStreamSynchronize(stream);
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   int device;
-  cudaGetDevice(&device);
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
 
   // Write the tensor data to a file as a binary blob
   std::string filename = "my_tensor_gpu" + std::to_string(device) + ".bin";
@@ -70,7 +70,7 @@ Error_Type InspectFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type mi
   }
 
   // Log the tensor metadata to the console
-  printf("Tensor data written to %s (shape: [", filename.c_str());
+  printf("[gpu%d]: Tensor data written to %s (shape: [", device, filename.c_str());
   for (size_t i = 0; i < input_buf.dimensions().size(); ++i) {
     printf("%zu", static_cast<size_t>(input_buf.dimensions()[i]));
     if (i < input_buf.dimensions().size() - 1) {

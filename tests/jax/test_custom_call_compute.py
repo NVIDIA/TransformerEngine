@@ -1921,3 +1921,35 @@ class TestGroupedDense:
         assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
+
+
+class TestDebugInspectFFI:
+
+    @pytest_parametrize_wrapper("shape", [(256, 128)])
+    @pytest_parametrize_wrapper("dtype", [
+        jnp.float32,
+        jnp.bfloat16,
+        jnp.float16,
+        jnp.float8_e4m3fn, 
+        jnp.float8_e5m2,
+        # Note: fp4 currently doesn't work
+        #jnp.float4_e2m1fn
+    ])
+    def test_debug_inspect_ffi(self, shape, dtype):
+        from transformer_engine.jax.debug.experimental import inspect_array, load_array_dump
+
+        def f(x):
+            x = x + 1
+            x = inspect_array(x, "my_array")
+            x = x + 1
+            return x
+
+        key = jax.random.PRNGKey(0)
+        x = jax.random.uniform(key, shape, jnp.float32)
+        x = x.astype(dtype)
+        _  = jax.jit(f)(x)
+        
+        expected = x + 1
+        actual = load_array_dump("my_tensor_gpu0.bin", shape, dtype)
+
+        assert_allclose(actual, expected, dtype=dtype)
