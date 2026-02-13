@@ -149,7 +149,7 @@ def inspect_array(x: jnp.ndarray, name: str) -> jnp.ndarray:
         x (jnp.ndarray): The JAX array to inspect.
         name (str): The name of the array for identification in the output.
     """
-    # TODO: Handle the name of the tensor in the primitive and output files
+    del name  # Name is currently unused, but can be included in the future for more informative output
     return _inspect(x)
 
 
