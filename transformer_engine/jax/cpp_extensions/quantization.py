@@ -20,7 +20,6 @@ from .amax import AmaxScope, calculate_amax, calculate_post_rht_amax
 from .base import BasePrimitive, register_primitive
 from .misc import (
     get_padded_spec,
-    check_valid_batch_dims,
     te_dtype_to_jax_dtype,
     jax_dtype_to_te_dtype,
     multidim_transpose,
@@ -97,7 +96,9 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         out_shape = x_aval.shape
-        assert scale_aval is None or scale_aval.dtype == jnp.float32
+        assert (
+            scale_aval is None or scale_aval.dtype == jnp.float32
+        ), f"scale must be float32 but received {scale_aval}"
         if stochastic_rounding:
             assert ScalingMode(
                 scaling_mode
@@ -1213,7 +1214,7 @@ def grouped_quantize(
     assert n_groups == len(
         quantizer.quantizers
     ), f"n_groups={n_groups} != n_quantizers = {len(quantizer.quantizers)}"
-    scale = jnp.empty((n_groups,), jnp.float32)
+    scale = jnp.ones((n_groups,), jnp.float32)
 
     if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         for i, quantizer_i in enumerate(quantizer.quantizers):
@@ -1249,7 +1250,8 @@ def grouped_quantize(
     ) = GroupedQuantizePrimitive.outer_primitive.bind(
         x,
         scale,
-        group_sizes,
+        # TODO(jberchtold): Remove this int32 cast once GMM does not require JAX int64 dtype
+        group_sizes.astype(jnp.int32),
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
         q_layout=q_layout,
