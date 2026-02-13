@@ -30,20 +30,37 @@ pybind11::dict Registrations() {
       pybind11::arg("execute") = EncapsulateFFI(DActLuDBiasQuantizeHandler));
 
   // Quantization
-  dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
-  dict["te_grouped_quantize_ffi"] = EncapsulateFFI(GroupedQuantizeHandler);
-  dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
+  dict["te_dbias_quantize_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(DBiasQuantizeInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(DBiasQuantizeHandler));
+  dict["te_grouped_quantize_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(GroupedQuantizeInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedQuantizeHandler));
+  dict["te_dequantize_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(DequantizeInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(DequantizeHandler));
 
   // Softmax
-  dict["te_scaled_softmax_forward_ffi"] = EncapsulateFFI(ScaledSoftmaxForwardHandler);
-  dict["te_scaled_softmax_backward_ffi"] = EncapsulateFFI(ScaledSoftmaxBackwardHandler);
-  dict["te_scaled_masked_softmax_forward_ffi"] = EncapsulateFFI(ScaledMaskedSoftmaxForwardHandler);
-  dict["te_scaled_masked_softmax_backward_ffi"] =
-      EncapsulateFFI(ScaledMaskedSoftmaxBackwardHandler);
-  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] =
-      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardHandler);
-  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] =
-      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+  dict["te_scaled_softmax_forward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledSoftmaxForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledSoftmaxForwardHandler));
+  dict["te_scaled_softmax_backward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledSoftmaxBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledSoftmaxBackwardHandler));
+  dict["te_scaled_masked_softmax_forward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledMaskedSoftmaxForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledMaskedSoftmaxForwardHandler));
+  dict["te_scaled_masked_softmax_backward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(ScaledMaskedSoftmaxBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledMaskedSoftmaxBackwardHandler));
+  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") =
+          EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardHandler));
+  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") =
+          EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler));
 
   // Normalization
   dict["te_norm_forward_ffi"] =
@@ -56,24 +73,29 @@ pybind11::dict Registrations() {
                      pybind11::arg("execute") = EncapsulateFFI(NormBackwardHandler));
 
   // Attention
-  dict["te_fused_attn_forward_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnForwardHandler));
-  dict["te_fused_attn_backward_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
+  dict["te_fused_attn_forward_ffi"] = pybind11::dict(
+      pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+      pybind11::arg("initialize") = EncapsulateFFI(FusedAttnForwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(FusedAttnForwardHandler));
+  dict["te_fused_attn_backward_ffi"] = pybind11::dict(
+      pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+      pybind11::arg("initialize") = EncapsulateFFI(FusedAttnBackwardInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
 
   // GEMM
   dict["te_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CollectiveGemmInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(GemmInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
 
   // Grouped GEMM
-  dict["te_grouped_gemm_d2h_group_sizes_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
-                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmD2HGroupSizesHandler));
+  dict["te_grouped_gemm_d2h_group_sizes_ffi"] = pybind11::dict(
+      pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+      pybind11::arg("initialize") = EncapsulateFFI(GroupedGemmD2HGroupSizesInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmD2HGroupSizesHandler));
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(GroupedGemmInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
 
   // Amax
