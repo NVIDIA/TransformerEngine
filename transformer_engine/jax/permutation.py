@@ -643,7 +643,6 @@ def _sort_chunks_by_index_bwd_rule(
 
     # Return gradients for all inputs: (inp, split_sizes, sorted_indices)
     # split_sizes and sorted_indices are integer arrays, so their gradients are zeros
-    # with matching dtype (use float32 as a safe default for index arrays)
     split_sizes_grad = jnp.zeros_like(split_sizes, dtype=split_sizes.dtype)
     sorted_indices_grad = jnp.zeros_like(sorted_indices, dtype=sorted_indices.dtype)
 

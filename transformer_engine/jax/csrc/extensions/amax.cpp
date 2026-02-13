@@ -14,7 +14,7 @@
 #include "transformer_engine/transformer_engine.h"
 #include "xla/ffi/api/c_api.h"
 
-namespace transformer_engine { 
+namespace transformer_engine {
 namespace jax {
 
 Error_Type RHTAmaxCalculationFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type amax_buf,
