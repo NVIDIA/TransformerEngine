@@ -795,7 +795,7 @@ class GroupedLinear(TransformerEngineBaseModule):
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
         # Grouped tensor weights is an opt-in feature.
-        if bool(int(os.getenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0"))):
+        if bool(int(os.getenv("NVTE_ALLOC_CONTIGUOUS_GROUPED_LINEAR_WEIGHTS", "0"))):
             self.make_grouped_weights(defer_init=defer_init)
 
     def set_tensor_parallel_attributes(self, defer_init=False) -> None:

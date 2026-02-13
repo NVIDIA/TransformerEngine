@@ -608,7 +608,7 @@ def test_sanity_grouped_linear(
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
 
     if single_param:
-        os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
+        os.environ["NVTE_ALLOC_CONTIGUOUS_GROUPED_LINEAR_WEIGHTS"] = "1"
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -650,7 +650,7 @@ def test_sanity_grouped_linear(
     assert out.shape == (num_tokens, ffn_hidden_size)
 
     if single_param:
-        del os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"]
+        del os.environ["NVTE_ALLOC_CONTIGUOUS_GROUPED_LINEAR_WEIGHTS"]
 
 
 @pytest.mark.parametrize("dtype", param_types)
