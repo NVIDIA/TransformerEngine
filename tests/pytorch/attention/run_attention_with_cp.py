@@ -486,9 +486,7 @@ def run_dpa_with_cp(
             bias_.grad if bias_ is not None else None,
         )
         d_softmax_offset_ = (
-            core_attn.softmax_offset.grad.clone()
-            if config.softmax_type != "vanilla"
-            else None
+            core_attn.softmax_offset.grad.clone() if config.softmax_type != "vanilla" else None
         )
     else:
         dq_, dk_, dv_, dbias_ = None, None, None, None
@@ -595,9 +593,9 @@ def run_dpa_with_cp(
                         num_pads_kv[b] == 0
                         or torch.count_nonzero(
                             x[
-                                (cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]) : cu_seqlens_kv_padded[
-                                    b + 1
-                                ]
+                                (
+                                    cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
+                                ) : cu_seqlens_kv_padded[b + 1]
                             ]
                         ).item()
                         == 0

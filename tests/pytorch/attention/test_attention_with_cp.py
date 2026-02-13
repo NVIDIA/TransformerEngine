@@ -181,7 +181,7 @@ model_configs_fused_attn = {
         attn_mask_type="causal",
         attn_bias_type="post_scale_bias",
         bias_shape="111s",
-        return_max_logit=True
+        return_max_logit=True,
     ),  # GQA
     "cp_2_5": ModelConfig(
         2, 4096, 12, 128, num_gqa_groups=2, attn_bias_type="post_scale_bias"

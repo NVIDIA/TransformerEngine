@@ -1453,8 +1453,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         attn_bias_ = None
         if attn_bias is not None:
             assert len(attn_bias.shape) == 4, (
-                "Only support bias shape of [1,1,sq,skv], [1,h,sq,skv], [b,1,sq,skv], [b,h,sq,skv], [1,1,sq,skv] for forward, "
-                "and [1,1,sq,skv], [1,h,sq,skv], [b,1,sq,skv], [b,h,sq,skv] for backward!"
+                "Only support bias shape of [1,1,sq,skv], [1,h,sq,skv], [b,1,sq,skv], [b,h,sq,skv],"
+                " [1,1,sq,skv] for forward, and [1,1,sq,skv], [1,h,sq,skv], [b,1,sq,skv],"
+                " [b,h,sq,skv] for backward!"
             )
             # For all bias shapes except 111s, sq must be divisible by 2 and sk must be divisible by 2*cp_size
             # For bias shape 111s, only sq must be divisible by 2
@@ -1471,7 +1472,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     attn_bias.shape[-1] // (2 * cp_size),
                 )
             else:
-                assert attn_bias.shape[-1] % (2 * cp_size) == 0, "Sequence length does not meet divisible requirements!"
+                assert (
+                    attn_bias.shape[-1] % (2 * cp_size) == 0
+                ), "Sequence length does not meet divisible requirements!"
                 # [b, h, sq, sk] -> [b, h, sq, 2*cp, sk//(2*cp)]
                 attn_bias_ = attn_bias.view(
                     *attn_bias.shape[:-1], 2 * cp_size, attn_bias.shape[-1] // (2 * cp_size)
