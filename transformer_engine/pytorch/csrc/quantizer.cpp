@@ -1263,6 +1263,17 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_unquantized_tensor_w
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+/**
+ * @brief Compress an N-D shape into a 2-D shape by flattening all but the last dimension.
+ *
+ * This utility is intended for comparing N-dimensional tensor shapes in a 2D space:
+ * it multiplies (flattens) every dimension except the final one into a single leading
+ * dimension, and keeps the last dimension unchanged.
+ *
+ * Example: [d0, d1, d2, ..., d{n-2}, d{n-1}] -> [d0*d1*...*d{n-2}, d{n-1}]
+ *
+ * If the input has 2 or fewer dimensions, it is returned unchanged.
+ */
 std::vector<size_t> compressShapeTo2D(const std::vector<size_t>& data) {
   // If 2 or fewer elements, return as-is
   if (data.size() <= 2) {
