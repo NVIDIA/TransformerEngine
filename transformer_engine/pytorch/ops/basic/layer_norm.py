@@ -185,6 +185,8 @@ class LayerNorm(BasicOperation):
 
         # Check tensor dims
         weight = self.weight
+        if isinstance(weight, DTensor):
+            weight = weight.to_local()
         weight_dims = tuple(weight.size())
         input_dims = tuple(input_.size())
         if len(input_dims) < len(weight_dims) or input_dims[-len(weight_dims) :] != weight_dims:
@@ -192,13 +194,16 @@ class LayerNorm(BasicOperation):
                 f"Input tensor (shape={input_dims}) "
                 f"and weight tensor (shape={weight_dims}) are not compatible"
             )
+        bias = self.bias
+        if isinstance(bias, DTensor):
+            bias = bias.to_local()
 
         # Check input tensors
         inner_dim = math.prod(weight_dims)
         dtype = maybe_autocast_dtype(default_dtype=weight.dtype)
         x = maybe_dequantize(input_.contiguous(), dtype).view((-1, inner_dim))
-        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
-        b = maybe_dequantize(self.bias, dtype).view((inner_dim,))
+        w = maybe_dequantize(weight, dtype).view((inner_dim,))
+        b = maybe_dequantize(bias, dtype).view((inner_dim,))
 
         # Compute layer norm
         sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
@@ -235,13 +240,16 @@ class LayerNorm(BasicOperation):
         x, means, rstdevs = ctx.saved_tensors
 
         # Tensor dims
-        weight_dims = self.weight.size()
+        weight = self.weight
+        if isinstance(weight, DTensor):
+            weight = weight.to_local()
+        weight_dims = weight.size()
         inner_dim = math.prod(weight_dims)
 
         # Check input tensors
         dtype = ctx.dtype
         dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
-        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
+        w = maybe_dequantize(weight, dtype).view((inner_dim,))
 
         # Compute layer norm backward pass
         dx, dw, db = layernorm_bwd(
@@ -262,7 +270,25 @@ class LayerNorm(BasicOperation):
         # Reshape results
         grad_input = dx.view(grad_output.size())
         grad_weight = dw.view(weight_dims)
+        # If the main weight was a DTensor, convert the wgrad to a DTensor.
+        if isinstance(self.weight, DTensor):
+            grad_weight = DTensor.from_local(
+                grad_weight,
+                device_mesh=self.weight.device_mesh,
+                placements=self.weight.placements,
+                shape=self.weight.size(),
+                stride=self.weight.stride(),
+            )
         grad_bias = db.view(weight_dims)
+        # If the main weight was a DTensor, convert the wgrad to a DTensor.
+        if isinstance(self.bias, DTensor):
+            grad_bias = DTensor.from_local(
+                grad_bias,
+                device_mesh=self.bias.device_mesh,
+                placements=self.bias.placements,
+                shape=self.bias.size(),
+                stride=self.bias.stride(),
+            )
         return grad_input, (grad_weight, grad_bias)
 
     def op_onnx_forward(
