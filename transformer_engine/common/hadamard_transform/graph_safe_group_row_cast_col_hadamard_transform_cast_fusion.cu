@@ -1428,9 +1428,8 @@ void group_hadamard_transform_cast_fusion_graph_safe(const GroupedTensor *input,
   float *const amax_rowwise_base_ptr = reinterpret_cast<float *>(output->amax.dptr);
   float *const amax_colwise_base_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
 
-  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
-  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
-  // const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
+  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
+  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
 
   const bool is_const_last_dim = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
                                   shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
