@@ -80,6 +80,82 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
+namespace {
+
+// helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)
+void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
+                               GroupedTensorWrapper &grouped_output_tensor,
+                               NVFP4Quantizer *nvfp4_quantizer_cpp, cudaStream_t stream) {
+  size_t num_tensors = grouped_input_tensor.num_tensors();
+
+  // assert the 2D scaling case, since 2D scaling grouped quant kernel is not ready yet
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_2d_quantization,
+             "2D scaling grouped quant kernel is not ready yet");
+
+  auto quant_config_cpp = QuantizationConfigWrapper();
+
+  // stochastic rounding
+  bool need_stochastic_rounding = nvfp4_quantizer_cpp->stochastic_rounding;
+  auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+  at::Tensor rng_states_tensor;  // Declare tensor outside, do not allocate yet
+  TensorWrapper te_rng_state;
+
+  if (need_stochastic_rounding) {
+    // in fused kernel, one rng state will be used by the grouped kernel to generate random
+    // number for different tensors in the group, so we only need to allocate one rng state
+    const size_t rng_elts_per_thread = 1024 * num_tensors;
+    rng_states_tensor = torch::empty({2}, opts);
+    auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+        std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+    at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+    philox_unpack(philox_args, static_cast<int64_t *>(rng_states_tensor.data_ptr()));
+
+    te_rng_state = makeTransformerEngineTensor(rng_states_tensor);
+    quant_config_cpp.set_rng_state(te_rng_state.data());
+    quant_config_cpp.set_stochastic_rounding(true);
+  }
+
+  // fast math
+  const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
+  if (use_fast_math) {
+    quant_config_cpp.set_use_fast_math(true);
+  }
+
+  // so far, only the RHT path has grouped kernel support
+  // grouped kernels for non-RHT path will be added later
+
+  if (nvfp4_quantizer_cpp->with_rht) {
+    // post-RHT amax or not
+    if (nvfp4_quantizer_cpp->with_post_rht_amax) {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_group_hadamard_transform_amax_graph_safe(
+            grouped_input_tensor.data(), grouped_output_tensor.data(), 0,
+            nvfp4_quantizer_cpp->rht_matrix_random_sign_mask_t, stream);
+      });
+    } else {
+      NVTE_ERROR("graph safe grouped quant kernel for non-RHT path is not ready yet");
+    }
+
+    // RHT cast fusion
+    auto tile_scheduler_workspace_torch =
+        at::empty({1}, at::device(at::kCUDA).dtype(torch::kInt32));
+    auto nvte_tile_scheduler_workspace =
+        makeTransformerEngineTensor(tile_scheduler_workspace_torch);
+
+    auto rht_matrix_nvte = makeTransformerEngineTensor(nvfp4_quantizer_cpp->rht_matrix);
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_group_hadamard_transform_cast_fusion_graph_safe(
+          grouped_input_tensor.data(), grouped_output_tensor.data(), rht_matrix_nvte.data(),
+          quant_config_cpp, nvte_tile_scheduler_workspace.data(), stream);
+    });
+
+  } else {
+    NVTE_ERROR("graph safe grouped quant kernel for non-RHT path is not ready yet");
+  }
+}
+
+}  // namespace
+
 // NOTE: Only supports varying first dim.
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims) {
@@ -95,6 +171,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   const auto logical_first_dim = logical_shape[0];
   const auto logical_last_dim = logical_shape[1];
 
+  bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
+
   auto quantizer_cpp = convert_quantizer(quantizer);
 
   // Create input GroupedTensor.
@@ -108,10 +186,47 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
       logical_last_dim);
 
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                        at::cuda::getCurrentCUDAStream());
-  });
+  // dispatch to scaling methods
+  enum class GroupedQuantizationMode {
+    MXFP8_GROUPED_QUANTIZE,
+    NVFP4_GROUPED_QUANTIZE,
+    INVALID_FOR_GROUPED_QUANTIZE
+  };
+  GroupedQuantizationMode grouped_quantization_mode =
+      GroupedQuantizationMode::INVALID_FOR_GROUPED_QUANTIZE;
+  if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
+    grouped_quantization_mode = GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE;
+  } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
+    grouped_quantization_mode = GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE;
+  }
+
+  if (empty_input_buffer) {
+    // early return for empty input buffer
+    // just return the output tensor as is
+    // no need to quantize
+    return py::reinterpret_borrow<py::object>(grouped_output_py);
+  }
+
+  switch (grouped_quantization_mode) {
+    case GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE: {
+      // NVFP4 grouped quantization
+      NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+      group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
+                                nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream());
+      break;
+    }
+    case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                            at::cuda::getCurrentCUDAStream());
+      });
+      break;
+    }
+    case GroupedQuantizationMode::INVALID_FOR_GROUPED_QUANTIZE:
+    default:
+      NVTE_ERROR("group_quantize: only support NVFP4 or MXFP8 quantizer.");
+      break;
+  }
 
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
