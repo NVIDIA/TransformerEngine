@@ -11,6 +11,7 @@ import os
 from typing import Optional
 
 import torch
+from torch.distributed.tensor import DTensor
 
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
 from ...constants import TE_DType
@@ -168,6 +169,8 @@ class RMSNorm(BasicOperation):
 
         # Check tensor dims
         weight = self.weight
+        if isinstance(weight, DTensor):
+            weight = weight.to_local()
         weight_dims = tuple(weight.size())
         input_dims = tuple(input_.size())
         if len(input_dims) < len(weight_dims) or input_dims[-len(weight_dims) :] != weight_dims:
@@ -180,7 +183,7 @@ class RMSNorm(BasicOperation):
         inner_dim = math.prod(weight_dims)
         dtype = maybe_autocast_dtype(default_dtype=weight.dtype)
         x = maybe_dequantize(input_.contiguous(), dtype).view((-1, inner_dim))
-        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
+        w = maybe_dequantize(weight, dtype).view((inner_dim,))
 
         # Compute RMSNorm
         sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
@@ -216,13 +219,16 @@ class RMSNorm(BasicOperation):
         x, rstdevs = ctx.saved_tensors
 
         # Tensor dims
-        weight_dims = self.weight.size()
+        weight = self.weight
+        if isinstance(weight, DTensor):
+            weight = weight.to_local()
+        weight_dims = weight.size()
         inner_dim = math.prod(weight_dims)
 
         # Check input tensors
         dtype = ctx.dtype
         dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
-        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
+        w = maybe_dequantize(weight, dtype).view((inner_dim,))
 
         # Compute RMSNorm backward pass
         dx, dw = rmsnorm_bwd(
@@ -241,6 +247,15 @@ class RMSNorm(BasicOperation):
         # Reshape results
         grad_input = dx.view(grad_output.size())
         grad_weight = dw.view(weight_dims)
+        # If the main weight was a DTensor, convert the wgrad to a DTensor.
+        if isinstance(self.weight, DTensor):
+            grad_weight = DTensor.from_local(
+                grad_weight,
+                device_mesh=self.weight.device_mesh,
+                placements=self.weight.placements,
+                shape=self.weight.size(),
+                stride=self.weight.stride(),
+            )
         return grad_input, (grad_weight,)
 
     def op_onnx_forward(
