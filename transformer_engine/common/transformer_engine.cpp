@@ -1145,8 +1145,8 @@ NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_
                                              NVTEShape logical_shape) {
   NVTE_CHECK(num_tensors > 0, "Number of tensors must be greater than 0");
   NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
-  NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,
-             "Logical shape must have positive dimensions");
+  // NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,
+  //            "Logical shape must have positive dimensions");
   NVTEGroupedTensor ret = transformer_engine::GroupedTensorAllocator::instance().Allocate(
       scaling_mode, num_tensors, logical_shape);
   return ret;
