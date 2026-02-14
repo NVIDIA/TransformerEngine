@@ -12,6 +12,8 @@ import logging
 
 import torch
 from torch.nn.parameter import Parameter
+from torch.distributed import DeviceMesh
+from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
@@ -44,6 +46,7 @@ from transformer_engine.pytorch.distributed import (
     set_all_rng_states,
     CudaRNGStatesTracker,
     graph_safe_rng_available,
+    _convert_param_to_dtensor_param,
 )
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
@@ -298,6 +301,11 @@ class DotProductAttention(TransformerEngineBaseModule):
               ``ProcessGroup`` is for :attr:`cp_comm_type` of ``"p2p"``, ``"all_gather"``, and ``"a2a"``.
               ``List[ProcessGroup]`` is for :attr:`cp_comm_type` of ``"a2a+p2p"``, where :attr:`cp_group[0]`
               and :attr:`cp_group[1]` are for ``"a2a"`` and ``"p2p"`` communications respectively.
+    tp_mesh : Optional[DeviceMesh], default = None
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+    weight_mesh : Optional[DeviceMesh]
+            Not used for DotProductAttention as there are no quantized weights.
     cp_global_ranks : list of global rank IDs, default = None
                      global rank IDs of GPUs that are in ``cp_group``.
     cp_stream : CUDA stream, default = None
@@ -343,6 +351,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
     ) -> None:
         super().__init__()
 
@@ -477,6 +487,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             return_max_logit=self.return_max_logit,
         )
 
+        if tp_mesh is not None or weight_mesh is not None:
+            # Apply DeviceMesh and DTensor-related modifications.
+            self.set_device_mesh(tp_mesh=tp_mesh, weight_mesh=weight_mesh)
+
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
             Temporarily remove core_attention._extra_state as a missing key
@@ -532,6 +546,53 @@ class DotProductAttention(TransformerEngineBaseModule):
         )
 
         return hidden_states
+
+    def set_device_mesh(
+        self,
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
+    ) -> None:
+        """
+        Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
+        depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
+        
+        TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
+        integration with Torch DCP checkpointing. This method should only be invoked when
+        using DTensor parameters, e.g. when using FSDP2 or DCP.
+
+        When FSDP2 fully_shard() encounters any DTensor Shard(s), it will automatically
+        convert them into FSDP-TP strided or non-strided shards depending on the current
+        sharding dimension and factor of the DTensor. When the sharding dimension of FSDP
+        matches that of TP, FSDP uses a _StridedShard placement type instead of Shard.
+        This experimental FSDP-TP logic presides in this FSDP2 initialization function:
+        ``torch.distributed.fsdp._fully_shard._fsdp_param._init_sharded_param``
+
+        Parameters
+        ----------
+        tp_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+        weight_mesh : Optional[DeviceMesh]
+            Not used for DotProductAttention as there are no quantized weights.
+        """
+        if tp_mesh is not None:
+            # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
+            assert (
+                tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
+                f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+            )
+            # Set the tensor parallel group from the mesh.
+            self.set_tensor_parallel_group(tp_mesh.get_group())
+
+            # Construct TP-sharded DTensors.
+            if self.softmax_type == "learnable":
+                from torch.distributed.tensor.placement_types import Shard
+                self.softmax_offset = _convert_param_to_dtensor_param(
+                    self.softmax_offset,
+                    tp_mesh,
+                    placements=(Shard(dim=0),)
+                )
 
     def set_context_parallel_group(
         self,
@@ -801,6 +862,17 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
+    
+    def _get_softmax_offset(self) -> torch.Tensor:
+        """Get the softmax offset."""
+        softmax_offset = (
+            self.softmax_offset.reshape(1, -1, 1, 1).to(torch.float32)
+            if self.softmax_offset is not None
+            else None
+        )
+        if isinstance(softmax_offset, DTensor):
+            softmax_offset = softmax_offset.to_local()
+        return softmax_offset
 
     @no_torch_dynamo(recursive=False)
     def forward(
@@ -1434,11 +1506,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             # run attention
-            softmax_offset = (
-                self.softmax_offset.reshape(1, -1, 1, 1).to(torch.float32)
-                if self.softmax_offset is not None
-                else None
-            )
+            softmax_offset = self._get_softmax_offset()
 
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":

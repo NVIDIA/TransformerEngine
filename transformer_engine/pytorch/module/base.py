@@ -35,6 +35,7 @@ from ..distributed import (
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
     _fsdp_gather_tensors,
+    _convert_param_to_dtensor_param,
 )
 from ..constants import dist_group_type
 from ..cpp_extensions.gemm import _NUM_MAX_UB_STREAMS
@@ -618,7 +619,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta_tensors_initialized = False
-        self.quantizers = {"scaling_fwd": {}, "scaling_bwd": {}}
+        self.quantizers = {"scaling_fwd": [], "scaling_bwd": []}
         self.tp_group = None
         self.tp_size = 1
         self.sequence_parallel = False
@@ -1041,6 +1042,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         )
         self.fast_setattr("forwarded_at_least_once", True)
 
+        # If the input is a DTensor, localize it. DTensor.to_local() is differentiable.
+        # TransformerEngine C++ kernels are not designed for the DTensor API.
+        if isinstance(inp, DTensor):
+            inp = inp.to_local()
+
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
             delayed_scaling_recipe = self.fp8_meta["recipe"].delayed()
@@ -1221,7 +1227,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def register_parameter(self, name, param, **kwargs):
         """
         Thin wrapper around PyTorch parameter registration to stash additional parameter
-        metedata used in deferred initialization.
+        metadata used in deferred initialization.
         """
         super().register_parameter(name, param)
         # Initialize param_init_meta exactly once during the init. FSDP2 can call
@@ -1277,14 +1283,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
-                if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
+                if (
+                    is_dtensor
+                    and isinstance(quantizer, Float8CurrentScalingQuantizer)
+                    and quantizer.amax_reduction_group is None
+                ):
+                    # If the amax_reduction_group is not set by `set_device_mesh`,
+                    # then default to the DTensor's full DeviceMesh.
                     device_mesh = dtensor_param.device_mesh
-                    amax_reduction_group = (
-                        device_mesh.get_group(mesh_dim="shard")
-                        if device_mesh.ndim > 1
-                        else device_mesh.get_group()
-                    )
-                    quantizer.amax_reduction_group = amax_reduction_group
+                    quantizer.amax_reduction_group = device_mesh.get_group()
                     quantizer.with_amax_reduction = True
                 # Quantize parameter
                 param = quantizer(param)
@@ -1294,15 +1301,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
             if is_dtensor:
-                # recreate the DTensor from the parameter.
-                dtensor_param = DTensor.from_local(
+                # Recreate the DTensor from the Parameter, inheriting 
+                # all attributes originally set on the Parameter.
+                dtensor_param = _convert_param_to_dtensor_param(
                     param,
                     device_mesh=dtensor_param.device_mesh,
                     placements=dtensor_param.placements,
                     shape=dtensor_param.size(),
                     stride=dtensor_param.stride(),
                 )
-                dtensor_param = torch.nn.Parameter(dtensor_param)
             else:
                 param = torch.nn.Parameter(param)
 

@@ -12,6 +12,8 @@ from operator import mul as multiply_op
 import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
+from torch.distributed import DeviceMesh
+from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 
@@ -58,6 +60,7 @@ from ..distributed import (
     _fsdp_scatter_tensors,
     _get_cuda_rng_state,
     _set_cuda_rng_state,
+    _convert_param_to_dtensor_param,
 )
 from ..constants import dist_group_type
 from ..jit import no_torch_dynamo
@@ -1368,7 +1371,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Make sure required data is available
             if ctx.fc1_weight_quantizer is not None and isinstance(
-                ctx.fc1_weight_quantizer, QuantizedTensorStorage
+                ctx.fc1_weight, QuantizedTensorStorage
             ):
                 ctx.fc1_weight.update_usage(columnwise_usage=True)
 
@@ -1721,6 +1724,19 @@ class LayerNormMLP(TransformerEngineBaseModule):
              ``set_tensor_parallel_group(tp_group)`` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
+    tp_mesh : Optional[DeviceMesh], default = None
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+    weight_mesh : Optional[DeviceMesh], default = None
+            A 1-D DeviceMesh containing a weight-sharding mesh dimension. Only required
+            when using the FP8 Current (per-tensor) Scaling recipe on sharded DTensor
+            parameters and if the DTensor DeviceMesh includes dimensions that do not
+            shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
+            For example:
+                - device_mesh["dp"] for FSDP.
+                - device_mesh["dp_cp"] if using CP ranks in FSDP.
+                - device_mesh["tp"] if using TP.
+                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
 
     Optimization parameters
     -----------------------
@@ -1798,6 +1814,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         checkpoint: bool = False,
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1940,6 +1958,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata(num_gemms=2)
 
+        if tp_mesh is not None or weight_mesh is not None:
+            # Apply DeviceMesh and DTensor-related modifications.
+            self.set_device_mesh(tp_mesh=tp_mesh, weight_mesh=weight_mesh)
         self.reset_parameters(defer_init=device == "meta")
 
         # For RPL, bias has to be added after TP collectives
@@ -1996,20 +2017,104 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
+        self._set_tensor_parallel_attributes(defer_init=defer_init)
 
-        if not defer_init:
-            # Set parallel attributes for layer norm parameters
-            setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
-            if self.normalization != "RMSNorm":
-                setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+    def set_device_mesh(
+        self,
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
+    ) -> None:
+        """
+        Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
+        depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
+        
+        TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
+        integration with Torch DCP checkpointing. This method should only be invoked when
+        using DTensor parameters, e.g. when using FSDP2 or DCP.
 
-            # Set parallel attributes for linear parameters
-            set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
-            set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
-            if self.use_bias:
-                set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
-                if self.set_parallel_mode:
-                    setattr(self.fc2_bias, "sequence_parallel", self.sequence_parallel)
+        When FSDP2 fully_shard() encounters any DTensor Shard(s), it will automatically
+        convert them into FSDP-TP strided or non-strided shards depending on the current
+        sharding dimension and factor of the DTensor. When the sharding dimension of FSDP
+        matches that of TP, FSDP uses a _StridedShard placement type instead of Shard.
+        This experimental FSDP-TP logic presides in this FSDP2 initialization function:
+        ``torch.distributed.fsdp._fully_shard._fsdp_param._init_sharded_param``
+
+        Parameters
+        ----------
+        tp_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+        weight_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a weight-sharding mesh dimension. Only required
+            when using the FP8 Current (per-tensor) Scaling recipe on sharded DTensor
+            parameters and if the DTensor DeviceMesh includes dimensions that do not
+            shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
+            For example:
+                - device_mesh["dp"] for FSDP.
+                - device_mesh["dp_cp"] if using CP ranks in FSDP.
+                - device_mesh["tp"] if using TP.
+                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
+        """
+        if tp_mesh is not None:
+            # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
+            assert (
+                tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
+                f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+            )
+            # Set the tensor parallel group from the mesh.
+            self.set_tensor_parallel_group(tp_mesh.get_group())
+
+            # Construct TP-sharded DTensors.
+            from torch.distributed.tensor.placement_types import Replicate, Shard
+            # FC1 -> Column-Parallel -> Shard(dim=0)
+            self.fc1_weight = _convert_param_to_dtensor_param(
+                self.fc1_weight,
+                tp_mesh,
+                placements=(Shard(dim=0),)
+            )
+            self.fc1_bias = _convert_param_to_dtensor_param(
+                self.fc1_bias,
+                tp_mesh,
+                placements=(Shard(dim=0),)
+            )
+            # FC2 Weight -> Row-Parallel -> Shard(dim=1)
+            self.fc2_weight = _convert_param_to_dtensor_param(
+                self.fc2_weight,
+                tp_mesh,
+                placements=(Shard(dim=1),)
+            )
+            # LN & FC2 Bias -> Replicate()
+            self.fc2_bias = _convert_param_to_dtensor_param(
+                self.fc2_bias,
+                tp_mesh,
+                placements=(Replicate(),)
+            )
+            self.layer_norm_weight = _convert_param_to_dtensor_param(
+                self.layer_norm_weight,
+                tp_mesh,
+                placements=(Replicate(),)
+            )
+            if self.layer_norm_bias is not None:
+                self.layer_norm_bias = _convert_param_to_dtensor_param(
+                    self.layer_norm_bias,
+                    tp_mesh,
+                    placements=(Replicate(),)
+                )
+
+        # Set amax_reduction_group to the FSDP and/or TP sharding mesh
+        # for per-tensor scaling recipes. Parameters must be registered.
+        if weight_mesh is not None and self.quantizers["scaling_fwd"]:
+            for weight in ["fc1_weight", "fc2_weight"]:
+                # Get fp8_meta_index and associated quantizer.
+                fp8_meta_index = self.param_init_meta[weight].fp8_meta_index
+                quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
+                if isinstance(quantizer, Float8CurrentScalingQuantizer):
+                    # If not set, will default to DTensor.device_mesh.get_group()!
+                    # MUST be provided when using HSDP (DP-Replicate) or when the
+                    # DeviceMesh includes dimensions that do not shard weights!
+                    quantizer.amax_reduction_group = weight_mesh.get_group()
+                    quantizer.with_amax_reduction = True
 
     @no_torch_dynamo()
     def forward(
@@ -2088,8 +2193,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
             # Get weight tensors
             fc1_weight, fc2_weight = self._get_weight_tensors()
-            fc1_bias = self.fc1_bias if self.use_bias else None
-            fc2_bias = self.fc2_bias if self.use_bias else None
+            fc1_bias, fc2_bias = self._get_bias_tensors()
+            ln_weight, ln_bias = self._get_layernorm_weight_and_bias()
+
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
                     fc1_weight = fc1_weight.dequantize()
@@ -2159,8 +2265,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             out = fwd_fn(
                 *autograd_ctx,
                 inp,
-                self.layer_norm_weight,
-                self.layer_norm_bias,
+                ln_weight,
+                ln_bias,
                 fc1_weight,
                 fc1_bias,
                 fc2_weight,
@@ -2278,14 +2384,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
         inp_dtype = inp.dtype
 
         fc1_weight, fc2_weight = self._get_weight_tensors()
-        fc1_bias = self.fc1_bias if self.use_bias else None
-        fc2_bias = self.fc2_bias if self.use_bias else None
+        fc1_bias, fc2_bias = self._get_bias_tensors()
+        ln_weight, ln_bias = self._get_layernorm_weight_and_bias()
 
         # layernorm + fp8 cast
         ln_out, ln_out_return = onnx_layernorm(
             inp,
-            self.layer_norm_weight,
-            self.layer_norm_bias,
+            ln_weight,
+            ln_bias,
             self.eps,
             self.normalization,
             self.zero_centered_gamma,
@@ -2471,7 +2577,33 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""
-        return [self.fc1_weight, self.fc2_weight]
+        fc1_weight = self.fc1_weight
+        if isinstance(fc1_weight, DTensor):
+            fc1_weight = fc1_weight.to_local()
+        fc2_weight = self.fc2_weight
+        if isinstance(fc2_weight, DTensor):
+            fc2_weight = fc2_weight.to_local()
+        return [fc1_weight, fc2_weight]
+    
+    def _get_bias_tensors(self) -> List[torch.Tensor]:
+        """Get the bias tensors of the module."""
+        fc1_bias = self.fc1_bias if self.use_bias else None
+        if isinstance(fc1_bias, DTensor):
+            fc1_bias = fc1_bias.to_local()
+        fc2_bias = self.fc2_bias if self.use_bias else None
+        if isinstance(fc2_bias, DTensor):
+            fc2_bias = fc2_bias.to_local()
+        return [fc1_bias, fc2_bias]
+    
+    def _get_layernorm_weight_and_bias(self) -> List[Optional[torch.Tensor]]:
+        """Get the weight and bias of the layer norm."""
+        ln_weight = self.layer_norm_weight
+        if isinstance(ln_weight, DTensor):
+            ln_weight = ln_weight.to_local()
+        ln_bias = self.layer_norm_bias
+        if isinstance(ln_bias, DTensor):
+            ln_bias = ln_bias.to_local()
+        return [ln_weight, ln_bias]
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
@@ -2519,3 +2651,19 @@ class LayerNormMLP(TransformerEngineBaseModule):
             del fc1_wgrad
             del fc1_bias_grad
             self._trigger_wgrad_accumulation_and_reduce_hooks()
+
+    def _set_tensor_parallel_attributes(self, defer_init = False) -> None:
+        """Set tensor and sequence parallelism attributes."""
+        if not defer_init:
+            # Set parallel attributes for layer norm parameters
+            setattr(self.layer_norm_weight, "sequence_parallel", self.sequence_parallel)
+            if self.normalization != "RMSNorm":
+                setattr(self.layer_norm_bias, "sequence_parallel", self.sequence_parallel)
+
+            # Set parallel attributes for linear parameters
+            set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
+            set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
+            if self.use_bias:
+                set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
+                if self.set_parallel_mode:
+                    setattr(self.fc2_bias, "sequence_parallel", self.sequence_parallel)

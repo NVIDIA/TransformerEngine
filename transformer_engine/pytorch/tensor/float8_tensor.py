@@ -8,6 +8,7 @@ from typing import Any, Optional, Tuple, Iterable, Union
 import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+from torch.distributed.tensor import DTensor
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
@@ -895,6 +896,16 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         (data,) = all_gather_outputs
         (fp8_scale_inv, rowwise_usage, columnwise_usage, fp8_dtype) = metadata
         orig_shape = data.size()
+
+        # If out is a DTensor from a previously un-sharded
+        # AG buffer, convert to local Tensor.
+        # FIXME(@cspades): FP8 parameters currently are not
+        # compatible with DCP checkpointing.
+        if isinstance(out, DTensor):
+            # out.to_local() is not supported with Torch Dispatch,
+            # for quantized tensors with _transpose usage.
+            out = out._local_tensor
+
         # Quantizer has only columnwise usage set for backward pass
         # In Blackwell+ architectures, transpose is not needed at all,
         # even if columnwise usage is set. and is going to be handled

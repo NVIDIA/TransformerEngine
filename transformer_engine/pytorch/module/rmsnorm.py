@@ -7,6 +7,7 @@ import warnings
 from typing import Iterable, Optional, Union
 
 import torch
+from torch.distributed import DeviceMesh
 
 from transformer_engine.pytorch.ops import RMSNorm as _RMSNormOp
 
@@ -136,6 +137,46 @@ class RMSNorm(_RMSNormOp):
         # Flag for sequence parallelism (custom Megatron-LM integration)
         if self.sequence_parallel is not None:
             self.weight.sequence_parallel = self.sequence_parallel
+
+    def set_device_mesh(
+        self,
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
+    ) -> None:
+        """
+        Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
+        depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
+        
+        TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
+        integration with Torch DCP checkpointing. This method should only be invoked when
+        using DTensor parameters, e.g. when using FSDP2 or DCP.
+
+        When FSDP2 fully_shard() encounters any DTensor Shard(s), it will automatically
+        convert them into FSDP-TP strided or non-strided shards depending on the current
+        sharding dimension and factor of the DTensor. When the sharding dimension of FSDP
+        matches that of TP, FSDP uses a _StridedShard placement type instead of Shard.
+        This experimental FSDP-TP logic presides in this FSDP2 initialization function:
+        ``torch.distributed.fsdp._fully_shard._fsdp_param._init_sharded_param``
+
+        Parameters
+        ----------
+        tp_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+        weight_mesh : Optional[DeviceMesh]
+            Quantized DTensor parameters are currently not supported for FusibleOperation(s),
+            and this mesh is not used.
+        """
+        if tp_mesh is not None:
+            # Construct TP-Replicate DTensors. Used to shim non-TP parameters for compatibility
+            # with DTensor parameters in TP layers to support DTensor operations.
+            from transformer_engine.pytorch.distributed import _convert_param_to_dtensor_param
+            from torch.distributed.tensor.placement_types import Replicate
+            self.weight = _convert_param_to_dtensor_param(
+                self.weight,
+                tp_mesh,
+                placements=(Replicate(),)
+            )
 
     @property
     def fwd_rmsnorm_sm_margin(self) -> int:
