@@ -1,1 +1,2 @@
 recursive-include transformer_engine/common/include *.*
+recursive-include build_tools *.py *.txt
