@@ -566,8 +566,8 @@ class DebugQuantizer(Quantizer):
         """
 
         assert (
-            self.rowwise_tensor_plan == STANDARD_FP8_QUANTIZE
-            and self.columnwise_tensor_plan == STANDARD_FP8_QUANTIZE
+            self.rowwise_tensor_plan == STANDARD_QUANTIZE
+            and self.columnwise_tensor_plan == STANDARD_QUANTIZE
         ), (
             "[NVTORCH INSPECT ERROR] Weight tensor with fp8 model paramters enabled cannot be"
             " modified by any feature."
