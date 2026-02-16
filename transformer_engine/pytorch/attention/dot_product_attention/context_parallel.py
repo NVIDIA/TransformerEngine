@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -4026,28 +4026,30 @@ def attn_forward_func_with_cp(
     assert not sliding_window_attn or cp_comm_type in [
         "a2a",
         "all_gather",
-    ], "Context parallelism does not support sliding window attention with {cp_comm_type=}!"
+    ], f"Context parallelism does not support sliding window attention with {cp_comm_type=}!"
 
     enable_mla = k.shape[-1] != v.shape[-1]
     assert not enable_mla or cp_comm_type in [
         "p2p",
         "a2a+p2p",
-    ], "Context parallelism does not support MLA with {cp_comm_type=}!"
+    ], f"Context parallelism does not support MLA with {cp_comm_type=}!"
 
     if fp8 and fp8_meta is not None:
         if fp8_meta["recipe"].fp8_dpa:
             assert (
                 softmax_type == "vanilla"
-            ), "Context parallelism does not support {softmax_type=} with FP8 attention!"
+            ), f"Context parallelism does not support {softmax_type=} with FP8 attention!"
     assert (
         softmax_type == "vanilla" or use_fused_attention
-    ), "Context parallelism only supports {softmax_type=} with FusedAttention backend!"
+    ), f"Context parallelism only supports {softmax_type=} with FusedAttention backend!"
     assert (
         softmax_type == "vanilla" or cp_comm_type == "a2a"
-    ), "Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
-    assert (
-        softmax_type == "vanilla" or qkv_format != "thd"
-    ), "Context parallelism does not support {softmax_type=} with qkv_format = 'thd'!"
+    ), f"Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
+    if get_cudnn_version() < (9, 18, 0):
+        assert softmax_type == "vanilla" or qkv_format != "thd", (
+            f"Before cuDNN 9.18.0, context parallelism does not support {softmax_type=} with"
+            " qkv_format = 'thd'!"
+        )
 
     args = [
         is_training,

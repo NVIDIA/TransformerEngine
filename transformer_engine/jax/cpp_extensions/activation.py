@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for activation"""
@@ -44,6 +44,7 @@ __all__ = ["act_lu", "dact_lu", "quantize_dact_dbias"]
 ActivationEnum = {
     ("gelu",): NVTE_Activation_Type.GELU,
     ("gelu", "linear"): NVTE_Activation_Type.GEGLU,
+    ("sigmoid", "linear"): NVTE_Activation_Type.GLU,
     ("silu",): NVTE_Activation_Type.SILU,
     ("silu", "linear"): NVTE_Activation_Type.SWIGLU,
     ("relu",): NVTE_Activation_Type.RELU,

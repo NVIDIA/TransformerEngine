@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -18,11 +18,6 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
     _stride_from_shape,
-)
-
-_quantized_tensor_cpu_supported_ops = (
-    torch.ops.aten.empty_like.default,
-    torch.ops.aten.copy_.default,
 )
 
 
@@ -74,7 +69,9 @@ class QuantizedTensorStorage:
             f"{self.__class__.__name__} class does not implement get_usages function"
         )
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
+    def prepare_for_saving(
+        self,
+    ) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
         """Prepare the tensor base for saving for backward"""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement prepare_for_saving function"
@@ -120,11 +117,18 @@ class QuantizedTensorStorage:
             warnings.warn("Quantizer is being updated, this may affect model behavior")
             self._quantizer = quantizer
 
+    def copy_from_storage(self, src: QuantizedTensorStorage) -> None:
+        """Copy data from another QuantizedTensorStorage."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement copy_from_storage function"
+        )
+
 
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorStorage],
 ) -> Tuple[
-    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], list[Optional[QuantizedTensorStorage]]
+    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
+    list[Optional[QuantizedTensorStorage]],
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
@@ -149,7 +153,10 @@ def restore_from_saved(
     return_saved_tensors: bool = False,
 ) -> (
     list[Optional[torch.Tensor | QuantizedTensorStorage]]
-    | tuple[list[Optional[torch.Tensor | QuantizedTensorStorage]], list[Optional[torch.Tensor]]]
+    | tuple[
+        list[Optional[torch.Tensor | QuantizedTensorStorage]],
+        list[Optional[torch.Tensor]],
+    ]
 ):
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []
@@ -204,10 +211,21 @@ class Quantizer(abc.ABC):
     """
     internal: bool
 
+    """Whether to solely optimize for matrix multiplication
+
+    The resulting quantized tensors are not guaranteed to support any
+    operation other than matrix multiplication. Use with care since
+    this is likely to break communication, checkpointing, and many
+    other features.
+
+    """
+    optimize_for_gemm: bool
+
     def __init__(self, *, rowwise: bool, columnwise: bool) -> None:
         self.rowwise_usage = rowwise
         self.columnwise_usage = columnwise
         self.internal = False
+        self.optimize_for_gemm = False
 
     def __repr__(self):
         return (
@@ -319,7 +337,11 @@ class Quantizer(abc.ABC):
         return False
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
-        """Returns whether or not given tensor can be quantized"""
+        """Whether tensor supports quantized all-gather
+
+        Consider a less misleading function name.
+
+        """
         return True
 
     def get_usages(self) -> Dict[str, bool]:
@@ -538,15 +560,6 @@ class QuantizedTensor(torch.Tensor):
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-
-        def check_if_cpu(arg):
-            if isinstance(cls, QuantizedTensor) and arg.device.type == "cpu":
-                assert (
-                    func in _quantized_tensor_cpu_supported_ops
-                ), f"QuantizedTensor on CPU does not support this operation: {func}"
-            return arg
-
-        args = tree_map(check_if_cpu, args)
 
         # Do not force the QuantizedTensor type on the returned tensor
         return torch._C._disabled_torch_function_impl(func, types, args, kwargs)

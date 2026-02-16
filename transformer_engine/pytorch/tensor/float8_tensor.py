@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,7 +11,11 @@ from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Recipe
+from transformer_engine.common.recipe import (
+    DelayedScaling,
+    Float8CurrentScaling,
+    Recipe,
+)
 from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
@@ -154,6 +158,10 @@ class Float8Quantizer(Quantizer):
         amin, amax = tensor.aminmax()
         self.amax.copy_(torch.max(-amin, amax))
 
+    def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
+        """Calculate the shape of the columnwise data for Float8 1D blockwise quantization."""
+        return [rowwise_data_shape[-1]] + list(rowwise_data_shape[:-1])
+
     def create_tensor_from_data(
         self,
         data: torch.Tensor,
@@ -293,6 +301,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             amax=self.amax,
         )
         quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
 
         return quantizer
 
@@ -406,6 +415,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
             data_transpose=None,
             quantizer=self,
         )
+
+    def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
+        """Calculate the shape of the columnwise data for Float8 1D blockwise quantization."""
+        return [rowwise_data_shape[-1]] + list(rowwise_data_shape[:-1])
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Function using primitives with ONNX defined translations."""
@@ -551,24 +564,31 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
     ) -> Float8Tensor:
         """Returns tensor with data in provided memory format
 
-        Returns `self` if data is already in correct memory format.
+        Returns ``self`` if data is already in correct memory format.
 
         """
-        # requires_grad remains unaltered when calling contiguous on
-        # torch tensor and so should be the case for our custom float8 tensor
-        # as well.
-        return Float8Tensor.make_like(
-            tensor=self,
-            data=self._data.contiguous(memory_format=memory_format),
-            data_transpose=(
-                self._transpose.contiguous(memory_format=memory_format)
-                if self._transpose is not None
-                else None
-            ),
-            requires_grad=self.requires_grad,
-        )
 
-        # raise ValueError("Float8Tensor does not support different memory formats!")
+        # Check if tensor already has correct memory format
+        if self._data is not None and not self._data.is_contiguous(memory_format=memory_format):
+            pass
+        elif self._transpose is not None and not self._transpose.is_contiguous(
+            memory_format=memory_format
+        ):
+            pass
+        else:
+            # Tensor has correct memory format, so return immediately
+            return self
+
+        # Construct tensor with correct data format
+        data, data_transpose = None, None
+        if self._data is not None:
+            data = self._data.contiguous(memory_format=memory_format)
+        if self._transpose is not None and not self._transpose_invalid:
+            data_transpose = self._transpose.contiguous(memory_format=memory_format)
+        return _IdentityFunc.apply(
+            self,
+            {"data": data, "data_transpose": data_transpose},
+        )
 
     def _reset_caches(self) -> None:
         """
@@ -761,7 +781,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     kwargs,
                 )
             return Float8Tensor.make_like(
-                tensor, data=func_out, data_transpose=func_transposed_out, shape=func_out.shape
+                tensor,
+                data=func_out,
+                data_transpose=func_transposed_out,
+                shape=func_out.shape,
             )
 
         if func == torch.ops.aten.detach.default:

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -33,6 +33,12 @@ inline bool dimensions_supported_by_TMA(const Tensor *const t) {
   constexpr size_t TMA_bytes = 16;
   const size_t alignment_requirement = (TMA_bytes * 8) / typeToNumBits(t->dtype());
   return cols % alignment_requirement == 0;
+}
+
+__device__ __forceinline__ unsigned char *align_smem_ptr_per_TMA_requirements(unsigned char *p) {
+  size_t addr = reinterpret_cast<size_t>(p);
+  addr = (addr + TMA_SHMEM_ALIGNMENT - 1) & ~(TMA_SHMEM_ALIGNMENT - 1);
+  return reinterpret_cast<unsigned char *>(addr);
 }
 
 namespace kernel {

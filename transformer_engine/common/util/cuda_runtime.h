@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -72,6 +72,12 @@ const std::string &include_directory(bool required = false);
  * Versions may differ between compile-time and run-time.
  */
 int cudart_version();
+
+/* \brief cuBLAS version number at run-time
+ *
+ * Versions may differ between compile-time and run-time.
+ */
+size_t cublas_version();
 
 }  // namespace cuda
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -71,14 +71,28 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
     """
 
+    # Row-scaled FP4 data
     _rowwise_data: Optional[torch.Tensor]
+    # Column-scaled FP4 data
     _columnwise_data: Optional[torch.Tensor]
-    _quantizer: Optional[Quantizer]
+    # Block scaling factors for row-scaled FP4 data
     _rowwise_scale_inv: torch.Tensor
+    # Block scaling factors for column-scaled FP4 data
     _columnwise_scale_inv: torch.Tensor
-    _fp4_dtype: TE_DType
+    # Input absolute maximum value (used to compute tensor scale for
+    # row-scaled FP4 data)
     _amax_rowwise: torch.Tensor
+    # Input absolute maximum value (used to compute tensor scale for
+    # column-scaled FP4 data)
     _amax_columnwise: torch.Tensor
+
+    # Builder class for casting to MXFP8
+    _quantizer: Optional[Quantizer]
+    # FP4 data type
+    _fp4_dtype: TE_DType
+    # Whether scaling factors are in the swizzled format expected by
+    # GEMM
+    _with_gemm_swizzled_scales: bool
 
     def __new__(
         cls,
@@ -90,6 +104,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         amax_columnwise: torch.Tensor,
         fp4_dtype: TE_DType,
         quantizer: Optional[Quantizer],
+        with_gemm_swizzled_scales: bool,
         *args,
         **kwargs,
     ):
@@ -104,6 +119,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._amax_rowwise = amax_rowwise
         instance._amax_columnwise = amax_columnwise
+        instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
         return instance
 
@@ -120,6 +136,26 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             if t is not None:
                 t.data = _empty_tensor()
 
+    def copy_from_storage(self, src: QuantizedTensorStorage) -> None:
+        """Copy data buffers from another NVFP4TensorStorage."""
+        if not isinstance(src, NVFP4TensorStorage):
+            raise TypeError("copy_from_storage expects NVFP4TensorStorage")
+        if self._fp4_dtype != src._fp4_dtype:
+            raise RuntimeError("FP4 dtype mismatch in copy_from_storage")
+        if self._with_gemm_swizzled_scales != src._with_gemm_swizzled_scales:
+            raise RuntimeError("Scale layout mismatch in copy_from_storage")
+
+        def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
+            if dst is not None and src_tensor is not None:
+                dst.copy_(src_tensor)
+
+        _copy_optional(self._rowwise_data, src._rowwise_data)
+        _copy_optional(self._columnwise_data, src._columnwise_data)
+        _copy_optional(self._rowwise_scale_inv, src._rowwise_scale_inv)
+        _copy_optional(self._columnwise_scale_inv, src._columnwise_scale_inv)
+        _copy_optional(self._amax_rowwise, src._amax_rowwise)
+        _copy_optional(self._amax_columnwise, src._amax_columnwise)
+
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {
@@ -131,6 +167,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "amax_columnwise": self._amax_columnwise,
             "fp4_dtype": self._fp4_dtype,
             "quantizer": self._quantizer,
+            "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], NVFP4TensorStorage]:
@@ -248,6 +285,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             amax_columnwise=self._amax_columnwise,
             quantizer=self._quantizer,
             fp4_dtype=self._fp4_dtype,
+            with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
         )
 
     def __repr__(self):

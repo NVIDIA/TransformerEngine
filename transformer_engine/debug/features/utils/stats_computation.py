@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -443,3 +443,65 @@ for _columnwise in [True, False]:
         add_underflows_stats(_recipe_name, _columnwise)
         add_scale_inv_stats(_recipe_name, _columnwise)
         add_mse_stats(_recipe_name, _columnwise)
+
+
+# NVFP4-specific statistics
+
+
+def count_nonzero_nvfp4(fp4_data: torch.Tensor) -> torch.Tensor:
+    """Count the number of non-zero elements in the FP4 data.
+
+    FP4 data is stored as 2 4-bit values per byte (uint8).
+    We need to unpack and count non-zeros.
+    """
+    # Each byte contains two FP4 values
+    # Value 0 in FP4 E2M1 format is represented as 0 (and also 8 for -0.0)
+    zero_vals = torch.tensor([0, 8], device=fp4_data.device, dtype=torch.uint8)
+
+    # Extract first and second nibbles
+    first_nibble = fp4_data % 16
+    second_nibble = fp4_data // 16
+
+    # Count zeros
+    first_zeros = torch.isin(first_nibble, zero_vals).sum()
+    second_zeros = torch.isin(second_nibble, zero_vals).sum()
+
+    total_elements = fp4_data.numel() * 2
+    return total_elements - first_zeros - second_zeros
+
+
+def add_nvfp4_underflows_stats():
+    """Register underflow stats for NVFP4.
+
+    Computes underflows by counting zeros in packed FP4 data vs original tensor.
+    """
+    stat_num = "nvfp4_underflows_num"
+    stat_pct = "nvfp4_underflows%"
+
+    stats_to_num[stat_num] = len(stats_to_num)
+    stats_to_num[stat_pct] = len(stats_to_num)
+
+    # Count non-zeros in original vs FP4 packed data
+    STATS[stat_num] = (
+        lambda x, aux_dict: x.count_nonzero()
+        - count_nonzero_nvfp4(aux_dict["nvfp4"]._rowwise_data),
+        lambda buffers, _sn=stat_num: sum(_get(buffers, _sn)),
+    )
+    STATS[stat_pct] = (
+        lambda x, aux_dict: (
+            x.count_nonzero() - count_nonzero_nvfp4(aux_dict["nvfp4"]._rowwise_data)
+        )
+        / aux_dict["nvfp4"].numel()
+        * 100,
+        lambda buffers, _sn_num=stat_num: 100
+        * sum(_get(buffers, _sn_num))
+        / sum(_get(buffers, "numel")),
+    )
+
+    DEPENDENCIES[stat_num] = {stat_num}
+    DEPENDENCIES[stat_pct] = {stat_num, "numel"}
+
+
+# Register NVFP4 stats
+add_nvfp4_underflows_stats()
+add_mse_stats("nvfp4")  # Reuse existing MSE function

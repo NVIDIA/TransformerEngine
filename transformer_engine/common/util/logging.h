@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -96,12 +96,12 @@
 
 #ifdef NVTE_WITH_CUBLASMP
 
-#define NVTE_CHECK_CUBLASMP(expr)                             \
-  do {                                                        \
-    const cublasMpStatus_t status = (expr);                   \
-    if (status != CUBLASMP_STATUS_SUCCESS) {                  \
-      NVTE_ERROR("cuBLASMp Error: ", std::to_string(status)); \
-    }                                                         \
+#define NVTE_CHECK_CUBLASMP(expr)                                      \
+  do {                                                                 \
+    const cublasMpStatus_t status = (expr);                            \
+    if (status != CUBLASMP_STATUS_SUCCESS) {                           \
+      NVTE_ERROR("cuBLASMp Error: ", cublasMpGetStatusString(status)); \
+    }                                                                  \
   } while (false)
 
 #endif  // NVTE_WITH_CUBLASMP

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -228,6 +228,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 map to ``window_size = (-1, 0)`` and Transformer Engine distinguishes them based on
                 ``attn_mask_type``. Similar to :attr:`attn_mask_type`, ``window_size`` can
                 be overridden by :attr:`window_size` in ``forward`` as well.
+    bottom_right_diagonal: Optional[bool], default = `None`
+                Align sliding window and ALiBi diagonal to the top left (`False`)
+                or bottom right (`True`) corner of the softmax matrix in the encoder.
+                If `None`, it will be set to `False` for `attn_mask_type` =
+                {'causal', 'padding_causal'} and `True` for other mask types.
     attention_type : str, default = "self"
                    type of attention, either ``"self"`` and ``"cross"``.
     layer_number : int, default = None
@@ -324,6 +329,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_format: str = "sbhd",
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -350,6 +356,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
         self.window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+        self.bottom_right_diagonal = bottom_right_diagonal
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -676,9 +683,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         # assume attention uses the same fp8_group as GEMMs
         fp8_group = FP8GlobalStateManager.get_fp8_group()
 
-        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
-        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        self.fast_setattr("fp8_parameters", FP8GlobalStateManager.with_fp8_parameters())
+        self.fast_setattr("fp8", FP8GlobalStateManager.is_fp8_enabled())
+        self.fast_setattr("fp8_calibration", FP8GlobalStateManager.is_fp8_calibration())
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
         if self.fp8_parameters or fp8_enabled:
@@ -703,7 +710,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
         else:
             # If fp8 isn't enabled, turn off and return.
-            self.fp8_initialized = False
+            self.fast_setattr("fp8_initialized", False)
             return
 
         if self.fp8_parameters and not self.fp8_initialized:
@@ -721,7 +728,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors(fp8_recipes)
-            self.fp8_initialized = True
+            self.fast_setattr("fp8_initialized", True)
 
             self.fp8_meta["recipe"] = fp8_recipe_dpa
             if fp8_recipe != fp8_recipe_dpa:
@@ -811,6 +818,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         max_seqlen_kv: int = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -963,6 +971,16 @@ class DotProductAttention(TransformerEngineBaseModule):
                        causal masks are aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = None
                     Sliding window size for local attention.
+        bottom_right_diagonal: Optional[bool], default = None
+                    Align sliding window and ALiBi diagonal to the top left (`False`)
+                    or bottom right (`True`) corner of the softmax matrix in the encoder.
+                    If `None`, it will be set to `False` for `attn_mask_type` =
+                    {'causal', 'padding_causal'} and `True` for other mask types.
+                    Note: This parameter will be automatically overridden based on the
+                    `attn_mask_type` - it will be forced to `False` for 'causal' and
+                    'padding_causal' mask types, and forced to `True` for mask types
+                    containing 'bottom_right' (e.g., 'causal_bottom_right',
+                    'padding_causal_bottom_right'), regardless of the explicitly passed value.
         checkpoint_core_attention : bool, default = False
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -1000,7 +1018,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             cases. It is ignored for other backends and when context parallelism is enabled.
         """
 
-        with self.prepare_forward(
+        with self.prepare_forward_ctx(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
@@ -1081,6 +1099,15 @@ class DotProductAttention(TransformerEngineBaseModule):
             if window_size is None:
                 window_size = self.window_size
             window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+            if bottom_right_diagonal is None:
+                bottom_right_diagonal = self.bottom_right_diagonal
+            if attn_mask_type in {"causal", "padding_causal"}:
+                bottom_right_diagonal = False
+            if bottom_right_diagonal is None or attn_mask_type in {
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            }:
+                bottom_right_diagonal = True
 
             # checks for qkv_format
             if qkv_format is None:
@@ -1144,11 +1171,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert "padding" in attn_mask_type, "KV caching requires padding mask!"
                 if attn_mask_type == "padding_causal":
                     attn_mask_type = attn_mask_type + "_bottom_right"
+                    # since attention mask is changed, set `bottom_right_diagonal` to True
+                    bottom_right_diagonal = True
 
-                self.attention_type = "cross"
-                self.flash_attention.attention_type = self.attention_type
-                self.fused_attention.attention_type = self.attention_type
-                self.unfused_attention.attention_type = self.attention_type
+                if self.attention_type != "cross":
+                    self.fast_setattr("attention_type", "cross")
+                    self.flash_attention.attention_type = self.attention_type
+                    self.fused_attention.attention_type = self.attention_type
+                    self.unfused_attention.attention_type = self.attention_type
 
                 query_layer, key_layer, value_layer = [
                     x.contiguous() if not x.is_contiguous() else x
@@ -1256,7 +1286,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if self.layer_number == 1:
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
-            bottom_right_alignment = (attn_mask_type not in ["causal", "padding_causal"],)
             if core_attention_bias_type == "alibi":
                 assert (
                     core_attention_bias is None
@@ -1265,7 +1294,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_num_heads"] != query_layer.shape[-2]
                     or _alibi_cache["_max_seqlen_q"] != max_seqlen_q
                     or _alibi_cache["_max_seqlen_kv"] != max_seqlen_kv
-                    or _alibi_cache["_bottom_right_alignment"] != bottom_right_alignment
+                    or _alibi_cache["_bottom_right_alignment"] != bottom_right_diagonal
                     or _alibi_cache["_alibi_slopes"] is None
                 ):
                     _alibi_cache["_alibi_slopes_require_update"] = True
@@ -1322,6 +1351,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 head_dim_v=head_dim_v,
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
+                bottom_right_diagonal=bottom_right_diagonal,
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias_shape=core_attention_bias_shape,
@@ -1445,9 +1475,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
-                if core_attention_bias_type == "alibi" and (
-                    alibi_slopes is not None or max_seqlen_q != max_seqlen_kv
-                ):
+                if core_attention_bias_type == "alibi" and (alibi_slopes is not None):
                     fu_core_attention_bias_type = "post_scale_bias"
                     _, fu_core_attention_bias = dpa_utils.get_alibi(
                         _alibi_cache,
@@ -1456,7 +1484,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                         bias_dtype=query_layer.dtype,
-                        bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
+                        bottom_right_alignment=bottom_right_diagonal,
                     )
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
@@ -1474,6 +1502,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
+                        bottom_right_diagonal=bottom_right_diagonal,
                         fused_attention_backend=fused_attention_backend,
                         core_attention_bias_type=fu_core_attention_bias_type,
                         core_attention_bias=fu_core_attention_bias,
@@ -1504,6 +1533,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,
+                    bottom_right_diagonal=bottom_right_diagonal,
                     fused_attention_backend=fused_attention_backend,
                     core_attention_bias_type=fu_core_attention_bias_type,
                     core_attention_bias=fu_core_attention_bias,
@@ -1522,7 +1552,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             if use_unfused_attention:
-                allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
+                allow_emulation = (
+                    os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
+                )
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.unfused_attention,
@@ -1538,6 +1570,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
+                        bottom_right_diagonal=bottom_right_diagonal,
                         core_attention_bias_type=core_attention_bias_type,
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
@@ -1561,6 +1594,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,
+                    bottom_right_diagonal=bottom_right_diagonal,
                     core_attention_bias_type=core_attention_bias_type,
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,

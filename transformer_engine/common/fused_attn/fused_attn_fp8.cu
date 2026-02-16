@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -1707,6 +1707,7 @@ void fused_attn_fp8_fwd_impl_v1(
                                0,
                                0,
                                true,
+                               true,
                                qkv_tensor_type,
                                o_tensor_type,
                                cudnn_frontend::DataType_t::NOT_SET,
@@ -1809,7 +1810,7 @@ void fused_attn_fp8_fwd_impl_v1(
       fe::graph::SDPA_fp8_attributes sdpa_options;
       sdpa_options = fe::graph::SDPA_fp8_attributes()
                          .set_name("sdpa_fp8")
-                         .set_is_inference(false)
+                         .set_generate_stats(true)
                          .set_causal_mask(is_causal)
                          .set_attn_scale(attn_scale);
 
@@ -2035,6 +2036,7 @@ void fused_attn_fp8_bwd_impl_v1(
                                NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX,
                                0,
                                0,
+                               true,
                                false,
                                qkv_tensor_type,
                                o_tensor_type,

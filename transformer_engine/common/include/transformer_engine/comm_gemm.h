@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -55,6 +55,8 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
 /*! \brief Destroy a comm-gemm context.
  *
  *  \param[in]  ctx  Context to destroy.
+ *
+ *  It's the caller's responsibility to synchronize all streams involved before calling this function.
  */
 void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx);
 

@@ -1,10 +1,12 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include "../util/cuda_runtime.h"
+
+#include <cublasLt.h>
 
 #include <filesystem>
 #include <mutex>
@@ -207,6 +209,12 @@ int cudart_version() {
     return version;
   };
   static int version = get_version();
+  return version;
+}
+
+size_t cublas_version() {
+  // Cache version to avoid cuBLAS logging overhead
+  static size_t version = cublasLtGetVersion();
   return version;
 }
 

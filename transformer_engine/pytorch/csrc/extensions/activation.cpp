@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -244,6 +244,14 @@ py::object gelu(const at::Tensor& input, py::handle quantizer) {
 
 py::object dgelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
   return dactivation_helper<nvte_dgelu, nullptr>(grad, input, quantizer);
+}
+
+py::object glu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_glu, nullptr>(input, quantizer, 2);
+}
+
+py::object dglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dglu, nullptr>(grad, input, quantizer);
 }
 
 py::object geglu(const at::Tensor& input, py::handle quantizer) {

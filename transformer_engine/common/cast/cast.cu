@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -24,6 +24,15 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
 
   constexpr bool IS_ACT = false;
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
+}
+
+void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                         cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_quantize);
+  using namespace transformer_engine;
+
+  constexpr bool IS_ACT = false;
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -57,6 +66,19 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
   constexpr const NVTETensor activation_input = nullptr;
 
   dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
+      input, activation_input, output, dbias, workspace, nullptr, stream);
+}
+
+void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                               NVTETensor dbias, NVTETensor workspace, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_quantize_dbias);
+  using namespace transformer_engine;
+
+  constexpr bool IS_DBIAS = true;
+  constexpr bool IS_DACT = false;
+  constexpr const NVTEGroupedTensor activation_input = nullptr;
+
+  dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
       input, activation_input, output, dbias, workspace, nullptr, stream);
 }
 
@@ -99,4 +121,19 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
   }
+}
+
+// Group quantize assumes contiguous inputs and outputs in memory allocation
+// TODO (zhongbo): find a better way to make it a more generalized API
+void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *outputs,
+                                         const size_t *split_sections, const size_t num_tensors,
+                                         const NVTEQuantizationConfig quant_config,
+                                         cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_nvfp4_quantize_with_amax);
+  using namespace transformer_engine;
+
+  constexpr bool IS_ACT = false;
+
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, outputs, split_sections,
+                                                              num_tensors, quant_config, stream);
 }

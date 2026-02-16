@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -150,6 +150,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
       .value("GELU", NVTE_Activation_Type::GELU)
       .value("GEGLU", NVTE_Activation_Type::GEGLU)
+      .value("GLU", NVTE_Activation_Type::GLU)
       .value("SILU", NVTE_Activation_Type::SILU)
       .value("SWIGLU", NVTE_Activation_Type::SWIGLU)
       .value("RELU", NVTE_Activation_Type::RELU)

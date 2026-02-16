@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -108,6 +108,9 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
       break;
     case NVTE_Activation_Type::GEGLU:
       nvte_geglu(input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::GLU:
+      nvte_glu(input_tensor.data(), output_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::SILU:
       nvte_silu(input_tensor.data(), output_tensor.data(), stream);
@@ -426,6 +429,9 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
         break;
       case NVTE_Activation_Type::GEGLU:
         nvte_dgeglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+        break;
+      case NVTE_Activation_Type::GLU:
+        nvte_dglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
         break;
       case NVTE_Activation_Type::SWIGLU:
         nvte_dswiglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);

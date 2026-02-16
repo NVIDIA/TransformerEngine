@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -884,7 +884,7 @@ def test_illegal_2D_by_2D_enforced(
     is_w_1d_scaled,
 ) -> None:
     # 2D block quantization by 2D block quantization is not supported.
-    expected_err_msg = "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling supported"
+    expected_err_msg = "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling GEMM is supported"
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,

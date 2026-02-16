@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -132,6 +132,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+  /* GLU (sigmoid gate) */
+  m.def("glu", transformer_engine::pytorch::glu, "GLU activation", py::arg("input"),
+        py::arg("quantizer"));
   /* GELU and variants*/
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
         py::arg("quantizer"));
@@ -158,6 +161,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
         "SwiGLU activation used in GPT OSS", py::arg("input"), py::arg("quantizer"),
         py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
+  /* Backward of GLU */
+  m.def("dglu", transformer_engine::pytorch::dglu, "Backward of GLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
   /* Backward of GELU and variants */
   m.def("dgelu", transformer_engine::pytorch::dgelu, "Backward of GeLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
@@ -248,7 +254,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
         "Split and multi-tensor quantize", py::arg("tensor"), py::arg("split_sections"),
-        py::arg("quantizer_list"));
+        py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false);
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
@@ -290,6 +296,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
+  m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
+        "Convert tensor block scales into GEMM swizzled format");
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
@@ -490,8 +498,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("comm_cga_size") = 2, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
            py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
            py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
-      .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
-           py::arg("local_chunk") = false)
+      .def("copy_into_buffer",
+           static_cast<void (CommOverlap::*)(const at::Tensor &, bool)>(
+               &CommOverlap::copy_into_buffer),
+           py::arg("input"), py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlap::get_communication_stream);
@@ -508,8 +518,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
-      .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
-           py::arg("local_chunk") = false)
+      .def("copy_into_buffer",
+           static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(
+               &CommOverlapP2P::copy_into_buffer),
+           py::arg("input"), py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
