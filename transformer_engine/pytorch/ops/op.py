@@ -16,6 +16,7 @@ import torch
 from transformer_engine.common.recipe import Recipe
 from ..quantization import (
     FP8GlobalStateManager,
+    QuantizerRole,
     RecipeState,
     autocast,
 )
@@ -209,12 +210,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """
         return 0
 
-    def get_quantizer_roles(self, mode: str) -> Optional[list[str]]:
-        """Return an ordered list of role strings for quantizers.
+    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
+        """Return an ordered list of :class:`QuantizerRole` for quantizers.
 
         The returned list must be aligned with the internal quantizer ordering and
-        must have length `num_quantizers(mode)` for supported modes.
-        Returning `None` means "no explicit roles".
+        must have length ``num_quantizers(mode)`` for supported modes.
+        Returning ``None`` means "no explicit roles".
         """
         return None
 

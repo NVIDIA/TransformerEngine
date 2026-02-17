@@ -18,18 +18,17 @@ from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, 
 def current_scaling_ref_quantizer_factory(role):
     """Factory function for current scaling reference quantizer.
 
-    Usage with CustomRecipe and autocast:
+    Receives a :class:`~transformer_engine.pytorch.quantization.QuantizerRole`.
+
+    Usage with CustomRecipe and autocast::
+
         custom_recipe = recipe.CustomRecipe(qfactory=current_scaling_ref_quantizer_factory)
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
-    if ":" not in role:
-        raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<tensor>'")
-    _, tensor_type = role.split(":", 1)
-
-    if tensor_type in ("input", "weight"):
+    if role.tensor_type in ("input", "weight"):
         dtype = torch.float8_e4m3fn
-    elif tensor_type in ("output", "grad_output"):
+    elif role.tensor_type in ("output", "grad_output"):
         dtype = torch.float8_e5m2
     else:
         return None

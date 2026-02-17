@@ -28,6 +28,7 @@ from ..quantization import (
     Float8BlockScalingRecipeState,
     NVFP4BlockScalingRecipeState,
     FP8GlobalStateManager,
+    QuantizerRole,
     RecipeState,
 )
 from ..distributed import (
@@ -752,8 +753,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         *,
         fwd: bool,
         num_quantizers: int,
-    ) -> Optional[List[str]]:
-        """Return an ordered list of role strings for quantizers.
+    ) -> Optional[List[QuantizerRole]]:
+        """Return an ordered list of :class:`QuantizerRole` for quantizers.
 
         The returned list must have length `num_quantizers`.
         Returning `None` means "no explicit roles".

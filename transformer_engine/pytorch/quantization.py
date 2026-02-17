@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import abc
+import dataclasses
 import itertools
 import functools
 import warnings
@@ -41,7 +42,51 @@ __all__ = [
     "is_nvfp4_available",
     "get_default_recipe",
     "get_align_size_for_quantization",
+    "QuantizerRole",
 ]
+
+
+@dataclasses.dataclass(frozen=True)
+class QuantizerRole:
+    """Identity of a tensor slot requesting a quantizer.
+
+    TE modules populate all fields they know about.
+    User factories inspect only the fields they care about.
+
+    Fields
+    ------
+    module_type : str
+        TE module class that emits this role, e.g.
+        `"linear"`, `"layernorm_linear"`, `"layernorm_mlp"`,
+        `"grouped_linear"`, `"dpa"`.
+    tensor_type : str
+        What tensor is being quantized, in the module's own vocabulary.
+        GEMM modules: `"input"`, `"weight"`, `"output"`,
+        `"grad_output"`, `"grad_input"`.
+        DPA: `"qkv"`, `"o"`, `"s"`, `"dqkv"`, `"do"`, `"dp"`.
+    name : str
+        Caller-provided module instance name (e.g. set by the training
+        framework), e.g.
+        `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`, `"linear_39"`.
+        Empty string when not provided.
+    position : str
+        Module-internal sub-slot. For modules that fuse multiple sequential operations,
+        e.g. `LayerNormMLP` has `"fc1"` and `"fc2"` sub-slots.
+        Empty string for simple modules.
+    """
+
+    module_type: str
+    tensor_type: str
+    name: str = ""
+    position: str = ""
+
+    def __str__(self) -> str:
+        parts = [f"{self.module_type}:{self.tensor_type}"]
+        if self.name:
+            parts.append(f"name={self.name}")
+        if self.position:
+            parts.append(f"position={self.position}")
+        return "|".join(parts)
 
 
 @functools.lru_cache(maxsize=None)
@@ -992,7 +1037,7 @@ class RecipeState(abc.ABC):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
-        roles: Optional[list[str]] = None,
+        roles: Optional[list[QuantizerRole]] = None,
     ) -> RecipeState:
         """Factory method to create the state for a quantization recipe
 
@@ -1006,6 +1051,8 @@ class RecipeState(abc.ABC):
             Number of quantizers to create state for.
         device: torch.device, default = default CUDA device
             Device for quantized tensors.
+        roles: list of QuantizerRole, optional
+            Semantic roles for each quantizer slot.
 
         Returns
         -------
@@ -1035,8 +1082,7 @@ class RecipeState(abc.ABC):
             num_quantizers=num_quantizers,
             device=device,
         )
-        # Optional role strings for quantizers, now only used only by CustomRecipe.
-        # TODO(negvet): Make all recipe states take roles in their constructors.
+        # Optional QuantizerRole objects
         state.roles = roles
         return state
 
@@ -1388,7 +1434,7 @@ class CustomRecipeState(RecipeState):
         qfactory = self.recipe.qfactory
         out = []
 
-        roles: List[str]
+        roles: List[QuantizerRole]
         if getattr(self, "roles", None) is None:
             raise ValueError("CustomRecipeState requires roles to be set.")
         roles = self.roles
@@ -1399,7 +1445,6 @@ class CustomRecipeState(RecipeState):
             )
 
         for i in range(self.num_quantizers):
-            # Get quantizer from the user defined factory
             quantizer = qfactory(roles[i])
             out.append(quantizer)
         return out

@@ -26,7 +26,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..quantization import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     assert_dim_for_fp8_exec,
     assert_dim_for_all_gather,
@@ -1417,19 +1417,20 @@ class LayerNormLinear(TransformerEngineBaseModule):
         *,
         fwd: bool,
         num_quantizers: int,
-    ) -> Optional[List[str]]:
-        """Role strings for quantizers used by `LayerNormLinear`."""
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``LayerNormLinear``."""
+        name = self.name or ""
         if fwd:
-            base = (
-                "layernorm_linear:input",
-                "layernorm_linear:weight",
-                "layernorm_linear:output",
-            )
+            base = [
+                QuantizerRole(module_type="layernorm_linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="layernorm_linear", tensor_type="weight", name=name),
+                QuantizerRole(module_type="layernorm_linear", tensor_type="output", name=name),
+            ]
         else:
-            base = (
-                "layernorm_linear:grad_output",
-                "layernorm_linear:grad_input",
-            )
+            base = [
+                QuantizerRole(module_type="layernorm_linear", tensor_type="grad_output", name=name),
+                QuantizerRole(module_type="layernorm_linear", tensor_type="grad_input", name=name),
+            ]
         return [base[i % len(base)] for i in range(num_quantizers)]
 
     def reset_layer_norm_parameters(self) -> None:

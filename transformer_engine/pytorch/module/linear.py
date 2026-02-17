@@ -25,7 +25,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import noop_cat, WeightGradStore
-from ..quantization import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     cast_if_needed,
     clear_tensor_data,
@@ -1313,12 +1313,20 @@ class Linear(TransformerEngineBaseModule):
         *,
         fwd: bool,
         num_quantizers: int,
-    ) -> Optional[List[str]]:
-        """Role strings for quantizers used by `Linear`."""
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``Linear``."""
+        name = self.name or ""
         if fwd:
-            base = ("linear:input", "linear:weight", "linear:output")
+            base = [
+                QuantizerRole(module_type="linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=name),
+                QuantizerRole(module_type="linear", tensor_type="output", name=name),
+            ]
         else:
-            base = ("linear:grad_output", "linear:grad_input")
+            base = [
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=name),
+                QuantizerRole(module_type="linear", tensor_type="grad_input", name=name),
+            ]
         return [base[i % len(base)] for i in range(num_quantizers)]
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:

@@ -21,7 +21,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import WeightGradStore
-from ..quantization import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     divide,
     cast_if_needed,
@@ -729,15 +729,23 @@ class GroupedLinear(TransformerEngineBaseModule):
         *,
         fwd: bool,
         num_quantizers: int,
-    ) -> Optional[List[str]]:
-        """Role strings for quantizers used by `GroupedLinear`.
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``GroupedLinear``.
 
         For grouped GEMMs we repeat the same pattern for each GEMM in order.
         """
+        name = self.name or ""
         if fwd:
-            base = ("grouped_linear:input", "grouped_linear:weight", "grouped_linear:output")
+            base = [
+                QuantizerRole(module_type="grouped_linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="grouped_linear", tensor_type="weight", name=name),
+                QuantizerRole(module_type="grouped_linear", tensor_type="output", name=name),
+            ]
         else:
-            base = ("grouped_linear:grad_output", "grouped_linear:grad_input")
+            base = [
+                QuantizerRole(module_type="grouped_linear", tensor_type="grad_output", name=name),
+                QuantizerRole(module_type="grouped_linear", tensor_type="grad_input", name=name),
+            ]
         return [base[i % len(base)] for i in range(num_quantizers)]
 
     def reset_parameters(self, defer_init=False):
