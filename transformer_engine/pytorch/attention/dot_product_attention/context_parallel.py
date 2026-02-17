@@ -1454,11 +1454,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if attn_bias is not None:
             assert len(attn_bias.shape) == 4, (
                 "Only support bias shape of [1,1,sq,skv], [1,h,sq,skv], [b,1,sq,skv], [b,h,sq,skv],"
-                " [1,1,sq,skv] for forward, and [1,1,sq,skv], [1,h,sq,skv], [b,1,sq,skv],"
+                " [1,1,1,skv] for forward, and [1,1,sq,skv], [1,h,sq,skv], [b,1,sq,skv],"
                 " [b,h,sq,skv] for backward!"
             )
             # For all bias shapes except 111s, sq must be divisible by 2 and skv must be divisible by 2*cp_size
-            # For bias shape 111s, only skv must be divisible by 2
+            # For bias shape 111s, only skv must be divisible by 2*cp_size
             if attn_bias.shape[-2] != 1:
                 assert (
                     attn_bias.shape[-2] % 2 == 0 and attn_bias.shape[-1] % (2 * cp_size) == 0
