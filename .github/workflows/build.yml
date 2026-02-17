@@ -39,6 +39,26 @@ jobs:
     name: 'PyTorch'
     runs-on: ubuntu-latest
     steps:
+      - name: Move /var/lib/docker/
+        shell: bash -euxo pipefail {0}
+        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          root-reserve-mb: 5120
+          temp-reserve-mb: 32
+          swap-size-mb: 10240
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          build-mount-path: '/var/lib/docker/'
+
+      - name: Restore /var/lib/docker/
+        shell: bash -euxo pipefail {0}
+        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -92,6 +112,26 @@ jobs:
     name: 'All'
     runs-on: ubuntu-latest
     steps:
+      - name: Move /var/lib/docker/
+        shell: bash -euxo pipefail {0}
+        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
+        with:
+          root-reserve-mb: 5120
+          temp-reserve-mb: 32
+          swap-size-mb: 10240
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          build-mount-path: '/var/lib/docker/'
+
+      - name: Restore /var/lib/docker/
+        shell: bash -euxo pipefail {0}
+        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
