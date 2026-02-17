@@ -164,6 +164,49 @@ class MXFP8Quantizer(Quantizer):
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
 
+    def get_scale_shape(
+        self,
+        shape: Iterable[int],
+        columnwise: bool,
+    ) -> Tuple[int, int]:
+        """Calculate the shape of the scaling tensor for MXFP8 1D blockwise quantization.
+
+        This method determines the shape of the scaling tensor needed for blockwise quantization,
+        taking into account the input tensor shape and whether columnwise scaling is used.
+
+        Parameters
+        ----------
+        shape : Iterable[int]
+            Shape of the input tensor to be quantized
+        columnwise : bool
+            Whether to use columnwise scaling (True) or rowwise scaling (False)
+
+        Returns
+        -------
+        Tuple[int, int]
+            Shape of the scaling tensor as (outer_dim, inner_dim)
+            For MXFP8 1D blockwise quantization, blocksize is 32
+        Swizzle kernel will be performed before GEMM to suit the need of CuBLAS.
+        CuBLAS doc: https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
+        """
+        if columnwise:
+            # Columnwise: scale_inv shape is [prod(shape[:-1]) // BLOCK_SIZE, shape[-1]]
+            # with padding to multiples of [4, 128]
+            return (
+                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(shape[-1], 128),
+            )
+        # Rowwise: scale_inv shape is [prod(shape[:-1]), shape[-1] // BLOCK_SIZE]
+        # with padding to multiples of [128, 4]
+        return (
+            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+        )
+
+    def get_columnwise_shape(self, rowwise_data_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Calculate the shape of the columnwise data for MXFP8 1D blockwise quantization."""
+        return rowwise_data_shape
+
     def create_tensor_from_data(
         self,
         data: torch.Tensor,
@@ -704,7 +747,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 columnwise_scale_inv=columnwise_scale_inv,
                 fp8_dtype=fp8_dtype,
                 dtype=param_dtype,
-                shape=rowwise_data.shape if rowwise_data is not None else columnwise_data.shape,
+                shape=(rowwise_data.shape if rowwise_data is not None else columnwise_data.shape),
                 quantizer=self._quantizer,
                 with_gemm_swizzled_scales=False,
             )

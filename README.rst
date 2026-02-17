@@ -137,7 +137,7 @@ Flax
       for _ in range(10):
         loss, (param_grads, other_grads) = fwd_bwd_fn(params, other_variables, inp)
 
-For a more comprehensive tutorial, check out our `Quickstart Notebook <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/quickstart.ipynb>`_.
+For a more comprehensive tutorial, check out our `Getting Started Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/getting_started.html>`_.
 
 .. overview-end-marker-do-not-remove
 
@@ -175,15 +175,22 @@ For example to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.08-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:26.01-py3
 
 For example to use the NGC JAX container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/jax:25.08-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/jax:26.01-py3
 
-Where 25.08 (corresponding to August 2025 release) is the container version.
+Where 26.01 (corresponding to January 2026 release) is the container version.
+
+We recommend updating to the latest NGC container available here:
+
+* https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch
+* https://catalog.ngc.nvidia.com/orgs/nvidia/containers/jax
+
+If you run any examples, please ensure you are using a matching version of TransformerEngine. TransformerEngine is pre-built and packaged inside the containers with examples available at ``/opt/transformerengine`` or ``/opt/transformer-engine``. If you would like to use examples from TE main branch and are running into import errors, please try the latest pip package or building from source, although NGC containers are recommended for ease-of-use for most users.
 
 **Benefits of using NGC containers:**
 
@@ -307,6 +314,37 @@ Troubleshooting
 
          cd transformer_engine
          pip install -v -v -v --no-build-isolation .
+
+**Problems using UV or Virtual Environments:**
+
+1. **Import Error:**
+
+   * **Symptoms:** Cannot import ``transformer_engine``
+   * **Solution:** Ensure your UV environment is active and that you have used ``uv pip install --no-build-isolation <te_pypi_package_or_wheel_or_source_dir>`` instead of a regular pip install to your system environment.
+
+2. **cuDNN Sublibrary Loading Failed:**
+
+   * **Symptoms:** Errors at runtime with ``CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED``
+   * **Solution:** This can occur when TE is built against the container's system installation of cuDNN, but pip packages inside the virtual environment pull in pip packages for ``nvidia-cudnn-cu12/cu13``. To resolve this, when building TE from source please specify the following environment variables to point to the cuDNN in your virtual environment.
+   
+   
+     .. code-block:: bash
+
+        export CUDNN_PATH=$(pwd)/.venv/lib/python3.12/site-packages/nvidia/cudnn
+        export CUDNN_HOME=$CUDNN_PATH
+        export LD_LIBRARY_PATH=$CUDNN_PATH/lib:$LD_LIBRARY_PATH
+
+3. **Building Wheels:**
+
+   * **Symptoms:** Regular TE installs work correctly but UV wheel builds fail at runtime.
+   * **Solution:** Ensure that ``uv build --wheel --no-build-isolation -v`` is used during the wheel build as well as the pip installation of the wheel. Use ``-v`` for verbose output to verify that TE is not pulling in a mismatching version of PyTorch or JAX that differs from the UV environment's version.
+
+**JAX-specific Common Issues and Solutions:**
+
+1. **FFI Issues:**
+
+   * **Symptoms:** ``No registered implementation for custom call to <some_te_ffi> for platform CUDA``
+   * **Solution:** Ensure ``--no-build-isolation`` is used during installation. If pre-building wheels, ensure that the wheel is both built and installed with ``--no-build-isolation``. See "Problems using UV or Virtual Environments" above if using UV.
 
 .. troubleshooting-end-marker-do-not-remove
 

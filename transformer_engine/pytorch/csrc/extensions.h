@@ -163,6 +163,11 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = st
  * Activations
  **************************************************************************************************/
 
+/* GLU (sigmoid gate) */
+py::object glu(const at::Tensor &input, py::handle quantizer);
+
+py::object dglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+
 /* GELU and variants*/
 py::object gelu(const at::Tensor &input, py::handle quantizer);
 
@@ -548,6 +553,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
   ~CommOverlap() {}
 
+  using transformer_engine::CommOverlapCore::copy_into_buffer;
   void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
   at::Tensor get_buffer(bool local_chunk = false,
@@ -569,6 +575,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
 
   ~CommOverlapP2P() {}
 
+  using transformer_engine::CommOverlapP2PBase::copy_into_buffer;
   void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
   at::Tensor get_buffer(bool local_chunk = false,

@@ -328,9 +328,13 @@ constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
 __device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
-  return (biased_exp == 0) ? 1
-                           : __int_as_float((254 - biased_exp)
-                                            << FP32_MANTISSA_BITS);  // 127 - (biased_exp - 127)
+  // Handle the special case of NaN.
+  if (biased_exp == 255) return __int_as_float(0x7fffffff);
+  // Handle the special case where the unbiased exponent is 127, so the reciprocal is 2^-127 which needs the first bit of
+  // the mantissa to be 1, which can't be obtained by shifting `FP32_MANTISSA_BITS` bits to the left.
+  if (biased_exp == 254) return __int_as_float(0x00400000);
+  // Fast calculation when the unbiased exp is in [-126, 126], and only the exponent part is used to express the reciprocal.
+  return __int_as_float((254 - biased_exp) << FP32_MANTISSA_BITS);
 }
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {

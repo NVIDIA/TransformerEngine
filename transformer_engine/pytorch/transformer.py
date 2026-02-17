@@ -184,7 +184,7 @@ class TransformerLayer(torch.nn.Module):
           if set to ``False``, the transformer layer will not learn any additive biases.
     activation : str, default = 'gelu'
           Type of activation used in MLP block.
-          Options are: ``'gelu'``, ``'geglu'``, ``'qgelu'``, ``'qgeglu'``, ``'relu'``, ``'reglu'``, ``'srelu'``, ``'sreglu'``,
+          Options are: ``'gelu'``, ``'geglu'``, ``'glu'``, ``'qgelu'``, ``'qgeglu'``, ``'relu'``, ``'reglu'``, ``'srelu'``, ``'sreglu'``,
           ``'silu'``, ``'swiglu'``, and ``'clamped_swiglu'``.
     activation_params : Optional[dict], default = None
                         Additional parameters for the activation function.

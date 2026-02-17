@@ -11,7 +11,11 @@ from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Recipe
+from transformer_engine.common.recipe import (
+    DelayedScaling,
+    Float8CurrentScaling,
+    Recipe,
+)
 from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
@@ -153,6 +157,10 @@ class Float8Quantizer(Quantizer):
     def calibrate(self, tensor: torch.Tensor) -> None:
         amin, amax = tensor.aminmax()
         self.amax.copy_(torch.max(-amin, amax))
+
+    def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
+        """Calculate the shape of the columnwise data for Float8 1D blockwise quantization."""
+        return [rowwise_data_shape[-1]] + list(rowwise_data_shape[:-1])
 
     def create_tensor_from_data(
         self,
@@ -407,6 +415,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
             data_transpose=None,
             quantizer=self,
         )
+
+    def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
+        """Calculate the shape of the columnwise data for Float8 1D blockwise quantization."""
+        return [rowwise_data_shape[-1]] + list(rowwise_data_shape[:-1])
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Function using primitives with ONNX defined translations."""
@@ -769,7 +781,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     kwargs,
                 )
             return Float8Tensor.make_like(
-                tensor, data=func_out, data_transpose=func_transposed_out, shape=func_out.shape
+                tensor,
+                data=func_out,
+                data_transpose=func_transposed_out,
+                shape=func_out.shape,
             )
 
         if func == torch.ops.aten.detach.default:

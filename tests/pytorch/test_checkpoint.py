@@ -101,7 +101,7 @@ class TestLoadCheckpoint:
         # Path to save checkpoint
         if checkpoint_dir is None:
             checkpoint_dir = TestLoadCheckpoint._checkpoint_dir()
-        checkpoint_dir.mkdir(exist_ok=True)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_file = checkpoint_dir / f"{name}.pt"
 
         # Create module and save checkpoint
