@@ -516,6 +516,12 @@ class QuantizedTensor(torch.Tensor):
                     return func(t)
             return False  # Or error out?
 
+        # Pass through te_moe custom ops without unwrapping
+        if hasattr(func, "namespace") and func.namespace == "te_moe":
+            if kwargs is None:
+                kwargs = {}
+            return super().__torch_dispatch__(func, types, args, kwargs)
+
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
                 return arg.dequantize(dtype=arg.dtype)
