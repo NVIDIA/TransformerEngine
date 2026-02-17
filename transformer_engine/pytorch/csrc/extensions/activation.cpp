@@ -246,6 +246,14 @@ py::object dgelu(const at::Tensor& grad, const at::Tensor& input, py::handle qua
   return dactivation_helper<nvte_dgelu, nullptr>(grad, input, quantizer);
 }
 
+py::object glu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_glu, nullptr>(input, quantizer, 2);
+}
+
+py::object dglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dglu, nullptr>(grad, input, quantizer);
+}
+
 py::object geglu(const at::Tensor& input, py::handle quantizer) {
   return activation_helper<nvte_geglu, nullptr>(input, quantizer, 2);
 }

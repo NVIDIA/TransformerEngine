@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 750" width="850" height="750">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      
+      /* Arrows */
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .arrow-dashed { stroke: #616161; stroke-width: 2; fill: none; stroke-dasharray: 5,5; marker-end: url(#arrowhead); }
+      
+      /* Phase labels */
+      .phase-forward { fill: #1565c0; font-weight: 600; }
+      .phase-backward { fill: #c62828; font-weight: 600; }
+    </style>
+    <marker id="arrowhead" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto">
+      <polygon points="0 0, 6 2, 0 4" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- OPTION 1: Both usages in forward -->
+  <text x="425" y="35" class="section-title" style="fill: #212121; font-weight: 600;">Option 1: Quantize both usages in forward</text>
+  
+  <!-- Forward phase label -->
+  <text x="20" y="113" class="text phase-forward" style="text-anchor: start;">FORWARD:</text>
+  
+  <!-- High Precision Tensor -->
+  <rect x="130" y="85" width="130" height="55" class="hp" rx="6"/>
+  <text x="195" y="108" class="text">High Precision</text>
+  <text x="195" y="125" class="text">Tensor</text>
+  
+  <!-- Arrow -->
+  <path d="M 260 112 L 290 112" class="arrow"/>
+  
+  <!-- Quantize -->
+  <rect x="290" y="85" width="160" height="55" class="quantize" rx="6"/>
+  <text x="370" y="117" class="text">Quantize</text>
+  
+  <!-- Arrow to FP8 -->
+  <path d="M 450 112 L 480 112" class="arrow"/>
+  
+  <!-- Quantized Tensor (for forward) -->
+  <rect x="480" y="85" width="130" height="55" class="fp8" rx="6"/>
+  <text x="545" y="108" class="text">Quantized</text>
+  <text x="545" y="125" class="text">Rowwise</text>
+  
+  <!-- Backward phase label -->
+  <text x="20" y="163" class="text phase-backward" style="text-anchor: start;">BACKWARD:</text>
+  
+  <!-- Arrow to FP8 columnwise -->
+  <path d="M 450 130 L 480 152" class="arrow"/>
+  
+  <!-- Quantized columnwise (saved for backward) -->
+  <rect x="480" y="150" width="130" height="55" class="fp8" rx="6"/>
+  <text x="545" y="173" class="text">Quantized</text>
+  <text x="545" y="190" class="text">Columnwise</text>
+  
+  <!-- Divider Line -->
+  <line x1="30" y1="220" x2="820" y2="220" stroke="#bdbdbd" stroke-width="3"/>
+  
+  <!-- OPTION 2: Separate approach -->
+  <text x="425" y="250" class="section-title" style="fill: #212121; font-weight: 600;">Option 2: Separate Quantizations (quantize when needed)</text>
+  
+  <!-- Forward phase -->
+  <text x="20" y="293" class="text phase-forward" style="text-anchor: start;">FORWARD:</text>
+  
+  <!-- High Precision Tensor (shared) -->
+  <rect x="130" y="265" width="130" height="55" class="hp" rx="6"/>
+  <text x="195" y="288" class="text">High Precision</text>
+  <text x="195" y="305" class="text">Tensor</text>
+  
+  <!-- Arrow to Quantize -->
+  <path d="M 260 292 L 290 292" class="arrow"/>
+  
+  <!-- Quantize only -->
+  <rect x="290" y="265" width="120" height="55" class="quantize" rx="6"/>
+  <text x="350" y="297" class="text">Quantize</text>
+  
+  <!-- Arrow to FP8 -->
+  <path d="M 410 292 L 440 292" class="arrow"/>
+  
+  <!-- Quantized Tensor -->
+  <rect x="440" y="265" width="130" height="55" class="fp8" rx="6"/>
+  <text x="505" y="288" class="text">Quantized</text>
+  <text x="505" y="305" class="text">Rowwise</text>
+  
+  <!-- Dashed line showing it's the same tensor -->
+  <path d="M 195 320 L 195 360" class="arrow-dashed"/>
+  
+  <!-- Backward phase -->
+  <text x="20" y="393" class="text phase-backward" style="text-anchor: start;">BACKWARD:</text>
+  
+  <!-- High Precision Tensor (same, reused) -->
+  <rect x="130" y="360" width="130" height="55" class="hp" rx="6"/>
+  <text x="195" y="383" class="text">High Precision</text>
+  <text x="195" y="400" class="text">Tensor</text>
+  
+  <!-- Arrow to Quantize -->
+  <path d="M 260 387 L 290 387" class="arrow"/>
+  
+  <!-- Quantize (in backward) -->
+  <rect x="290" y="360" width="160" height="55" class="quantize" rx="6"/>
+  <text x="370" y="392" class="text">Quantize</text>
+  
+  <!-- Arrow to FP8 columnwise -->
+  <path d="M 450 387 L 480 387" class="arrow"/>
+  
+  <!-- Quantized columnwise -->
+  <rect x="480" y="360" width="130" height="55" class="fp8" rx="6"/>
+  <text x="545" y="383" class="text">Quantized</text>
+  <text x="545" y="400" class="text">Columnwise</text>
+  
+  <!-- Divider Line -->
+  <line x1="30" y1="430" x2="820" y2="430" stroke="#bdbdbd" stroke-width="3"/>
+  
+  <!-- OPTION 3: Convert from rowwise to columnwise -->
+  <text x="425" y="460" class="section-title" style="fill: #212121; font-weight: 600;">Option 3: Convert Rowwise to Columnwise in Backward (reuse saved tensor)</text>
+  
+  <!-- Forward phase -->
+  <text x="20" y="503" class="text phase-forward" style="text-anchor: start;">FORWARD:</text>
+  
+  <!-- High Precision Tensor -->
+  <rect x="130" y="475" width="130" height="55" class="hp" rx="6"/>
+  <text x="195" y="498" class="text">High Precision</text>
+  <text x="195" y="515" class="text">Tensor</text>
+  
+  <!-- Arrow to Quantize -->
+  <path d="M 260 502 L 290 502" class="arrow"/>
+  
+  <!-- Quantize only -->
+  <rect x="290" y="475" width="120" height="55" class="quantize" rx="6"/>
+  <text x="350" y="507" class="text">Quantize</text>
+  
+  <!-- Arrow to FP8 -->
+  <path d="M 410 502 L 440 502" class="arrow"/>
+  
+  <!-- Quantized Tensor (saved) -->
+  <rect x="440" y="475" width="130" height="55" class="fp8" rx="6"/>
+  <text x="505" y="498" class="text">Quantized</text>
+  <text x="505" y="515" class="text">Rowwise</text>
+  
+  <!-- Dashed line showing tensor is saved -->
+  <path d="M 505 530 L 505 547 L 195 547 L 195 565" class="arrow-dashed"/>
+  
+  <!-- Backward phase -->
+  <text x="20" y="598" class="text phase-backward" style="text-anchor: start;">BACKWARD:</text>
+  
+  <!-- Quantized Tensor (reused) -->
+  <rect x="130" y="565" width="130" height="55" class="fp8" rx="6"/>
+  <text x="195" y="588" class="text">Quantized</text>
+  <text x="195" y="605" class="text">Rowwise</text>
+  
+  <!-- Arrow to Make Columnwise -->
+  <path d="M 260 592 L 290 592" class="arrow"/>
+  
+  <!-- Make Columnwise operation -->
+  <rect x="290" y="565" width="120" height="55" class="quantize" rx="6"/>
+  <text x="350" y="585" class="text">Make</text>
+  <text x="350" y="602" class="text">Columnwise</text>
+  
+  <!-- Arrow to FP8 columnwise -->
+  <path d="M 410 592 L 440 592" class="arrow"/>
+  
+  <!-- Quantized columnwise -->
+  <rect x="440" y="565" width="130" height="55" class="fp8" rx="6"/>
+  <text x="505" y="588" class="text">Quantized</text>
+  <text x="505" y="605" class="text">Columnwise</text>
+  
+  <!-- Legend -->
+  <g transform="translate(150, 660)">
+    <rect x="0" y="0" width="70" height="35" rx="5" class="hp"/>
+    <text x="85" y="21" class="small-text" style="text-anchor: start;">High Precision (FP32/BF16/FP16)</text>
+    
+    <rect x="380" y="0" width="70" height="35" rx="5" class="fp8"/>
+    <text x="465" y="21" class="small-text" style="text-anchor: start;">Lower Precision (FP8, etc.)</text>
+    
+    <rect x="0" y="45" width="70" height="35" rx="5" class="quantize"/>
+    <text x="85" y="66" class="small-text" style="text-anchor: start;">Quantization / Make Columnwise</text>
+  </g>
+  
+</svg>
+
