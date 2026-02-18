@@ -12,6 +12,8 @@ import torch
 import random
 import math
 
+from mxfp8_utils import swizzle_mxfp8_scale, get_mxfp8_scale_shape_no_padding
+
 recipe_available, reason_for_no_recipe = te.is_mxfp8_available(return_reason=True)
 
 
@@ -71,62 +73,6 @@ def generate_split_sections(M: int, N: int, edge_cases: str) -> list[int]:
         ), "The split_sections are not multiples of least_multiple"
 
     return split_sections
-
-
-# Calculate the shape of the scaling tensor for MXFP8 1D blockwise quantization without padding
-def get_mxfp8_scale_shape_no_padding(shape, columnwise):
-    M, K = 1, 1
-    M = math.prod(shape[:-1])
-    K = shape[-1]
-
-    if columnwise:
-        outer = M // 32
-        inner = K
-        return (outer, inner)
-    # rowwise
-    outer = M
-    inner = K // 32
-    return (outer, inner)
-
-
-def _rowwise_swizzle_mxfp8_scale(input_M, input_N, scale: torch.Tensor) -> torch.Tensor:
-    assert scale.dim() == 2
-    assert input_M == scale.shape[0]
-    assert input_N // 32 == scale.shape[1]
-
-    x = scale.view(input_M // 128, 4, 32, input_N // 128, 4)
-    x = x.permute(0, 3, 2, 1, 4)
-    x = x.contiguous()
-    # View back as original 2D shape
-    x = x.view(input_M, input_N // 32)
-    return x
-
-
-def _columnwise_swizzle_mxfp8_scale(input_M, input_N, scale: torch.Tensor) -> torch.Tensor:
-    assert scale.dim() == 2
-    assert input_M // 32 == scale.shape[0]
-    assert input_N == scale.shape[1]
-
-    x = scale.view(input_M // 128, 4, input_N // 128, 4, 32)
-    x = x.permute(2, 0, 4, 3, 1)
-    x = x.contiguous()
-
-    # alternative way: transpose the scale and do rowwise swizzle with M, N swapped
-    x1 = _rowwise_swizzle_mxfp8_scale(input_N, input_M, scale.transpose(0, 1).contiguous())
-    torch.testing.assert_close(
-        x.view(-1), x1.view(-1), atol=0.0, rtol=0.0, msg="columnwise swizzle sanity check failed"
-    )
-
-    # View back as original 2D shape
-    x = x.view(input_M // 32, input_N)
-    return x
-
-
-def swizzle_mxfp8_scale(input_M, input_N, scale: torch.Tensor, rowwise: bool) -> torch.Tensor:
-    if rowwise:
-        return _rowwise_swizzle_mxfp8_scale(input_M, input_N, scale)
-    else:
-        return _columnwise_swizzle_mxfp8_scale(input_M, input_N, scale)
 
 
 def reference_group_quantize(
@@ -248,7 +194,9 @@ def check_grouped_tensor_mxfp8_versus_reference(
                 x_sx_i = x_sx[i].clone()
                 x_sx_ref_i = x_sx_ref[i].clone()
                 if optimize_for_gemm:
-                    x_sx_ref_i = swizzle_mxfp8_scale(split_sections[i], N, x_sx_ref_i, rowwise=True)
+                    x_sx_ref_i = swizzle_mxfp8_scale(
+                        split_sections[i], N, x_sx_ref_i, columnwise=False
+                    )
                 torch.testing.assert_close(x_sx_i, x_sx_ref_i, atol=0.0, rtol=0.0)
 
     if return_transpose:
@@ -272,7 +220,7 @@ def check_grouped_tensor_mxfp8_versus_reference(
                 x_sx_t_ref_i = x_sx_t_ref[i].clone()
                 if optimize_for_gemm:
                     x_sx_t_ref_i = swizzle_mxfp8_scale(
-                        split_sections[i], N, x_sx_t_ref_i, rowwise=False
+                        split_sections[i], N, x_sx_t_ref_i, columnwise=True
                     )
                 # TODO: bug found, this shows that MXFP8 columnwise swizzle is not correct
                 # torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
@@ -352,7 +300,9 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
                 x_sx_i = x_sx[i].clone()
                 x_sx_ref_i = x_sx_ref[i].clone()
                 if optimize_for_gemm:
-                    x_sx_ref_i = swizzle_mxfp8_scale(split_sections[i], N, x_sx_ref_i, rowwise=True)
+                    x_sx_ref_i = swizzle_mxfp8_scale(
+                        split_sections[i], N, x_sx_ref_i, columnwise=False
+                    )
                 torch.testing.assert_close(x_sx_i, x_sx_ref_i, atol=0.0, rtol=0.0)
 
     if return_transpose:
@@ -376,7 +326,7 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
                 x_sx_t_ref_i = x_sx_t_ref[i].clone()
                 if optimize_for_gemm:
                     x_sx_t_ref_i = swizzle_mxfp8_scale(
-                        split_sections[i], N, x_sx_t_ref_i, rowwise=False
+                        split_sections[i], N, x_sx_t_ref_i, columnwise=True
                     )
                 # TODO: bug found, this shows that MXFP8 columnwise swizzle is not correct
                 # torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
