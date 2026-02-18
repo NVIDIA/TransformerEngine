@@ -77,11 +77,6 @@ def setup_common_extension() -> CMakeExtension:
             f"nvidia-cublasmp-cu{cuda_version()[0]}"
         ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
         cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
-        nvshmem_dir = os.getenv("NVSHMEM_HOME") or metadata.distribution(
-            f"nvidia-nvshmem-cu{cuda_version()[0]}"
-        ).locate_file("nvidia/nvshmem")
-        cmake_flags.append(f"-DNVSHMEM_DIR={nvshmem_dir}")
-        print("CMAKE_FLAGS:", cmake_flags[-2:])
 
     # Add custom CMake arguments from environment variable
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
