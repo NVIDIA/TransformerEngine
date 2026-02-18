@@ -123,6 +123,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
+            "fake_dtype": self._dtype,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorStorage]:

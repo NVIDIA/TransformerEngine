@@ -85,6 +85,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "is_2D_scaled": self._is_2D_scaled,
+            "fake_dtype": self._dtype,
         }
 
     def prepare_for_saving(

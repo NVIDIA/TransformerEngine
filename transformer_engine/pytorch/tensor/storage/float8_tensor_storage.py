@@ -114,6 +114,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "data_transpose": self._transpose,
             "quantizer": self._quantizer,
+            "fake_dtype": self._dtype,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
