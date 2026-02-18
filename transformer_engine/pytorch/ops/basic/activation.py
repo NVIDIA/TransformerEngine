@@ -20,6 +20,7 @@ from .._common import maybe_dequantize
 __all__ = [
     "GELU",
     "GEGLU",
+    "GLU",
     "QGELU",
     "QGEGLU",
     "ReLU",
@@ -27,8 +28,6 @@ __all__ = [
     "SReLU",
     "SReGLU",
     "SiLU",
-    "SwiGLU",
-    "ClampedSwiGLU",
 ]
 
 
@@ -162,6 +161,38 @@ class GELU(_ActivationOperation):
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.dgelu(*args, **kwargs)
+
+
+class GLU(_ActivationOperation):
+    r"""Gated Linear Unit
+
+    The input tensor is split into chunks :math:`a` and :math:`b`
+    along the last dimension and the following is computed:
+
+    .. math::
+
+       \text{GLU}(a,b) = \sigma(a) * b
+
+    where :math:`\sigma` is the sigmoid function.
+
+    .. warning::
+
+       Transformer Engine's gated activations and PyTorch's GLU
+       activation follow opposite conventions for :math:`a` and
+       :math:`b`. Transformer Engine applies the gating function to
+       the first half of the input tensor, while PyTorch applies it to
+       the second half.
+
+    See `Language Modeling with Gated Convolutional Networks<https://arxiv.org/abs/1612.08083>`__
+    and `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
+
+    """
+
+    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.glu(*args, **kwargs)
+
+    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.dglu(*args, **kwargs)
 
 
 class GEGLU(_ActivationOperation):
@@ -355,81 +386,3 @@ class SiLU(_ActivationOperation):
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.dsilu(*args, **kwargs)
-
-
-class SwiGLU(_ActivationOperation):
-    r"""Swish gated linear unit
-
-    The input tensor is split into chunks :math:`a` and :math:`b`
-    along the last dimension and the following is computed:
-
-    .. math::
-
-       \text{GEGLU}(a,b) = \text{SiLU}(a) * b
-
-    where
-
-    .. math::
-
-       \text{SiLU}(x) = x \sigma(x) = \frac{x}{1+\exp(-x)}
-
-    .. warning::
-
-       Transformer Engine's gated activations and PyTorch's GLU
-       activation follow opposite conventions for :math:`a` and
-       :math:`b`. Transformer Engine applies the gating function to
-       the first half of the input tensor, while PyTorch applies it to
-       the second half.
-
-    The Sigmoid Linear Unit (SiLU) gating function is also known as
-    the swish function. See
-    `GLU Variants Improve Transformer <https://arxiv.org/abs/2002.05202>`__
-    and `Gaussian Error Linear Units (GELUs) <https://arxiv.org/abs/1606.08415>`__ .
-
-    """
-
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.swiglu(*args, **kwargs)
-
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.dswiglu(*args, **kwargs)
-
-
-class ClampedSwiGLU(_ActivationOperation):
-    r"""GPT-OSS
-    Implementation based on `GPT-OSS <https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250>`__.
-
-    This activation has two differences compared to the original SwiGLU
-       1. Both gate and pre-activations are clipped based on parameter limit.
-       2. Activation uses sigmoid(alpha * x) instead of sigmoid(x) used in Swish activation.
-
-    .. warning::
-
-       The input tensor is chunked along the last dimension to get
-       gates/pre-activations which is differnt from GPT OSS
-       implementation where the gates/pre-activations are assumed to
-       be interleaved in the input tensor.
-
-    Parameters
-    ----------
-    limit : float
-        The clamp limit.
-    alpha : float
-        The scaling factor for the sigmoid function used in the activation.
-    cache_quantized_input : bool, default = False
-        Quantize input tensor when caching for use in the backward pass.
-
-    """
-
-    def __init__(
-        self, *, limit: float = 7.0, alpha: float = 1.702, cache_quantized_input: bool = False
-    ):
-        super().__init__(cache_quantized_input=cache_quantized_input)
-        self.limit = limit
-        self.alpha = alpha
-
-    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.clamped_swiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)
-
-    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.clamped_dswiglu(*args, limit=self.limit, alpha=self.alpha, **kwargs)

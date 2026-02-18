@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400">
+  <defs>
+    <style>
+      .axis { stroke: #333; stroke-width: 3; stroke-linecap: round; }
+      .tick { stroke: #333; stroke-width: 2; }
+      .tick-label { font-family: sans-serif; font-size: 22px; text-anchor: middle; fill: #333; font-weight: bold; }
+      .title { font-family: sans-serif; font-size: 24px; font-weight: bold; text-anchor: middle; fill: #333; }
+      .sub-label { font-family: sans-serif; font-size: 16px; text-anchor: middle; fill: #555; }
+      .value-point { fill: #e74c3c; stroke: #333; stroke-width: 2; }
+      .value-label { font-family: sans-serif; font-size: 22px; text-anchor: middle; fill: #e74c3c; font-weight: bold; }
+      .divider { stroke: #ccc; stroke-width: 2; stroke-dasharray: 5,5; }
+      .bar-bg { fill: #eee; stroke: #555; stroke-width: 1.5; }
+      .bar-fill-blue { fill: #87CEEB; stroke: #555; stroke-width: 1.5; }
+      .bar-fill-green { fill: #a8d99c; stroke: #555; stroke-width: 1.5; }
+      .percentage-text { font-family: sans-serif; font-weight: bold; font-size: 20px; }
+    </style>
+  </defs>
+
+
+  <!-- Divider -->
+  <line x1="500" y1="20" x2="500" y2="380" class="divider" />
+
+  <!-- LEFT SIDE: Deterministic Rounding -->
+  <g transform="translate(0,0)">
+    <text x="250" y="40" class="title">Round to Nearest</text>
+    
+    <!-- Axis -->
+    <line x1="50" y1="150" x2="450" y2="150" class="axis" />
+    
+    <!-- v1 -->
+    <line x1="100" y1="140" x2="100" y2="160" class="tick" />
+    <text x="100" y="185" class="tick-label">v₁</text>
+    
+    <!-- v2 -->
+    <line x1="400" y1="140" x2="400" y2="160" class="tick" />
+    <text x="400" y="185" class="tick-label">v₂</text>
+    
+    <!-- x (at 40% distance) -->
+    <circle cx="220" cy="150" r="8" class="value-point" />
+    <text x="220" y="120" class="value-label">x</text>
+    
+    <!-- Visuals for deterministic rounding: Bars -->
+    <g transform="translate(50, 230)">
+        <!-- Bar for v1 (100%) -->
+        <text x="50" y="-10" class="sub-label">Round to v₁</text>
+        <rect x="10" y="0" width="80" height="100" rx="4" class="bar-bg" />
+        <rect x="10" y="0" width="80" height="100" rx="4" class="bar-fill-green" />
+        <text x="50" y="56" fill="#000" text-anchor="middle" class="percentage-text">100%</text>
+        
+        <!-- Bar for v2 (0%) -->
+        <text x="350" y="-10" class="sub-label">Round to v₂</text>
+        <rect x="310" y="0" width="80" height="100" rx="4" class="bar-bg" />
+        <!-- 0% filled, so just bg visible -->
+        <text x="350" y="56" fill="#666" text-anchor="middle" class="percentage-text">0%</text>
+    </g>
+
+  </g>
+
+  <!-- RIGHT SIDE: Stochastic -->
+  <g transform="translate(500,0)">
+    <text x="250" y="40" class="title">Stochastic Rounding</text>
+    
+    <!-- Axis -->
+    <line x1="50" y1="150" x2="450" y2="150" class="axis" />
+    
+    <!-- v1 -->
+    <line x1="100" y1="140" x2="100" y2="160" class="tick" />
+    <text x="100" y="185" class="tick-label">v₁</text>
+    
+    <!-- v2 -->
+    <line x1="400" y1="140" x2="400" y2="160" class="tick" />
+    <text x="400" y="185" class="tick-label">v₂</text>
+    
+    <!-- x (at 40% distance) -->
+    <circle cx="220" cy="150" r="8" class="value-point" />
+    <text x="220" y="120" class="value-label">x</text>
+    
+    <!-- Visuals for Stochastic: Bars -->
+    <g transform="translate(50, 230)">
+        <!-- Bar for v1 -->
+        <text x="50" y="-10" class="sub-label">Round to v₁</text>
+        <rect x="10" y="0" width="80" height="100" rx="4" class="bar-bg" />
+        <rect x="10" y="40" width="80" height="60" rx="4" class="bar-fill-blue" />
+        <text x="50" y="80" fill="#000" text-anchor="middle" class="percentage-text">60%</text>
+        
+        <!-- Bar for v2 -->
+        <text x="350" y="-10" class="sub-label">Round to v₂</text>
+        <rect x="310" y="0" width="80" height="100" rx="4" class="bar-bg" />
+        <rect x="310" y="60" width="80" height="40" rx="4" class="bar-fill-blue" />
+        <text x="350" y="90" fill="#000" text-anchor="middle" class="percentage-text">40%</text>
+    </g>
+    
+  </g>
+
+</svg>
