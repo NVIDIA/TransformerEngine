@@ -33,8 +33,10 @@ typedef struct NVTECusolverMpCtx NVTECusolverMpCtx;
  *  \param[in]  comm    NCCL communicator.
  *  \param[in]  nranks  Number of ranks.
  *  \param[in]  rank    Local rank.
+ *  \param[in]  stream  CUDA stream.
  */
-NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank);
+NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank,
+                                               cudaStream_t stream);
 
 /*! \brief Destroy a cuSolverMp context.
  *
