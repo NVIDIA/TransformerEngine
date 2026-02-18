@@ -256,7 +256,7 @@ forward pass for use in the backward pass.
 
         def __init__(self) -> None:
             super().__init__()
-            scale = torch.ones((), dtype=dtype, device=device)
+            scale = torch.ones((), dtype=torch.float32, device="cuda")
             self.register_parameter("scale", torch.nn.Parameter(scale))
 
         def op_forward(
@@ -309,7 +309,7 @@ of context objects for all the corresponding ``BasicOperation`` s.
             input_: torch.Tensor,
             basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
             **unused,
-        ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, ...]]:
+        ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, ...]]]:
             scale_op, add_op = self.basic_ops
             extra_input = basic_op_extra_inputs[1][0]  # Extra input to add op
             out = scale_op.scale * input_ + extra_input
