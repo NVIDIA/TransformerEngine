@@ -619,18 +619,15 @@ def run_dpa_with_cp(
                     # Compare the two sequence chunks separately
                     # Compare dbias
                     if names[i] == "dbias":
-                        # After reshaping: (1, 1, 2, seq_q//2, seq_kv)
-                        # Compare along dimension 2 (the split sequence dimension)
+                        # Compare the two chunks along dimension 2 (the split sequence dimension)
+                        seq_q_dim_bias = 2
                         ndim_bias = t.ndim
-                        seq_q_dim_bias = ndim_bias - 2  # Query sequence dimension
-                        # After reshaping both have shape: [..., 2, seq_q//2, seq_kv]
-                        # The split dimension is at seq_q_dim_bias
                         slice_0 = [slice(None)] * ndim_bias
                         slice_0[seq_q_dim_bias] = 0
                         slice_1 = [slice(None)] * ndim_bias
                         slice_1[seq_q_dim_bias] = 1
                         compare_and_assert(
-                            t[tuple(slice_0)],  # First sequence chunk
+                            t[tuple(slice_0)],
                             tensors_cp[i][tuple(slice_0)],
                             names_no_cp[i],
                             names_cp[i],
@@ -640,7 +637,7 @@ def run_dpa_with_cp(
                             is_fp8,
                         )
                         compare_and_assert(
-                            t[tuple(slice_1)],  # First sequence chunk
+                            t[tuple(slice_1)],
                             tensors_cp[i][tuple(slice_1)],
                             names_no_cp[i],
                             names_cp[i],
@@ -651,7 +648,7 @@ def run_dpa_with_cp(
                         )
                     # Compare Q/K/V/out
                     else:
-                        # Compare along dimension 1 (the split sequence dimension)
+                        #  Compare the two chunks along dimension 1 (the split sequence dimension)
                         compare_and_assert(
                             t[:, 0],
                             tensors_cp[i][:, 0],
@@ -676,16 +673,15 @@ def run_dpa_with_cp(
                     # Compare the two sequence chunks separately
                     # Compare dbias (same as BSHD)
                     if names[i] == "dbias":
-                        # After reshaping: (1, 1, 2, seq_q//2, seq_kv)
-                        # Compare along dimension 2 (the split sequence dimension)
+                        # Same as bshd: Compare the two chunks along dimension 2 (the split sequence dimension)
+                        seq_q_dim_bias = 2
                         ndim_bias = t.ndim
-                        seq_q_dim_bias = ndim_bias - 2
                         slice_0 = [slice(None)] * ndim_bias
                         slice_0[seq_q_dim_bias] = 0
                         slice_1 = [slice(None)] * ndim_bias
                         slice_1[seq_q_dim_bias] = 1
                         compare_and_assert(
-                            t[tuple(slice_0)],  # First sequence chunk
+                            t[tuple(slice_0)],
                             tensors_cp[i][tuple(slice_0)],
                             names_no_cp[i],
                             names_cp[i],
@@ -695,7 +691,7 @@ def run_dpa_with_cp(
                             is_fp8,
                         )
                         compare_and_assert(
-                            t[tuple(slice_1)],  # First sequence chunk
+                            t[tuple(slice_1)],
                             tensors_cp[i][tuple(slice_1)],
                             names_no_cp[i],
                             names_cp[i],
@@ -706,7 +702,7 @@ def run_dpa_with_cp(
                         )
                     # Compare Q/K/V/out
                     else:
-                        # Compare along dimension 0 (the split sequence dimension)
+                        #  Compare the two chunks along dimension 0 (the split sequence dimension)
                         compare_and_assert(
                             t[0],
                             tensors_cp[i][0],
