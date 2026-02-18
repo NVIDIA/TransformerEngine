@@ -81,12 +81,8 @@ def _moe_permute_index_map_fake(
     output_tokens = num_out_tokens if num_out_tokens > 0 else num_tokens * topK
 
     # row_id_map is 1D with size = num_tokens * topK
-    fake_output = torch.empty(
-        (output_tokens, inp.shape[1]), dtype=inp.dtype, device=inp.device
-    )
-    fake_row_id_map = torch.empty(
-        (num_tokens * topK,), dtype=torch.int32, device=inp.device
-    )
+    fake_output = torch.empty((output_tokens, inp.shape[1]), dtype=inp.dtype, device=inp.device)
+    fake_row_id_map = torch.empty((num_tokens * topK,), dtype=torch.int32, device=inp.device)
 
     return fake_output, fake_row_id_map
 
@@ -151,6 +147,7 @@ moe_permute_index_map_forward.register_autograd(
 
 # ===================== _moe_unpermute_index_map custom ops =====================
 
+
 @torch.library.custom_op("te_moe::unpermute_index_map_fwd", mutates_args=[])
 def moe_unpermute_index_map_forward(
     inp: torch.Tensor,
@@ -174,9 +171,7 @@ def _moe_unpermute_index_map_forward_fake(
 ) -> torch.Tensor:
     """Fake implementation for shape inference."""
     # Output shape: (num_tokens, hidden_size)
-    return torch.empty(
-        (num_tokens, inp.shape[1]), dtype=inp.dtype, device=inp.device
-    )
+    return torch.empty((num_tokens, inp.shape[1]), dtype=inp.dtype, device=inp.device)
 
 
 @torch.library.custom_op("te_moe::unpermute_index_map_bwd", mutates_args=[])
@@ -217,7 +212,6 @@ def _moe_unpermute_index_map_backward_fake(
     return act_grad, prob_grad
 
 
-
 def _moe_unpermute_index_map_setup_context(ctx, inputs, output):
     """Save context for backward pass."""
     inp, row_id_map, probs, num_tokens, topK = inputs
@@ -249,6 +243,7 @@ moe_unpermute_index_map_forward.register_autograd(
 
 
 # ===================== _moe_permute_mask_map custom ops =====================
+
 
 @torch.library.custom_op("te_moe::permute_mask_map_fwd", mutates_args=[])
 def moe_permute_mask_map_forward(
@@ -296,37 +291,57 @@ def moe_permute_mask_map_forward(
         scale_hidden_dim = None
 
     output, permuted_scale, permuted_probs = triton_permutation.permute_with_mask_map(
-        inp, row_id_map, probs, fp8_scale, pad_offsets,
-        num_tokens, num_experts, num_out_tokens, hidden_size, scale_hidden_dim,
+        inp,
+        row_id_map,
+        probs,
+        fp8_scale,
+        pad_offsets,
+        num_tokens,
+        num_experts,
+        num_out_tokens,
+        hidden_size,
+        scale_hidden_dim,
     )
 
     if fp8:
         if per_tensor_recipe:
             output = Float8Tensor(
-                data=output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv,
-                shape=output.shape, dtype=fake_dtype,
+                data=output,
+                fp8_dtype=fp8_dtype,
+                fp8_scale_inv=fp8_scale_inv,
+                shape=output.shape,
+                dtype=fake_dtype,
             )
         elif blockwise_recipe:
             output = Float8BlockwiseQTensor(
-                shape=output.shape, dtype=fake_dtype, rowwise_data=output,
+                shape=output.shape,
+                dtype=fake_dtype,
+                rowwise_data=output,
                 rowwise_scale_inv=permuted_scale.T.contiguous(),
-                columnwise_data=None, columnwise_scale_inv=None,
-                fp8_dtype=fp8_dtype, quantizer=None, is_2D_scaled=False,
+                columnwise_data=None,
+                columnwise_scale_inv=None,
+                fp8_dtype=fp8_dtype,
+                quantizer=None,
+                is_2D_scaled=False,
                 requires_grad=output.requires_grad,
             )
         elif mxfp8_recipe:
             output = MXFP8Tensor(
-                shape=output.shape, dtype=fake_dtype, fp8_dtype=fp8_dtype,
-                rowwise_data=output, rowwise_scale_inv=permuted_scale.contiguous(),
-                columnwise_data=None, columnwise_scale_inv=None,
-                quantizer=None, requires_grad=output.requires_grad,
+                shape=output.shape,
+                dtype=fake_dtype,
+                fp8_dtype=fp8_dtype,
+                rowwise_data=output,
+                rowwise_scale_inv=permuted_scale.contiguous(),
+                columnwise_data=None,
+                columnwise_scale_inv=None,
+                quantizer=None,
+                requires_grad=output.requires_grad,
                 with_gemm_swizzled_scales=False,
             )
 
     # If permuted_probs is None, return empty tensor (custom ops need concrete tensors)
     if permuted_probs is None:
         permuted_probs = torch.empty(0, device=inp.device)
-
 
     return output, row_id_map, permuted_probs
 
@@ -367,8 +382,14 @@ def moe_permute_mask_map_backward(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Backward pass for MoE permute with mask router map."""
     act_grad, probs_grad = triton_permutation.unpermute_with_mask_map(
-        permuted_act_grad, row_id_map, None, permuted_probs_grad, pad_offsets,
-        num_tokens, num_experts, hidden_size,
+        permuted_act_grad,
+        row_id_map,
+        None,
+        permuted_probs_grad,
+        pad_offsets,
+        num_tokens,
+        num_experts,
+        hidden_size,
     )
     if probs_grad is None:
         probs_grad = torch.empty(0, device=permuted_act_grad.device)
@@ -391,7 +412,8 @@ def _moe_permute_mask_map_backward_fake(
     )
     if permuted_probs_grad is not None:
         probs_grad = torch.empty(
-            (num_tokens, num_experts), dtype=permuted_probs_grad.dtype,
+            (num_tokens, num_experts),
+            dtype=permuted_probs_grad.dtype,
             device=permuted_act_grad.device,
         )
     else:
@@ -422,8 +444,13 @@ def _moe_permute_mask_map_backward_wrapper(ctx, grad_output, grad_row_id_map, gr
     probs_grad_input = grad_permuted_probs if grad_permuted_probs.numel() > 0 else None
 
     act_grad, probs_grad = torch.ops.te_moe.permute_mask_map_bwd(
-        grad_output, probs_grad_input, row_id_map, pad_offsets,
-        ctx.num_tokens, ctx.num_experts, ctx.hidden_size,
+        grad_output,
+        probs_grad_input,
+        row_id_map,
+        pad_offsets,
+        ctx.num_tokens,
+        ctx.num_experts,
+        ctx.hidden_size,
     )
 
     if not ctx.needs_probs_grad or probs_grad.numel() == 0:
@@ -440,6 +467,7 @@ moe_permute_mask_map_forward.register_autograd(
 
 # ===================== _moe_unpermute_mask_map custom ops =====================
 
+
 @torch.library.custom_op("te_moe::unpermute_mask_map_fwd", mutates_args=[])
 def moe_unpermute_mask_map_forward(
     inp: torch.Tensor,
@@ -455,8 +483,14 @@ def moe_unpermute_mask_map_forward(
         inp, QuantizedTensor
     ), "The forward of moe_unpermute does not support FP8."
     unpermuted_output, _ = triton_permutation.unpermute_with_mask_map(
-        inp, row_id_map, merging_probs, None, pad_offsets,
-        num_tokens, num_experts, hidden_size,
+        inp,
+        row_id_map,
+        merging_probs,
+        None,
+        pad_offsets,
+        num_tokens,
+        num_experts,
+        hidden_size,
     )
     return unpermuted_output
 
@@ -489,8 +523,15 @@ def moe_unpermute_mask_map_backward_with_probs(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Backward pass for MoE unpermute with merging probs."""
     act_grad, probs_grad = triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
-        unpermuted_act_grad, row_id_map, fwd_input, merging_probs, pad_offsets,
-        num_tokens, num_experts, num_permuted_tokens, hidden_size,
+        unpermuted_act_grad,
+        row_id_map,
+        fwd_input,
+        merging_probs,
+        pad_offsets,
+        num_tokens,
+        num_experts,
+        num_permuted_tokens,
+        hidden_size,
     )
     return act_grad, probs_grad
 
@@ -510,11 +551,13 @@ def _moe_unpermute_mask_map_bwd_with_probs_fake(
     """Fake for backward shape inference with merging probs."""
     act_grad = torch.empty(
         (num_permuted_tokens, hidden_size),
-        dtype=unpermuted_act_grad.dtype, device=unpermuted_act_grad.device,
+        dtype=unpermuted_act_grad.dtype,
+        device=unpermuted_act_grad.device,
     )
     probs_grad = torch.empty(
         (num_tokens, num_experts),
-        dtype=merging_probs.dtype, device=unpermuted_act_grad.device,
+        dtype=merging_probs.dtype,
+        device=unpermuted_act_grad.device,
     )
     return act_grad, probs_grad
 
@@ -562,30 +605,51 @@ def moe_unpermute_mask_map_backward_no_probs(
         fp8_scale = None
 
     act_grad, permuted_scale, _ = triton_permutation.permute_with_mask_map(
-        unpermuted_act_grad, row_id_map, None, fp8_scale, pad_offsets,
-        num_tokens, num_experts, num_permuted_tokens, hidden_size, scale_hidden_dim,
+        unpermuted_act_grad,
+        row_id_map,
+        None,
+        fp8_scale,
+        pad_offsets,
+        num_tokens,
+        num_experts,
+        num_permuted_tokens,
+        hidden_size,
+        scale_hidden_dim,
     )
 
     if fp8:
         if per_tensor_recipe:
             act_grad = Float8Tensor(
-                data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv,
-                shape=act_grad.shape, dtype=fake_dtype,
+                data=act_grad,
+                fp8_dtype=fp8_dtype,
+                fp8_scale_inv=fp8_scale_inv,
+                shape=act_grad.shape,
+                dtype=fake_dtype,
             )
         elif blockwise_recipe:
             act_grad = Float8BlockwiseQTensor(
-                shape=act_grad.shape, dtype=fake_dtype, rowwise_data=act_grad,
+                shape=act_grad.shape,
+                dtype=fake_dtype,
+                rowwise_data=act_grad,
                 rowwise_scale_inv=permuted_scale.T.contiguous(),
-                columnwise_data=None, columnwise_scale_inv=None,
-                fp8_dtype=fp8_dtype, quantizer=None, is_2D_scaled=False,
+                columnwise_data=None,
+                columnwise_scale_inv=None,
+                fp8_dtype=fp8_dtype,
+                quantizer=None,
+                is_2D_scaled=False,
                 requires_grad=act_grad.requires_grad,
             )
         elif mxfp8_recipe:
             act_grad = MXFP8Tensor(
-                shape=act_grad.shape, dtype=fake_dtype, fp8_dtype=fp8_dtype,
-                rowwise_data=act_grad, rowwise_scale_inv=permuted_scale.contiguous(),
-                columnwise_data=None, columnwise_scale_inv=None,
-                quantizer=None, requires_grad=act_grad.requires_grad,
+                shape=act_grad.shape,
+                dtype=fake_dtype,
+                fp8_dtype=fp8_dtype,
+                rowwise_data=act_grad,
+                rowwise_scale_inv=permuted_scale.contiguous(),
+                columnwise_data=None,
+                columnwise_scale_inv=None,
+                quantizer=None,
+                requires_grad=act_grad.requires_grad,
                 with_gemm_swizzled_scales=False,
             )
 
@@ -605,7 +669,8 @@ def _moe_unpermute_mask_map_bwd_no_probs_fake(
     """Fake for backward shape inference without probs."""
     return torch.empty(
         (num_permuted_tokens, hidden_size),
-        dtype=unpermuted_act_grad.dtype, device=unpermuted_act_grad.device,
+        dtype=unpermuted_act_grad.dtype,
+        device=unpermuted_act_grad.device,
     )
 
 
@@ -636,14 +701,26 @@ def _moe_unpermute_mask_map_backward_wrapper(ctx, unpermuted_act_grad):
             unpermuted_act_grad, QuantizedTensor
         ), "The backward of moe_unpermute with merging probs does not support FP8."
         act_grad, probs_grad = torch.ops.te_moe.unpermute_mask_map_bwd_with_probs(
-            unpermuted_act_grad, row_id_map, fwd_input, merging_probs, pad_offsets,
-            ctx.num_tokens, ctx.num_experts, ctx.num_permuted_tokens, ctx.hidden_size,
+            unpermuted_act_grad,
+            row_id_map,
+            fwd_input,
+            merging_probs,
+            pad_offsets,
+            ctx.num_tokens,
+            ctx.num_experts,
+            ctx.num_permuted_tokens,
+            ctx.hidden_size,
         )
     else:
         row_id_map, pad_offsets = ctx.saved_tensors
         act_grad = torch.ops.te_moe.unpermute_mask_map_bwd_no_probs(
-            unpermuted_act_grad, row_id_map, pad_offsets,
-            ctx.num_tokens, ctx.num_experts, ctx.num_permuted_tokens, ctx.hidden_size,
+            unpermuted_act_grad,
+            row_id_map,
+            pad_offsets,
+            ctx.num_tokens,
+            ctx.num_experts,
+            ctx.num_permuted_tokens,
+            ctx.hidden_size,
         )
 
     if not ctx.needs_probs_grad:
@@ -659,13 +736,15 @@ moe_unpermute_mask_map_forward.register_autograd(
 
 # Register all te_moe custom ops as passthrough in QuantizedTensor.__torch_dispatch__
 # so that FP8 tensors are not unwrapped before entering these ops.
-_quantized_tensor_passthrough_ops.update({
-    torch.ops.te_moe.permute_mask_map_fwd.default,
-    torch.ops.te_moe.permute_mask_map_bwd.default,
-    torch.ops.te_moe.unpermute_mask_map_fwd.default,
-    torch.ops.te_moe.unpermute_mask_map_bwd_with_probs.default,
-    torch.ops.te_moe.unpermute_mask_map_bwd_no_probs.default,
-})
+_quantized_tensor_passthrough_ops.update(
+    {
+        torch.ops.te_moe.permute_mask_map_fwd.default,
+        torch.ops.te_moe.permute_mask_map_bwd.default,
+        torch.ops.te_moe.unpermute_mask_map_fwd.default,
+        torch.ops.te_moe.unpermute_mask_map_bwd_with_probs.default,
+        torch.ops.te_moe.unpermute_mask_map_bwd_no_probs.default,
+    }
+)
 
 
 def moe_permute(
@@ -894,7 +973,9 @@ def moe_unpermute(
             )
             row_id_map = row_id_map.to(torch.int32)
 
-        return torch.ops.te_moe.unpermute_index_map_fwd(inp, row_id_map, merging_probs, num_tokens, topK)
+        return torch.ops.te_moe.unpermute_index_map_fwd(
+            inp, row_id_map, merging_probs, num_tokens, topK
+        )
     if map_type == "mask":
         if not inp.numel():
             # Keep merging_probs in autograd graph so that probs.grad is an empty
@@ -916,13 +997,19 @@ def moe_unpermute(
             assert pad_offsets.is_cuda, "TransformerEngine needs CUDA."
 
         return torch.ops.te_moe.unpermute_mask_map_fwd(
-            inp, row_id_map, merging_probs,
-            num_tokens, num_experts, hidden_size, pad_offsets,
+            inp,
+            row_id_map,
+            merging_probs,
+            num_tokens,
+            num_experts,
+            hidden_size,
+            pad_offsets,
         )
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
 # ===================== _moe_chunk_sort custom ops =====================
+
 
 @torch.library.custom_op("te_moe::chunk_sort_fwd", mutates_args=[])
 def moe_chunk_sort_forward(
@@ -943,15 +1030,26 @@ def moe_chunk_sort_forward(
         inp = inp._data
 
     row_id_map = triton_permutation.make_chunk_sort_map(
-        split_sizes, sorted_idxs, num_tokens, num_splits,
+        split_sizes,
+        sorted_idxs,
+        num_tokens,
+        num_splits,
     )
     output, permuted_probs = triton_permutation.sort_chunks_by_map(
-        inp, row_id_map, probs, num_tokens, hidden_size, is_forward=True,
+        inp,
+        row_id_map,
+        probs,
+        num_tokens,
+        hidden_size,
+        is_forward=True,
     )
     if fp8:
         output = Float8Tensor(
-            data=output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv,
-            shape=output.shape, dtype=fake_dtype,
+            data=output,
+            fp8_dtype=fp8_dtype,
+            fp8_scale_inv=fp8_scale_inv,
+            shape=output.shape,
+            dtype=fake_dtype,
         )
 
     if permuted_probs is None:
@@ -997,14 +1095,21 @@ def moe_chunk_sort_backward(
         permuted_act_grad = permuted_act_grad._data
 
     act_grad, probs_grad = triton_permutation.sort_chunks_by_map(
-        permuted_act_grad, row_id_map, permuted_probs_grad,
-        num_tokens, hidden_size, is_forward=False,
+        permuted_act_grad,
+        row_id_map,
+        permuted_probs_grad,
+        num_tokens,
+        hidden_size,
+        is_forward=False,
     )
 
     if fp8:
         act_grad = Float8Tensor(
-            data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv,
-            shape=act_grad.shape, dtype=fake_dtype,
+            data=act_grad,
+            fp8_dtype=fp8_dtype,
+            fp8_scale_inv=fp8_scale_inv,
+            shape=act_grad.shape,
+            dtype=fake_dtype,
         )
 
     if probs_grad is None:
@@ -1023,11 +1128,15 @@ def _moe_chunk_sort_backward_fake(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fake for backward shape inference."""
     fake_act_grad = torch.empty(
-        (num_tokens, hidden_size), dtype=permuted_act_grad.dtype, device=permuted_act_grad.device,
+        (num_tokens, hidden_size),
+        dtype=permuted_act_grad.dtype,
+        device=permuted_act_grad.device,
     )
     if permuted_probs_grad is not None:
         fake_probs_grad = torch.empty(
-            (num_tokens,), dtype=permuted_probs_grad.dtype, device=permuted_act_grad.device,
+            (num_tokens,),
+            dtype=permuted_probs_grad.dtype,
+            device=permuted_act_grad.device,
         )
     else:
         fake_probs_grad = torch.empty(0, device=permuted_act_grad.device)
@@ -1052,8 +1161,11 @@ def _moe_chunk_sort_backward_wrapper(ctx, permuted_act_grad, permuted_probs_grad
     probs_grad_input = permuted_probs_grad if permuted_probs_grad.numel() > 0 else None
 
     act_grad, probs_grad = torch.ops.te_moe.chunk_sort_bwd(
-        permuted_act_grad, probs_grad_input, row_id_map,
-        ctx.num_tokens, ctx.hidden_size,
+        permuted_act_grad,
+        probs_grad_input,
+        row_id_map,
+        ctx.num_tokens,
+        ctx.hidden_size,
     )
 
     if not ctx.needs_probs_grad or probs_grad.numel() == 0:
@@ -1068,10 +1180,12 @@ moe_chunk_sort_forward.register_autograd(
 )
 
 # Register chunk sort ops as passthrough in QuantizedTensor.__torch_dispatch__
-_quantized_tensor_passthrough_ops.update({
-    torch.ops.te_moe.chunk_sort_fwd.default,
-    torch.ops.te_moe.chunk_sort_bwd.default,
-})
+_quantized_tensor_passthrough_ops.update(
+    {
+        torch.ops.te_moe.chunk_sort_fwd.default,
+        torch.ops.te_moe.chunk_sort_bwd.default,
+    }
+)
 
 
 def moe_sort_chunks_by_index(
@@ -1125,5 +1239,7 @@ def moe_sort_chunks_by_index_with_probs(
     """
     if not inp.numel():
         return inp, probs
-    output, permuted_probs, _ = torch.ops.te_moe.chunk_sort_fwd(inp, split_sizes, sorted_index, probs)
+    output, permuted_probs, _ = torch.ops.te_moe.chunk_sort_fwd(
+        inp, split_sizes, sorted_index, probs
+    )
     return output, permuted_probs

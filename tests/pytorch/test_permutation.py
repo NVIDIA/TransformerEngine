@@ -223,6 +223,7 @@ def _maybe_compile(fn, use_torch_compile):
     if use_torch_compile:
         torch._dynamo.reset()
         import torch._functorch.config as functorch_config
+
         functorch_config.donated_buffer = False
         return torch.compile(fn, fullgraph=True)
     return fn
@@ -310,12 +311,12 @@ def _test_permutation_index_map(
     te_permute_bwd_input = pytorch_permute_bwd_input.detach()
 
     _permute = _maybe_compile(
-        lambda inp, idx, num_out, max_token: te_permute(inp, idx, num_out, max_token, map_type="index"),
+        lambda inp, idx, num_out, max_token: te_permute(
+            inp, idx, num_out, max_token, map_type="index"
+        ),
         use_torch_compile,
     )
-    te_permute_output, row_id_map = _permute(
-        te_permute_fwd_input, indices, num_out_tokens, -1
-    )
+    te_permute_output, row_id_map = _permute(te_permute_fwd_input, indices, num_out_tokens, -1)
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
 
     te_probs = None
@@ -330,9 +331,7 @@ def _test_permutation_index_map(
         lambda inp, row_map, probs_val: te_unpermute(inp, row_map, probs_val, map_type="index"),
         use_torch_compile,
     )
-    te_unpermute_output = _unpermute(
-        te_unpermute_fwd_input, row_id_map, te_probs
-    )
+    te_unpermute_output = _unpermute(te_unpermute_fwd_input, row_id_map, te_probs)
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
 
     ###################################################################################################################################
@@ -538,9 +537,7 @@ def _test_permutation_mask_map(
         lambda inp, rmap, n_out: te_permute(inp, rmap, num_out_tokens=n_out, map_type="mask"),
         use_torch_compile,
     )
-    te_permute_output, row_id_map = _permute(
-        te_permute_fwd_input, routing_map, num_out_tokens
-    )
+    te_permute_output, row_id_map = _permute(te_permute_fwd_input, routing_map, num_out_tokens)
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
 
     te_probs = None
@@ -555,9 +552,7 @@ def _test_permutation_mask_map(
         lambda inp, row_map, p, rs: te_unpermute(inp, row_map, p, rs, map_type="mask"),
         use_torch_compile,
     )
-    te_unpermute_output = _unpermute(
-        te_unpermute_fwd_input, row_id_map, te_probs, restore_shape
-    )
+    te_unpermute_output = _unpermute(te_unpermute_fwd_input, row_id_map, te_probs, restore_shape)
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
 
     ###################################################################################################################################
@@ -1547,7 +1542,9 @@ def _test_permutation_mask_map_alongside_probs(
     te_probs.requires_grad_(True)
 
     def _alongside_probs_fn(fwd_inp, t_probs, rmap, ss1, si1, ss2, si2):
-        out, pprobs, rid = te_permute_with_probs(fwd_inp, t_probs, rmap, num_out_tokens=num_out_tokens)
+        out, pprobs, rid = te_permute_with_probs(
+            fwd_inp, t_probs, rmap, num_out_tokens=num_out_tokens
+        )
         out, pprobs = te_sort_chunks_by_index_with_probs(out, pprobs, ss1, si1)
         out_dtype = out.dtype
         out = out * pprobs.unsqueeze(-1)
@@ -1558,8 +1555,13 @@ def _test_permutation_mask_map_alongside_probs(
 
     _fn = _maybe_compile(_alongside_probs_fn, use_torch_compile)
     te_unpermute_output = _fn(
-        te_permute_fwd_input, te_probs, routing_map,
-        split_sizes_cuda, sorted_idxs_cuda, split_sizes_2_cuda, sorted_idxs_2_cuda,
+        te_permute_fwd_input,
+        te_probs,
+        routing_map,
+        split_sizes_cuda,
+        sorted_idxs_cuda,
+        split_sizes_2_cuda,
+        sorted_idxs_2_cuda,
     )
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
 
