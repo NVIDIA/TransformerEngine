@@ -259,19 +259,14 @@ forward pass for use in the backward pass.
             scale = torch.ones((), dtype=torch.float32, device="cuda")
             self.register_parameter("scale", torch.nn.Parameter(scale))
 
-        def op_forward(
-            self,
-            ctx: OperationContext,
-            input_: torch.Tensor,
-            **unused,
-        ) -> torch.Tensor:
+        def op_forward(self, ctx, input_: torch.Tensor, **unused) -> torch.Tensor:
             out = self.scale * input_
             ctx.save_for_backward(self.scale, input_)
             return out
 
         def op_backward(
             self,
-            ctx: OperationContext,
+            ctx,
             grad_output: torch.Tensor,
         ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
             scale, input_ = ctx.saved_tensors
@@ -297,6 +292,7 @@ of context objects for all the corresponding ``BasicOperation`` s.
 
     import torch
     import transformer_engine.pytorch as te
+    from typing import Optional
 
     class ForwardAxpy(te.ops.FusedOperation):
 
@@ -305,7 +301,7 @@ of context objects for all the corresponding ``BasicOperation`` s.
 
         def fuser_forward(
             self,
-            basic_op_ctxs: list[OperationContext],
+            basic_op_ctxs: list,
             input_: torch.Tensor,
             basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
             **unused,

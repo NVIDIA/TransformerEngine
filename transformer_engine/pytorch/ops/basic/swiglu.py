@@ -46,7 +46,7 @@ class SwiGLU(BasicOperation):
 
     The Sigmoid Linear Unit (SiLU) gating function is also known as
     the swish function. See
-    ``GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>``__.
+    `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
 
     Parameters
     ----------
@@ -189,14 +189,18 @@ class SwiGLU(BasicOperation):
 
 class ClampedSwiGLU(BasicOperation):
     r"""GPT-OSS
-    Implementation based on ``GPT-OSS<https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250>``__.
+    Implementation based on `GPT-OSS<https://github.com/openai/gpt-oss/blob/a0a84273e9e0c14a233cb9befdfd159c2bcfa6cd/gpt_oss/torch/model.py#L250>`__.
 
     This activation has two differences compared to the original SwiGLU
        1. Both gate and pre-activations are clipped based on parameter limit.
        2. Activation uses sigmoid(alpha * x) instead of sigmoid(x) used in Swish activation.
 
-    .. warning::    The input tensor is chunked along the last dimension to get gates/pre-activations which is different
-    from GPT OSS implementation where the gates/pre-activations are assumed to be interleaved in the input tensor.
+    .. warning::
+
+       The input tensor is chunked along the last dimension to get
+       gates/pre-activations which is different from GPT OSS
+       implementation where the gates/pre-activations are assumed to
+       be interleaved in the input tensor.
 
     Parameters
     ----------
