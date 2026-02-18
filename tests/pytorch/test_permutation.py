@@ -218,6 +218,16 @@ def backward_wrapper(
     return act.backward(backward_input, retain_graph=retain_graph)
 
 
+def _maybe_compile(fn, use_torch_compile):
+    """Wrap fn with torch.compile(fullgraph=True) if requested."""
+    if use_torch_compile:
+        torch._dynamo.reset()
+        import torch._functorch.config as functorch_config
+        functorch_config.donated_buffer = False
+        return torch.compile(fn, fullgraph=True)
+    return fn
+
+
 def _test_permutation_index_map(
     te_dtype,
     num_tokens,
@@ -299,27 +309,13 @@ def _test_permutation_index_map(
     te_permute_fwd_input.requires_grad_(True)
     te_permute_bwd_input = pytorch_permute_bwd_input.detach()
 
-    if use_torch_compile:
-        # Reset dynamo to avoid recompile limit across parametrized tests
-        torch._dynamo.reset()
-        # Disable donated buffers to allow retain_graph=True
-        import torch._functorch.config as functorch_config
-        old_donated_buffer = functorch_config.donated_buffer
-        functorch_config.donated_buffer = False
-
-        # Create a wrapper function for torch.compile
-        def permute_wrapper(inp, idx, num_out, max_token):
-            return te_permute(inp, idx, num_out, max_token, map_type="index")
-
-        # Compile with fullgraph=True
-        compiled_permute = torch.compile(permute_wrapper, fullgraph=True)
-        te_permute_output, row_id_map = compiled_permute(
-            te_permute_fwd_input, indices, num_out_tokens, -1
-        )
-    else:
-        te_permute_output, row_id_map = te_permute(
-            te_permute_fwd_input, indices, num_out_tokens, map_type="index"
-        )
+    _permute = _maybe_compile(
+        lambda inp, idx, num_out, max_token: te_permute(inp, idx, num_out, max_token, map_type="index"),
+        use_torch_compile,
+    )
+    te_permute_output, row_id_map = _permute(
+        te_permute_fwd_input, indices, num_out_tokens, -1
+    )
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
 
     te_probs = None
@@ -330,24 +326,14 @@ def _test_permutation_index_map(
     te_unpermute_fwd_input.requires_grad_(True)
     te_unpermute_bwd_input = pytorch_unpermute_bwd_input.detach()
 
-    if use_torch_compile:
-        # Create a wrapper function for torch.compile
-        def unpermute_wrapper(inp, row_map, probs_val):
-            return te_unpermute(inp, row_map, probs_val, map_type="index")
-
-        # Compile with fullgraph=True
-        compiled_unpermute = torch.compile(unpermute_wrapper, fullgraph=True)
-        te_unpermute_output = compiled_unpermute(
-            te_unpermute_fwd_input, row_id_map, te_probs
-        )
-    else:
-        te_unpermute_output = te_unpermute(
-            te_unpermute_fwd_input, row_id_map, te_probs, map_type="index"
-        )
+    _unpermute = _maybe_compile(
+        lambda inp, row_map, probs_val: te_unpermute(inp, row_map, probs_val, map_type="index"),
+        use_torch_compile,
+    )
+    te_unpermute_output = _unpermute(
+        te_unpermute_fwd_input, row_id_map, te_probs
+    )
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
-
-    if use_torch_compile:
-        functorch_config.donated_buffer = old_donated_buffer
 
     ###################################################################################################################################
     #
@@ -477,6 +463,7 @@ def _test_permutation_mask_map(
     num_out_tokens,
     with_probs,
     BENCHMARK=False,
+    use_torch_compile=False,
 ):
     if topK > num_expert:
         pytest.skip("topK should be smaller than the number of experts.")
@@ -547,8 +534,12 @@ def _test_permutation_mask_map(
     te_permute_fwd_input.requires_grad_(True)
     te_permute_bwd_input = pytorch_permute_bwd_input.detach()
 
-    te_permute_output, row_id_map = te_permute(
-        te_permute_fwd_input, routing_map, num_out_tokens=num_out_tokens, map_type="mask"
+    _permute = _maybe_compile(
+        lambda inp, rmap, n_out: te_permute(inp, rmap, num_out_tokens=n_out, map_type="mask"),
+        use_torch_compile,
+    )
+    te_permute_output, row_id_map = _permute(
+        te_permute_fwd_input, routing_map, num_out_tokens
     )
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
 
@@ -560,8 +551,12 @@ def _test_permutation_mask_map(
     te_unpermute_fwd_input.requires_grad_(True)
     te_unpermute_bwd_input = pytorch_unpermute_bwd_input.detach()
 
-    te_unpermute_output = te_unpermute(
-        te_unpermute_fwd_input, row_id_map, te_probs, restore_shape, map_type="mask"
+    _unpermute = _maybe_compile(
+        lambda inp, row_map, p, rs: te_unpermute(inp, row_map, p, rs, map_type="mask"),
+        use_torch_compile,
+    )
+    te_unpermute_output = _unpermute(
+        te_unpermute_fwd_input, row_id_map, te_probs, restore_shape
     )
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
 
@@ -699,6 +694,7 @@ def _test_permutation_and_padding_mask_map(
     with_merging_probs=False,
     align_size=16,
     BENCHMARK=False,
+    use_torch_compile=False,
 ):
     if topK > num_expert:
         pytest.skip("topK should be smaller than the number of experts.")
@@ -990,6 +986,7 @@ def _test_permutation_and_padding_with_merging_probs(
     num_out_tokens,
     align_size=16,
     BENCHMARK=False,
+    use_torch_compile=False,
 ):
     """
     Test the combination of merging_probs AND pad_offsets together in moe_unpermute.
@@ -1324,6 +1321,7 @@ def _test_moe_chunk_sort(
     tp_size,
     hidden_size,
     BENCHMARK=False,
+    use_torch_compile=False,
 ):
     print(
         "chunk permute:"
@@ -1373,7 +1371,11 @@ def _test_moe_chunk_sort(
     te_fwd_input.requires_grad_(True)
     te_bwd_input = pytorch_bwd_input.detach()
 
-    te_output = te_sort_chunks_by_index(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
+    _sort = _maybe_compile(
+        lambda inp, ss, si: te_sort_chunks_by_index(inp, ss, si),
+        use_torch_compile,
+    )
+    te_output = _sort(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
     te_output.backward(te_bwd_input, retain_graph=True)
 
     ###################################################################################################################################
@@ -1448,6 +1450,7 @@ def _test_permutation_mask_map_alongside_probs(
     num_out_tokens,
     tp_size,
     BENCHMARK=False,
+    use_torch_compile=False,
 ):
     if topK > num_expert:
         pytest.skip("topK should be smaller than the number of experts.")
@@ -1543,30 +1546,20 @@ def _test_permutation_mask_map_alongside_probs(
     te_probs = probs.detach()
     te_probs.requires_grad_(True)
 
-    te_permute_output, te_permuted_probs, row_id_map = te_permute_with_probs(
-        te_permute_fwd_input,
-        te_probs,
-        routing_map,
-        num_out_tokens=num_out_tokens,
-    )
+    def _alongside_probs_fn(fwd_inp, t_probs, rmap, ss1, si1, ss2, si2):
+        out, pprobs, rid = te_permute_with_probs(fwd_inp, t_probs, rmap, num_out_tokens=num_out_tokens)
+        out, pprobs = te_sort_chunks_by_index_with_probs(out, pprobs, ss1, si1)
+        out_dtype = out.dtype
+        out = out * pprobs.unsqueeze(-1)
+        out = out.to(dtype=out_dtype)
+        out = te_sort_chunks_by_index(out, ss2, si2)
+        out = te_unpermute(out, rid, restore_shape=restore_shape, map_type="mask")
+        return out
 
-    te_permute_output, te_permuted_probs = te_sort_chunks_by_index_with_probs(
-        te_permute_output, te_permuted_probs, split_sizes_cuda, sorted_idxs_cuda
-    )
-
-    te_permute_output_dtype = te_permute_output.dtype
-    te_permute_output = te_permute_output * te_permuted_probs.unsqueeze(-1)
-    te_permute_output = te_permute_output.to(dtype=te_permute_output_dtype)
-
-    te_permute_output = te_sort_chunks_by_index(
-        te_permute_output, split_sizes_2_cuda, sorted_idxs_2_cuda
-    )
-
-    te_unpermute_output = te_unpermute(
-        te_permute_output,
-        row_id_map,
-        restore_shape=restore_shape,
-        map_type="mask",
+    _fn = _maybe_compile(_alongside_probs_fn, use_torch_compile)
+    te_unpermute_output = _fn(
+        te_permute_fwd_input, te_probs, routing_map,
+        split_sizes_cuda, sorted_idxs_cuda, split_sizes_2_cuda, sorted_idxs_2_cuda,
     )
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
 
@@ -1696,6 +1689,8 @@ def test_permutation_index_map(
 ):
     if use_torch_compile and torch.__version__ < "2":
         pytest.skip("torch.compile not available")
+    if use_torch_compile and (num_expert != 7 or topK != 2):
+        pytest.skip("torch.compile tested with single config only")
     with_probs = True
     BENCHMARK = False
 
@@ -1718,6 +1713,7 @@ def test_permutation_index_map(
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("topK", [2, 5])
 @pytest.mark.parametrize("num_out_tokens", [None, 2039])
+@pytest.mark.parametrize("use_torch_compile", [False, True])
 def test_permutation_mask_map(
     te_dtype,
     num_tokens,
@@ -1725,7 +1721,10 @@ def test_permutation_mask_map(
     hidden_size,
     topK,
     num_out_tokens,
+    use_torch_compile,
 ):
+    if use_torch_compile and (num_expert != 7 or topK != 2):
+        pytest.skip("torch.compile tested with single config only")
     with_probs = True
     BENCHMARK = False
 
@@ -1738,6 +1737,7 @@ def test_permutation_mask_map(
         num_out_tokens=num_out_tokens,
         with_probs=with_probs,
         BENCHMARK=BENCHMARK,
+        use_torch_compile=use_torch_compile,
     )
 
 
@@ -1753,6 +1753,7 @@ def test_permutation_mask_map(
     ],
 )
 @pytest.mark.parametrize("with_merging_probs", [True, False])
+@pytest.mark.parametrize("use_torch_compile", [False, True])
 def test_permutation_and_padding_mask_map(
     te_dtype,
     num_tokens,
@@ -1761,7 +1762,10 @@ def test_permutation_and_padding_mask_map(
     topK,
     num_out_tokens,
     with_merging_probs,
+    use_torch_compile,
 ):
+    if use_torch_compile and (num_expert != 8 or topK != 2):
+        pytest.skip("torch.compile tested with single config only")
     BENCHMARK = False
 
     _test_permutation_and_padding_mask_map(
@@ -1773,6 +1777,7 @@ def test_permutation_and_padding_mask_map(
         num_out_tokens=num_out_tokens,
         with_merging_probs=with_merging_probs,
         BENCHMARK=BENCHMARK,
+        use_torch_compile=use_torch_compile,
     )
 
 
@@ -1787,6 +1792,7 @@ def test_permutation_and_padding_mask_map(
         (4096, 512, 9216, 8),
     ],
 )
+@pytest.mark.parametrize("use_torch_compile", [False, True])
 def test_permutation_and_padding_with_merging_probs(
     te_dtype,
     num_tokens,
@@ -1794,8 +1800,11 @@ def test_permutation_and_padding_with_merging_probs(
     hidden_size,
     topK,
     num_out_tokens,
+    use_torch_compile,
 ):
     """Test moe_unpermute backward pass with BOTH merging_probs AND pad_offsets."""
+    if use_torch_compile and (num_expert != 8 or topK != 2):
+        pytest.skip("torch.compile tested with single config only")
     BENCHMARK = False
 
     _test_permutation_and_padding_with_merging_probs(
@@ -1806,11 +1815,13 @@ def test_permutation_and_padding_with_merging_probs(
         topK=topK,
         num_out_tokens=num_out_tokens,
         BENCHMARK=BENCHMARK,
+        use_torch_compile=use_torch_compile,
     )
 
 
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
-def test_permutation_mask_map_empty_input(te_dtype):
+@pytest.mark.parametrize("use_torch_compile", [False, True])
+def test_permutation_mask_map_empty_input(te_dtype, use_torch_compile):
     with_probs = True
     BENCHMARK = False
 
@@ -1823,6 +1834,7 @@ def test_permutation_mask_map_empty_input(te_dtype):
         num_out_tokens=0,
         with_probs=with_probs,
         BENCHMARK=BENCHMARK,
+        use_torch_compile=use_torch_compile,
     )
 
 
@@ -1833,6 +1845,7 @@ def test_permutation_mask_map_empty_input(te_dtype):
 @pytest.mark.parametrize("topK", [2, 5])
 @pytest.mark.parametrize("num_out_tokens", [None, 2039])
 @pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("use_torch_compile", [False, True])
 def test_permutation_mask_map_alongside_probs(
     te_dtype,
     num_tokens,
@@ -1841,7 +1854,10 @@ def test_permutation_mask_map_alongside_probs(
     topK,
     num_out_tokens,
     tp_size,
+    use_torch_compile,
 ):
+    if use_torch_compile and (num_expert != 7 or topK != 2 or tp_size != 1):
+        pytest.skip("torch.compile tested with single config only")
     _test_permutation_mask_map_alongside_probs(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
@@ -1850,11 +1866,13 @@ def test_permutation_mask_map_alongside_probs(
         topK=topK,
         num_out_tokens=num_out_tokens,
         tp_size=tp_size,
+        use_torch_compile=use_torch_compile,
     )
 
 
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
-def test_permutation_mask_map_alongside_probs_empty_input(te_dtype):
+@pytest.mark.parametrize("use_torch_compile", [False, True])
+def test_permutation_mask_map_alongside_probs_empty_input(te_dtype, use_torch_compile):
     _test_permutation_mask_map_alongside_probs(
         te_dtype=te_dtype,
         num_tokens=0,
@@ -1863,6 +1881,7 @@ def test_permutation_mask_map_alongside_probs_empty_input(te_dtype):
         topK=2,
         num_out_tokens=0,
         tp_size=2,
+        use_torch_compile=use_torch_compile,
     )
 
 
@@ -1931,6 +1950,8 @@ def test_permutation_index_map_topk1_no_probs(
 ):
     if use_torch_compile and torch.__version__ < "2":
         pytest.skip("torch.compile not available")
+    if use_torch_compile and num_expert != 7:
+        pytest.skip("torch.compile tested with single config only")
     topK = 1
     num_out_tokens = None
     with_probs = False
@@ -1953,12 +1974,16 @@ def test_permutation_index_map_topk1_no_probs(
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [7, 16])
 @pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("use_torch_compile", [False, True])
 def test_permutation_mask_map_topk1_no_probs(
     te_dtype,
     num_tokens,
     num_expert,
     hidden_size,
+    use_torch_compile,
 ):
+    if use_torch_compile and num_expert != 7:
+        pytest.skip("torch.compile tested with single config only")
     topK = 1
     num_out_tokens = None
     with_probs = False
@@ -1973,6 +1998,7 @@ def test_permutation_mask_map_topk1_no_probs(
         num_out_tokens=num_out_tokens,
         with_probs=with_probs,
         BENCHMARK=BENCHMARK,
+        use_torch_compile=use_torch_compile,
     )
 
 
@@ -1981,13 +2007,17 @@ def test_permutation_mask_map_topk1_no_probs(
 @pytest.mark.parametrize("num_expert", [7, 16])
 @pytest.mark.parametrize("tp_size", [2, 8])
 @pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("use_torch_compile", [False, True])
 def test_chunk_permutation(
     te_dtype,
     num_tokens,
     num_expert,
     tp_size,
     hidden_size,
+    use_torch_compile,
 ):
+    if use_torch_compile and (num_expert != 7 or tp_size != 2):
+        pytest.skip("torch.compile tested with single config only")
     BENCHMARK = False
 
     _test_moe_chunk_sort(
@@ -1997,11 +2027,13 @@ def test_chunk_permutation(
         tp_size=tp_size,
         hidden_size=hidden_size,
         BENCHMARK=BENCHMARK,
+        use_torch_compile=use_torch_compile,
     )
 
 
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
-def test_chunk_permutation_empty_input(te_dtype):
+@pytest.mark.parametrize("use_torch_compile", [False, True])
+def test_chunk_permutation_empty_input(te_dtype, use_torch_compile):
     BENCHMARK = False
 
     _test_moe_chunk_sort(
@@ -2011,6 +2043,7 @@ def test_chunk_permutation_empty_input(te_dtype):
         tp_size=2,
         hidden_size=4096,
         BENCHMARK=BENCHMARK,
+        use_torch_compile=use_torch_compile,
     )
 
 

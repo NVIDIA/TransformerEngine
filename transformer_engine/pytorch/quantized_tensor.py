@@ -21,6 +21,12 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
 )
 
 
+# Custom ops that should pass through __torch_dispatch__ without unwrapping
+# QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
+# handle quantized tensors internally.
+_quantized_tensor_passthrough_ops: set = set()
+
+
 class QuantizedTensorStorage:
     r"""Base class for all TensorStorage classes.
 
@@ -516,8 +522,8 @@ class QuantizedTensor(torch.Tensor):
                     return func(t)
             return False  # Or error out?
 
-        # Pass through te_moe custom ops without unwrapping
-        if hasattr(func, "namespace") and func.namespace == "te_moe":
+        # Pass through registered custom ops without unwrapping
+        if func in _quantized_tensor_passthrough_ops:
             if kwargs is None:
                 kwargs = {}
             return super().__torch_dispatch__(func, types, args, kwargs)
