@@ -31,11 +31,11 @@ passes them into a fuser, resulting in the same fused kernels as the
 monolithic modules. This approach is more flexible, making it easier
 to support new model architectures or to experiment with fusions.
 
-Description and usage
----------------------
-
 Basic usage
-^^^^^^^^^^^
+-----------
+
+Sequential operations
+^^^^^^^^^^^^^^^^^^^^^
 
 At the most basic level, the operation fuser API involves two classes
 in the ``transformer_engine.pytorch.ops`` submodule:
@@ -45,8 +45,8 @@ in the ``transformer_engine.pytorch.ops`` submodule:
   a subclass of ``torch.nn.Module``, so it can hold trainable
   parameters and can be called to perform the operation's forward
   pass.
-- ``Sequential``: A container of modules in sequential order. It has a
-  very similar interface as ``torch.nn.Sequential``. If it contains
+- ``Sequential``: A container of modules in sequential order. Its
+  interface is very similar to ``torch.nn.Sequential``. If it contains
   any ``FusibleOperation`` s, then it may attempt to fuse them in the
   forward and backward passes.
 
@@ -110,48 +110,6 @@ quantized compute.
     # Backward pass outside of autocast context
     y.sum().backward()
 
-.. figure:: ./fp8_layernorm_linear.png
-   :align: center
-
-   Operations that match ``LayerNormLinear`` module with FP8
-   quantization.
-
-Internally, each operation that supports quantized compute holds one
-or more ``Quantizer`` s, which are builder classes for converting
-high-precision tensors (e.g. in FP32 or BF16) to quantized tensors. In
-order to enable fused quantization kernels, operations can access the
-quantizers of neighboring operations and quantize eagerly. In some
-situations, like when operations are split across multiple
-``Sequential`` s, it may be helpful to encourage the fuser by manually
-adding ``Quantize`` operations.
-
-.. code-block:: python
-
-    import torch
-    import transformer_engine.pytorch as te
-
-    # Construct layer with quantized weights
-    with te.quantized_model_init():
-        norm = te.ops.Sequential(
-            te.ops.LayerNorm(4096),
-            te.ops.Quantize(),
-        )
-        fc1 = te.ops.Sequential(
-            te.ops.Linear(4096, 28672),
-        )
-
-    # Forward pass
-    x = torch.randn(16384, 4096, device="cuda")
-    with te.autocast():
-        y = norm(x)  # y is a QuantizedTensor
-        z = fc1(y)
-
-.. warning::
-
-   This is an expert technique. Quantizer configurations can be quite
-   complicated, so the ``Quantize`` operation's quantizers may be
-   suboptimal.
-
 Branching operations
 ^^^^^^^^^^^^^^^^^^^^
 
@@ -193,8 +151,11 @@ arguments and the extra outputs will be returned.
    the block has been split into two sections, each with one branching
    operation.
 
-Implementation details
-^^^^^^^^^^^^^^^^^^^^^^
+Developer guide
+---------------
+
+Infrastructure
+^^^^^^^^^^^^^^
 
 In addition to ``FusibleOperation`` and ``Sequential``, the fuser
 infrastructure relies on the following classes:
@@ -218,7 +179,8 @@ infrastructure relies on the following classes:
   may be missing its forward and/or backward implementation.
 - ``OperationFuser``: This is the class that manages the operation
   fusions. It launches the forward and backward passes within a
-  ``torch.autograd.Function``.
+  ``torch.autograd.Function``. It can also replace operations with
+  equivalent ``FusedOperation`` s.
 
 The first time that a ``Sequential`` is called, it will group adjacent
 ``FusibleOperation`` s together into ``OperationFuser`` s. The first
@@ -227,25 +189,166 @@ operations for the forward pass and backward pass. Subsequent calls
 will reuse the same state unless it has been invalidated, e.g. by
 changing the quantization recipe.
 
-Misconceptions
---------------
+Quantization
+^^^^^^^^^^^^
 
-- **The op fuser is not a general kernel compiler**: The op fuser API
-  is simply an alternative way to access TE fused kernels, most of
-  which are targeted toward common Transformer architectures. For
-  generic kernel compilation, consider tools like
-  `nvFuser <https://github.com/NVIDIA/Fuser>`_,
-  `CuTe DSL <https://github.com/NVIDIA/cutlass>`_,
-  `torch.compile <https://docs.pytorch.org/tutorials/intermediate/torch_compile_tutorial.html>`_,
-  `Triton <https://github.com/triton-lang/triton>`_,
-  or `Pallas <https://docs.jax.dev/en/latest/pallas/index.html>`_.
-- **The op fuser is not a graph compiler**: The op fuser only supports
-  operations in a sequential order, with very limited support for
-  branching operations. Support for general graphs is not planned
-  since it would massively increase complexity.
-- **The op fuser is not interchangeable with the monolithic TE
-  modules**: Modules like ``Linear``, ``LayerNormLinear``, and
-  ``TransformerLayer`` support a wide range of features and advanced
-  workflows, which makes them challenging to decompose into simple
-  operations that work with the fuser. They are also carefully
-  hand-tuned to achieve maximum performance.
+Each operation that supports quantized compute holds one or more
+``Quantizer`` s, which are builder classes for converting
+high-precision tensors (e.g. in FP32 or BF16) to quantized tensors. In
+order to enable fused quantization kernels, operations can access the
+quantizers of neighboring operations and quantize eagerly.
+
+.. figure:: ./fp8_layernorm_linear.png
+   :align: center
+
+   Operations that match ``LayerNormLinear`` module with FP8
+   quantization.
+
+In some situations, like when operations are split across multiple
+``Sequential`` s, it may be helpful to encourage the fuser by manually
+adding ``Quantize`` operations.
+
+.. code-block:: python
+
+    import torch
+    import transformer_engine.pytorch as te
+
+    # Construct layer with quantized weights
+    with te.quantized_model_init():
+        norm = te.ops.Sequential(
+            te.ops.LayerNorm(4096),
+            te.ops.Quantize(),
+        )
+        fc1 = te.ops.Sequential(
+            te.ops.Linear(4096, 28672),
+        )
+
+    # Forward pass
+    x = torch.randn(16384, 4096, device="cuda")
+    with te.autocast():
+        y = norm(x)  # y is a QuantizedTensor
+        z = fc1(y)
+
+.. warning::
+
+   This is an expert technique. Quantizer configurations can be quite
+   complicated, so the ``Quantize`` operation's quantizers may be
+   suboptimal.
+
+Implementing new operations
+---------------------------
+
+Implementing a basic operation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Subclasses of ``BasicOperation`` must implement ``op_forward`` and
+``op_backward``, which are reminiscent of the ``forward`` and
+``backward`` methods of ``torch.autograd.Function``. They have an
+argument for a context object that can be used to cache state from the
+forward pass for use in the backward pass.
+
+.. code-block:: python
+
+    import torch
+    import transformer_engine.pytorch as te
+
+    class LearnableScale(te.ops.BasicOperation):
+
+        def __init__(self) -> None:
+            super().__init__()
+            scale = torch.ones((), dtype=dtype, device=device)
+            self.register_parameter("scale", torch.nn.Parameter(scale))
+
+        def op_forward(
+            self,
+            ctx: OperationContext,
+            input_: torch.Tensor,
+            **unused,
+        ) -> torch.Tensor:
+            out = self.scale * input_
+            ctx.save_for_backward(self.scale, input_)
+            return out
+
+        def op_backward(
+            self,
+            ctx: OperationContext,
+            grad_output: torch.Tensor,
+        ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
+            scale, input_ = ctx.saved_tensors
+            grad_scale = torch.inner(input_.reshape(-1), grad_output.reshape(-1)).reshape(())
+            grad_input = scale * grad_output
+            return (
+                grad_input,     # Input gradient
+                (grad_scale,),  # Param gradients
+            )
+
+Implementing a fused operation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Subclasses of ``FusedOperation`` should declare their corresponding
+``BasicOperation`` s in the constructor. They should also implement
+``fuser_forward`` and ``fuser_backward``, depending on usage. These
+functions are similar to ``op_forward`` and ``op_backward`` from
+``BasicOperation``, but some arguments and returns are lists. For
+example, instead of taking a single context object, they take a list
+of context objects for all the corresponding ``BasicOperation`` s.
+
+.. code-block:: python
+
+    import torch
+    import transformer_engine.pytorch as te
+
+    class ForwardAxpy(te.ops.FusedOperation):
+
+        def __init__(self, scale: te.ops.ConstantScale, add: te.ops.AddExtraInput) -> None:
+            super().__init__((scale, add))  # Equivalent basic ops
+
+        def fuser_forward(
+            self,
+            basic_op_ctxs: list[OperationContext],
+            input_: torch.Tensor,
+            basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+            **unused,
+        ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, ...]]:
+            scale_op, add_op = self.basic_ops
+            extra_input = basic_op_extra_inputs[1][0]  # Extra input to add op
+            out = scale_op.scale * input_ + extra_input
+            scale_ctx, add_ctx = basic_op_ctxs  # No state needed for backward
+            return (
+                out,       # Output
+                [(), ()],  # Extra outputs for each basic op
+            )
+
+.. warning::
+
+   Remember the contract that the fused operation must produce outputs
+   that are interchangeable with the corresponding basic operation
+   outputs.
+
+In order to make these fused operations useful, they should be
+registered with the operation fuser. To do this, first implement a
+fusion function that can replace operations with the fused operation,
+and then register it with the ``register_forward_fusion`` or
+``register_backward_fusion`` functions.
+
+.. code-block:: python
+
+    def fuse_axpy_ops(ops: list[te.ops.FusibleOperation]) -> list[te.ops.FusibleOperation]:
+        """Sliding window scan to perform ForwardAxpy fusion"""
+        out = []
+        window, ops = ops[:2], ops[2:]
+        while len(window) == 2:
+            if (
+                isinstance(window[0], te.ops.ConstantScale)
+                and isinstance(window[1], te.ops.AddExtraInput)
+            ):
+                window = [ForwardAxpy(window[0], window[1])]
+            else:
+                out.append(window[0])
+                window = window[1:]
+            window, ops = window + ops[:1], ops[1:]
+        out.extend(window + ops)
+        return out
+
+    # Register fusion with operation fuser
+    te.ops.register_forward_fusion(fuse_axpy_ops)

@@ -3428,8 +3428,15 @@ class TestCustomOps:
     ) -> None:
         """Custom basic op"""
 
-        class CustomScaleOp(te.ops.BasicOperation):
-            """Custom op that applies a learnable scale"""
+        class LearnableScale(te.ops.BasicOperation):
+            """Custom op that applies a learnable scale
+
+            This class is as an example in the op fuser guide at
+            docs/examples/op_fuser/op_fuser.rst (see "Implementing a
+            basic operation"). Any changes made to this class should
+            also be made there.
+
+            """
 
             def __init__(self) -> None:
                 super().__init__()
@@ -3442,23 +3449,19 @@ class TestCustomOps:
                 self,
                 ctx: OperationContext,
                 input_: torch.Tensor,
-                prev_op_grad_output_quantizer: Optional[Quantizer],
-                next_op_input_quantizer: Optional[Quantizer],
+                **unused,
             ) -> torch.Tensor:
+                out = self.scale * input_
                 ctx.save_for_backward(self.scale, input_)
-                return self.scale * input_
+                return out
 
             def op_backward(
                 self,
                 ctx: OperationContext,
                 grad_output: torch.Tensor,
-            ) -> torch.Tensor:
-                (
-                    scale,
-                    input_,
-                ) = ctx.saved_tensors
-                grad_scale = torch.inner(input_.reshape(-1), grad_output.reshape(-1))
-                grad_scale = grad_scale.reshape(())
+            ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
+                scale, input_ = ctx.saved_tensors
+                grad_scale = torch.inner(input_.reshape(-1), grad_output.reshape(-1)).reshape(())
                 grad_input = scale * grad_output
                 return grad_input, (grad_scale,)
 
@@ -3485,7 +3488,7 @@ class TestCustomOps:
         y_ref.backward(dy_ref)
 
         # Implementation with fusible operation
-        op = CustomScaleOp()
+        op = LearnableScale()
         forward = te.ops.Sequential(te.ops.Identity(), op, te.ops.Identity())
         with torch.no_grad():
             op.scale.copy_(w_test)
@@ -3502,7 +3505,109 @@ class TestCustomOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
-    def test_custom_forward_fused_op(
+    def test_custom_forward_fused_op1(
+        self,
+        *,
+        shape: Iterable[int] = (7, 11),
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ):
+        """Custom fused op in forward pass"""
+
+        class ForwardAxpy(te.ops.FusedOperation):
+            """Custom op that computes BLAS SAXPY in forward pass
+
+            This class is as an example in the op fuser guide at
+            docs/examples/op_fuser/op_fuser.rst (see "Implementing a
+            fused operation"). Any changes made to this class should
+            also be made there.
+
+            """
+
+            _enabled = True
+
+            def __init__(
+                self,
+                scale: te.ops.ConstantScale,
+                add: te.ops.AddExtraInput,
+            ) -> None:
+                super().__init__((scale, add))
+
+            def fuser_forward(
+                self,
+                basic_op_ctxs: list[OperationContext],
+                input_: torch.Tensor,
+                basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+                **unused,
+            ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, ...]]:
+                scale_op, add_op = self.basic_ops
+                extra_input = basic_op_extra_inputs[1][0]  # Extra input to add op
+                out = scale_op.scale * input_ + extra_input
+                scale_ctx, add_ctx = basic_op_ctxs  # No state needed for backward
+                return (
+                    out,       # Output
+                    [(), ()],  # Extra outputs for each basic op
+                )
+
+        def fuse_axpy_ops(
+            ops: list[te.ops.FusibleOperation],
+        ) -> list[te.ops.FusibleOperation]:
+            """Apply fusion the first time this function is called"""
+            if ForwardAxpy._enabled:
+                ForwardAxpy._enabled = False
+            else:
+                return ops
+            out = []
+            window, ops = ops[:2], ops[2:]
+            while len(window) == 2:
+                if isinstance(window[0], te.ops.ConstantScale) and isinstance(window[1], te.ops.AddExtraInput):
+                    window = [ForwardAxpy(*window)]
+                else:
+                    out.append(window[0])
+                    window = window[1:]
+                window, ops = window + ops[:1], ops[1:]
+            out.extend(window + ops)
+            return out
+
+        # Random data
+        scale = 0.5
+        x1_ref, x1_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        x2_ref, x2_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = scale * x1_ref + x2_ref
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        te.ops.register_forward_fusion(fuse_axpy_ops)
+        model = te.ops.Sequential(
+            te.ops.ConstantScale(scale=scale),
+            te.ops.AddExtraInput(),
+        )
+        y_test = model(x1_test, x2_test)
+        y_test.backward(dy_test)
+
+        # Check values
+        tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x1_test, x1_ref, **tols)
+        assert_close_grads(x2_test, x2_ref, **tols)
+
+    def test_custom_forward_fused_op2(
         self,
         *,
         shape: Iterable[int] = (7, 11),
