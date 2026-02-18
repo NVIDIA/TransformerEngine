@@ -823,15 +823,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                 .set_name("bias")
                 .set_dim({bias_b, bias_h, bias_sq, bias_skv})
                 .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
-        dBias = mha_graph->tensor(
-            fe::graph::Tensor_attributes()
-                .set_name("dBias")
-                .set_dim({bias_b, bias_h, bias_sq, bias_skv})
-                .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
         sdpa_backward_options.set_bias(bias);
         // bias shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s], [1, h, s, s] are supported for dbias calculation
         // bias shape [1, 1, 1, s] is not supported for dbias calculation as of cuDNN 9.18
         if (!((bias_b == 1) && (bias_h == 1) && (bias_sq == 1))) {
+          dBias = mha_graph->tensor(
+              fe::graph::Tensor_attributes()
+                  .set_name("dBias")
+                  .set_dim({bias_b, bias_h, bias_sq, bias_skv})
+                  .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
           sdpa_backward_options.set_dbias(dBias);
         }
       }
@@ -982,12 +982,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
     if (is_bias) {
       variant_pack[bias] = devPtrBias;
-      // bias shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s], [1, h, s, s] are supported for dbias calculation
-      // bias shape [1, 1, 1, s] is not supported for dbias calculation as of cuDNN 9.18
-      if (!((bias_b == 1) && (bias_h == 1) && (bias_sq == 1))) {
+      if (dBias != nullptr) {
         variant_pack[dBias] = devPtrdBias;
-      } else {
-        variant_pack[dBias] = nullptr;
       }
     }
 
