@@ -3545,7 +3545,7 @@ class TestCustomOps:
                 out = scale_op.scale * input_ + extra_input
                 scale_ctx, add_ctx = basic_op_ctxs  # No state needed for backward
                 return (
-                    out,       # Output
+                    out,  # Output
                     [(), ()],  # Extra outputs for each basic op
                 )
 
@@ -3560,7 +3560,9 @@ class TestCustomOps:
             out = []
             window, ops = ops[:2], ops[2:]
             while len(window) == 2:
-                if isinstance(window[0], te.ops.ConstantScale) and isinstance(window[1], te.ops.AddExtraInput):
+                if isinstance(window[0], te.ops.ConstantScale) and isinstance(
+                    window[1], te.ops.AddExtraInput
+                ):
                     window = [ForwardAxpy(*window)]
                 else:
                     out.append(window[0])
