@@ -1203,6 +1203,9 @@ void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorP
       NVTE_CHECK(t->tensor_offsets.dtype == transformer_engine::DType::kInt64,
                  "tensor_offsets must have dtype Int64");
       break;
+    case kNVTEGroupedWithGEMMSwizzledScales:
+      NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param_name),
+                 "). Use nvte_set_grouped_tensor_param_v2 for boolean attributes.");
     default:
       NVTE_ERROR("Unknown grouped tensor parameter!");
   }
@@ -1236,8 +1239,186 @@ NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
       return t.last_dims;
     case kNVTEGroupedTensorOffsets:
       return t.tensor_offsets;
+    case kNVTEGroupedWithGEMMSwizzledScales:
+      NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param_name),
+                 "). Use nvte_get_grouped_tensor_param_v2 for boolean attributes.");
     default:
       NVTE_ERROR("Unknown grouped tensor parameter!");
+  }
+}
+
+void nvte_set_grouped_tensor_param_v2(NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                      const void *buf, size_t size_in_bytes) {
+  using namespace transformer_engine;
+
+  // Check attribute and buffer
+  NVTE_CHECK(param < kNVTENumGroupedTensorParams, "Invalid NVTEGroupedTensorParam (got ",
+             static_cast<int>(param), ")");
+  NVTE_CHECK(tensor != nullptr, "Grouped tensor pointer can't be NULL.");
+  auto &t = *convertNVTEGroupedTensorCheck(tensor);
+  const auto &attr_size = GroupedTensor::attr_sizes[param];
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for grouped tensor parameter "
+             "(parameter ",
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
+  NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
+
+  // Read from buffer
+  switch (param) {
+    case kNVTEGroupedRowwiseData: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.data = *basic_tensor;
+      break;
+    }
+    case kNVTEGroupedColumnwiseData: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_data = *basic_tensor;
+      break;
+    }
+    case kNVTEGroupedScale: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.scale = *basic_tensor;
+      break;
+    }
+    case kNVTEGroupedAmax: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.amax = *basic_tensor;
+      break;
+    }
+    case kNVTEGroupedRowwiseScaleInv: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.scale_inv = *basic_tensor;
+      break;
+    }
+    case kNVTEGroupedColumnwiseScaleInv: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_scale_inv = *basic_tensor;
+      break;
+    }
+    case kNVTEGroupedColumnwiseAmax: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_amax = *basic_tensor;
+      break;
+    }
+    case kNVTEGroupedFirstDims: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.first_dims = *basic_tensor;
+      NVTE_CHECK(t.first_dims.dtype == DType::kInt64, "first_dims must have dtype Int64");
+      break;
+    }
+    case kNVTEGroupedLastDims: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.last_dims = *basic_tensor;
+      NVTE_CHECK(t.last_dims.dtype == DType::kInt64, "last_dims must have dtype Int64");
+      break;
+    }
+    case kNVTEGroupedTensorOffsets: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.tensor_offsets = *basic_tensor;
+      NVTE_CHECK(t.tensor_offsets.dtype == DType::kInt64, "tensor_offsets must have dtype Int64");
+      break;
+    }
+    case kNVTEGroupedWithGEMMSwizzledScales:
+      t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+    default:
+      NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");
+  }
+}
+
+void nvte_get_grouped_tensor_param_v2(const NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                      void *buf, size_t size_in_bytes, size_t *size_written) {
+  using namespace transformer_engine;
+
+  // Check param
+  NVTE_CHECK(param < kNVTENumGroupedTensorParams, "Invalid NVTEGroupedTensorParam (got ",
+             static_cast<int>(param), ")");
+
+  // Write attribute size if provided
+  const auto &attr_size = GroupedTensor::attr_sizes[param];
+  if (size_written != nullptr) {
+    *size_written = attr_size;
+  }
+
+  // Return immediately if buffer is not provided
+  if (buf == nullptr) {
+    return;
+  }
+
+  // Check buffer size
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for grouped tensor parameter "
+             "(parameter ",
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
+
+  // Get C++ grouped tensor
+  const GroupedTensor *t = convertNVTEGroupedTensor(tensor);
+  std::optional<GroupedTensor> dummy;
+  if (t == nullptr) {
+    // Make dummy grouped tensor if provided tensor is invalid
+    dummy.emplace(NVTE_DELAYED_TENSOR_SCALING, 1);
+    t = &(*dummy);
+  }
+
+  // Write to buffer
+  switch (param) {
+    case kNVTEGroupedRowwiseData: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->data);
+      break;
+    }
+    case kNVTEGroupedColumnwiseData: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_data);
+      break;
+    }
+    case kNVTEGroupedScale: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->scale);
+      break;
+    }
+    case kNVTEGroupedAmax: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->amax);
+      break;
+    }
+    case kNVTEGroupedRowwiseScaleInv: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->scale_inv);
+      break;
+    }
+    case kNVTEGroupedColumnwiseScaleInv: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_scale_inv);
+      break;
+    }
+    case kNVTEGroupedColumnwiseAmax: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_amax);
+      break;
+    }
+    case kNVTEGroupedFirstDims: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->first_dims);
+      break;
+    }
+    case kNVTEGroupedLastDims: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->last_dims);
+      break;
+    }
+    case kNVTEGroupedTensorOffsets: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->tensor_offsets);
+      break;
+    }
+    case kNVTEGroupedWithGEMMSwizzledScales:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
+      break;
+    default:
+      NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");
   }
 }
 

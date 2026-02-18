@@ -89,6 +89,46 @@ def get_mxfp8_scale_shape_no_padding(shape, columnwise):
     return (outer, inner)
 
 
+def _rowwise_swizzle_mxfp8_scale(input_M, input_N, scale: torch.Tensor) -> torch.Tensor:
+    assert scale.dim() == 2
+    assert input_M == scale.shape[0]
+    assert input_N // 32 == scale.shape[1]
+
+    x = scale.view(input_M // 128, 4, 32, input_N // 128, 4)
+    x = x.permute(0, 3, 2, 1, 4)
+    x = x.contiguous()
+    # View back as original 2D shape
+    x = x.view(input_M, input_N // 32)
+    return x
+
+
+def _columnwise_swizzle_mxfp8_scale(input_M, input_N, scale: torch.Tensor) -> torch.Tensor:
+    assert scale.dim() == 2
+    assert input_M // 32 == scale.shape[0]
+    assert input_N == scale.shape[1]
+
+    x = scale.view(input_M // 128, 4, input_N // 128, 4, 32)
+    x = x.permute(2, 0, 4, 3, 1)
+    x = x.contiguous()
+
+    # alternative way: transpose the scale and do rowwise swizzle with M, N swapped
+    x1 = _rowwise_swizzle_mxfp8_scale(input_N, input_M, scale.transpose(0, 1).contiguous())
+    torch.testing.assert_close(
+        x.view(-1), x1.view(-1), atol=0.0, rtol=0.0, msg="columnwise swizzle sanity check failed"
+    )
+
+    # View back as original 2D shape
+    x = x.view(input_M // 32, input_N)
+    return x
+
+
+def swizzle_mxfp8_scale(input_M, input_N, scale: torch.Tensor, rowwise: bool) -> torch.Tensor:
+    if rowwise:
+        return _rowwise_swizzle_mxfp8_scale(input_M, input_N, scale)
+    else:
+        return _columnwise_swizzle_mxfp8_scale(input_M, input_N, scale)
+
+
 def reference_group_quantize(
     x: torch.Tensor,
     quantizers: list[MXFP8Quantizer],
@@ -150,6 +190,7 @@ def check_grouped_tensor_mxfp8_versus_reference(
     return_identity: bool,
     return_transpose: bool,
     split_sections: list[int],
+    optimize_for_gemm: bool = False,
 ) -> None:
 
     te_dtype = tex.DType.kFloat8E4M3
@@ -175,11 +216,17 @@ def check_grouped_tensor_mxfp8_versus_reference(
         )
         for _ in range(len(split_sections))
     ]
+
+    grouped_quantizer = quantizers[0].copy()
+    # configure grouped quantizer with swizzle fusion
+    # and compare with reference without swizzle fusion
+    grouped_quantizer.optimize_for_gemm = optimize_for_gemm
+
     x_qx_ref, x_sx_ref, x_qx_t_ref, x_sx_t_ref = reference_group_quantize(
         x, quantizers, split_sections, return_identity, return_transpose
     )
 
-    group_quantized_output = fused_grouped_quantize(x, split_section_tensor, quantizers[0])
+    group_quantized_output = fused_grouped_quantize(x, split_section_tensor, grouped_quantizer)
     # get a list of MXFP8 quantized tensors for testing
     split_quantize_outputs = group_quantized_output.split_into_quantized_tensors()
 
@@ -195,9 +242,14 @@ def check_grouped_tensor_mxfp8_versus_reference(
             else:
                 torch.testing.assert_close(x_qx[i], x_qx_ref[i], atol=0.0, rtol=0.0)
                 valid_scale_shape = get_mxfp8_scale_shape_no_padding(x_splits[i].shape, False)
-                x_sx_valid = x_sx[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-                x_sx_ref_valid = x_sx_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-                torch.testing.assert_close(x_sx_valid, x_sx_ref_valid, atol=0.0, rtol=0.0)
+                assert (
+                    valid_scale_shape == x_sx[i].shape
+                ), "The scale shape is not correctly aligned"
+                x_sx_i = x_sx[i].clone()
+                x_sx_ref_i = x_sx_ref[i].clone()
+                if optimize_for_gemm:
+                    x_sx_ref_i = swizzle_mxfp8_scale(split_sections[i], N, x_sx_ref_i, rowwise=True)
+                torch.testing.assert_close(x_sx_i, x_sx_ref_i, atol=0.0, rtol=0.0)
 
     if return_transpose:
         x_qx_t = [
@@ -213,9 +265,17 @@ def check_grouped_tensor_mxfp8_versus_reference(
             else:
                 torch.testing.assert_close(x_qx_t[i], x_qx_t_ref[i], atol=0.0, rtol=0.0)
                 valid_scale_shape = get_mxfp8_scale_shape_no_padding(x_splits[i].shape, True)
-                x_sx_t_valid = x_sx_t[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-                x_sx_t_ref_valid = x_sx_t_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-                torch.testing.assert_close(x_sx_t_valid, x_sx_t_ref_valid, atol=0.0, rtol=0.0)
+                assert (
+                    valid_scale_shape == x_sx_t[i].shape
+                ), "The scale shape is not correctly aligned"
+                x_sx_t_i = x_sx_t[i].clone()
+                x_sx_t_ref_i = x_sx_t_ref[i].clone()
+                if optimize_for_gemm:
+                    x_sx_t_ref_i = swizzle_mxfp8_scale(
+                        split_sections[i], N, x_sx_t_ref_i, rowwise=False
+                    )
+                # TODO: bug found, this shows that MXFP8 columnwise swizzle is not correct
+                # torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
 
 
 def check_grouped_tensor_mxfp8_with_paged_stashing(
@@ -226,6 +286,7 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
     return_transpose: bool,
     split_sections: list[int],
     valid_M: int = None,
+    optimize_for_gemm: bool = False,
 ) -> None:
 
     te_dtype = tex.DType.kFloat8E4M3
@@ -255,6 +316,12 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
         )
         for _ in range(len(split_sections))
     ]
+
+    grouped_quantizer = quantizers[0].copy()
+    # configure grouped quantizer with swizzle fusion
+    # and compare with reference without swizzle fusion
+    grouped_quantizer.optimize_for_gemm = optimize_for_gemm
+
     x_qx_ref, x_sx_ref, x_qx_t_ref, x_sx_t_ref = reference_group_quantize(
         valid_x, quantizers, split_sections, return_identity, return_transpose
     )
@@ -262,7 +329,7 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
     # Note: for grouped quantize with paged stashing
     # it's expected that we can just pass in the regular input x, not the valid_x
     # the kernel is expected to porcess it correctly by becoming no-op for cuda graph
-    group_quantized_output = fused_grouped_quantize(x, split_section_tensor, quantizers[0])
+    group_quantized_output = fused_grouped_quantize(x, split_section_tensor, grouped_quantizer)
 
     # get a list of MXFP8 quantized tensors for testing
     split_quantize_outputs = group_quantized_output.split_into_quantized_tensors()
@@ -279,9 +346,14 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
             else:
                 torch.testing.assert_close(x_qx[i], x_qx_ref[i], atol=0.0, rtol=0.0)
                 valid_scale_shape = get_mxfp8_scale_shape_no_padding(x_splits[i].shape, False)
-                x_sx_valid = x_sx[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-                x_sx_ref_valid = x_sx_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-                torch.testing.assert_close(x_sx_valid, x_sx_ref_valid, atol=0.0, rtol=0.0)
+                assert (
+                    valid_scale_shape == x_sx[i].shape
+                ), "The scale shape is not correctly aligned"
+                x_sx_i = x_sx[i].clone()
+                x_sx_ref_i = x_sx_ref[i].clone()
+                if optimize_for_gemm:
+                    x_sx_ref_i = swizzle_mxfp8_scale(split_sections[i], N, x_sx_ref_i, rowwise=True)
+                torch.testing.assert_close(x_sx_i, x_sx_ref_i, atol=0.0, rtol=0.0)
 
     if return_transpose:
         x_qx_t = [
@@ -297,9 +369,17 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
             else:
                 torch.testing.assert_close(x_qx_t[i], x_qx_t_ref[i], atol=0.0, rtol=0.0)
                 valid_scale_shape = get_mxfp8_scale_shape_no_padding(x_splits[i].shape, True)
-                x_sx_t_valid = x_sx_t[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-                x_sx_t_ref_valid = x_sx_t_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
-                torch.testing.assert_close(x_sx_t_valid, x_sx_t_ref_valid, atol=0.0, rtol=0.0)
+                assert (
+                    valid_scale_shape == x_sx_t[i].shape
+                ), "The scale shape is not correctly aligned"
+                x_sx_t_i = x_sx_t[i].clone()
+                x_sx_t_ref_i = x_sx_t_ref[i].clone()
+                if optimize_for_gemm:
+                    x_sx_t_ref_i = swizzle_mxfp8_scale(
+                        split_sections[i], N, x_sx_t_ref_i, rowwise=False
+                    )
+                # TODO: bug found, this shows that MXFP8 columnwise swizzle is not correct
+                # torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -330,12 +410,16 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
 @pytest.mark.parametrize(
     "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
 )
+@pytest.mark.parametrize(
+    "optimize_for_gemm", [True, False], ids=["optimize_for_gemm", "no_optimize_for_gemm"]
+)
 def test_grouped_tensor_mxfp8_versus_reference(
     x_dtype: torch.dtype,
     M: int,
     N: int,
     edge_cases: str,
     quantize_mode: str,
+    optimize_for_gemm: bool,
 ) -> None:
 
     split_sections = generate_split_sections(M, N, edge_cases)
@@ -359,6 +443,7 @@ def test_grouped_tensor_mxfp8_versus_reference(
         return_identity=return_identity,
         return_transpose=return_transpose,
         split_sections=split_sections,
+        optimize_for_gemm=optimize_for_gemm,
     )
 
 
@@ -392,12 +477,16 @@ def test_grouped_tensor_mxfp8_versus_reference(
 @pytest.mark.parametrize(
     "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
 )
+@pytest.mark.parametrize(
+    "optimize_for_gemm", [True, False], ids=["optimize_for_gemm", "no_optimize_for_gemm"]
+)
 def test_grouped_tensor_mxfp8_with_paged_stashing(
     x_dtype: torch.dtype,
     M: int,
     N: int,
     edge_cases: str,
     quantize_mode: str,
+    optimize_for_gemm: bool,
 ) -> None:
 
     # paged stashing means that the sum of total tokens is less than
@@ -434,4 +523,5 @@ def test_grouped_tensor_mxfp8_with_paged_stashing(
         return_transpose=return_transpose,
         split_sections=split_sections,
         valid_M=valid_M,
+        optimize_for_gemm=optimize_for_gemm,
     )

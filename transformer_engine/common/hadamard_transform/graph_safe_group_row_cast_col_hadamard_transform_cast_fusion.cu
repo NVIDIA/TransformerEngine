@@ -1440,7 +1440,7 @@ void group_hadamard_transform_cast_fusion_graph_safe(const GroupedTensor *input,
 
   int k_tile_size = 1024;
 
-  const bool use_swizzle_sf_output = false;
+  const bool use_swizzle_sf_output = output->with_gemm_swizzled_scales;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, kEnableStochasticRounding,

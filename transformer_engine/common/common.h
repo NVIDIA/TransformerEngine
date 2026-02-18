@@ -341,6 +341,21 @@ struct GroupedTensor {
    */
   bool with_gemm_swizzled_scales = false;
 
+  /*! Map from NVTEGroupedTensorParam to parameter sizes */
+  static constexpr size_t attr_sizes[] = {
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedRowwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedColumnwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedScale
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedAmax
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedRowwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedColumnwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedColumnwiseAmax
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedFirstDims
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedLastDims
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedTensorOffsets
+      sizeof(uint8_t)           // kNVTEGroupedWithGEMMSwizzledScales
+  };
+
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
       : data(),
         columnwise_data(),
