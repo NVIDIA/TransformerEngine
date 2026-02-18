@@ -126,9 +126,17 @@ void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
 
 void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor x,
                         int64_t num_iterations, const float* coefficients,
-                        int64_t num_coefficients) {
+                        int64_t num_coefficients, cudaStream_t caller_stream) {
   NVTE_API_CALL(nvte_newton_schulz);
   const auto* t = convertNVTETensorCheck(x);
+
+  // Make the internal stream wait for the caller's stream so that
+  // the input tensor is ready before cuSolverMp reads it.
+  cudaEvent_t input_ready{};
+  NVTE_CHECK_CUDA(cudaEventCreate(&input_ready));
+  NVTE_CHECK_CUDA(cudaEventRecord(input_ready, caller_stream));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream, input_ready));
+  NVTE_CHECK_CUDA(cudaEventDestroy(input_ready));
 
   // Block size for ScaLAPACK-style distribution
   const int64_t mb = (m + ctx->nranks - 1) / ctx->nranks;
@@ -172,8 +180,13 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
       coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, workspace_host.data(),
       workspace_host.size(), &info));
 
-  // Synchronize
-  NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream));
+  // Make the caller's stream wait for the internal stream so that
+  // the in-place result is visible to subsequent work on caller_stream.
+  cudaEvent_t output_ready{};
+  NVTE_CHECK_CUDA(cudaEventCreate(&output_ready));
+  NVTE_CHECK_CUDA(cudaEventRecord(output_ready, ctx->stream));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(caller_stream, output_ready));
+  NVTE_CHECK_CUDA(cudaEventDestroy(output_ready));
 
   NVTE_CHECK(info == 0, "cusolverMpNewtonSchulz failed with info = ", info);
 }

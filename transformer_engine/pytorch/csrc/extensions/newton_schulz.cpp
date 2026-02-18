@@ -44,8 +44,9 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x,
   auto te_dtype = GetTransformerEngineDType(x.scalar_type());
   TensorWrapper x_tensor(x.data_ptr(), shape, te_dtype);
 
+  auto caller_stream = at::cuda::getCurrentCUDAStream().stream();
   nvte_newton_schulz(ctx, m, n, x_tensor.data(), num_iterations, coefficients.data(),
-                     static_cast<int64_t>(coefficients.size()));
+                     static_cast<int64_t>(coefficients.size()), caller_stream);
 #else
   NVTE_ERROR("newton_schulz requires building with NVTE_WITH_CUSOLVERMP=1");
 #endif
