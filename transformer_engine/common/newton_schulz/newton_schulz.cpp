@@ -17,9 +17,8 @@
 
 using namespace transformer_engine;
 
-namespace {
-
-// RAII wrapper types for cuSolverMp handles
+// RAII wrapper types for cuSolverMp handles (outside anonymous namespace because
+// CusolverMpHandle and CusolverMpGrid are used in the NVTECusolverMpCtx struct)
 
 struct CusolverMpHandleDeleter {
   void operator()(cusolverMpHandle_t handle) const { cusolverMpDestroy(handle); }
@@ -32,6 +31,8 @@ struct CusolverMpGridDeleter {
 };
 using CusolverMpGrid = std::unique_ptr<std::remove_pointer_t<cusolverMpGrid_t>,
                                        CusolverMpGridDeleter>;
+
+namespace {
 
 struct CusolverMpMatrixDescDeleter {
   void operator()(cusolverMpMatrixDescriptor_t desc) const { cusolverMpDestroyMatrixDesc(desc); }
@@ -81,17 +82,27 @@ CusolverMpNSDesc MakeCusolverMpNSDesc() {
 struct NVTECusolverMpCtx {
   int64_t nranks;
   int64_t rank;
-  ncclComm_t comm;
+  CusolverMpHandle handle;
+  CusolverMpGrid grid;
   void* workspace;
   size_t workspace_size;
 };
 
-NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank) {
+NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank,
+                                               cudaStream_t stream) {
   NVTE_API_CALL(nvte_cusolvermp_ctx_create);
+  int device_id{};
+  NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+
+  auto handle = MakeCusolverMpHandle(device_id, stream);
+  auto grid = MakeCusolverMpGrid(handle.get(), comm, nranks, 1,
+                                  CUSOLVERMP_GRID_MAPPING_COL_MAJOR);
+
   return new NVTECusolverMpCtx{
       .nranks = nranks,
       .rank = rank,
-      .comm = comm,
+      .handle = std::move(handle),
+      .grid = std::move(grid),
       .workspace = nullptr,
       .workspace_size = 0,
   };
@@ -111,17 +122,6 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   NVTE_API_CALL(nvte_newton_schulz);
   const auto* t = convertNVTETensorCheck(x);
 
-  // Get current device
-  int device_id{};
-  NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-
-  // Create cuSolverMp handle bound to the caller's stream
-  auto handle = MakeCusolverMpHandle(device_id, stream);
-
-  // 1D row partition: nranks x 1, column-major
-  auto grid = MakeCusolverMpGrid(handle.get(), ctx->comm, ctx->nranks, 1,
-                                  CUSOLVERMP_GRID_MAPPING_COL_MAJOR);
-
   // Block size for ScaLAPACK-style distribution
   const int64_t mb = (m + ctx->nranks - 1) / ctx->nranks;
   const int64_t nb = n;
@@ -133,7 +133,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   const cudaDataType_t cuda_dtype = get_cuda_dtype(t->dtype());
 
   // Create matrix descriptor
-  auto mat_desc = MakeCusolverMpMatrixDesc(grid.get(), cuda_dtype, m, n, mb, nb, 0, 0, lld);
+  auto mat_desc = MakeCusolverMpMatrixDesc(ctx->grid.get(), cuda_dtype, m, n, mb, nb, 0, 0, lld);
 
   // Create Newton-Schulz descriptor
   auto ns_desc = MakeCusolverMpNSDesc();
@@ -142,7 +142,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   size_t wrksp_size_device = 0;
   size_t wrksp_size_host = 0;
   NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz_bufferSize(
-      handle.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
+      ctx->handle.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
       coefficients, CUDA_R_32F, &wrksp_size_device, &wrksp_size_host));
 
   // Allocate/grow device workspace
@@ -160,7 +160,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   // Execute Newton-Schulz
   int info = 0;
   NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz(
-      handle.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
+      ctx->handle.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
       coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, workspace_host.data(),
       workspace_host.size(), &info));
 
