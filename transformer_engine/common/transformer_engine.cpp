@@ -1156,99 +1156,8 @@ void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor) {
   transformer_engine::GroupedTensorAllocator::instance().Free(tensor);
 }
 
-void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
-                                   const NVTEBasicTensor *param) {
-  NVTE_CHECK(tensor != nullptr, "Grouped tensor pointer can't be NULL.");
-  auto *t = transformer_engine::convertNVTEGroupedTensor(*tensor);
-  NVTE_CHECK(t != nullptr, "Grouped tensor is not allocated.");
-  NVTE_CHECK(param != nullptr, "Grouped tensor param can't be NULL.");
-
-  switch (param_name) {
-    case kNVTEGroupedRowwiseData:
-      t->data = *param;
-      break;
-    case kNVTEGroupedColumnwiseData:
-      t->columnwise_data = *param;
-      break;
-    case kNVTEGroupedScale:
-      t->scale = *param;
-      break;
-    case kNVTEGroupedAmax:
-      t->amax = *param;
-      break;
-    case kNVTEGroupedRowwiseScaleInv:
-      t->scale_inv = *param;
-      break;
-    case kNVTEGroupedColumnwiseScaleInv:
-      t->columnwise_scale_inv = *param;
-      break;
-    case kNVTEGroupedColumnwiseAmax:
-      t->columnwise_amax = *param;
-      break;
-    case kNVTEGroupedFirstDims:
-      t->first_dims = *param;
-      // Validate it's Int64
-      NVTE_CHECK(t->first_dims.dtype == transformer_engine::DType::kInt64,
-                 "first_dims must have dtype Int64");
-      break;
-    case kNVTEGroupedLastDims:
-      t->last_dims = *param;
-      // Validate it's Int64
-      NVTE_CHECK(t->last_dims.dtype == transformer_engine::DType::kInt64,
-                 "last_dims must have dtype Int64");
-      break;
-    case kNVTEGroupedTensorOffsets:
-      t->tensor_offsets = *param;
-      // Validate it's Int64
-      NVTE_CHECK(t->tensor_offsets.dtype == transformer_engine::DType::kInt64,
-                 "tensor_offsets must have dtype Int64");
-      break;
-    case kNVTEGroupedWithGEMMSwizzledScales:
-      NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param_name),
-                 "). Use nvte_set_grouped_tensor_param_v2 for boolean attributes.");
-    default:
-      NVTE_ERROR("Unknown grouped tensor parameter!");
-  }
-}
-
-NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
-                                              NVTEGroupedTensorParam param_name) {
-  if (tensor == nullptr) {
-    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 1)};
-  }
-  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
-
-  switch (param_name) {
-    case kNVTEGroupedRowwiseData:
-      return t.data;
-    case kNVTEGroupedColumnwiseData:
-      return t.columnwise_data;
-    case kNVTEGroupedScale:
-      return t.scale;
-    case kNVTEGroupedAmax:
-      return t.amax;
-    case kNVTEGroupedRowwiseScaleInv:
-      return t.scale_inv;
-    case kNVTEGroupedColumnwiseScaleInv:
-      return t.columnwise_scale_inv;
-    case kNVTEGroupedColumnwiseAmax:
-      return t.columnwise_amax;
-    case kNVTEGroupedFirstDims:
-      return t.first_dims;
-    case kNVTEGroupedLastDims:
-      return t.last_dims;
-    case kNVTEGroupedTensorOffsets:
-      return t.tensor_offsets;
-    case kNVTEGroupedWithGEMMSwizzledScales:
-      NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param_name),
-                 "). Use nvte_get_grouped_tensor_param_v2 for boolean attributes.");
-    default:
-      NVTE_ERROR("Unknown grouped tensor parameter!");
-  }
-}
-
-void nvte_set_grouped_tensor_param_v2(NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
-                                      const void *buf, size_t size_in_bytes) {
+void nvte_set_grouped_tensor_param(NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                   const void *buf, size_t size_in_bytes) {
   using namespace transformer_engine;
 
   // Check attribute and buffer
@@ -1327,8 +1236,8 @@ void nvte_set_grouped_tensor_param_v2(NVTEGroupedTensor tensor, NVTEGroupedTenso
   }
 }
 
-void nvte_get_grouped_tensor_param_v2(const NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
-                                      void *buf, size_t size_in_bytes, size_t *size_written) {
+void nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                   void *buf, size_t size_in_bytes, size_t *size_written) {
   using namespace transformer_engine;
 
   // Check param

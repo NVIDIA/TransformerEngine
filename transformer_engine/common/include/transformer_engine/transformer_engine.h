@@ -481,27 +481,6 @@ NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_
 void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
 
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
-/*! \brief Set a parameter of the grouped tensor.
- *
- *  \param[in/out] tensor Grouped tensor.
- *  \param[in] param_name The parameter to be set.
- *  \param[in] param The value to be set (NVTEBasicTensor).
- */
-void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
-                                   const NVTEBasicTensor *param);
-
-/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
-/*! \brief Get a value of the parameter of the grouped tensor.
- *
- *  \param[in] tensor Grouped tensor.
- *  \param[in] param_name The parameter to be queried.
- *
- *  \return NVTEBasicTensor containing the parameter data.
- */
-NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
-                                              NVTEGroupedTensorParam param_name);
-
-/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Set a grouped tensor parameter.
  *
  *  \param[in/out] tensor        Grouped tensor.
@@ -509,8 +488,8 @@ NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
  *  \param[in]     buf           Memory address to read parameter value.
  *  \param[in]     size_in_bytes Size of buf.
  */
-void nvte_set_grouped_tensor_param_v2(NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
-                                      const void *buf, size_t size_in_bytes);
+void nvte_set_grouped_tensor_param(NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                   const void *buf, size_t size_in_bytes);
 
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Query a grouped tensor parameter.
@@ -524,8 +503,8 @@ void nvte_set_grouped_tensor_param_v2(NVTEGroupedTensor tensor, NVTEGroupedTenso
  *                            buf. If buf is NULL, then the number of
  *                            bytes that would have been written.
  */
-void nvte_get_grouped_tensor_param_v2(const NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
-                                      void *buf, size_t size_in_bytes, size_t *size_written);
+void nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                   void *buf, size_t size_in_bytes, size_t *size_written);
 
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Get the number of tensors in a grouped tensor.
@@ -1046,7 +1025,7 @@ class GroupedTensorWrapper {
                                       const ShapeType &shape) noexcept {
     NVTEShape nvte_shape = this->convertShape(shape);
     NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(type), nvte_shape};
-    nvte_set_grouped_tensor_param(&tensor_, param, &data);
+    nvte_set_grouped_tensor_param(tensor_, param, &data, sizeof(data));
     return *this;
   }
 
@@ -1107,13 +1086,14 @@ class GroupedTensorWrapper {
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
     const auto val = static_cast<uint8_t>(with_gemm_swizzled_scales);
-    nvte_set_grouped_tensor_param_v2(tensor_, kNVTEGroupedWithGEMMSwizzledScales, &val,
-                                     sizeof(val));
+    nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedWithGEMMSwizzledScales, &val, sizeof(val));
   }
 
   // Parameter getters
   NVTEBasicTensor get_parameter(const NVTEGroupedTensorParam param) const noexcept {
-    return nvte_get_grouped_tensor_param(tensor_, param);
+    NVTEBasicTensor ret;
+    nvte_get_grouped_tensor_param(tensor_, param, &ret, sizeof(ret), nullptr);
+    return ret;
   }
 
   NVTEBasicTensor get_rowwise_data() const noexcept {
@@ -1150,8 +1130,8 @@ class GroupedTensorWrapper {
 
   bool get_with_gemm_swizzled_scales() const {
     uint8_t val = 0;
-    nvte_get_grouped_tensor_param_v2(tensor_, kNVTEGroupedWithGEMMSwizzledScales, &val, sizeof(val),
-                                     nullptr);
+    nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedWithGEMMSwizzledScales, &val, sizeof(val),
+                                  nullptr);
     return static_cast<bool>(val);
   }
 
