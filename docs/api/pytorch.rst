@@ -152,6 +152,16 @@ Operation fuser
 .. autoapiclass:: transformer_engine.pytorch.ops.FusibleOperation
    :members: fuser_forward, fuser_backward
 
+.. autoapiclass:: transformer_engine.pytorch.ops.BasicOperation
+   :members: op_forward, op_backward
+
+.. autoapiclass:: transformer_engine.pytorch.ops.FusedOperation
+   :members: fuser_forward, fuser_backward
+
+.. autoapiclass:: transformer_engine.pytorch.ops.register_forward_fusion
+
+.. autoapiclass:: transformer_engine.pytorch.ops.register_backward_fusion
+
 .. autoapiclass:: transformer_engine.pytorch.ops.Linear
 
 .. autoapiclass:: transformer_engine.pytorch.ops.AddExtraInput

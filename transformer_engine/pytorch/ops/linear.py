@@ -54,7 +54,7 @@ class Linear(FusedOperation):
         weight's ``main_grad`` attribute instead of relying on PyTorch
         autograd. The weight's ``main_grad`` must be set externally and
         there is no guarantee that ``grad`` will be set or be
-        meaningful. This is primarily intented to integrate with
+        meaningful. This is primarily intended to integrate with
         Megatron-LM.
 
     """
