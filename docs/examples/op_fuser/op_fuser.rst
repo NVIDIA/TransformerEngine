@@ -333,7 +333,10 @@ and then register it with the ``register_forward_fusion`` or
 
 .. code-block:: python
 
-    def fuse_axpy_ops(ops: list[te.ops.FusibleOperation]) -> list[te.ops.FusibleOperation]:
+    def fuse_axpy_ops(
+        ops: list[te.ops.FusibleOperation],
+        **unused,
+    ) -> list[te.ops.FusibleOperation]:
         """Sliding window scan to perform ForwardAxpy fusion"""
         out = []
         window, ops = ops[:2], ops[2:]

@@ -175,6 +175,10 @@ Operation fuser
 
 .. autoapiclass:: transformer_engine.pytorch.ops.GELU
 
+.. autoapiclass:: transformer_engine.pytorch.ops.GLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.GroupedLinear
+
 .. autoapiclass:: transformer_engine.pytorch.ops.Identity
 
 .. autoapiclass:: transformer_engine.pytorch.ops.L2Normalization
@@ -202,6 +206,8 @@ Operation fuser
 .. autoapiclass:: transformer_engine.pytorch.ops.SReGLU
 
 .. autoapiclass:: transformer_engine.pytorch.ops.SReLU
+
+.. autoapiclass:: transformer_engine.pytorch.ops.ScaledSwiGLU
 
 .. autoapiclass:: transformer_engine.pytorch.ops.SiLU
 

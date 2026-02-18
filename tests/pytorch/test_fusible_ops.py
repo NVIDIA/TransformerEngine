@@ -3551,6 +3551,7 @@ class TestCustomOps:
 
         def fuse_axpy_ops(
             ops: list[te.ops.FusibleOperation],
+            **unused,
         ) -> list[te.ops.FusibleOperation]:
             """Apply fusion the first time this function is called"""
             if ForwardAxpy._enabled:

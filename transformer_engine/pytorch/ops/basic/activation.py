@@ -184,7 +184,7 @@ class GLU(_ActivationOperation):
        the second half.
 
     See `Language Modeling with Gated Convolutional Networks<https://arxiv.org/abs/1612.08083>`__
-    and `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
+    and `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__ .
 
     """
 
