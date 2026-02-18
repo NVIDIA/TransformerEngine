@@ -3508,7 +3508,7 @@ class TestCustomOps:
     def test_custom_forward_fused_op1(
         self,
         *,
-        shape: Iterable[int] = (7, 11),
+        shape: Iterable[int] = (5, 11),
         dtype: torch.dtype = torch.float32,
         device: torch.device = "cuda",
     ):
