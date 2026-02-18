@@ -82,17 +82,20 @@ CusolverMpNSDesc MakeCusolverMpNSDesc() {
 struct NVTECusolverMpCtx {
   int64_t nranks;
   int64_t rank;
+  cudaStream_t stream;
   CusolverMpHandle handle;
   CusolverMpGrid grid;
   void* workspace;
   size_t workspace_size;
 };
 
-NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank,
-                                               cudaStream_t stream) {
+NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank) {
   NVTE_API_CALL(nvte_cusolvermp_ctx_create);
   int device_id{};
   NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+
+  cudaStream_t stream{};
+  NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
   auto handle = MakeCusolverMpHandle(device_id, stream);
   auto grid = MakeCusolverMpGrid(handle.get(), comm, nranks, 1,
@@ -101,6 +104,7 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
   return new NVTECusolverMpCtx{
       .nranks = nranks,
       .rank = rank,
+      .stream = stream,
       .handle = std::move(handle),
       .grid = std::move(grid),
       .workspace = nullptr,
@@ -113,12 +117,16 @@ void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
   if (ctx->workspace) {
     cudaFree(ctx->workspace);
   }
+  // Destroy handle and grid before the stream they depend on
+  ctx->handle.reset();
+  ctx->grid.reset();
+  cudaStreamDestroy(ctx->stream);
   delete ctx;
 }
 
 void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor x,
                         int64_t num_iterations, const float* coefficients,
-                        int64_t num_coefficients, cudaStream_t stream) {
+                        int64_t num_coefficients) {
   NVTE_API_CALL(nvte_newton_schulz);
   const auto* t = convertNVTETensorCheck(x);
 
@@ -165,7 +173,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
       workspace_host.size(), &info));
 
   // Synchronize
-  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream));
 
   NVTE_CHECK(info == 0, "cusolverMpNewtonSchulz failed with info = ", info);
 }

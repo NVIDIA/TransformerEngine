@@ -15,8 +15,7 @@ namespace transformer_engine::pytorch {
 int64_t cusolvermp_ctx_create(int64_t nccl_comm_ptr, int nranks, int rank) {
 #ifdef NVTE_WITH_CUSOLVERMP
   auto comm = reinterpret_cast<ncclComm_t>(nccl_comm_ptr);
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
-  auto* ctx = nvte_cusolvermp_ctx_create(comm, nranks, rank, stream);
+  auto* ctx = nvte_cusolvermp_ctx_create(comm, nranks, rank);
   return reinterpret_cast<int64_t>(ctx);
 #else
   NVTE_ERROR("newton_schulz requires building with NVTE_WITH_CUSOLVERMP=1");
@@ -45,9 +44,8 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x,
   auto te_dtype = GetTransformerEngineDType(x.scalar_type());
   TensorWrapper x_tensor(x.data_ptr(), shape, te_dtype);
 
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
   nvte_newton_schulz(ctx, m, n, x_tensor.data(), num_iterations, coefficients.data(),
-                     static_cast<int64_t>(coefficients.size()), stream);
+                     static_cast<int64_t>(coefficients.size()));
 #else
   NVTE_ERROR("newton_schulz requires building with NVTE_WITH_CUSOLVERMP=1");
 #endif
