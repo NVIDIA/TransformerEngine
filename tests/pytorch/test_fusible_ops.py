@@ -3539,7 +3539,7 @@ class TestCustomOps:
                 input_: torch.Tensor,
                 basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
                 **unused,
-            ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, ...]]:
+            ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, ...]]]:
                 scale_op, add_op = self.basic_ops
                 extra_input = basic_op_extra_inputs[1][0]  # Extra input to add op
                 out = scale_op.scale * input_ + extra_input
