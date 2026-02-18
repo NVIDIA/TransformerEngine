@@ -83,6 +83,7 @@ struct NVTECusolverMpCtx {
   int64_t nranks;
   int64_t rank;
   cudaStream_t stream;
+  cudaEvent_t event;
   CusolverMpHandle handle;
   CusolverMpGrid grid;
   void* workspace;
@@ -97,6 +98,9 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
   cudaStream_t stream{};
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
+  cudaEvent_t event{};
+  NVTE_CHECK_CUDA(cudaEventCreate(&event));
+
   auto handle = MakeCusolverMpHandle(device_id, stream);
   auto grid = MakeCusolverMpGrid(handle.get(), comm, nranks, 1,
                                   CUSOLVERMP_GRID_MAPPING_COL_MAJOR);
@@ -105,6 +109,7 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
       .nranks = nranks,
       .rank = rank,
       .stream = stream,
+      .event = event,
       .handle = std::move(handle),
       .grid = std::move(grid),
       .workspace = nullptr,
@@ -120,6 +125,7 @@ void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
   // Destroy handle and grid before the stream they depend on
   ctx->handle.reset();
   ctx->grid.reset();
+  cudaEventDestroy(ctx->event);
   cudaStreamDestroy(ctx->stream);
   delete ctx;
 }
@@ -132,11 +138,8 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
 
   // Make the internal stream wait for the caller's stream so that
   // the input tensor is ready before cuSolverMp reads it.
-  cudaEvent_t input_ready{};
-  NVTE_CHECK_CUDA(cudaEventCreate(&input_ready));
-  NVTE_CHECK_CUDA(cudaEventRecord(input_ready, caller_stream));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream, input_ready));
-  NVTE_CHECK_CUDA(cudaEventDestroy(input_ready));
+  NVTE_CHECK_CUDA(cudaEventRecord(ctx->event, caller_stream));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream, ctx->event));
 
   // Block size for ScaLAPACK-style distribution
   const int64_t mb = (m + ctx->nranks - 1) / ctx->nranks;
