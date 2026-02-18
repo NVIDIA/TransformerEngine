@@ -180,13 +180,11 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
       coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, workspace_host.data(),
       workspace_host.size(), &info));
 
-  // Make the caller's stream wait for the internal stream so that
-  // the in-place result is visible to subsequent work on caller_stream.
-  cudaEvent_t output_ready{};
-  NVTE_CHECK_CUDA(cudaEventCreate(&output_ready));
-  NVTE_CHECK_CUDA(cudaEventRecord(output_ready, ctx->stream));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(caller_stream, output_ready));
-  NVTE_CHECK_CUDA(cudaEventDestroy(output_ready));
+  // Host-side sync: cuSolverMp is asynchronous and uses the host
+  // workspace during execution for multi-GPU coordination.  We must
+  // block until the stream finishes so that workspace_host (a local
+  // vector) is not destroyed while the GPU is still reading from it.
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(ctx->stream));
 
   NVTE_CHECK(info == 0, "cusolverMpNewtonSchulz failed with info = ", info);
 }
