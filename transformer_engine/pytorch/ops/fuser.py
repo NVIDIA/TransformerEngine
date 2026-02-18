@@ -519,6 +519,8 @@ def register_forward_fusion(
 
     The fusion function should have the following signature:
 
+    .. code-block:: python
+
         func(ops, *, recipe) -> updated ops
 
     Parameters
@@ -544,6 +546,8 @@ def register_backward_fusion(
     """Register function to perform operation fusion for backward pass.
 
     The fusion function should have the following signature:
+
+    .. code-block:: python
 
         func(ops, *, recipe) -> updated ops
 
