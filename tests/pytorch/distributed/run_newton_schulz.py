@@ -55,14 +55,11 @@ def main():
     # Ensure N is divisible by world_size
     assert N % world_size == 0, f"Matrix size {N} must be divisible by world_size {world_size}"
 
-    # Default quintic polynomial coefficients
-    coefficients = [
-        3069.0 / 1024.0,
-        -7175.0 / 1024.0,
-        9009.0 / 1024.0,
-        -6435.0 / 1024.0,
-        2835.0 / 2048.0,
-    ]
+    coefficients = [4.0848, -6.8946, 2.9270,
+                    3.9505, -6.3029, 2.6377,
+                    3.7418, -5.5913, 2.3037,
+                    2.8769,  -3.1427, 1.2046,
+                    2.8366,  -3.0525, 1.2012]
 
     # Create a random symmetric positive definite matrix on rank 0
     # A = Q @ diag(eigenvalues) @ Q^T with eigenvalues in (0, 1)
