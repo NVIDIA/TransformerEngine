@@ -40,10 +40,9 @@ namespace nvfp4_recipe {
  *          +------------------+
  *
  * 2) Partial Cast (`nvfp4_2d_partial_cast_kernel`)
- *    - Stage the BF16 tile into shared memory (same pattern as FP8).
- *    - For each 4-value group, pack BF16 values and call
- *      `ptx::mul_cvt_bf16_to_fp4_4x`, producing packed FP4 nibbles.
- *    - Uses direct BF16->FP4 conversion to match quantize_transpose kernel.
+ *    - Stage the tile into shared memory (same pattern as FP8).
+ *    - For each 4-value group, build float2 pairs and call
+ *      `ptx::mul_cvt_fp32_to_fp4_4x`, producing packed FP4 nibbles.
  *    - Compute a shard-local byte index and update only the owned nibble(s)
  *      using read-modify-write:
  *
@@ -125,9 +124,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 }
 
-template <bool kWidthAligned>
+template <typename IType, bool kWidthAligned>
 __global__ void __launch_bounds__(kThreadsPerBlock)
-    nvfp4_2d_partial_cast_kernel(const bf16 *input, uint8_t *output, const float *decode_scale_ptr,
+    nvfp4_2d_partial_cast_kernel(const IType *input, uint8_t *output, const float *decode_scale_ptr,
                                  const size_t scale_stride_h, const size_t scale_stride_w,
                                  const float *global_scale_ptr, const size_t h, const size_t w,
                                  const size_t start_offset, const size_t len) {
@@ -137,14 +136,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
   constexpr int kRowsPerWarp = (kTileDim + kNumWarps - 1) / kNumWarps;
 
-  // Use bf16 for shared memory to enable direct BF16->FP4 conversion.
-  // This matches the quantize_transpose kernel's NO_ACTIVATIONS_NOT_FP32_INPUT path.
-  __shared__ bf16 smem[kTileDim][kTileDim + kNumOutputElemsPerBank];
+  __shared__ float smem[kTileDim][kTileDim + kNumOutputElemsPerBank];
 
   const int tile_w = blockIdx.x;
   const int tile_h = blockIdx.y;
   const size_t shard_end = start_offset + len;
-  const bf16 *input_minus_offset = input - start_offset;
+  const IType *input_minus_offset = input - start_offset;
 
   float global_encode_scale = global_scale_ptr[0];
   if (global_encode_scale <= 0.f) {
@@ -175,8 +172,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       const size_t idx_in_input = static_cast<size_t>(h_in_input) * w + w_in_input;
       if (h_in_input < h && w_in_input < w && idx_in_input >= start_offset &&
           idx_in_input < shard_end) {
-        // Store input directly without casting to float
-        smem[h_in_smem][w_in_smem] = input_minus_offset[idx_in_input];
+        smem[h_in_smem][w_in_smem] = static_cast<float>(input_minus_offset[idx_in_input]);
         skip_store = false;
       }
     }
@@ -203,7 +199,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     }
     const int col_in_output = tile_w * kTileDim + col_in_smem;
 
-    bf16 vals[kNumOutputElemsPerBank];
+    float vals[kNumOutputElemsPerBank];
     bool mask[kNumOutputElemsPerBank];
     size_t elem_idx[kNumOutputElemsPerBank];
     bool any_valid = false;
@@ -216,9 +212,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       const bool in_shard = in_width && idx >= start_offset && idx < shard_end;
       mask[j] = in_shard;
       const bool in_tile = (col_in_smem + j) < kTileDim;
-      const bf16 zero_bf16 = __float2bfloat16(0.0f);
-      const bf16 tile_val = in_tile ? smem[row_in_smem][col_in_smem + j] : zero_bf16;
-      vals[j] = in_shard ? tile_val : zero_bf16;
+      const float tile_val =
+          in_tile ? smem[row_in_smem][col_in_smem + j] : 0.0f;
+      vals[j] = in_shard ? tile_val : 0.0f;
       any_valid |= in_shard;
     }
 
@@ -226,17 +222,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       continue;
     }
 
-    // Use direct BF16->FP4 conversion to match quantize_transpose kernel.
-    // This avoids the BF16->FP32->FP4 round-trip that causes numerical differences.
-    // Pack 4 BF16 values into uint64_t for mul_cvt_bf16_to_fp4_4x
-    uint64_t in_4x;
-    uint16_t *in_ptr = reinterpret_cast<uint16_t *>(&in_4x);
-    in_ptr[0] = reinterpret_cast<const uint16_t &>(vals[0]);
-    in_ptr[1] = reinterpret_cast<const uint16_t &>(vals[1]);
-    in_ptr[2] = reinterpret_cast<const uint16_t &>(vals[2]);
-    in_ptr[3] = reinterpret_cast<const uint16_t &>(vals[3]);
+    const float2 in01 = make_float2(vals[0], vals[1]);
+    const float2 in23 = make_float2(vals[2], vals[3]);
     const auto packed =
-        transformer_engine::ptx::mul_cvt_bf16_to_fp4_4x<false>(in_4x, scale_vec, 0);
+        transformer_engine::ptx::mul_cvt_fp32_to_fp4_4x<false>(in01, in23, scale_vec, 0);
     const uint16_t packed_bits = reinterpret_cast<const uint16_t &>(packed);
 
     for (int pair = 0; pair < 2; ++pair) {
@@ -307,8 +296,6 @@ void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
                            cudaStream_t stream) {
   NVTE_CHECK(block_len == 16, "NVFP4 2D supports 16x16 tiles only (block_len = 16).");
   NVTE_CHECK(out.dtype() == DType::kByte, "NVFP4 rowwise data must be uint8.");
-  NVTE_CHECK(inp.dtype() == DType::kBFloat16,
-             "NVFP4 partial cast requires BF16 input for direct BF16->FP4 conversion.");
 
   size_t len = inp.numel();
 
@@ -322,15 +309,17 @@ void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
   assert(blocks_y <= std::numeric_limits<unsigned int>::max());
   dim3 grid(blocks_x, blocks_y);
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      w % kTileDim == 0, kWidthAligned,
-      nvfp4_2d_partial_cast_kernel<kWidthAligned>
-          <<<grid, kThreadsPerBlock, 0, stream>>>(
-              reinterpret_cast<const bf16 *>(inp.data.dptr),
-              reinterpret_cast<uint8_t *>(out.data.dptr),
-              reinterpret_cast<const float *>(scale.data.dptr), scale_stride_h, scale_stride_w,
-              reinterpret_cast<const float *>(global_scale.data.dptr), h, w, start_offset,
-              len);)
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      inp.dtype(), inp_dtype,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          w % kTileDim == 0, kWidthAligned,
+          nvfp4_2d_partial_cast_kernel<inp_dtype, kWidthAligned>
+              <<<grid, kThreadsPerBlock, 0, stream>>>(
+                  reinterpret_cast<const inp_dtype *>(inp.data.dptr),
+                  reinterpret_cast<uint8_t *>(out.data.dptr),
+                  reinterpret_cast<const float *>(scale.data.dptr), scale_stride_h, scale_stride_w,
+                  reinterpret_cast<const float *>(global_scale.data.dptr), h, w, start_offset,
+                  len);))
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
