@@ -891,7 +891,7 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
     )
     optimizer = MiniZero_1([w for w in model.parameters()], 10.0, dp_group)
 
-    for i in range(100):
+    for i in range(500):
         for w_nvfp4, w in zip(model_nvfp4.parameters(), model.parameters()):
             w_nvfp4.main_grad.zero_()
             w.main_grad.zero_()
@@ -927,7 +927,6 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         optimizer_nvfp4.step()
         
         torch.testing.assert_close(loss_nvfp4, loss, atol=0, rtol=0)
-        print("iter:", i, "loss matched")   
 
 def run_parallel_tests() -> None:
     """Run parallel tests"""
