@@ -79,11 +79,11 @@ def moe_permute_index_map_forward(
 
 
 @moe_permute_index_map_forward.register_fake
-def _moe_permute_index_map_fake(
+def _moe_permute_index_map_fake(  # pylint: disable=unused-argument
     inp: torch.Tensor,
     index: torch.Tensor,
     num_out_tokens: int,
-    _max_token_num: int,
+    max_token_num: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for shape inference."""
     num_tokens = inp.shape[0]
@@ -115,11 +115,11 @@ def moe_permute_index_map_backward(
 
 
 @moe_permute_index_map_backward.register_fake
-def _moe_permute_index_map_backward_fake(
+def _moe_permute_index_map_backward_fake(  # pylint: disable=unused-argument
     grad_permuted_act: torch.Tensor,
-    _row_id_map: torch.Tensor,
+    row_id_map: torch.Tensor,
     num_tokens: int,
-    _topK: int,
+    topK: int,
 ) -> torch.Tensor:
     """Fake implementation for shape inference of backward."""
     return torch.empty(
@@ -139,7 +139,7 @@ def _moe_permute_index_map_setup_context(ctx, inputs, output):
     ctx.topK = index.size(1) if not ctx.empty_input else 1
 
 
-def _moe_permute_index_map_backward_wrapper(ctx, grad_permuted_act, _grad_row_id_map):
+def _moe_permute_index_map_backward_wrapper(ctx, grad_permuted_act, grad_row_id_map):  # pylint: disable=unused-argument
     """Backward pass wrapper that calls the custom backward op."""
     if ctx.empty_input:
         return grad_permuted_act, None, None, None
@@ -180,12 +180,12 @@ def moe_unpermute_index_map_forward(
 
 
 @moe_unpermute_index_map_forward.register_fake
-def _moe_unpermute_index_map_forward_fake(
+def _moe_unpermute_index_map_forward_fake(  # pylint: disable=unused-argument
     inp: torch.Tensor,
-    _row_id_map: torch.Tensor,
-    _probs: torch.Tensor,
+    row_id_map: torch.Tensor,
+    probs: torch.Tensor,
     num_tokens: int,
-    _topK: int,
+    topK: int,
 ) -> torch.Tensor:
     """Fake implementation for shape inference."""
     # Output shape: (num_tokens, hidden_size)
@@ -230,7 +230,7 @@ def _moe_unpermute_index_map_backward_fake(
     return act_grad, prob_grad
 
 
-def _moe_unpermute_index_map_setup_context(ctx, inputs, _output):
+def _moe_unpermute_index_map_setup_context(ctx, inputs, output):  # pylint: disable=unused-argument
     """Save context for backward pass."""
     inp, row_id_map, probs, _num_tokens, _topK = inputs
     ctx.empty_input = inp.size(0) == 0
@@ -381,12 +381,12 @@ def moe_permute_mask_map_forward(
 
 
 @moe_permute_mask_map_forward.register_fake
-def _moe_permute_mask_map_forward_fake(
+def _moe_permute_mask_map_forward_fake(  # pylint: disable=unused-argument
     inp: torch.Tensor,
     routing_map: torch.Tensor,
     num_out_tokens: int,
     probs: Optional[torch.Tensor],
-    _pad_offsets: Optional[torch.Tensor],
+    pad_offsets: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fake implementation for shape inference."""
     num_tokens = inp.shape[0]
@@ -431,11 +431,11 @@ def moe_permute_mask_map_backward(
 
 
 @moe_permute_mask_map_backward.register_fake
-def _moe_permute_mask_map_backward_fake(
+def _moe_permute_mask_map_backward_fake(  # pylint: disable=unused-argument
     permuted_act_grad: torch.Tensor,
     permuted_probs_grad: Optional[torch.Tensor],
-    _row_id_map: torch.Tensor,
-    _pad_offsets: Optional[torch.Tensor],
+    row_id_map: torch.Tensor,
+    pad_offsets: Optional[torch.Tensor],
     num_tokens: int,
     num_experts: int,
     hidden_size: int,
@@ -467,7 +467,7 @@ def _moe_permute_mask_map_setup_context(ctx, inputs, output):
     ctx.needs_probs_grad = probs is not None and probs.requires_grad
 
 
-def _moe_permute_mask_map_backward_wrapper(ctx, grad_output, _grad_row_id_map, grad_permuted_probs):
+def _moe_permute_mask_map_backward_wrapper(ctx, grad_output, grad_row_id_map, grad_permuted_probs):  # pylint: disable=unused-argument
     """Backward wrapper calling the custom backward op."""
     if ctx.empty_input:
         if ctx.needs_probs_grad:
@@ -544,14 +544,14 @@ def moe_unpermute_mask_map_forward(
 
 
 @moe_unpermute_mask_map_forward.register_fake
-def _moe_unpermute_mask_map_forward_fake(
+def _moe_unpermute_mask_map_forward_fake(  # pylint: disable=unused-argument
     inp: torch.Tensor,
-    _row_id_map: torch.Tensor,
-    _merging_probs: Optional[torch.Tensor],
+    row_id_map: torch.Tensor,
+    merging_probs: Optional[torch.Tensor],
     num_tokens: int,
-    _num_experts: int,
+    num_experts: int,
     hidden_size: int,
-    _pad_offsets: Optional[torch.Tensor],
+    pad_offsets: Optional[torch.Tensor],
 ) -> torch.Tensor:
     """Fake implementation for shape inference."""
     return torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device=inp.device)
@@ -585,12 +585,12 @@ def moe_unpermute_mask_map_backward_with_probs(
 
 
 @moe_unpermute_mask_map_backward_with_probs.register_fake
-def _moe_unpermute_mask_map_bwd_with_probs_fake(
+def _moe_unpermute_mask_map_bwd_with_probs_fake(  # pylint: disable=unused-argument
     unpermuted_act_grad: torch.Tensor,
-    _row_id_map: torch.Tensor,
-    _fwd_input: torch.Tensor,
+    row_id_map: torch.Tensor,
+    fwd_input: torch.Tensor,
     merging_probs: torch.Tensor,
-    _pad_offsets: Optional[torch.Tensor],
+    pad_offsets: Optional[torch.Tensor],
     num_tokens: int,
     num_experts: int,
     num_permuted_tokens: int,
@@ -705,12 +705,12 @@ def moe_unpermute_mask_map_backward_no_probs(
 
 
 @moe_unpermute_mask_map_backward_no_probs.register_fake
-def _moe_unpermute_mask_map_bwd_no_probs_fake(
+def _moe_unpermute_mask_map_bwd_no_probs_fake(  # pylint: disable=unused-argument
     unpermuted_act_grad: torch.Tensor,
-    _row_id_map: torch.Tensor,
-    _pad_offsets: Optional[torch.Tensor],
-    _num_tokens: int,
-    _num_experts: int,
+    row_id_map: torch.Tensor,
+    pad_offsets: Optional[torch.Tensor],
+    num_tokens: int,
+    num_experts: int,
     num_permuted_tokens: int,
     hidden_size: int,
 ) -> torch.Tensor:
@@ -722,7 +722,7 @@ def _moe_unpermute_mask_map_bwd_no_probs_fake(
     )
 
 
-def _moe_unpermute_mask_map_setup_context(ctx, inputs, _output):
+def _moe_unpermute_mask_map_setup_context(ctx, inputs, output):  # pylint: disable=unused-argument
     """Save context for backward pass."""
     inp, row_id_map, merging_probs, num_tokens, num_experts, hidden_size, pad_offsets = inputs
     ctx.empty_input = inp.size(0) == 0
@@ -1086,10 +1086,10 @@ def moe_chunk_sort_forward(
 
 
 @moe_chunk_sort_forward.register_fake
-def _moe_chunk_sort_forward_fake(
+def _moe_chunk_sort_forward_fake(  # pylint: disable=unused-argument
     inp: torch.Tensor,
-    _split_sizes: torch.Tensor,
-    _sorted_idxs: torch.Tensor,
+    split_sizes: torch.Tensor,
+    sorted_idxs: torch.Tensor,
     probs: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fake for shape inference."""
@@ -1146,10 +1146,10 @@ def moe_chunk_sort_backward(
 
 
 @moe_chunk_sort_backward.register_fake
-def _moe_chunk_sort_backward_fake(
+def _moe_chunk_sort_backward_fake(  # pylint: disable=unused-argument
     permuted_act_grad: torch.Tensor,
     permuted_probs_grad: Optional[torch.Tensor],
-    _row_id_map: torch.Tensor,
+    row_id_map: torch.Tensor,
     num_tokens: int,
     hidden_size: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
