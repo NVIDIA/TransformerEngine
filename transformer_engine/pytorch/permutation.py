@@ -139,7 +139,9 @@ def _moe_permute_index_map_setup_context(ctx, inputs, output):
     ctx.topK = index.size(1) if not ctx.empty_input else 1
 
 
-def _moe_permute_index_map_backward_wrapper(ctx, grad_permuted_act, grad_row_id_map):  # pylint: disable=unused-argument
+def _moe_permute_index_map_backward_wrapper(
+    ctx, grad_permuted_act, grad_row_id_map
+):  # pylint: disable=unused-argument
     """Backward pass wrapper that calls the custom backward op."""
     if ctx.empty_input:
         return grad_permuted_act, None, None, None
@@ -467,7 +469,9 @@ def _moe_permute_mask_map_setup_context(ctx, inputs, output):
     ctx.needs_probs_grad = probs is not None and probs.requires_grad
 
 
-def _moe_permute_mask_map_backward_wrapper(ctx, grad_output, grad_row_id_map, grad_permuted_probs):  # pylint: disable=unused-argument
+def _moe_permute_mask_map_backward_wrapper(
+    ctx, grad_output, grad_row_id_map, grad_permuted_probs
+):  # pylint: disable=unused-argument
     """Backward wrapper calling the custom backward op."""
     if ctx.empty_input:
         if ctx.needs_probs_grad:
