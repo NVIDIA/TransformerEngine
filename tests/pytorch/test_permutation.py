@@ -1285,9 +1285,7 @@ def _test_permutation_mask_map_fp8(
         lambda inp, rmap, n_out: te_permute(inp, rmap, num_out_tokens=n_out, map_type="mask"),
         use_torch_compile,
     )
-    permute_output, _ = _permute(
-        permute_fwd_input_fp8, routing_map, num_out_tokens
-    )
+    permute_output, _ = _permute(permute_fwd_input_fp8, routing_map, num_out_tokens)
     if recipe.float8_block_scaling():
         te_permute_output = permute_output._rowwise_data
         te_permute_scale_output = permute_output._rowwise_scale_inv.T.contiguous()
@@ -1936,7 +1934,7 @@ def test_permutation_mask_map_fp8(
         topK=topK,
         num_out_tokens=num_out_tokens,
         recipe=recipe,
-        use_torch_compile=False, # FP8 permutation is not yet supported under torch.compile
+        use_torch_compile=False,  # FP8 permutation is not yet supported under torch.compile
     )
 
 

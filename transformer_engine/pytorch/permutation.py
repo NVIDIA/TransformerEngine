@@ -1021,8 +1021,13 @@ def moe_unpermute(
         num_experts = (row_id_map.size(1) - 1) // 2 if row_id_map.dim() > 1 else 0
 
         return torch.ops.te_moe.unpermute_mask_map_fwd(
-            inp, row_id_map, merging_probs,
-            num_tokens, num_experts, hidden_size, pad_offsets,
+            inp,
+            row_id_map,
+            merging_probs,
+            num_tokens,
+            num_experts,
+            hidden_size,
+            pad_offsets,
         )
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
