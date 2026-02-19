@@ -853,8 +853,8 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
     rank = dist.get_rank(dp_group)
     world_size = dist.get_world_size(dp_group)
 
-    torch.manual_seed(12345)
-    torch.cuda.manual_seed(12345)
+    torch.manual_seed(1234)
+    torch.cuda.manual_seed(1234)
 
     mock_groups = [dist.new_group(ranks=[i]) for i in range(world_size)]
     mock_group = mock_groups[rank]
@@ -1098,7 +1098,7 @@ def test_nvfp4_partial_cast_matches_full() -> None:
     if not available:
         pytest.skip(reason)
 
-    torch.manual_seed(77777)
+    torch.manual_seed(1234)
     device = torch.device("cuda")
     # Shape must be divisible by WORLD_SIZE for even splitting
     # Also ensure dimensions are multiples of 16 for NVFP4 tiles
@@ -1193,7 +1193,7 @@ def test_single_gpu_partial_cast_vs_full():
     from transformer_engine.pytorch.tensor.utils import cast_master_weights_to_nvfp4
     import transformer_engine_torch as tex
     
-    torch.manual_seed(77777)
+    torch.manual_seed(1234)
     device = torch.device("cuda")
     
     # Test with same shape as the optimizer test
