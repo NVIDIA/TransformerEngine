@@ -81,6 +81,9 @@ pybind11::dict Registrations() {
       pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
       pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
 
+  dict["te_inspect_ffi"] =
+      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
+
   return dict;
 }
 
@@ -150,6 +153,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
       .value("GELU", NVTE_Activation_Type::GELU)
       .value("GEGLU", NVTE_Activation_Type::GEGLU)
+      .value("GLU", NVTE_Activation_Type::GLU)
       .value("SILU", NVTE_Activation_Type::SILU)
       .value("SWIGLU", NVTE_Activation_Type::SWIGLU)
       .value("RELU", NVTE_Activation_Type::RELU)

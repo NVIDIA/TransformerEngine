@@ -153,6 +153,7 @@ def test_dot_product_attention(
 
     if config.window_size == (-1, -1) and swa:
         config.window_size = [2, 2]
+
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
     qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
     if qkv_format == "thd" and "padding" not in config.attn_mask_type:
@@ -161,7 +162,16 @@ def test_dot_product_attention(
         )
 
     # Get backends
+    # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
+    # For all other shapes test fwd+bwd
     is_training = True
+    # TODO(KshitijLakhani): Set is_training to True for all cases once cuDNN supports dbias for 111s.
+    if config.bias_shape == "111s":
+        is_training = False
+        logging.info(
+            "Setting is_training to False as cuDNN does not support dbias for"
+            f" {config.bias_shape=} "
+        )
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -171,6 +181,7 @@ def test_dot_product_attention(
         deterministic=_deterministic,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+
     if not fused_attn_supported:
         is_training = False
         available_backends, _, fused_attn_backends = get_available_attention_backends(
@@ -429,6 +440,15 @@ def test_dpa_softmax(dtype, model_configs, model):
     )
 
 
+@pytest.mark.skipif(get_cudnn_version() < (9, 18, 0), reason="cuDNN 9.18.0+ is required.")
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("model_configs", [model_configs_softmax])
+@pytest.mark.parametrize("model", model_configs_softmax.keys())
+def test_dpa_softmax_thd(dtype, model_configs, model):
+    """Test DotProductAttention module with different softmax types"""
+    test_dot_product_attention(dtype, model_configs, model, True, True, "thd_thd_thd", False, False)
+
+
 model_configs_mla = {
     # test: ModelConfig(b, sq, hq, dqk)
     "mla_1_0": ModelConfig(8, 128, 16, 64, head_dim_v=128),
@@ -625,7 +645,8 @@ model_configs_bias_shapes = {
     "bias_1_1": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="1hss"),
     "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="b1ss"),
     "bias_1_3": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"),
-    "bias_1_4": ModelConfig(
+    "bias_1_4": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="111s"),
+    "bias_1_5": ModelConfig(
         4,
         2048,
         24,
@@ -635,7 +656,7 @@ model_configs_bias_shapes = {
         bias_shape="1hss",
         alibi_type="custom",
     ),
-    "bias_1_5": ModelConfig(
+    "bias_1_6": ModelConfig(
         2,
         2048,
         24,
@@ -692,9 +713,10 @@ model_configs_swa = {
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_swa])
 @pytest.mark.parametrize("model", model_configs_swa.keys())
-def test_dpa_sliding_window(dtype, model_configs, model):
+@pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "sbhd_sbhd_sbhd"])
+def test_dpa_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with sliding window attention"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, True, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, True, False)
 
 
 model_configs_alibi_slopes = {
@@ -1131,10 +1153,16 @@ def _run_dot_product_attention(
         bias = None
     if config.attn_bias_type == "post_scale_bias":
         shape = "_".join(config.bias_shape)
+        # For 1hss, 11ss, b1ss, bhss
+        shape_cache = shape
         shape = shape.replace("_s_s", "_sq_skv")
+        # For 111s
+        if shape == shape_cache:
+            shape = shape.replace("_1_s", "_1_skv")
         tensor_shape = [dim_to_num[j] for j in shape.split("_")]
         bias = torch.randn(tensor_shape, dtype=dtype, device="cuda")
-        if config.bias_shape != "1hss":
+        # For 111s, dbias calculation is not supported as of cuDNN 9.18
+        if config.bias_shape == "111s":
             bias.requires_grad = False
 
     # Create RNG
@@ -2790,7 +2818,7 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
         cu_seqlens,
         max_s,
     ) -> torch.Tensor:
-        with self.prepare_forward(inp, num_gemms=3) as inp:
+        with self.prepare_forward_ctx(inp, num_gemms=3) as inp:
             out = _custom_mha_fp8.apply(
                 inp,
                 self.qkv_weight,
