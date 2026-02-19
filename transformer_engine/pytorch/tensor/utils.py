@@ -2,9 +2,10 @@
 #
 # See LICENSE for license information.
 
-"""Helper functions for using fp8 tensors as weights"""
+"""Helper functions for using fp8/nvfp4 tensors as weights"""
 
 from typing import Optional, Union, List
+import math
 import torch
 
 import transformer_engine_torch as tex
@@ -16,10 +17,12 @@ from transformer_engine_torch import (
 
 from ..quantized_tensor import QuantizedTensor, Quantizer, QuantizedTensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
+from .nvfp4_tensor import NVFP4Tensor, NVFP4Quantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 from ..utils import is_non_tn_fp8_gemm_supported
+from ..constants import NVFP4_BLOCK_SCALING_SIZE
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
@@ -45,6 +48,12 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         new_raw_data.detach().copy_(old_raw_data)
         tensor._rowwise_data = new_raw_data
         del old_raw_data
+    elif isinstance(tensor, NVFP4Tensor):
+        old_rowwise = tensor._rowwise_data
+        assert old_rowwise.dtype == new_raw_data.dtype, "The data types of raw data don't match"
+        new_rowwise_data.detach().copy_(old_rowwise)
+        tensor._rowwise_data = new_rowwise_data
+        del old_rowwise
     elif isinstance(tensor, MXFP8Tensor):
         raise NotImplementedError("replace_raw_data for MXFP8Tensor is not supported yet")
     else:
@@ -153,6 +162,77 @@ def cast_master_weights_to_fp8(
         _cast_master_weights_to_fp8_blockwise_scaling(blockwise_scaling_params, *extra_args)
     if len(mxfp8_scaling_params) > 0:
         _cast_master_weights_to_fp8_mxfp8_scaling(mxfp8_scaling_params, *extra_args)
+
+
+def cast_master_weights_to_nvfp4(
+    model_weights,
+    master_weights,
+    start_offsets,
+    group,
+    fsdp_shard_model_weights=None,
+    manual_post_all_gather_processing=False,
+):
+    """Helper to cast master weights to NVFP4 primary weights."""
+
+    nvfp4_params = []
+    if fsdp_shard_model_weights is None:
+        use_fsdp_shard_model_weights = False
+        fsdp_shard_model_weights = [None] * len(model_weights)
+    else:
+        use_fsdp_shard_model_weights = True
+
+    # Batch convert master_weights to model dtype (single kernel instead of N kernels)
+    # All NVFP4 model_weights should have the same dtype (BF16)
+    if len(model_weights) > 0:
+        target_dtype = model_weights[0].dtype
+
+        # Collect non-None master_weights and their indices
+        non_none_indices = []
+        non_none_weights = []
+        sizes = []
+        for i, mw in enumerate(master_weights):
+            if mw is not None:
+                non_none_indices.append(i)
+                non_none_weights.append(mw.view(-1))
+                sizes.append(mw.numel())
+
+        if len(non_none_weights) > 0 and non_none_weights[0].dtype != target_dtype:
+            # Concatenate, convert once, then split
+            concatenated = torch.cat(non_none_weights)
+            converted = concatenated.to(target_dtype)
+            split_weights = torch.split(converted, sizes)
+
+            # Rebuild master_weights list with converted tensors
+            converted_master_weights = list(master_weights)
+            for idx, split_w, orig_mw in zip(
+                non_none_indices, split_weights, [master_weights[i] for i in non_none_indices]
+            ):
+                converted_master_weights[idx] = split_w.view(orig_mw.shape)
+            master_weights = converted_master_weights
+
+    for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
+        model_weights, master_weights, start_offsets, fsdp_shard_model_weights
+    ):
+        if hasattr(model_weight, "clear_high_precision_init_val"):
+            model_weight.clear_high_precision_init_val()
+
+        quantizer = model_weight._get_quantizer()
+        if isinstance(quantizer, NVFP4Quantizer):
+            nvfp4_params.append(
+                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+            )
+        else:
+            raise ValueError(
+                "cast_master_weights_to_nvfp4 only supports NVFP4 tensors, got"
+                f" {type(model_weight)}"
+            )
+    if len(nvfp4_params) > 0:
+        _cast_master_weights_to_nvfp4_2d(
+            nvfp4_params,
+            group,
+            use_fsdp_shard_model_weights=use_fsdp_shard_model_weights,
+            manual_post_all_gather_processing=manual_post_all_gather_processing,
+        )
 
 
 def _cast_master_weights_to_fp8_delayed_scaling(
@@ -474,6 +554,220 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         )
 
 
+def _cast_master_weights_to_nvfp4_2d(
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
+):
+    r"""Helper function to cast master weights to FP8 primary weights for blockwise scaling.
+
+    Parameters
+    ----------
+    params : List of tuple, each tuple contains a model weight, a master weight, and an offset
+             indicating the starting index of the master weight in the model weight.
+    group  : The distributed group to do amax reduction. Typically it's the data parallel
+             group.
+    use_fsdp_shard_model_weights : bool, if True, it means that the model weights are sharded.
+    """
+
+    device = params[0][0].device
+    block_len = NVFP4_BLOCK_SCALING_SIZE
+
+    cu_amax_sizes = [0]
+    tile_shapes: List[tuple[int, int]] = []
+    row_sizes: List[int] = []
+    tile_widths: List[int] = []
+    scale_targets: List[torch.Tensor] = []
+    amax_targets: List[Optional[torch.Tensor]] = []
+    for model_weight, _, _, _ in params:
+        quantizer = model_weight._get_quantizer()
+        assert isinstance(quantizer, NVFP4Quantizer)
+        assert quantizer.with_2d_quantization, "NVFP4 2D quantization must be enabled."
+        assert len(model_weight.shape) == 2
+        h, w = model_weight.shape
+        tile_h = (h + block_len - 1) // block_len
+        tile_w = (w + block_len - 1) // block_len
+        tile_shapes.append((tile_h, tile_w))
+        row_sizes.append(h)
+        tile_widths.append(tile_w)
+        scale_targets.append(model_weight._rowwise_scale_inv)
+        amax_targets.append(model_weight._amax_rowwise)
+        num_amaxes = tile_h * tile_w
+        cu_amax_sizes.append(cu_amax_sizes[-1] + num_amaxes)
+
+    packed_amaxes = torch.zeros(cu_amax_sizes[-1], dtype=torch.float32, device=device)
+    packed_scales = torch.zeros(cu_amax_sizes[-1], dtype=torch.float32, device=device)
+
+    amaxes: List[torch.Tensor] = []
+    scales: List[torch.Tensor] = []
+    global_amaxes = torch.zeros(len(params), dtype=torch.float32, device=device)
+    global_amax_views: List[torch.Tensor] = [global_amaxes[i : i + 1] for i in range(len(params))]
+
+    # Collect tensors for batched multi-tensor amax computation
+    master_weight_list: List[torch.Tensor] = []
+    partial_amax_list: List[torch.Tensor] = []
+    global_amax_list: List[torch.Tensor] = []
+    h_list: List[int] = []
+    w_list: List[int] = []
+    start_offset_list: List[int] = []
+
+    for i, (model_weight, master_weight, start_offset, _) in enumerate(params):
+        scale_shape = tile_shapes[i]
+        amax = packed_amaxes[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].reshape(scale_shape)
+        scale = packed_scales[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].reshape(scale_shape)
+        global_amax_view = global_amax_views[i]
+
+        assert model_weight._rowwise_scale_inv is not None
+
+        amaxes.append(amax)
+        scales.append(scale)
+
+        if master_weight is not None and master_weight.numel() > 0:
+            assert len(model_weight.shape) == 2
+            h, w = model_weight.shape
+            # Collect for batched processing
+            master_weight_list.append(master_weight)
+            partial_amax_list.append(amax)
+            global_amax_list.append(global_amax_view)
+            h_list.append(h)
+            w_list.append(w)
+            start_offset_list.append(start_offset)
+
+    # Batched multi-tensor call for partial and global amax computation
+    if master_weight_list:
+        tex.nvfp4_multi_tensor_compute_partial_amax(
+            master_weight_list,
+            partial_amax_list,
+            global_amax_list,
+            h_list,
+            w_list,
+            start_offset_list,
+            block_len,
+        )
+
+    if packed_amaxes.numel() > 0:
+        torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
+
+    if global_amaxes.numel() > 0:
+        torch.distributed.all_reduce(global_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
+
+    # Use GPU kernel to compute global encode scales from global amaxes
+    # This replaces multiple Python tensor operations with a single kernel
+    global_scale_tensor = torch.empty_like(global_amaxes)
+
+    tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor)
+    global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
+
+    # Collect tensors for batched fused scale kernel
+    fused_scale_block_amax_list: List[torch.Tensor] = []
+    fused_scale_global_amax_list: List[torch.Tensor] = []
+    fused_scale_per_block_scale_list: List[torch.Tensor] = []
+    fused_scale_target_scale_list: List[torch.Tensor] = []
+    fused_scale_target_amax_list: List[torch.Tensor] = []
+    fused_scale_tile_rows_list: List[int] = []
+    fused_scale_tile_cols_list: List[int] = []
+    fused_scale_rows_padded_list: List[int] = []
+
+    # Collect tensors for batched partial cast kernel
+    partial_cast_inp_list: List[torch.Tensor] = []
+    partial_cast_out_list: List[torch.Tensor] = []
+    partial_cast_scale_list: List[torch.Tensor] = []
+    partial_cast_global_scale_list: List[torch.Tensor] = []
+    partial_cast_h_list: List[int] = []
+    partial_cast_w_list: List[int] = []
+    partial_cast_start_offset_list: List[int] = []
+
+    # First pass: collect all tensors and update usage
+    zipped_meta = zip(
+        tile_shapes,
+        row_sizes,
+        tile_widths,
+        scale_targets,
+        amax_targets,
+        params,
+        amaxes,
+        scales,
+        global_scale_views,
+    )
+    for idx, (
+        tile_shape,
+        rows,
+        tile_col_cnt,
+        target_scale,
+        target_amax,
+        (model_weight, master_weight, start_offset, model_weight_fragment),
+        block_amax,
+        per_block_decode_scale,
+        global_scale,
+    ) in enumerate(zipped_meta):
+
+        if not manual_post_all_gather_processing:
+            # Reset transpose cache for all model weights.
+            # We cannot create transpose cache here because users (like megatron) may want to
+            # overlap the all-gather of model weights and forward process, so the model weight is
+            # not updated currently.
+            model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
+
+        tile_rows = tile_shape[0]
+        rows_padded = target_scale.shape[0]
+        global_amax_view = global_amaxes[idx : idx + 1]
+
+        # Collect for fused scale kernel (only if target_amax is not None)
+        if target_amax is not None:
+            fused_scale_block_amax_list.append(block_amax)
+            fused_scale_global_amax_list.append(global_amax_view)
+            fused_scale_per_block_scale_list.append(per_block_decode_scale)
+            fused_scale_target_scale_list.append(target_scale)
+            fused_scale_target_amax_list.append(target_amax)
+            fused_scale_tile_rows_list.append(tile_rows)
+            fused_scale_tile_cols_list.append(tile_col_cnt)
+            fused_scale_rows_padded_list.append(rows_padded)
+
+        # Collect for partial cast kernel (only for layers owned by this rank)
+        if master_weight is not None and master_weight.numel() > 0:
+            end_offset = start_offset + master_weight.numel()
+            if not use_fsdp_shard_model_weights:
+                rowwise_bytes = model_weight._rowwise_data.view(-1)
+                byte_start = start_offset // 2
+                byte_end = (end_offset + 1) // 2
+                model_weight_fragment = rowwise_bytes[byte_start:byte_end]
+            assert len(model_weight.shape) == 2
+            h, w = model_weight.shape
+
+            partial_cast_inp_list.append(master_weight)
+            partial_cast_out_list.append(model_weight_fragment)
+            partial_cast_scale_list.append(per_block_decode_scale)
+            partial_cast_global_scale_list.append(global_scale)
+            partial_cast_h_list.append(h)
+            partial_cast_w_list.append(w)
+            partial_cast_start_offset_list.append(start_offset)
+
+    # Batched multi-tensor call for fused scale
+    if fused_scale_block_amax_list:
+        tex.nvfp4_multi_tensor_fused_scale(
+            fused_scale_block_amax_list,
+            fused_scale_global_amax_list,
+            fused_scale_per_block_scale_list,
+            fused_scale_target_scale_list,
+            fused_scale_target_amax_list,
+            fused_scale_tile_rows_list,
+            fused_scale_tile_cols_list,
+            fused_scale_rows_padded_list,
+            block_len,
+        )
+
+    # Batched multi-tensor call for partial cast
+    if partial_cast_inp_list:
+        tex.nvfp4_multi_tensor_2d_partial_cast(
+            partial_cast_inp_list,
+            partial_cast_out_list,
+            partial_cast_scale_list,
+            partial_cast_global_scale_list,
+            partial_cast_h_list,
+            partial_cast_w_list,
+            partial_cast_start_offset_list,
+            block_len,
+        )
+
+
 def _cast_master_weights_to_fp8_mxfp8_scaling(
     params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):  # pylint: disable=unused-argument
@@ -605,9 +899,15 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
     - Float8Tensor: may need to create a transposed view to match backend GEMM.
     - Float8BlockwiseQTensor: create column-wise storage.
     - Plain pytorch tensor: noop.
+
+    For NVFP4 tensors, uses batched multi-tensor processing to reduce CPU overhead.
     """
     if not isinstance(model_weights, list):
         model_weights = [model_weights]
+
+    # Collect NVFP4 tensors for batched processing
+    nvfp4_tensors = []
+
     for model_weight in model_weights:
         if isinstance(model_weight, Float8Tensor):
             # Delayed scaling and per-tensor current scaling: if backend does not support
@@ -617,11 +917,93 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
         elif isinstance(model_weight, Float8BlockwiseQTensor):
             # Blockwise scaling: create column-wise storage.
             model_weight._create_columnwise()
+        elif isinstance(model_weight, NVFP4Tensor):
+            # Collect for batched processing
+            nvfp4_tensors.append(model_weight)
         elif isinstance(model_weight, MXFP8Tensor):
             # MXFP8 scaling: no need to do anything.
             pass
         elif isinstance(model_weight, QuantizedTensor):
             raise ValueError(f"post_processing for {type(model_weight)} is not supported")
+
+    # Batch process all NVFP4 tensors with multi-tensor approach
+    if nvfp4_tensors:
+        _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors)
+
+
+def _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors: List[NVFP4Tensor]):
+    """
+    Batched columnwise creation for multiple NVFP4 tensors.
+    Reduces CPU overhead by collecting all tensor metadata and dispatching to C++.
+    """
+    TILE_SIZE = 16
+
+    # Prepare tensor lists for batched C++ call
+    rowwise_data_list = []
+    columnwise_data_list = []
+    rowwise_scale_inv_list = []
+    columnwise_scale_inv_list = []
+    M_list = []
+    K_list = []
+
+    for tensor in nvfp4_tensors:
+        rowwise_data = tensor._rowwise_data
+        if not rowwise_data.is_contiguous():
+            rowwise_data = rowwise_data.contiguous()
+            tensor._rowwise_data = rowwise_data
+
+        logical_shape = tensor.size()
+        M, K = logical_shape[0], logical_shape[-1]
+        M_tiles = (M + TILE_SIZE - 1) // TILE_SIZE
+        K_tiles = (K + TILE_SIZE - 1) // TILE_SIZE
+
+        # Allocate columnwise_data if needed
+        if tensor._columnwise_data is None:
+            # Output shape: [K, M/2] packed bytes
+            columnwise_data = torch.empty(
+                (K, M // 2),
+                dtype=torch.uint8,
+                device=rowwise_data.device,
+            )
+            tensor._columnwise_data = columnwise_data
+        else:
+            columnwise_data = tensor._columnwise_data
+
+        # Allocate columnwise_scale_inv if needed
+        if tensor._columnwise_scale_inv is None:
+            assert tensor._quantizer is not None
+            columnwise_scale_inv_shape = tensor._quantizer.get_scale_shape(logical_shape, True)
+            columnwise_scale_inv = torch.empty(
+                columnwise_scale_inv_shape,
+                dtype=tensor._rowwise_scale_inv.dtype,
+                device=tensor._rowwise_scale_inv.device,
+            )
+            tensor._columnwise_scale_inv = columnwise_scale_inv
+        else:
+            columnwise_scale_inv = tensor._columnwise_scale_inv
+
+        rowwise_data_list.append(rowwise_data)
+        columnwise_data_list.append(columnwise_data)
+        rowwise_scale_inv_list.append(tensor._rowwise_scale_inv)
+        columnwise_scale_inv_list.append(columnwise_scale_inv)
+        M_list.append(M)
+        K_list.append(K)
+
+        # Copy amax if needed
+        if tensor._amax_columnwise is None and tensor._amax_rowwise is not None:
+            tensor._amax_columnwise = tensor._amax_rowwise.clone()
+        elif tensor._amax_rowwise is not None:
+            tensor._amax_columnwise.copy_(tensor._amax_rowwise)
+
+    # Dispatch to C++ multi-tensor kernel
+    tex.nvfp4_multi_tensor_create_columnwise(
+        rowwise_data_list,
+        columnwise_data_list,
+        rowwise_scale_inv_list,
+        columnwise_scale_inv_list,
+        M_list,
+        K_list,
+    )
 
 
 def is_custom(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
