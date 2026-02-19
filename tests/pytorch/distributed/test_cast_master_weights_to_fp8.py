@@ -225,7 +225,10 @@ class MiniZero_1:
             for idx, (weight, storage_offset, storage_size) in enumerate(
                 zip(self.weights, self.storage_offsets[:-1], self.storage_sizes)
             ):
-                if storage_offset >= storage_rank_end or (storage_offset + storage_size) <= storage_rank_start:
+                if (
+                    storage_offset >= storage_rank_end
+                    or (storage_offset + storage_size) <= storage_rank_start
+                ):
                     continue
                 overlap_start = max(storage_rank_start, storage_offset)
                 overlap_end = min(storage_rank_end, storage_offset + storage_size)
@@ -867,14 +870,14 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
         enabled=True, recipe=nvfp4_recipe, preserve_high_precision_init_val=True
     ):
         model_nvfp4 = nn.Sequential(
-            te.Linear(128, 256+64, **linear_kwargs),
-            te.Linear(256+64, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256 + 64, **linear_kwargs),
+            te.Linear(256 + 64, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
     # Create model with bf16 weights
     model = nn.Sequential(
-        te.Linear(128, 256+64, **linear_kwargs),
-        te.Linear(256+64, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256 + 64, **linear_kwargs),
+        te.Linear(256 + 64, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -925,8 +928,9 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
 
         optimizer.step()
         optimizer_nvfp4.step()
-        
+
         torch.testing.assert_close(loss_nvfp4, loss, atol=0, rtol=0)
+
 
 def run_parallel_tests() -> None:
     """Run parallel tests"""
@@ -1005,9 +1009,7 @@ def main() -> None:
         run_parallel_tests()
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="NVFP4 transpose test requires CUDA."
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 transpose test requires CUDA.")
 def test_nvfp4_transpose_kernel() -> None:
     """Test that nvfp4_transpose kernel produces bitwise identical results to reference."""
     available, reason = is_nvfp4_available(return_reason=True)
@@ -1027,10 +1029,16 @@ def test_nvfp4_transpose_kernel() -> None:
     )
     reference_tensor = quantizer_with_colwise(master_weight.to(torch.bfloat16))
     assert reference_tensor._columnwise_data is not None, "Reference should have columnwise data"
-    assert reference_tensor._columnwise_scale_inv is not None, "Reference should have columnwise scale_inv"
+    assert (
+        reference_tensor._columnwise_scale_inv is not None
+    ), "Reference should have columnwise scale_inv"
     reference_columnwise_data = reference_tensor._columnwise_data.detach().clone()
     reference_columnwise_scale_inv = reference_tensor._columnwise_scale_inv.detach().clone()
-    reference_columnwise_amax = reference_tensor._amax_columnwise.detach().clone() if reference_tensor._amax_columnwise is not None else None
+    reference_columnwise_amax = (
+        reference_tensor._amax_columnwise.detach().clone()
+        if reference_tensor._amax_columnwise is not None
+        else None
+    )
 
     # Create tensor with only rowwise data, then call _create_columnwise()
     quantizer_rowwise_only = NVFP4Quantizer(
@@ -1041,8 +1049,12 @@ def test_nvfp4_transpose_kernel() -> None:
 
     # Now call _create_columnwise() which uses our nvfp4_transpose kernel
     test_tensor.update_usage(rowwise_usage=True, columnwise_usage=True)
-    assert test_tensor._columnwise_data is not None, "Test tensor should have columnwise data after _create_columnwise()"
-    assert test_tensor._columnwise_scale_inv is not None, "Test tensor should have columnwise scale_inv after _create_columnwise()"
+    assert (
+        test_tensor._columnwise_data is not None
+    ), "Test tensor should have columnwise data after _create_columnwise()"
+    assert (
+        test_tensor._columnwise_scale_inv is not None
+    ), "Test tensor should have columnwise scale_inv after _create_columnwise()"
 
     # Compare columnwise data - should be bitwise identical
     torch.testing.assert_close(
@@ -1052,7 +1064,7 @@ def test_nvfp4_transpose_kernel() -> None:
         rtol=0,
         msg="NVFP4 transpose kernel produced different columnwise data than reference!",
     )
-    
+
     torch.testing.assert_close(
         test_tensor._columnwise_scale_inv,
         reference_columnwise_scale_inv,
@@ -1069,9 +1081,8 @@ def test_nvfp4_transpose_kernel() -> None:
         msg="NVFP4 _create_columnwise produced different columnwise amax than reference!",
     )
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="NVFP4 partial-cast test requires CUDA."
-)
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 partial-cast test requires CUDA.")
 def test_nvfp4_partial_cast_matches_full() -> None:
     """Test multi-GPU partial cast: split master weight, partial cast on each rank, all-gather, compare."""
     WORLD_RANK = int(os.getenv("RANK", "0"))
@@ -1140,17 +1151,17 @@ def test_nvfp4_partial_cast_matches_full() -> None:
     # Each rank has the full tensor but only its shard is filled
     # We need to all-gather the shards
     rowwise_data_flat = nvfp4_tensor._rowwise_data.view(-1)
-    
+
     # For NVFP4, 2 elements are packed per byte, so byte shard size is shard_size // 2
     byte_shard_size = shard_size // 2
     byte_start = WORLD_RANK * byte_shard_size
     byte_end = byte_start + byte_shard_size
     my_shard_bytes = rowwise_data_flat[byte_start:byte_end].contiguous()
-    
+
     # Gather all shards
     gathered_shards = [torch.empty_like(my_shard_bytes) for _ in range(WORLD_SIZE)]
     dist.all_gather(gathered_shards, my_shard_bytes, group=dp_group)
-    
+
     # Reconstruct the full rowwise data
     gathered_data = torch.cat(gathered_shards, dim=0).view(reference_data.shape)
 
@@ -1181,6 +1192,7 @@ def test_nvfp4_partial_cast_matches_full() -> None:
         msg=f"[Rank {WORLD_RANK}] Amax does not match reference!",
     )
 
+
 def test_single_gpu_partial_cast_vs_full():
     """
     Single GPU test: compare cast_master_weights_to_nvfp4 (offset=0) vs quantizer().
@@ -1191,23 +1203,23 @@ def test_single_gpu_partial_cast_vs_full():
     from transformer_engine.pytorch.tensor import NVFP4Quantizer
     from transformer_engine.pytorch.tensor.utils import cast_master_weights_to_nvfp4
     import transformer_engine_torch as tex
-    
+
     torch.manual_seed(1234)
     device = torch.device("cuda")
-    
+
     # Test with same shape as the optimizer test
     shape = (2048, 2048)
-    
+
     # Create BF16 master weight
     master_weight = torch.randn(shape, dtype=torch.bfloat16, device=device)
-    
+
     # === Reference: Use NVFP4Quantizer directly ===
     quantizer = NVFP4Quantizer(rowwise=True, columnwise=False, with_2d_quantization=True)
     ref = quantizer(master_weight)
     ref_data = ref._rowwise_data.clone()
     ref_scale = ref._rowwise_scale_inv.clone()
     ref_amax = ref._amax_rowwise.clone()
-    
+
     # === Test: Use cast_master_weights_to_nvfp4 with offset=0 (full tensor) ===
     # Create empty NVFP4 tensor
     test_tensor = quantizer.make_empty(shape, dtype=torch.bfloat16, device=device)
@@ -1215,30 +1227,31 @@ def test_single_gpu_partial_cast_vs_full():
     test_tensor._rowwise_scale_inv.zero_()
     if test_tensor._amax_rowwise is not None:
         test_tensor._amax_rowwise.zero_()
-    
+
     # Create a mock distributed group for single GPU
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl", init_method="env://", rank=0, world_size=1)
     mock_group = dist.new_group(ranks=[0])
-    
+
     cast_master_weights_to_nvfp4(
         [test_tensor],
         [master_weight.view(-1)],  # Flatten as expected
         [0],  # offset=0 means full tensor
         mock_group,
     )
-    
+
     # Compare amax
     amax_match = torch.equal(test_tensor._amax_rowwise, ref_amax)
-    
+
     # Compare scale
     scale_match = torch.equal(test_tensor._rowwise_scale_inv, ref_scale)
-    
+
     # Compare data
     data_match = torch.equal(test_tensor._rowwise_data, ref_data)
 
+
 if __name__ == "__main__":
     main()
-    #test_nvfp4_transpose_kernel()
-    #test_single_gpu_partial_cast_vs_full()
-    #test_nvfp4_partial_cast_matches_full()
+    # test_nvfp4_transpose_kernel()
+    # test_single_gpu_partial_cast_vs_full()
+    # test_nvfp4_partial_cast_matches_full()

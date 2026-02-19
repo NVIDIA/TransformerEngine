@@ -327,8 +327,7 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
  */
 void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, size_t h, size_t w,
                                         size_t amax_stride_h, size_t amax_stride_w,
-                                        size_t start_offset, size_t block_len,
-                                        cudaStream_t stream);
+                                        size_t start_offset, size_t block_len, cudaStream_t stream);
 
 /*! \brief Cast a partial shard of a tensor to NVFP4 using 2D tile-based quantization.
  *
@@ -376,8 +375,8 @@ void nvte_nvfp4_transpose(const NVTETensor input, NVTETensor output, cudaStream_
  *  \param[in]     K_tiles     Number of tiles in K dimension.
  *  \param[in]     stream      CUDA stream.
  */
-void nvte_nvfp4_scale_transpose(const NVTETensor input, NVTETensor output,
-                                size_t M_tiles, size_t K_tiles, cudaStream_t stream);
+void nvte_nvfp4_scale_transpose(const NVTETensor input, NVTETensor output, size_t M_tiles,
+                                size_t K_tiles, cudaStream_t stream);
 
 /*! \brief Expand tile-level scales to row-level scales and convert to FP8 E4M3, used in partial cast.
  *
@@ -391,14 +390,13 @@ void nvte_nvfp4_scale_transpose(const NVTETensor input, NVTETensor output,
  *  \param[in]     block_len   Block length (typically 16 for NVFP4).
  *  \param[in]     stream      CUDA stream.
  */
-void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output,
-                                    size_t tile_rows, size_t tile_cols,
-                                    size_t rows_padded, size_t block_len,
+void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, size_t tile_rows,
+                                    size_t tile_cols, size_t rows_padded, size_t block_len,
                                     cudaStream_t stream);
 
 /*! \brief Compute per-block decode scale from block amax and global amax.
  *
- * Computes: 
+ * Computes:
  *   global_scale = (fp8_max * fp4_max) / global_amax = 2688 / global_amax
  *   per_block_decode_scale = block_amax / fp4_max * global_scale
  *
@@ -434,10 +432,8 @@ void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor 
  */
 void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global_amax,
                             NVTETensor per_block_scale, NVTETensor target_scale,
-                            NVTETensor target_amax,
-                            size_t tile_rows, size_t tile_cols,
-                            size_t rows_padded, size_t block_len,
-                            cudaStream_t stream);
+                            NVTETensor target_amax, size_t tile_rows, size_t tile_cols,
+                            size_t rows_padded, size_t block_len, cudaStream_t stream);
 
 /*! \brief Compute global encode scale from global amax.
  *

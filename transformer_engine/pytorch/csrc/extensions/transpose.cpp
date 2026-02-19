@@ -5,11 +5,10 @@
  ************************************************************************/
 
 #include <pybind.h>
+#include <transformer_engine/recipe.h>
 
 #include <optional>
 #include <vector>
-
-#include <transformer_engine/recipe.h>
 
 #include "../extensions.h"
 #include "pybind.h"
@@ -76,9 +75,9 @@ at::Tensor nvfp4_transpose(at::Tensor input, std::optional<at::Tensor> output) {
   at::Tensor out;
   if (output.has_value()) {
     out = *output;
-    NVTE_CHECK(static_cast<size_t>(out.size(0)) == K &&
-                   static_cast<size_t>(out.size(1)) == M_packed,
-               "Output shape mismatch for NVFP4 transpose.");
+    NVTE_CHECK(
+        static_cast<size_t>(out.size(0)) == K && static_cast<size_t>(out.size(1)) == M_packed,
+        "Output shape mismatch for NVFP4 transpose.");
   } else {
     const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
     out = at::empty(output_shape, opts);
@@ -90,17 +89,16 @@ at::Tensor nvfp4_transpose(at::Tensor input, std::optional<at::Tensor> output) {
   }
 
   // Call the NVFP4 transpose kernel
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), std::vector<size_t>{M, K_packed},
-                                              DType::kByte);
-  auto output_cu = makeTransformerEngineTensor(out.data_ptr(), std::vector<size_t>{K, M_packed},
-                                               DType::kByte);
+  auto input_cu =
+      makeTransformerEngineTensor(input.data_ptr(), std::vector<size_t>{M, K_packed}, DType::kByte);
+  auto output_cu =
+      makeTransformerEngineTensor(out.data_ptr(), std::vector<size_t>{K, M_packed}, DType::kByte);
   nvte_nvfp4_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return out;
 }
 
-void nvfp4_scale_transpose(at::Tensor input, at::Tensor output,
-                           int64_t M_tiles, int64_t K_tiles) {
+void nvfp4_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles, int64_t K_tiles) {
   init_extension();
 
   // Input: rowwise_scale_inv [M_padded, K_tiles], uint8 (E4M3 stored as bytes)
@@ -110,21 +108,20 @@ void nvfp4_scale_transpose(at::Tensor input, at::Tensor output,
   NVTE_CHECK(in_shape.size() == 2, "NVFP4 scale transpose expects 2D input.");
   NVTE_CHECK(out_shape.size() == 2, "NVFP4 scale transpose expects 2D output.");
   NVTE_CHECK(input.scalar_type() == at::kByte, "NVFP4 scale transpose input must be uint8 (E4M3).");
-  NVTE_CHECK(output.scalar_type() == at::kByte, "NVFP4 scale transpose output must be uint8 (E4M3).");
+  NVTE_CHECK(output.scalar_type() == at::kByte,
+             "NVFP4 scale transpose output must be uint8 (E4M3).");
 
   auto input_cu = makeTransformerEngineTensor(
       input.data_ptr(), std::vector<size_t>{in_shape[0], in_shape[1]}, DType::kByte);
   auto output_cu = makeTransformerEngineTensor(
       output.data_ptr(), std::vector<size_t>{out_shape[0], out_shape[1]}, DType::kByte);
 
-  nvte_nvfp4_scale_transpose(input_cu.data(), output_cu.data(),
-                             static_cast<size_t>(M_tiles), static_cast<size_t>(K_tiles),
-                             at::cuda::getCurrentCUDAStream());
+  nvte_nvfp4_scale_transpose(input_cu.data(), output_cu.data(), static_cast<size_t>(M_tiles),
+                             static_cast<size_t>(K_tiles), at::cuda::getCurrentCUDAStream());
 }
 
-void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output,
-                               int64_t tile_rows, int64_t tile_cols,
-                               int64_t rows_padded, int64_t block_len) {
+void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output, int64_t tile_rows,
+                               int64_t tile_cols, int64_t rows_padded, int64_t block_len) {
   init_extension();
 
   // Input: per_block_decode_scale [tile_rows, tile_cols], float32
@@ -141,15 +138,13 @@ void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output,
   auto output_cu = makeTransformerEngineTensor(
       output.data_ptr(), std::vector<size_t>{out_shape[0], out_shape[1]}, DType::kByte);
 
-  nvte_nvfp4_expand_scale_to_fp8(input_cu.data(), output_cu.data(),
-                                 static_cast<size_t>(tile_rows),
-                                 static_cast<size_t>(tile_cols),
-                                 static_cast<size_t>(rows_padded),
-                                 static_cast<size_t>(block_len),
-                                 at::cuda::getCurrentCUDAStream());
+  nvte_nvfp4_expand_scale_to_fp8(input_cu.data(), output_cu.data(), static_cast<size_t>(tile_rows),
+                                 static_cast<size_t>(tile_cols), static_cast<size_t>(rows_padded),
+                                 static_cast<size_t>(block_len), at::cuda::getCurrentCUDAStream());
 }
 
-void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax) {
+void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale,
+                                   at::Tensor global_amax) {
   init_extension();
 
   // block_amax and scale: [tile_rows, tile_cols], float32
@@ -163,15 +158,13 @@ void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::
   auto scale_cu = makeTransformerEngineTensor(scale);
   auto global_amax_cu = makeTransformerEngineTensor(global_amax);
 
-  nvte_nvfp4_compute_per_block_scale(block_amax_cu.data(), scale_cu.data(),
-                                     global_amax_cu.data(), at::cuda::getCurrentCUDAStream());
+  nvte_nvfp4_compute_per_block_scale(block_amax_cu.data(), scale_cu.data(), global_amax_cu.data(),
+                                     at::cuda::getCurrentCUDAStream());
 }
 
-void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax,
-                       at::Tensor per_block_scale, at::Tensor target_scale,
-                       at::Tensor target_amax,
-                       int64_t tile_rows, int64_t tile_cols,
-                       int64_t rows_padded, int64_t block_len) {
+void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax, at::Tensor per_block_scale,
+                       at::Tensor target_scale, at::Tensor target_amax, int64_t tile_rows,
+                       int64_t tile_cols, int64_t rows_padded, int64_t block_len) {
   init_extension();
 
   // block_amax: [tile_rows, tile_cols], float32
@@ -193,24 +186,18 @@ void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax,
   auto target_scale_cu = makeTransformerEngineTensor(target_scale);
   auto target_amax_cu = makeTransformerEngineTensor(target_amax);
 
-  nvte_nvfp4_fused_scale(block_amax_cu.data(), global_amax_cu.data(),
-                         per_block_scale_cu.data(), target_scale_cu.data(),
-                         target_amax_cu.data(),
+  nvte_nvfp4_fused_scale(block_amax_cu.data(), global_amax_cu.data(), per_block_scale_cu.data(),
+                         target_scale_cu.data(), target_amax_cu.data(),
                          static_cast<size_t>(tile_rows), static_cast<size_t>(tile_cols),
                          static_cast<size_t>(rows_padded), static_cast<size_t>(block_len),
                          at::cuda::getCurrentCUDAStream());
 }
 
 void nvfp4_multi_tensor_fused_scale(
-    std::vector<at::Tensor> block_amax_list,
-    std::vector<at::Tensor> global_amax_list,
-    std::vector<at::Tensor> per_block_scale_list,
-    std::vector<at::Tensor> target_scale_list,
-    std::vector<at::Tensor> target_amax_list,
-    std::vector<int64_t> tile_rows_list,
-    std::vector<int64_t> tile_cols_list,
-    std::vector<int64_t> rows_padded_list,
-    int64_t block_len) {
+    std::vector<at::Tensor> block_amax_list, std::vector<at::Tensor> global_amax_list,
+    std::vector<at::Tensor> per_block_scale_list, std::vector<at::Tensor> target_scale_list,
+    std::vector<at::Tensor> target_amax_list, std::vector<int64_t> tile_rows_list,
+    std::vector<int64_t> tile_cols_list, std::vector<int64_t> rows_padded_list, int64_t block_len) {
   init_extension();
 
   const size_t num_tensors = block_amax_list.size();
@@ -252,11 +239,9 @@ void nvfp4_multi_tensor_fused_scale(
     auto target_scale_cu = makeTransformerEngineTensor(target_scale);
     auto target_amax_cu = makeTransformerEngineTensor(target_amax);
 
-    nvte_nvfp4_fused_scale(block_amax_cu.data(), global_amax_cu.data(),
-                           per_block_scale_cu.data(), target_scale_cu.data(),
-                           target_amax_cu.data(),
-                           tile_rows, tile_cols, rows_padded,
-                           static_cast<size_t>(block_len), stream);
+    nvte_nvfp4_fused_scale(block_amax_cu.data(), global_amax_cu.data(), per_block_scale_cu.data(),
+                           target_scale_cu.data(), target_amax_cu.data(), tile_rows, tile_cols,
+                           rows_padded, static_cast<size_t>(block_len), stream);
   }
 }
 
@@ -278,7 +263,7 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
   init_extension();
 
   // Make sure input is contiguous
-  const auto &input = tensor.contiguous();
+  const auto& input = tensor.contiguous();
 
   // Allocate output tensor if needed
   if (!out) {
@@ -299,13 +284,12 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
   return std::move(*out);
 }
 
-void nvfp4_multi_tensor_create_columnwise(
-    std::vector<at::Tensor> rowwise_data_list,
-    std::vector<at::Tensor> columnwise_data_list,
-    std::vector<at::Tensor> rowwise_scale_inv_list,
-    std::vector<at::Tensor> columnwise_scale_inv_list,
-    std::vector<int64_t> M_list,
-    std::vector<int64_t> K_list) {
+void nvfp4_multi_tensor_create_columnwise(std::vector<at::Tensor> rowwise_data_list,
+                                          std::vector<at::Tensor> columnwise_data_list,
+                                          std::vector<at::Tensor> rowwise_scale_inv_list,
+                                          std::vector<at::Tensor> columnwise_scale_inv_list,
+                                          std::vector<int64_t> M_list,
+                                          std::vector<int64_t> K_list) {
   init_extension();
 
   const size_t num_tensors = rowwise_data_list.size();
@@ -355,14 +339,14 @@ void nvfp4_multi_tensor_create_columnwise(
     const auto scale_out_shape = getTensorShape(columnwise_scale_inv);
 
     auto scale_input_cu = makeTransformerEngineTensor(
-        rowwise_scale_inv.data_ptr(),
-        std::vector<size_t>{scale_in_shape[0], scale_in_shape[1]}, DType::kByte);
+        rowwise_scale_inv.data_ptr(), std::vector<size_t>{scale_in_shape[0], scale_in_shape[1]},
+        DType::kByte);
     auto scale_output_cu = makeTransformerEngineTensor(
         columnwise_scale_inv.data_ptr(),
         std::vector<size_t>{scale_out_shape[0], scale_out_shape[1]}, DType::kByte);
 
-    nvte_nvfp4_scale_transpose(scale_input_cu.data(), scale_output_cu.data(),
-                               M_tiles, K_tiles, stream);
+    nvte_nvfp4_scale_transpose(scale_input_cu.data(), scale_output_cu.data(), M_tiles, K_tiles,
+                               stream);
   }
 }
 

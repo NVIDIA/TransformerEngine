@@ -165,8 +165,12 @@ def cast_master_weights_to_fp8(
 
 
 def cast_master_weights_to_nvfp4(
-    model_weights, master_weights, start_offsets, group, fsdp_shard_model_weights=None,
-    manual_post_all_gather_processing=False
+    model_weights,
+    master_weights,
+    start_offsets,
+    group,
+    fsdp_shard_model_weights=None,
+    manual_post_all_gather_processing=False,
 ):
     """Helper to cast master weights to NVFP4 primary weights."""
 
@@ -181,7 +185,7 @@ def cast_master_weights_to_nvfp4(
     # All NVFP4 model_weights should have the same dtype (BF16)
     if len(model_weights) > 0:
         target_dtype = model_weights[0].dtype
-        
+
         # Collect non-None master_weights and their indices
         non_none_indices = []
         non_none_weights = []
@@ -191,17 +195,18 @@ def cast_master_weights_to_nvfp4(
                 non_none_indices.append(i)
                 non_none_weights.append(mw.view(-1))
                 sizes.append(mw.numel())
-        
+
         if len(non_none_weights) > 0 and non_none_weights[0].dtype != target_dtype:
             # Concatenate, convert once, then split
             concatenated = torch.cat(non_none_weights)
             converted = concatenated.to(target_dtype)
             split_weights = torch.split(converted, sizes)
-            
+
             # Rebuild master_weights list with converted tensors
             converted_master_weights = list(master_weights)
-            for idx, split_w, orig_mw in zip(non_none_indices, split_weights, 
-                                              [master_weights[i] for i in non_none_indices]):
+            for idx, split_w, orig_mw in zip(
+                non_none_indices, split_weights, [master_weights[i] for i in non_none_indices]
+            ):
                 converted_master_weights[idx] = split_w.view(orig_mw.shape)
             master_weights = converted_master_weights
 
@@ -218,13 +223,17 @@ def cast_master_weights_to_nvfp4(
             )
         else:
             raise ValueError(
-                f"cast_master_weights_to_nvfp4 only supports NVFP4 tensors, got {type(model_weight)}"
+                "cast_master_weights_to_nvfp4 only supports NVFP4 tensors, got"
+                f" {type(model_weight)}"
             )
     if len(nvfp4_params) > 0:
         _cast_master_weights_to_nvfp4_2d(
-            nvfp4_params, group, use_fsdp_shard_model_weights=use_fsdp_shard_model_weights,
-            manual_post_all_gather_processing=manual_post_all_gather_processing
+            nvfp4_params,
+            group,
+            use_fsdp_shard_model_weights=use_fsdp_shard_model_weights,
+            manual_post_all_gather_processing=manual_post_all_gather_processing,
         )
+
 
 def _cast_master_weights_to_fp8_delayed_scaling(
     params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
@@ -544,6 +553,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
             master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype
         )
 
+
 def _cast_master_weights_to_nvfp4_2d(
     params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):
@@ -557,7 +567,7 @@ def _cast_master_weights_to_nvfp4_2d(
              group.
     use_fsdp_shard_model_weights : bool, if True, it means that the model weights are sharded.
     """
-    
+
     device = params[0][0].device
     block_len = NVFP4_BLOCK_SCALING_SIZE
 
@@ -589,9 +599,7 @@ def _cast_master_weights_to_nvfp4_2d(
     amaxes: List[torch.Tensor] = []
     scales: List[torch.Tensor] = []
     global_amaxes = torch.zeros(len(params), dtype=torch.float32, device=device)
-    global_amax_views: List[torch.Tensor] = [
-        global_amaxes[i : i + 1] for i in range(len(params))
-    ]
+    global_amax_views: List[torch.Tensor] = [global_amaxes[i : i + 1] for i in range(len(params))]
 
     # Collect tensors for batched multi-tensor amax computation
     master_weight_list: List[torch.Tensor] = []
@@ -644,7 +652,7 @@ def _cast_master_weights_to_nvfp4_2d(
     # Use GPU kernel to compute global encode scales from global amaxes
     # This replaces multiple Python tensor operations with a single kernel
     global_scale_tensor = torch.empty_like(global_amaxes)
-    
+
     tex.nvfp4_compute_global_scale(global_amaxes, global_scale_tensor)
     global_scale_views = [global_scale_tensor[i : i + 1] for i in range(len(params))]
 
@@ -758,6 +766,7 @@ def _cast_master_weights_to_nvfp4_2d(
             partial_cast_start_offset_list,
             block_len,
         )
+
 
 def _cast_master_weights_to_fp8_mxfp8_scaling(
     params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
@@ -890,15 +899,15 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
     - Float8Tensor: may need to create a transposed view to match backend GEMM.
     - Float8BlockwiseQTensor: create column-wise storage.
     - Plain pytorch tensor: noop.
-    
+
     For NVFP4 tensors, uses batched multi-tensor processing to reduce CPU overhead.
     """
     if not isinstance(model_weights, list):
         model_weights = [model_weights]
-    
+
     # Collect NVFP4 tensors for batched processing
     nvfp4_tensors = []
-    
+
     for model_weight in model_weights:
         if isinstance(model_weight, Float8Tensor):
             # Delayed scaling and per-tensor current scaling: if backend does not support
@@ -916,7 +925,7 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
             pass
         elif isinstance(model_weight, QuantizedTensor):
             raise ValueError(f"post_processing for {type(model_weight)} is not supported")
-    
+
     # Batch process all NVFP4 tensors with multi-tensor approach
     if nvfp4_tensors:
         _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors)
@@ -928,7 +937,7 @@ def _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors: List[NVFP4Tensor]):
     Reduces CPU overhead by collecting all tensor metadata and dispatching to C++.
     """
     TILE_SIZE = 16
-    
+
     # Prepare tensor lists for batched C++ call
     rowwise_data_list = []
     columnwise_data_list = []
@@ -936,18 +945,18 @@ def _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors: List[NVFP4Tensor]):
     columnwise_scale_inv_list = []
     M_list = []
     K_list = []
-    
+
     for tensor in nvfp4_tensors:
         rowwise_data = tensor._rowwise_data
         if not rowwise_data.is_contiguous():
             rowwise_data = rowwise_data.contiguous()
             tensor._rowwise_data = rowwise_data
-        
+
         logical_shape = tensor.size()
         M, K = logical_shape[0], logical_shape[-1]
         M_tiles = (M + TILE_SIZE - 1) // TILE_SIZE
         K_tiles = (K + TILE_SIZE - 1) // TILE_SIZE
-        
+
         # Allocate columnwise_data if needed
         if tensor._columnwise_data is None:
             # Output shape: [K, M/2] packed bytes
@@ -959,7 +968,7 @@ def _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors: List[NVFP4Tensor]):
             tensor._columnwise_data = columnwise_data
         else:
             columnwise_data = tensor._columnwise_data
-        
+
         # Allocate columnwise_scale_inv if needed
         if tensor._columnwise_scale_inv is None:
             assert tensor._quantizer is not None
@@ -972,20 +981,20 @@ def _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors: List[NVFP4Tensor]):
             tensor._columnwise_scale_inv = columnwise_scale_inv
         else:
             columnwise_scale_inv = tensor._columnwise_scale_inv
-        
+
         rowwise_data_list.append(rowwise_data)
         columnwise_data_list.append(columnwise_data)
         rowwise_scale_inv_list.append(tensor._rowwise_scale_inv)
         columnwise_scale_inv_list.append(columnwise_scale_inv)
         M_list.append(M)
         K_list.append(K)
-        
+
         # Copy amax if needed
         if tensor._amax_columnwise is None and tensor._amax_rowwise is not None:
             tensor._amax_columnwise = tensor._amax_rowwise.clone()
         elif tensor._amax_rowwise is not None:
             tensor._amax_columnwise.copy_(tensor._amax_rowwise)
-    
+
     # Dispatch to C++ multi-tensor kernel
     tex.nvfp4_multi_tensor_create_columnwise(
         rowwise_data_list,

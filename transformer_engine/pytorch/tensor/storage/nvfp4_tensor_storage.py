@@ -365,7 +365,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             self._columnwise_data = None
             self._columnwise_scale_inv = None
             self._amax_columnwise = None
-    
+
     def _create_columnwise(self):
         """
         Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
@@ -388,7 +388,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             )
         assert len(self._rowwise_scale_inv.shape) == 2
         assert len(self._columnwise_scale_inv.shape) == 2
-        
+
         # rowwise_scale_inv has shape [M_padded, K_tiles] where each tile's scale
         # is repeated 16 times (once per row in the 16x16 tile).
         # columnwise_scale_inv has shape [K_padded, M_tiles] where scales are
@@ -398,7 +398,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         M, K = logical_shape[0], logical_shape[-1]
         M_tiles = (M + TILE_SIZE - 1) // TILE_SIZE
         K_tiles = (K + TILE_SIZE - 1) // TILE_SIZE
-        
+
         tex.nvfp4_scale_transpose(
             self._rowwise_scale_inv,
             self._columnwise_scale_inv,
