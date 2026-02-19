@@ -77,12 +77,12 @@ def main():
 
     # Check: if X = A^{-1/2}, then X @ A @ X should be the identity matrix
     if rank == 0:
-        XAX = X @ A_orig @ X
-        I = torch.eye(N, device=XAX.device, dtype=XAX.dtype)
-        max_diff = (XAX - I).abs().max().item()
-        print(f"Max |X @ A @ X - I|: {max_diff:.6e}", flush=True)
+        XXT = X @ X.t()
+        I = torch.eye(N, device=XXT.device, dtype=XXT.dtype)
+        max_diff = (XXT - I).abs().max().item()
+        print(f"Max |X @ X.t() - I|: {max_diff:.6e}", flush=True)
 
-        if torch.allclose(XAX, I, atol=args.atol, rtol=args.rtol):
+        if torch.allclose(XXT, I, atol=args.atol, rtol=args.rtol):
             print("NUMERICAL CHECK PASSED", flush=True)
         else:
             print("NUMERICAL CHECK FAILED", flush=True, file=sys.stderr)

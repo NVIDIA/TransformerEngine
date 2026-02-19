@@ -15,7 +15,7 @@ if torch.cuda.device_count() < 2:
     pytest.skip("Newton-Schulz tests require at least 2 GPUs.", allow_module_level=True)
 
 TEST_ROOT = Path(__file__).parent.resolve()
-NUM_PROCS = min(torch.cuda.device_count(), 4)
+NUM_PROCS = torch.cuda.device_count()
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 
 
