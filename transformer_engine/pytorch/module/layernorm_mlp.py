@@ -1981,19 +1981,19 @@ class LayerNormMLP(TransformerEngineBaseModule):
         name = self.name or ""
         if fwd:
             roles = [
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="input", name=name, position="fc1"),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="weight", name=name, position="fc1"),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="output", name=name, position="fc1"),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="input", name=name, position="fc2"),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="weight", name=name, position="fc2"),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="output", name=name, position="fc2"),
+                QuantizerRole(module_type="linear", tensor_type="input", name=name, position="fc1"),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=name, position="fc1"),
+                QuantizerRole(module_type="linear", tensor_type="output", name=name, position="fc1"),
+                QuantizerRole(module_type="linear", tensor_type="input", name=name, position="fc2"),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=name, position="fc2"),
+                QuantizerRole(module_type="linear", tensor_type="output", name=name, position="fc2"),
             ]
         else:
             roles = [
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="grad_output", name=name, position="fc1"),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="grad_input", name=name, position="fc1"),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="grad_output", name=name, position="fc2"),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="grad_input", name=name, position="fc2"),
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=name, position="fc1"),
+                QuantizerRole(module_type="linear", tensor_type="grad_input", name=name, position="fc1"),
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=name, position="fc2"),
+                QuantizerRole(module_type="linear", tensor_type="grad_input", name=name, position="fc2"),
             ]
         return roles[:num_quantizers]
 

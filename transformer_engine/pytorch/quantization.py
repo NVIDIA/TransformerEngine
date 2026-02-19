@@ -56,14 +56,11 @@ class QuantizerRole:
     Fields
     ------
     module_type : str
-        TE module class that emits this role, e.g.
-        `"linear"`, `"layernorm_linear"`, `"layernorm_mlp"`,
-        `"grouped_linear"`, `"dpa"`.
+        Module type that emits this role, e.g. `"linear"`, `"grouped_linear"`, `"dpa"`.
     tensor_type : str
         What tensor is being quantized, in the module's own vocabulary.
-        GEMM modules: `"input"`, `"weight"`, `"output"`,
-        `"grad_output"`, `"grad_input"`.
-        DPA: `"qkv"`, `"o"`, `"s"`, `"dqkv"`, `"do"`, `"dp"`.
+        GEMM modules: `"input"`, `"weight"`, `"grad_output"`, etc.
+        DPA: `"qkv"`, `"s"`, etc.
     name : str
         Caller-provided module instance name (e.g. set by the training
         framework), e.g.

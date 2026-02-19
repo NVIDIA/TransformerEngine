@@ -501,12 +501,10 @@ class CustomRecipe(Recipe):
 
         `QuantizerRole` is a frozen dataclass with the following fields:
 
-        - `module_type` (str): TE module class, e.g. `"linear"`,
-          `"layernorm_linear"`, `"layernorm_mlp"`, `"grouped_linear"`,
-          `"dpa"`.
+        - `module_type` (str): module type, e.g.
+          `"linear"`, `"grouped_linear"`, `"dpa"`.
         - `tensor_type` (str): what tensor is being quantized, e.g.
-          `"input"`, `"weight"`, `"output"`, `"grad_output"`,
-          `"grad_input"`.
+          `"input"`, `"weight"`, `"grad_output"`, etc.
         - `name` (str): caller-provided module instance name (empty
           string when not set), e.g. `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`.
         - `position` (str): module-internal sub-slot within compound
