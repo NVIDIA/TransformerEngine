@@ -397,6 +397,9 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
     }
     // Fuse the add for BackwardAdd stage
     if (_norm_stage == NVTE_Norm_Stage::BackwardAdd) {
+      NVTE_CHECK(cudnnGetVersion() >= 92100,
+                 "Fused BackwardAdd requires cuDNN >= 9.21.0, but found ", cudnnGetVersion());
+      
       _add = _graph.tensor(fe::graph::Tensor_attributes()
                                .set_name("add")
                                .set_dim({batch_dim, hidden_dim, 1, 1})
