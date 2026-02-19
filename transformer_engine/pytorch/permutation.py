@@ -45,6 +45,19 @@ def moe_permute_index_map_forward(
     """Forward pass for MoE permute with index router map."""
     global _moe_permute_index_map_workspace, _moe_permute_index_map_max_expanded_token_num
 
+    if not inp.numel():
+        return inp.clone(), torch.tensor([], device=inp.device)
+
+    assert inp.is_cuda, "TransformerEngine needs CUDA."
+    assert index.is_cuda, "TransformerEngine needs CUDA."
+    assert inp.size(0) == index.size(0), "Permute not possible"
+    if index.dtype != torch.int32:
+        warnings.warn(
+            f"The data type of the input `index` of Permute is {index.dtype}! "
+            "The recommended type is torch.int32."
+        )
+        index = index.to(torch.int32)
+
     dtype = TE_DType[inp.dtype]
 
     topK = index.size(1)
@@ -121,13 +134,17 @@ def _moe_permute_index_map_setup_context(ctx, inputs, output):
     """Save context for backward pass."""
     inp, index, num_out_tokens, max_token_num = inputs
     permuted_act, row_id_map = output
+    ctx.empty_input = inp.size(0) == 0
     ctx.save_for_backward(row_id_map)
-    ctx.num_tokens = index.size(0)
-    ctx.topK = index.size(1)
+    ctx.num_tokens = index.size(0) if not ctx.empty_input else 0
+    ctx.topK = index.size(1) if not ctx.empty_input else 1
 
 
 def _moe_permute_index_map_backward_wrapper(ctx, grad_permuted_act, grad_row_id_map):
     """Backward pass wrapper that calls the custom backward op."""
+    if ctx.empty_input:
+        return grad_permuted_act, None, None, None
+
     if not grad_permuted_act.is_contiguous():
         grad_permuted_act = grad_permuted_act.contiguous()
 
@@ -157,6 +174,8 @@ def moe_unpermute_index_map_forward(
     topK: int,
 ) -> torch.Tensor:
     """Forward pass for MoE unpermute with index router map."""
+    if not inp.numel():
+        return inp.clone()
     dtype = TE_DType[inp.dtype]
     return tex.moe_unpermute_fwd(inp, dtype, row_id_map, probs, num_tokens, topK)
 
@@ -215,12 +234,17 @@ def _moe_unpermute_index_map_backward_fake(
 def _moe_unpermute_index_map_setup_context(ctx, inputs, output):
     """Save context for backward pass."""
     inp, row_id_map, probs, num_tokens, topK = inputs
+    ctx.empty_input = inp.size(0) == 0
     ctx.save_for_backward(inp, row_id_map, probs)
     ctx.needs_probs_grad = probs.requires_grad
 
 
 def _moe_unpermute_index_map_backward_wrapper(ctx, unpermuted_act_grad):
     """Backward pass wrapper that calls the custom backward op."""
+    if ctx.empty_input:
+        prob_grad = torch.zeros_like(ctx.saved_tensors[2]) if ctx.needs_probs_grad else None
+        return unpermuted_act_grad, None, prob_grad, None, None
+
     if not unpermuted_act_grad.is_contiguous():
         unpermuted_act_grad = unpermuted_act_grad.contiguous()
 
@@ -254,6 +278,17 @@ def moe_permute_mask_map_forward(
     pad_offsets: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Forward pass for MoE permute with mask router map."""
+    if not inp.numel():
+        return inp.clone(), torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
+
+    assert inp.is_cuda, "TransformerEngine needs CUDA."
+    assert routing_map.is_cuda, "TransformerEngine needs CUDA."
+    if probs is not None:
+        assert probs.is_cuda, "TransformerEngine needs CUDA."
+    if pad_offsets is not None:
+        assert pad_offsets.is_cuda, "TransformerEngine needs CUDA."
+    assert inp.size(0) == routing_map.size(0), "Permute not possible"
+
     num_tokens, hidden_size = inp.size()
     num_experts = routing_map.size(1)
 
@@ -425,15 +460,27 @@ def _moe_permute_mask_map_setup_context(ctx, inputs, output):
     """Save context for backward pass."""
     inp, routing_map, num_out_tokens, probs, pad_offsets = inputs
     output_tensor, row_id_map, permuted_probs = output
+    ctx.empty_input = inp.size(0) == 0
     ctx.save_for_backward(row_id_map, pad_offsets)
     ctx.num_experts = routing_map.size(1)
     ctx.num_tokens = inp.size(0)
-    ctx.hidden_size = inp.size(1)
+    ctx.hidden_size = inp.size(1) if not ctx.empty_input else 0
     ctx.needs_probs_grad = probs is not None and probs.requires_grad
 
 
 def _moe_permute_mask_map_backward_wrapper(ctx, grad_output, grad_row_id_map, grad_permuted_probs):
     """Backward wrapper calling the custom backward op."""
+    if ctx.empty_input:
+        if ctx.needs_probs_grad:
+            probs_grad = torch.zeros(
+                (ctx.num_tokens, ctx.num_experts),
+                dtype=grad_permuted_probs.dtype,
+                device=grad_permuted_probs.device,
+            )
+        else:
+            probs_grad = None
+        return grad_output, None, None, probs_grad, None
+
     assert not isinstance(
         grad_output, QuantizedTensor
     ), "The backward of moe_permute does not support FP8."
@@ -479,6 +526,8 @@ def moe_unpermute_mask_map_forward(
     pad_offsets: Optional[torch.Tensor],
 ) -> torch.Tensor:
     """Forward pass for MoE unpermute with mask router map."""
+    if not inp.numel():
+        return inp.clone()
     assert not isinstance(
         inp, QuantizedTensor
     ), "The forward of moe_unpermute does not support FP8."
@@ -677,6 +726,7 @@ def _moe_unpermute_mask_map_bwd_no_probs_fake(
 def _moe_unpermute_mask_map_setup_context(ctx, inputs, output):
     """Save context for backward pass."""
     inp, row_id_map, merging_probs, num_tokens, num_experts, hidden_size, pad_offsets = inputs
+    ctx.empty_input = inp.size(0) == 0
     ctx.num_experts = num_experts
     ctx.num_tokens = num_tokens
     ctx.num_permuted_tokens = inp.size(0)
@@ -692,6 +742,13 @@ def _moe_unpermute_mask_map_setup_context(ctx, inputs, output):
 
 def _moe_unpermute_mask_map_backward_wrapper(ctx, unpermuted_act_grad):
     """Backward wrapper calling the appropriate custom backward op."""
+    if ctx.empty_input:
+        if ctx.with_probs:
+            _, _, merging_probs, _ = ctx.saved_tensors
+            probs_grad = torch.zeros_like(merging_probs) if ctx.needs_probs_grad else None
+            return unpermuted_act_grad, None, probs_grad, None, None, None, None
+        return unpermuted_act_grad, None, None, None, None, None, None
+
     act_grad = None
     probs_grad = None
 
@@ -781,17 +838,11 @@ def moe_permute(
         Options are: 'mask', 'index'.
         Refer to `routing_map` for more details.
     """
-    if not inp.numel():
-        return inp, torch.tensor([], device=inp.device)
-    assert inp.is_cuda, "TransformerEngine needs CUDA."
-    assert routing_map.is_cuda, "TransformerEngine needs CUDA."
-    assert inp.size(0) == routing_map.size(0), "Permute not possible"
-    if routing_map.dtype != torch.int32:
-        warnings.warn(
-            f"The data type of the input `routing_map` of Permute is {routing_map.dtype}! "
-            "The recommended type is torch.int32."
+    if isinstance(inp, QuantizedTensor) and torch.compiler.is_compiling():
+        raise RuntimeError(
+            "moe_permute with quantized (FP8) input is not supported under torch.compile. "
+            "Please move quantization outside the compiled region."
         )
-        routing_map = routing_map.to(torch.int32)
     if map_type == "index":
         return torch.ops.te_moe.permute_index_map(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
@@ -829,13 +880,10 @@ def moe_permute_with_probs(
         The effective output token count, representing the number of tokens not dropped.
         By default, set to '-1', meaning no tokens are dropped.
     """
-    if not inp.numel():
-        # Keep probs in autograd graph so that probs.grad is an empty tensor
-        # instead of None after backward (backward compatibility).
-        return (
-            inp + probs.sum() * 0,
-            probs.sum(dim=1),
-            torch.tensor([], device=inp.device),
+    if isinstance(inp, QuantizedTensor) and torch.compiler.is_compiling():
+        raise RuntimeError(
+            "moe_permute_with_probs with quantized (FP8) input is not supported under "
+            "torch.compile. Please move quantization outside the compiled region."
         )
     output, row_id_map, permuted_probs = torch.ops.te_moe.permute_mask_map_fwd(
         inp, routing_map, num_out_tokens, probs, None
@@ -872,6 +920,11 @@ def moe_permute_and_pad_with_probs(
     align_size : int
         the alignment size for the input tensor.
     """
+    if isinstance(inp, QuantizedTensor) and torch.compiler.is_compiling():
+        raise RuntimeError(
+            "moe_permute_and_pad_with_probs with quantized (FP8) input is not supported under "
+            "torch.compile. Please move quantization outside the compiled region."
+        )
     assert (
         tokens_per_expert is not None
     ), "tokens_per_expert must be provided to the fused permute padding function."
@@ -943,13 +996,8 @@ def moe_unpermute(
         warnings.warn("probs kwarg is deprecated. Use merging_probs kwarg instead.")
         merging_probs = probs
     if map_type == "index":
-        # Empty input check
-        if not inp.numel():
-            return inp
-
         # Normalize probs
         if merging_probs is not None:
-            assert merging_probs.is_cuda, "TransformerEngine needs CUDA."
             if merging_probs.dtype != torch.float32:
                 warnings.warn(
                     f"The data type of the input `probs` of Unpermute is {merging_probs.dtype}! "
@@ -963,47 +1011,18 @@ def moe_unpermute(
             topK = 1
             merging_probs = torch.empty(0, device=inp.device)
 
-        # Device check
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
-        if row_id_map.dtype != torch.int32:
-            warnings.warn(
-                f"The data type of the input `row_id_map` of Unpermute is {row_id_map.dtype}! "
-                "The recommended type is torch.int32."
-            )
-            row_id_map = row_id_map.to(torch.int32)
-
         return torch.ops.te_moe.unpermute_index_map_fwd(
             inp, row_id_map, merging_probs, num_tokens, topK
         )
     if map_type == "mask":
-        if not inp.numel():
-            # Keep merging_probs in autograd graph so that probs.grad is an empty
-            # tensor instead of None after backward (backward compatibility).
-            if merging_probs is not None:
-                return inp + merging_probs.sum() * 0
-            return inp
-
         if restore_shape is None:
             restore_shape = inp.shape
         num_tokens, hidden_size = restore_shape
-        num_experts = (row_id_map.size(1) - 1) // 2
-
-        if merging_probs is not None:
-            assert merging_probs.is_cuda, "TransformerEngine needs CUDA."
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
-        if pad_offsets is not None:
-            assert pad_offsets.is_cuda, "TransformerEngine needs CUDA."
+        num_experts = (row_id_map.size(1) - 1) // 2 if row_id_map.dim() > 1 else 0
 
         return torch.ops.te_moe.unpermute_mask_map_fwd(
-            inp,
-            row_id_map,
-            merging_probs,
-            num_tokens,
-            num_experts,
-            hidden_size,
-            pad_offsets,
+            inp, row_id_map, merging_probs,
+            num_tokens, num_experts, hidden_size, pad_offsets,
         )
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
@@ -1019,6 +1038,10 @@ def moe_chunk_sort_forward(
     probs: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Forward pass for MoE chunk sort. Returns (output, permuted_probs, row_id_map)."""
+    if not inp.numel():
+        probs_out = probs.clone() if probs is not None else torch.empty(0, device=inp.device)
+        return inp.clone(), probs_out, torch.empty(0, device=inp.device, dtype=torch.int32)
+
     num_tokens, hidden_size = inp.shape
     num_splits = split_sizes.size(0)
 
@@ -1147,15 +1170,19 @@ def _moe_chunk_sort_setup_context(ctx, inputs, output):
     """Save context for backward pass."""
     inp, split_sizes, sorted_idxs, probs = inputs
     output_tensor, permuted_probs, row_id_map = output
-
+    ctx.empty_input = inp.size(0) == 0
     ctx.save_for_backward(row_id_map)
     ctx.num_tokens = inp.size(0)
-    ctx.hidden_size = inp.size(1)
+    ctx.hidden_size = inp.size(1) if not ctx.empty_input else 0
     ctx.needs_probs_grad = probs is not None and probs.requires_grad
 
 
 def _moe_chunk_sort_backward_wrapper(ctx, permuted_act_grad, permuted_probs_grad, _row_id_map_grad):
     """Backward wrapper calling the custom backward op."""
+    if ctx.empty_input:
+        probs_grad = permuted_probs_grad if ctx.needs_probs_grad else None
+        return permuted_act_grad, None, None, probs_grad
+
     (row_id_map,) = ctx.saved_tensors
 
     probs_grad_input = permuted_probs_grad if permuted_probs_grad.numel() > 0 else None
@@ -1207,8 +1234,6 @@ def moe_sort_chunks_by_index(
     sorted_indices : torch.Tensor
         Chunk indices used to permute the chunks.
     """
-    if not inp.numel():
-        return inp
     output, _, _ = torch.ops.te_moe.chunk_sort_fwd(inp, split_sizes, sorted_index, None)
     return output
 
@@ -1237,8 +1262,6 @@ def moe_sort_chunks_by_index_with_probs(
     sorted_indices : torch.Tensor
         Chunk indices used to permute the chunks.
     """
-    if not inp.numel():
-        return inp, probs
     output, permuted_probs, _ = torch.ops.te_moe.chunk_sort_fwd(
         inp, split_sizes, sorted_index, probs
     )
