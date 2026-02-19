@@ -21,14 +21,15 @@ LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("matrix_size", [256])
-def test_newton_schulz(dtype, matrix_size):
+@pytest.mark.parametrize("num_iterations", [5, 15])
+def test_newton_schulz(dtype, matrix_size, num_iterations):
     """Test distributed Newton-Schulz inverse square root."""
     test_path = TEST_ROOT / "run_newton_schulz.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
         f"--dtype={dtype}",
         f"--matrix-size={matrix_size}",
-        "--num-iterations=5",
+        f"--num-iterations={num_iterations}",
     ]
     if dtype == "bfloat16":
         test_cmd += ["--atol=5e-2", "--rtol=5e-2"]
