@@ -33,9 +33,6 @@ from transformer_engine.pytorch import (
     Float8BlockwiseQTensor,
     NVFP4Tensor,
     is_mxfp8_available,
-    QuantizedTensor,
-    Float8Tensor,
-    Float8BlockwiseQTensor,
     MXFP8Tensor,
 )
 from transformer_engine.pytorch.tensor.utils import (
