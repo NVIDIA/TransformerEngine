@@ -38,9 +38,9 @@ from transformer_engine.pytorch import (
     Float8BlockwiseQTensor,
     MXFP8Tensor,
 )
-from transformer_engine.pytorch.tensor import (
+from transformer_engine.pytorch.tensor.utils import (
+    quantize_master_weights,
     cast_master_weights_to_fp8,
-    cast_master_weights_to_nvfp4,
 )
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.tensor.utils import post_all_gather_processing, replace_raw_data
@@ -303,13 +303,13 @@ class MiniZero_1:
         if isinstance(first_weight, NVFP4Tensor):
             for weight in self.weights:
                 assert isinstance(weight, NVFP4Tensor)
-            cast_master_weights_to_nvfp4(
+            quantize_master_weights(
                 self.weights,
                 self.master_weights,
                 self.start_offsets,
                 self.dp_group,
             )
-        elif isinstance(first_weight, QuantizedTensor):
+        elif isinstance(first_weight, (Float8Tensor, Float8BlockwiseQTensor, MXFP8Tensor)):
             for weight in self.weights:
                 assert isinstance(weight, QuantizedTensor)
             cast_master_weights_to_fp8(
@@ -576,7 +576,7 @@ class MiniFSDP:
                     local_weights.append(None)
                     continue
                 local_weights.append(local_weight)
-            cast_master_weights_to_nvfp4(
+            quantize_master_weights(
                 self.weights,
                 self.master_weights,
                 [idx[0] for idx in self.weight_indices],
@@ -848,7 +848,7 @@ def _test_fsdp_cast_master_weights_to_fp8(
         ), f"Loss mismatch at rank {rank}, step {i} for {quantization} (FSDP)"
 
 
-def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processing):
+def _test_quantize_master_weights(dp_group, manual_post_all_gather_processing):
     available, reason = is_nvfp4_available(return_reason=True)
     if not available:
         pytest.skip(reason)
@@ -974,7 +974,7 @@ def run_parallel_tests() -> None:
     print("starting cast master weights to nvfp4 test")
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:
-        _test_cast_master_weights_to_nvfp4(dp_group, False)
+        _test_quantize_master_weights(dp_group, False)
 
     dist.destroy_process_group()
 
@@ -1140,7 +1140,7 @@ def test_nvfp4_partial_cast_matches_full() -> None:
         nvfp4_tensor._amax_rowwise.zero_()
 
     # Partial cast on each rank's shard
-    cast_master_weights_to_nvfp4(
+    quantize_master_weights(
         [nvfp4_tensor],
         [master_weight_shard],
         [start_offset],
@@ -1195,13 +1195,13 @@ def test_nvfp4_partial_cast_matches_full() -> None:
 
 def test_single_gpu_partial_cast_vs_full():
     """
-    Single GPU test: compare cast_master_weights_to_nvfp4 (offset=0) vs quantizer().
+    Single GPU test: compare quantize_master_weights (offset=0) vs quantizer().
     This isolates whether the issue is in our manual Python scale computation or elsewhere.
     """
     import math
     import os
     from transformer_engine.pytorch.tensor import NVFP4Quantizer
-    from transformer_engine.pytorch.tensor.utils import cast_master_weights_to_nvfp4
+    from transformer_engine.pytorch.tensor.utils import quantize_master_weights
     import transformer_engine_torch as tex
 
     torch.manual_seed(1234)
@@ -1220,7 +1220,7 @@ def test_single_gpu_partial_cast_vs_full():
     ref_scale = ref._rowwise_scale_inv.clone()
     ref_amax = ref._amax_rowwise.clone()
 
-    # === Test: Use cast_master_weights_to_nvfp4 with offset=0 (full tensor) ===
+    # === Test: Use quantize_master_weights with offset=0 (full tensor) ===
     # Create empty NVFP4 tensor
     test_tensor = quantizer.make_empty(shape, dtype=torch.bfloat16, device=device)
     test_tensor._rowwise_data.zero_()
@@ -1233,7 +1233,7 @@ def test_single_gpu_partial_cast_vs_full():
         dist.init_process_group(backend="nccl", init_method="env://", rank=0, world_size=1)
     mock_group = dist.new_group(ranks=[0])
 
-    cast_master_weights_to_nvfp4(
+    quantize_master_weights(
         [test_tensor],
         [master_weight.view(-1)],  # Flatten as expected
         [0],  # offset=0 means full tensor
@@ -1252,6 +1252,3 @@ def test_single_gpu_partial_cast_vs_full():
 
 if __name__ == "__main__":
     main()
-    # test_nvfp4_transpose_kernel()
-    # test_single_gpu_partial_cast_vs_full()
-    # test_nvfp4_partial_cast_matches_full()

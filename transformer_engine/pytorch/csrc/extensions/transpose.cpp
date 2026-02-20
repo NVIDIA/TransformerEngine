@@ -6,6 +6,7 @@
 
 #include <pybind.h>
 #include <transformer_engine/recipe.h>
+#include <transformer_engine/transpose.h>
 
 #include <optional>
 #include <vector>
@@ -53,7 +54,7 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
   return out;
 }
 
-at::Tensor nvfp4_transpose(at::Tensor input, std::optional<at::Tensor> output) {
+at::Tensor nvfp4_data_transpose(at::Tensor input, std::optional<at::Tensor> output) {
   init_extension();
 
   // Input is packed FP4: logical [M, K] stored as [M, K/2] bytes
@@ -93,12 +94,12 @@ at::Tensor nvfp4_transpose(at::Tensor input, std::optional<at::Tensor> output) {
       makeTransformerEngineTensor(input.data_ptr(), std::vector<size_t>{M, K_packed}, DType::kByte);
   auto output_cu =
       makeTransformerEngineTensor(out.data_ptr(), std::vector<size_t>{K, M_packed}, DType::kByte);
-  nvte_nvfp4_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+  nvte_nvfp4_data_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return out;
 }
 
-void nvfp4_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles, int64_t K_tiles) {
+void nvfp4_2d_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles, int64_t K_tiles) {
   init_extension();
 
   // Input: rowwise_scale_inv [M_padded, K_tiles], uint8 (E4M3 stored as bytes)
@@ -284,7 +285,7 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
   return std::move(*out);
 }
 
-void nvfp4_multi_tensor_create_columnwise(std::vector<at::Tensor> rowwise_data_list,
+void nvfp4_2d_multi_tensor_transpose(std::vector<at::Tensor> rowwise_data_list,
                                           std::vector<at::Tensor> columnwise_data_list,
                                           std::vector<at::Tensor> rowwise_scale_inv_list,
                                           std::vector<at::Tensor> columnwise_scale_inv_list,
@@ -329,7 +330,7 @@ void nvfp4_multi_tensor_create_columnwise(std::vector<at::Tensor> rowwise_data_l
     auto output_cu = makeTransformerEngineTensor(
         columnwise_data.data_ptr(), std::vector<size_t>{static_cast<size_t>(K), M_packed},
         DType::kByte);
-    nvte_nvfp4_transpose(input_cu.data(), output_cu.data(), stream);
+    nvte_nvfp4_data_transpose(input_cu.data(), output_cu.data(), stream);
 
     // Transpose scales
     const size_t M_tiles = (static_cast<size_t>(M) + TILE_SIZE - 1) / TILE_SIZE;

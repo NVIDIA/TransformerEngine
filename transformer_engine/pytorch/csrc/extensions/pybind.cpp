@@ -260,11 +260,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
-  m.def("nvfp4_transpose", &transformer_engine::pytorch::nvfp4_transpose,
+  m.def("nvfp4_data_transpose", &transformer_engine::pytorch::nvfp4_data_transpose,
         "Transpose NVFP4 packed data with nibble repacking", py::arg("input"), py::kw_only(),
         py::arg("out"), py::call_guard<py::gil_scoped_release>());
   m.def(
-      "nvfp4_scale_transpose", &transformer_engine::pytorch::nvfp4_scale_transpose,
+      "nvfp4_2d_scale_transpose", &transformer_engine::pytorch::nvfp4_2d_scale_transpose,
       "Transpose NVFP4 tile-level scales (E4M3 stored as uint8) from rowwise to columnwise format",
       py::arg("input"), py::arg("output"), py::arg("M_tiles"), py::arg("K_tiles"),
       py::call_guard<py::gil_scoped_release>());
@@ -292,8 +292,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("target_scale_list"), py::arg("target_amax_list"), py::arg("tile_rows_list"),
         py::arg("tile_cols_list"), py::arg("rows_padded_list"), py::arg("block_len"),
         py::call_guard<py::gil_scoped_release>());
-  m.def("nvfp4_multi_tensor_create_columnwise",
-        &transformer_engine::pytorch::nvfp4_multi_tensor_create_columnwise,
+  m.def("nvfp4_2d_multi_tensor_transpose",
+        &transformer_engine::pytorch::nvfp4_2d_multi_tensor_transpose,
         "Batched NVFP4 columnwise creation: transpose data and scales for multiple tensors",
         py::arg("rowwise_data_list"), py::arg("columnwise_data_list"),
         py::arg("rowwise_scale_inv_list"), py::arg("columnwise_scale_inv_list"), py::arg("M_list"),

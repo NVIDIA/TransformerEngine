@@ -157,11 +157,11 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 
-at::Tensor nvfp4_transpose(at::Tensor input, std::optional<at::Tensor> output = std::nullopt);
+at::Tensor nvfp4_data_transpose(at::Tensor input, std::optional<at::Tensor> output = std::nullopt);
 
-void nvfp4_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles, int64_t K_tiles);
+void nvfp4_2d_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles, int64_t K_tiles);
 
-void nvfp4_multi_tensor_create_columnwise(std::vector<at::Tensor> rowwise_data_list,
+void nvfp4_2d_multi_tensor_transpose(std::vector<at::Tensor> rowwise_data_list,
                                           std::vector<at::Tensor> columnwise_data_list,
                                           std::vector<at::Tensor> rowwise_scale_inv_list,
                                           std::vector<at::Tensor> columnwise_scale_inv_list,

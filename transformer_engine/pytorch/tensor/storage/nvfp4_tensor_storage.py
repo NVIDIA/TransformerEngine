@@ -319,7 +319,9 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         # If both rowwise and columnwise are requested, create columnwise from rowwise if needed
         if rowwise_usage and columnwise_usage:
             assert (
-                self._rowwise_data is not None and self._rowwise_scale_inv is not None
+                self._rowwise_data is not None
+                and self._rowwise_scale_inv is not None
+                and self._amax_rowwise is not None
             ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
             if self._columnwise_data is None or self._columnwise_scale_inv is None:
                 self._create_columnwise()
@@ -370,11 +372,14 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         """
         Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
         """
+        assert (
+            self._quantizer is not None and self._quantizer.with_2d_quantization
+        ), "Cannot create columnwise data without 2D quantization enabled."
         rowwise_data = self._rowwise_data
         if not rowwise_data.is_contiguous():
             rowwise_data = rowwise_data.contiguous()
         # NVFP4 requires a specialized transpose that handles nibble repacking
-        self._columnwise_data = tex.nvfp4_transpose(rowwise_data, out=self._columnwise_data)
+        self._columnwise_data = tex.nvfp4_data_transpose(rowwise_data, out=self._columnwise_data)
         if self._columnwise_scale_inv is None:
             assert self._quantizer is not None
             # Use logical shape (self.size()), not packed byte shape (rowwise_data.shape)
@@ -399,7 +404,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         M_tiles = (M + TILE_SIZE - 1) // TILE_SIZE
         K_tiles = (K + TILE_SIZE - 1) // TILE_SIZE
 
-        tex.nvfp4_scale_transpose(
+        tex.nvfp4_2d_scale_transpose(
             self._rowwise_scale_inv,
             self._columnwise_scale_inv,
             M_tiles,
@@ -407,7 +412,6 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         )
 
         # Also set columnwise amax (same as rowwise since it's just transposed data)
-        if self._amax_columnwise is None and self._amax_rowwise is not None:
-            self._amax_columnwise = self._amax_rowwise.clone()
-        elif self._amax_rowwise is not None:
-            self._amax_columnwise.copy_(self._amax_rowwise)
+        if self._amax_columnwise is None:
+            self._amax_columnwise = torch.empty_like(self._amax_rowwise)
+        self._amax_columnwise.copy_(self._amax_rowwise)

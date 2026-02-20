@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <transformer_engine/recipe.h>
+#include <transformer_engine/transpose.h>
 
 #include <cassert>
 #include <limits>
@@ -843,8 +844,8 @@ void nvte_nvfp4_scale_transpose(const NVTETensor input, NVTETensor output, size_
                                       *convertNVTETensorCheck(output), M_tiles, K_tiles, stream);
 }
 
-void nvte_nvfp4_transpose(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_nvfp4_transpose);
+void nvte_nvfp4_data_transpose(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_nvfp4_data_transpose);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_transpose(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                                 stream);

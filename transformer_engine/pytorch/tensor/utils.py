@@ -51,8 +51,8 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
     elif isinstance(tensor, NVFP4Tensor):
         old_rowwise = tensor._rowwise_data
         assert old_rowwise.dtype == new_raw_data.dtype, "The data types of raw data don't match"
-        new_rowwise_data.detach().copy_(old_rowwise)
-        tensor._rowwise_data = new_rowwise_data
+        new_raw_data.detach().copy_(old_rowwise)
+        tensor._rowwise_data = new_raw_data
         del old_rowwise
     elif isinstance(tensor, MXFP8Tensor):
         raise NotImplementedError("replace_raw_data for MXFP8Tensor is not supported yet")
@@ -60,7 +60,7 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         raise ValueError(f"replace_raw_data for {type(tensor)} is not supported yet")
 
 
-def cast_master_weights_to_fp8(
+def quantize_master_weights(
     model_weights,
     master_weights,
     start_offsets,
@@ -68,15 +68,15 @@ def cast_master_weights_to_fp8(
     fsdp_shard_model_weights=None,
     manual_post_all_gather_processing=False,
 ):
-    r"""Helper function to cast master weights to FP8 primary weights.
+    r"""Helper function to cast master weights to quantized (FP8/NVFP4) primary weights.
 
     This is intended for use with ZeRO/FSDP. Each rank has a shard of
     the master weights (possibly empty) and a full copy of the model
-    weights.
+    weights. Supports FP8 (delayed, current, blockwise, MXFP8) and NVFP4 quantization.
 
     Parameters
     ----------
-    model_weights  : list of FP8 weights.
+    model_weights  : list of quantized weights (FP8 or NVFP4).
     master_weights : list of master weights. Typically they are FP32 weights.
     start_offsets  : list of integers, the starting index of the master weight in the model weight.
                      master_weight may be smaller than model_weight because it could be distributed
@@ -99,12 +99,51 @@ def cast_master_weights_to_fp8(
     current_scaling_params = []
     blockwise_scaling_params = []
     mxfp8_scaling_params = []
+    nvfp4_params = []
 
     if fsdp_shard_model_weights is None:
         use_fsdp_shard_model_weights = False
         fsdp_shard_model_weights = [None] * len(model_weights)
     else:
         use_fsdp_shard_model_weights = True
+
+    # Batch convert master_weights to model dtype for NVFP4 (single kernel instead of N kernels)
+    # Check if there are any NVFP4 weights
+    has_nvfp4 = any(
+        isinstance(w._get_quantizer(), NVFP4Quantizer) for w in model_weights if hasattr(w, '_get_quantizer')
+    )
+    if has_nvfp4 and len(model_weights) > 0:
+        # Find target dtype from first NVFP4 weight
+        target_dtype = None
+        for w in model_weights:
+            if hasattr(w, '_get_quantizer') and isinstance(w._get_quantizer(), NVFP4Quantizer):
+                target_dtype = w.dtype
+                break
+
+        if target_dtype is not None:
+            # Collect non-None master_weights and their indices
+            non_none_indices = []
+            non_none_weights = []
+            sizes = []
+            for i, mw in enumerate(master_weights):
+                if mw is not None:
+                    non_none_indices.append(i)
+                    non_none_weights.append(mw.view(-1))
+                    sizes.append(mw.numel())
+
+            if len(non_none_weights) > 0 and non_none_weights[0].dtype != target_dtype:
+                # Concatenate, convert once, then split
+                concatenated = torch.cat(non_none_weights)
+                converted = concatenated.to(target_dtype)
+                split_weights = torch.split(converted, sizes)
+
+                # Rebuild master_weights list with converted tensors
+                converted_master_weights = list(master_weights)
+                for idx, split_w, orig_mw in zip(
+                    non_none_indices, split_weights, [master_weights[i] for i in non_none_indices]
+                ):
+                    converted_master_weights[idx] = split_w.view(orig_mw.shape)
+                master_weights = converted_master_weights
 
     for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
         model_weights, master_weights, start_offsets, fsdp_shard_model_weights
@@ -124,34 +163,42 @@ def cast_master_weights_to_fp8(
         if hasattr(model_weight, "clear_high_precision_init_val"):
             model_weight.clear_high_precision_init_val()
 
-        if master_weight is not None:
-            # When not using fp8_primary_weights, the master_weight (fp32) is first cast to
-            # bf16/fp16, and then cast to fp8 during forward. Although it's not necessary when
-            # fp8_primary_weights is enabled, we still keep this logic to keep numerical
-            # consistency. So here we cast the master_weight to model_weight.dtype.
-            master_weight = master_weight.to(model_weight.dtype)
-
         quantizer = model_weight._get_quantizer()
-        if isinstance(quantizer, Float8Quantizer):
-            delayed_scaling_params.append(
-                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
-            )
-        elif isinstance(quantizer, Float8CurrentScalingQuantizer):
-            current_scaling_params.append(
-                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
-            )
-        elif isinstance(quantizer, Float8BlockQuantizer):
-            blockwise_scaling_params.append(
-                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
-            )
-        elif isinstance(quantizer, MXFP8Quantizer):
-            mxfp8_scaling_params.append(
+
+        if isinstance(quantizer, NVFP4Quantizer):
+            # NVFP4: master_weight dtype conversion already done above
+            nvfp4_params.append(
                 (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
             )
         else:
-            raise ValueError(
-                f"cast_master_weights_to_fp8 for {type(quantizer)} is not supported yet"
-            )
+            # FP8: convert master_weight to model dtype
+            if master_weight is not None:
+                # When not using fp8_primary_weights, the master_weight (fp32) is first cast to
+                # bf16/fp16, and then cast to fp8 during forward. Although it's not necessary when
+                # fp8_primary_weights is enabled, we still keep this logic to keep numerical
+                # consistency. So here we cast the master_weight to model_weight.dtype.
+                master_weight = master_weight.to(model_weight.dtype)
+
+            if isinstance(quantizer, Float8Quantizer):
+                delayed_scaling_params.append(
+                    (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+                )
+            elif isinstance(quantizer, Float8CurrentScalingQuantizer):
+                current_scaling_params.append(
+                    (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+                )
+            elif isinstance(quantizer, Float8BlockQuantizer):
+                blockwise_scaling_params.append(
+                    (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+                )
+            elif isinstance(quantizer, MXFP8Quantizer):
+                mxfp8_scaling_params.append(
+                    (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+                )
+            else:
+                raise ValueError(
+                    f"quantize_master_weights for {type(quantizer)} is not supported yet"
+                )
 
     extra_args = [group, use_fsdp_shard_model_weights, manual_post_all_gather_processing]
     if len(delayed_scaling_params) > 0:
@@ -162,9 +209,11 @@ def cast_master_weights_to_fp8(
         _cast_master_weights_to_fp8_blockwise_scaling(blockwise_scaling_params, *extra_args)
     if len(mxfp8_scaling_params) > 0:
         _cast_master_weights_to_fp8_mxfp8_scaling(mxfp8_scaling_params, *extra_args)
+    if len(nvfp4_params) > 0:
+        _cast_master_weights_to_nvfp4_2d(nvfp4_params, *extra_args)
 
 
-def cast_master_weights_to_nvfp4(
+def cast_master_weights_to_fp8(
     model_weights,
     master_weights,
     start_offsets,
@@ -172,67 +221,20 @@ def cast_master_weights_to_nvfp4(
     fsdp_shard_model_weights=None,
     manual_post_all_gather_processing=False,
 ):
-    """Helper to cast master weights to NVFP4 primary weights."""
+    r"""Helper function to cast master weights to FP8 primary weights.
 
-    nvfp4_params = []
-    if fsdp_shard_model_weights is None:
-        use_fsdp_shard_model_weights = False
-        fsdp_shard_model_weights = [None] * len(model_weights)
-    else:
-        use_fsdp_shard_model_weights = True
+    .. deprecated::
+        Use :func:`quantize_master_weights` instead.
 
-    # Batch convert master_weights to model dtype (single kernel instead of N kernels)
-    # All NVFP4 model_weights should have the same dtype (BF16)
-    if len(model_weights) > 0:
-        target_dtype = model_weights[0].dtype
-
-        # Collect non-None master_weights and their indices
-        non_none_indices = []
-        non_none_weights = []
-        sizes = []
-        for i, mw in enumerate(master_weights):
-            if mw is not None:
-                non_none_indices.append(i)
-                non_none_weights.append(mw.view(-1))
-                sizes.append(mw.numel())
-
-        if len(non_none_weights) > 0 and non_none_weights[0].dtype != target_dtype:
-            # Concatenate, convert once, then split
-            concatenated = torch.cat(non_none_weights)
-            converted = concatenated.to(target_dtype)
-            split_weights = torch.split(converted, sizes)
-
-            # Rebuild master_weights list with converted tensors
-            converted_master_weights = list(master_weights)
-            for idx, split_w, orig_mw in zip(
-                non_none_indices, split_weights, [master_weights[i] for i in non_none_indices]
-            ):
-                converted_master_weights[idx] = split_w.view(orig_mw.shape)
-            master_weights = converted_master_weights
-
-    for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
-        model_weights, master_weights, start_offsets, fsdp_shard_model_weights
-    ):
-        if hasattr(model_weight, "clear_high_precision_init_val"):
-            model_weight.clear_high_precision_init_val()
-
-        quantizer = model_weight._get_quantizer()
-        if isinstance(quantizer, NVFP4Quantizer):
-            nvfp4_params.append(
-                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
-            )
-        else:
-            raise ValueError(
-                "cast_master_weights_to_nvfp4 only supports NVFP4 tensors, got"
-                f" {type(model_weight)}"
-            )
-    if len(nvfp4_params) > 0:
-        _cast_master_weights_to_nvfp4_2d(
-            nvfp4_params,
-            group,
-            use_fsdp_shard_model_weights=use_fsdp_shard_model_weights,
-            manual_post_all_gather_processing=manual_post_all_gather_processing,
-        )
+    """
+    quantize_master_weights(
+        model_weights,
+        master_weights,
+        start_offsets,
+        group,
+        fsdp_shard_model_weights,
+        manual_post_all_gather_processing,
+    )
 
 
 def _cast_master_weights_to_fp8_delayed_scaling(
@@ -928,10 +930,10 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
 
     # Batch process all NVFP4 tensors with multi-tensor approach
     if nvfp4_tensors:
-        _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors)
+        _nvfp4_2d_multi_tensor_transpose(nvfp4_tensors)
 
 
-def _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors: List[NVFP4Tensor]):
+def _nvfp4_2d_multi_tensor_transpose(nvfp4_tensors: List[NVFP4Tensor]):
     """
     Batched columnwise creation for multiple NVFP4 tensors.
     Reduces CPU overhead by collecting all tensor metadata and dispatching to C++.
@@ -996,7 +998,7 @@ def _nvfp4_multi_tensor_create_columnwise(nvfp4_tensors: List[NVFP4Tensor]):
             tensor._amax_columnwise.copy_(tensor._amax_rowwise)
 
     # Dispatch to C++ multi-tensor kernel
-    tex.nvfp4_multi_tensor_create_columnwise(
+    tex.nvfp4_2d_multi_tensor_transpose(
         rowwise_data_list,
         columnwise_data_list,
         rowwise_scale_inv_list,
