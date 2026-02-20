@@ -610,7 +610,7 @@ def get_attention_backend(
                 qkv_layout,
             )
             use_fused_attention = False
-        #TODO: KL check if this condition is now supported or not ?
+        # TODO: KL check if this condition is now supported or not ?
         if (
             device_compute_capability == (12, 0)
             and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
