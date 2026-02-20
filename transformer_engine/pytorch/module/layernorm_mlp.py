@@ -1989,14 +1989,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
         name = self.name or ""
         if fwd:
             base = [
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="input", name=name),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="weight", name=name),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="output", name=name),
+                QuantizerRole(module_type="linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=name),
+                QuantizerRole(module_type="linear", tensor_type="output", name=name),
             ]
         else:
             base = [
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="grad_output", name=name),
-                QuantizerRole(module_type="layernorm_mlp", tensor_type="grad_input", name=name),
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=name),
+                QuantizerRole(module_type="linear", tensor_type="grad_input", name=name),
             ]
         return [base[i % len(base)] for i in range(num_quantizers)]
 

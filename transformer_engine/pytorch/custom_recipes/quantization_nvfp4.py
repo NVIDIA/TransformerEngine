@@ -26,28 +26,19 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
-    if role.tensor_type == "input":
-        return NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
-            quant_tile_shape=(1, 16),
-            pow_2_scales=False,
-            with_rht=True,
-        )
-    if role.tensor_type == "weight":
+    if role.is_gemm() and role.tensor_type == "weight":
         return NVFP4QuantizerRef(
             dtype=utils.Fp4Formats.E2M1,
             quant_tile_shape=(16, 16),
             pow_2_scales=False,
             with_rht=False,
         )
-    if role.tensor_type == "grad_output":
-        return NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
-            quant_tile_shape=(1, 16),
-            pow_2_scales=False,
-            with_rht=True,
-        )
-    return None
+    return NVFP4QuantizerRef(
+        dtype=utils.Fp4Formats.E2M1,
+        quant_tile_shape=(1, 16),
+        pow_2_scales=False,
+        with_rht=True,
+    )
 
 
 def cast_to_fp4x2(x):

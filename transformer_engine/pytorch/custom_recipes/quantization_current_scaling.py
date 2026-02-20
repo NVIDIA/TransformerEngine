@@ -20,18 +20,18 @@ def current_scaling_ref_quantizer_factory(role):
 
     Receives a :class:`~transformer_engine.pytorch.quantization.QuantizerRole`.
 
+    Backward tensors use E5M2, everything else uses E4M3.
+
     Usage with CustomRecipe and autocast::
 
         custom_recipe = recipe.CustomRecipe(qfactory=current_scaling_ref_quantizer_factory)
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
-    if role.tensor_type in ("input", "weight"):
-        dtype = torch.float8_e4m3fn
-    elif role.tensor_type in ("output", "grad_output"):
+    if role.tensor_type in ("grad_output", "grad_input"):
         dtype = torch.float8_e5m2
     else:
-        return None
+        dtype = torch.float8_e4m3fn
     return CurrentScalingQuantizerRef(
         dtype=dtype,
         rowwise=True,

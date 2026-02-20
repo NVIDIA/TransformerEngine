@@ -58,6 +58,7 @@ class QuantizerRole:
     module_type : str
         Module type that emits this role, e.g. `"linear"`, `"grouped_linear"`, `"dpa"`.
         Empty string when not provided.
+        See `GEMM_MODULE_TYPES` for the set of GEMM-based module types.
     tensor_type : str
         What tensor is being quantized, in the module's own vocabulary.
         GEMM modules: `"input"`, `"weight"`, `"grad_output"`, etc.
@@ -68,11 +69,22 @@ class QuantizerRole:
         framework), e.g.
         `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`, `"linear_39"`.
         Empty string when not provided.
+
+    Class attributes
+    ----------------
+    GEMM_MODULE_TYPES : frozenset of str
+        Module types that represent GEMM-based operations.
     """
+
+    GEMM_MODULE_TYPES = frozenset({"linear", "grouped_linear"})
 
     module_type: str = ""
     tensor_type: str = ""
     name: str = ""
+
+    def is_gemm(self) -> bool:
+        """Whether this role belongs to a GEMM-based module."""
+        return self.module_type in self.GEMM_MODULE_TYPES
 
     def __str__(self) -> str:
         parts = []
