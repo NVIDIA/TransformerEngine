@@ -57,33 +57,32 @@ class QuantizerRole:
     ------
     module_type : str
         Module type that emits this role, e.g. `"linear"`, `"grouped_linear"`, `"dpa"`.
+        Empty string when not provided.
     tensor_type : str
         What tensor is being quantized, in the module's own vocabulary.
         GEMM modules: `"input"`, `"weight"`, `"grad_output"`, etc.
         DPA: `"qkv"`, `"s"`, etc.
+        Empty string when not provided.
     name : str
         Caller-provided module instance name (e.g. set by the training
         framework), e.g.
         `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`, `"linear_39"`.
         Empty string when not provided.
-    position : str
-        Module-internal sub-slot. For modules that fuse multiple sequential operations,
-        e.g. `LayerNormMLP` has `"fc1"` and `"fc2"` sub-slots.
-        Empty string for simple modules.
     """
 
     module_type: str = ""
     tensor_type: str = ""
     name: str = ""
-    position: str = ""
 
     def __str__(self) -> str:
-        parts = [f"{self.module_type}:{self.tensor_type}"]
+        parts = []
+        if self.module_type:
+            parts.append(f"module_type={self.module_type}")
+        if self.tensor_type:
+            parts.append(f"tensor_type={self.tensor_type}")
         if self.name:
             parts.append(f"name={self.name}")
-        if self.position:
-            parts.append(f"position={self.position}")
-        return "|".join(parts)
+        return "|".join(parts) if parts else "QuantizerRole()"
 
 
 @functools.lru_cache(maxsize=None)

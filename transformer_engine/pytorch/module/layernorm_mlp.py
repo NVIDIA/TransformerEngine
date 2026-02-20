@@ -1985,44 +1985,20 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fwd: bool,
         num_quantizers: int,
     ) -> Optional[List[QuantizerRole]]:
-        """QuantizerRole list for quantizers used by ``LayerNormMLP``.
-
-        Uses ``position`` to distinguish FC1 and FC2 sub-operations.
-        """
+        """QuantizerRole list for quantizers used by ``LayerNormMLP``."""
         name = self.name or ""
         if fwd:
-            roles = [
-                QuantizerRole(module_type="linear", tensor_type="input", name=name, position="fc1"),
-                QuantizerRole(
-                    module_type="linear", tensor_type="weight", name=name, position="fc1"
-                ),
-                QuantizerRole(
-                    module_type="linear", tensor_type="output", name=name, position="fc1"
-                ),
-                QuantizerRole(module_type="linear", tensor_type="input", name=name, position="fc2"),
-                QuantizerRole(
-                    module_type="linear", tensor_type="weight", name=name, position="fc2"
-                ),
-                QuantizerRole(
-                    module_type="linear", tensor_type="output", name=name, position="fc2"
-                ),
+            base = [
+                QuantizerRole(module_type="layernorm_mlp", tensor_type="input", name=name),
+                QuantizerRole(module_type="layernorm_mlp", tensor_type="weight", name=name),
+                QuantizerRole(module_type="layernorm_mlp", tensor_type="output", name=name),
             ]
         else:
-            roles = [
-                QuantizerRole(
-                    module_type="linear", tensor_type="grad_output", name=name, position="fc1"
-                ),
-                QuantizerRole(
-                    module_type="linear", tensor_type="grad_input", name=name, position="fc1"
-                ),
-                QuantizerRole(
-                    module_type="linear", tensor_type="grad_output", name=name, position="fc2"
-                ),
-                QuantizerRole(
-                    module_type="linear", tensor_type="grad_input", name=name, position="fc2"
-                ),
+            base = [
+                QuantizerRole(module_type="layernorm_mlp", tensor_type="grad_output", name=name),
+                QuantizerRole(module_type="layernorm_mlp", tensor_type="grad_input", name=name),
             ]
-        return roles[:num_quantizers]
+        return [base[i % len(base)] for i in range(num_quantizers)]
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""

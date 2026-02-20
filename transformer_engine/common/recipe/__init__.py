@@ -508,15 +508,12 @@ class CustomRecipe(Recipe):
 
         `QuantizerRole` is a frozen dataclass with the following fields:
 
-        - `module_type` (str): module type, e.g.
+        - `module_type` (str): module type (empty string when not set), e.g.
           `"linear"`, `"grouped_linear"`, `"dpa"`.
-        - `tensor_type` (str): what tensor is being quantized, e.g.
-          `"input"`, `"weight"`, `"grad_output"`, etc.
+        - `tensor_type` (str): what tensor is being quantized (empty 
+        string when not set), e.g. `"input"`, `"weight"`, `"grad_output"`.
         - `name` (str): caller-provided module instance name (empty
           string when not set), e.g. `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`.
-        - `position` (str): module-internal sub-slot within compound
-          modules, e.g. `"fc1"` / `"fc2"` inside `LayerNormMLP`
-          (empty string for simple modules).
 
         See `transformer_engine.pytorch.quantization.QuantizerRole`
         for full documentation.
