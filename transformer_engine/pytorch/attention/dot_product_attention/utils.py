@@ -610,6 +610,7 @@ def get_attention_backend(
                 qkv_layout,
             )
             use_fused_attention = False
+        #TODO: KL check if this condition is now supported or not ?
         if (
             device_compute_capability == (12, 0)
             and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
@@ -690,11 +691,11 @@ def get_attention_backend(
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
-        if device_compute_capability == (12, 0):
+        if device_compute_capability == (12, 0) and cudnn_version < (9, 18, 1):
             if use_fused_attention:
                 logger.debug(
                     "Disabling FusedAttention as qkv_format = thd is"
-                    " not supported for compute capability = sm120"
+                    " not supported for compute capability = sm120 and cuDNN version < 9.18.1"
                 )
             use_fused_attention = False
 
