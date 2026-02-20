@@ -333,43 +333,28 @@ class MiniZero_1:
         # -----------------------------------------------------------------------------------------
         # Step 5: Copy the updated weights (not all weights) to the weight buffer
         # -----------------------------------------------------------------------------------------
-        for i in range(len(self.weights)):
-            master_weight = self.master_weights[i]
-            if master_weight is None:
-                continue
-            start_offset = self.start_offsets[i]
-            if isinstance(self.weights[i], NVFP4Tensor):
-                storage_start = self.storage_start_offsets[i]
-                storage_overlap = self.storage_overlapping_areas[i]
-                if storage_start is None or storage_overlap is None:
-                    continue
-                weight = _get_raw_data(self.weights[i]).view(-1)
-                storage_len = storage_overlap[1] - storage_overlap[0]
-                weight_slice = weight[storage_start : storage_start + storage_len]
-                overlapping_start, overlapping_end = storage_overlap
-                self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
-                continue
-            elif isinstance(self.weights[i], QuantizedTensor):
-                weight = _get_raw_data(self.weights[i])
-            else:
-                weight = self.weights[i]
-            weight_slice = weight.view(-1)[start_offset : start_offset + master_weight.numel()]
-            overlapping_start, overlapping_end = self.overlapping_areas[i]
-            self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
         colwise_list = [False]
         if isinstance(self.weights[0], MXFP8Tensor):
             colwise_list.append(True)
 
         for colwise in colwise_list:
-            # -------------------------------------------------------------------------------------
-            # Step 5: Copy the updated weights (not all weights) to the weight buffer
-            # -------------------------------------------------------------------------------------
             for i in range(len(self.weights)):
                 master_weight = self.master_weights[i]
                 if master_weight is None:
                     continue
                 start_offset = self.start_offsets[i]
-                if isinstance(self.weights[i], QuantizedTensor):
+                if isinstance(self.weights[i], NVFP4Tensor):
+                    storage_start = self.storage_start_offsets[i]
+                    storage_overlap = self.storage_overlapping_areas[i]
+                    if storage_start is None or storage_overlap is None:
+                        continue
+                    weight = _get_raw_data(self.weights[i]).view(-1)
+                    storage_len = storage_overlap[1] - storage_overlap[0]
+                    weight_slice = weight[storage_start : storage_start + storage_len]
+                    overlapping_start, overlapping_end = storage_overlap
+                    self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
+                    continue
+                elif isinstance(self.weights[i], QuantizedTensor):
                     weight = _get_raw_data(self.weights[i], colwise)
                 else:
                     weight = self.weights[i]
@@ -377,22 +362,32 @@ class MiniZero_1:
                 overlapping_start, overlapping_end = self.overlapping_areas[i]
                 self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
 
-        # -------------------------------------------------------------------------------------
-        # Step 6: Weight all-gather (FP8 or BF16)
-        # -------------------------------------------------------------------------------------
-        dist.all_gather_into_tensor(
-            self.weight_buffer, self.weight_buffer_slice, group=self.dp_group
-        )
+            # -------------------------------------------------------------------------------------
+            # Step 6: Weight all-gather (FP8 or BF16)
+            # -------------------------------------------------------------------------------------
+            dist.all_gather_into_tensor(
+                self.weight_buffer, self.weight_buffer_slice, group=self.dp_group
+            )
 
-        # -------------------------------------------------------------------------------------
-        # Step 7: Copy the gathered weights from weight buffer to the actual weights
-        # -------------------------------------------------------------------------------------
-        for weight, offset in zip(self.weights, self.offsets[:-1]):
-            start = offset
-            end = offset + weight.numel()
-            if isinstance(weight, QuantizedTensor):
-                weight = _get_raw_data(weight, colwise)
-            weight.view(-1).data.copy_(self.weight_buffer[start:end])
+            # -------------------------------------------------------------------------------------
+            # Step 7: Copy the gathered weights from weight buffer to the actual weights
+            # -------------------------------------------------------------------------------------
+            if self.weights_are_nvfp4:
+                # NVFP4: use storage offsets (packs 2 values per byte)
+                for weight, storage_offset, storage_size in zip(
+                    self.weights, self.storage_offsets[:-1], self.storage_sizes
+                ):
+                    start = storage_offset
+                    end = storage_offset + storage_size
+                    raw_data = _get_raw_data(weight)
+                    raw_data.view(-1).data.copy_(self.weight_buffer[start:end])
+            else:
+                for weight, offset in zip(self.weights, self.offsets[:-1]):
+                    start = offset
+                    end = offset + weight.numel()
+                    if isinstance(weight, QuantizedTensor):
+                        weight = _get_raw_data(weight, colwise)
+                    weight.view(-1).data.copy_(self.weight_buffer[start:end])
 
         if self.manual_post_all_gather_processing:
             quantized_weights = [
@@ -848,7 +843,7 @@ def _test_fsdp_cast_master_weights_to_fp8(
         ), f"Loss mismatch at rank {rank}, step {i} for {quantization} (FSDP)"
 
 
-def _test_quantize_master_weights(dp_group, manual_post_all_gather_processing):
+def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processing):
     available, reason = is_nvfp4_available(return_reason=True)
     if not available:
         pytest.skip(reason)
@@ -971,10 +966,10 @@ def run_parallel_tests() -> None:
         for post_ag_processing in manual_post_all_gather_processings:
             _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
             _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
-    print("starting cast master weights to nvfp4 test")
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:
-        _test_quantize_master_weights(dp_group, False)
+        print("starting cast master weights to nvfp4 test")
+        _test_cast_master_weights_to_nvfp4(dp_group, False)
 
     dist.destroy_process_group()
 
