@@ -510,7 +510,7 @@ class CustomRecipe(Recipe):
 
         - `module_type` (str): module type (empty string when not set), e.g.
           `"linear"`, `"grouped_linear"`, `"dpa"`.
-        - `tensor_type` (str): what tensor is being quantized (empty 
+        - `tensor_type` (str): what tensor is being quantized (empty
         string when not set), e.g. `"input"`, `"weight"`, `"grad_output"`.
         - `name` (str): caller-provided module instance name (empty
           string when not set), e.g. `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`.
