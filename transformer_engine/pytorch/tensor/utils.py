@@ -110,13 +110,15 @@ def quantize_master_weights(
     # Batch convert master_weights to model dtype for NVFP4 (single kernel instead of N kernels)
     # Check if there are any NVFP4 weights
     has_nvfp4 = any(
-        isinstance(w._get_quantizer(), NVFP4Quantizer) for w in model_weights if hasattr(w, '_get_quantizer')
+        isinstance(w._get_quantizer(), NVFP4Quantizer)
+        for w in model_weights
+        if hasattr(w, "_get_quantizer")
     )
     if has_nvfp4 and len(model_weights) > 0:
         # Find target dtype from first NVFP4 weight
         target_dtype = None
         for w in model_weights:
-            if hasattr(w, '_get_quantizer') and isinstance(w._get_quantizer(), NVFP4Quantizer):
+            if hasattr(w, "_get_quantizer") and isinstance(w._get_quantizer(), NVFP4Quantizer):
                 target_dtype = w.dtype
                 break
 

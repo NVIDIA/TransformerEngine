@@ -99,7 +99,8 @@ at::Tensor nvfp4_data_transpose(at::Tensor input, std::optional<at::Tensor> outp
   return out;
 }
 
-void nvfp4_2d_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles, int64_t K_tiles) {
+void nvfp4_2d_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles,
+                              int64_t K_tiles) {
   init_extension();
 
   // Input: rowwise_scale_inv [M_padded, K_tiles], uint8 (E4M3 stored as bytes)
@@ -286,11 +287,10 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
 }
 
 void nvfp4_2d_multi_tensor_transpose(std::vector<at::Tensor> rowwise_data_list,
-                                          std::vector<at::Tensor> columnwise_data_list,
-                                          std::vector<at::Tensor> rowwise_scale_inv_list,
-                                          std::vector<at::Tensor> columnwise_scale_inv_list,
-                                          std::vector<int64_t> M_list,
-                                          std::vector<int64_t> K_list) {
+                                     std::vector<at::Tensor> columnwise_data_list,
+                                     std::vector<at::Tensor> rowwise_scale_inv_list,
+                                     std::vector<at::Tensor> columnwise_scale_inv_list,
+                                     std::vector<int64_t> M_list, std::vector<int64_t> K_list) {
   init_extension();
 
   const size_t num_tensors = rowwise_data_list.size();
