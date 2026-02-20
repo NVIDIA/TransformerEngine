@@ -72,8 +72,8 @@ class QuantizerRole:
         Empty string for simple modules.
     """
 
-    module_type: str
-    tensor_type: str
+    module_type: str = ""
+    tensor_type: str = ""
     name: str = ""
     position: str = ""
 
@@ -1429,18 +1429,23 @@ class CustomRecipeState(RecipeState):
 
     def make_quantizers(self) -> list:
         qfactory = self.recipe.qfactory
-        out = []
 
-        roles: List[QuantizerRole]
-        if getattr(self, "roles", None) is None:
-            raise ValueError("CustomRecipeState requires roles to be set.")
-        roles = self.roles
+        roles: List[QuantizerRole] = getattr(self, "roles", None)
+        if roles is None:
+            warnings.warn(
+                "CustomRecipeState: no QuantizerRole list provided by the module/op. "
+                "Falling back to bare QuantizerRole() defaults. "
+                "Override get_quantizer_roles() to provide meaningful roles.",
+                stacklevel=2,
+            )
+            roles = [QuantizerRole() for _ in range(self.num_quantizers)]
         if len(roles) != self.num_quantizers:
             raise ValueError(
                 "CustomRecipeState requires roles to match num_quantizers "
                 f"({len(roles)=} vs {self.num_quantizers=})"
             )
 
+        out = []
         for i in range(self.num_quantizers):
             quantizer = qfactory(roles[i])
             out.append(quantizer)
