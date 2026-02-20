@@ -263,7 +263,7 @@ std::vector<py::object> fused_attn_fwd(
   // fp8          : M [b, h, sq, 1], ZInv [b, h, sq, 1], rng_state [2]
   size_t i = 0;
   at::Tensor output_tensor;
-  // intermediate softmax tensor, S (or `Stats`)
+  // intermediate softmax tensor, S or M (for fp8)
   output_tensor =
       allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                     static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
