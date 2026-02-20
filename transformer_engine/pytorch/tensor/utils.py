@@ -561,7 +561,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
 def _cast_master_weights_to_nvfp4_2d(
     params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):
-    r"""Helper function to cast master weights to FP8 primary weights for blockwise scaling.
+    r"""Helper function to cast master weights to NVFP4 2D quantized weights.
 
     Parameters
     ----------
