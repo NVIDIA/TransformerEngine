@@ -179,10 +179,13 @@ def run_dpa_with_cp(
     fp8_mha="False",
     scaling_mode="delayed",
     f16_O="False",
+    is_training="True",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
     logging.root.setLevel(log_level)
+    # When is_training is False, gradient outputs are None.
+    is_training = is_training == "True"
 
     # set up environment variables and config
     fp8_bwd = fp8_bwd == "True" and dtype == "fp8"
@@ -257,7 +260,9 @@ def run_dpa_with_cp(
         softmax_type=config.softmax_type,
         return_max_logit=config.return_max_logit,
     ).cuda()
-    if config.softmax_type != "vanilla":
+    if not is_training:
+        core_attn.eval()
+    if is_training and config.softmax_type != "vanilla":
         core_attn.softmax_offset.requires_grad = True
 
     # generate attention inputs
@@ -305,8 +310,25 @@ def run_dpa_with_cp(
         x.requires_grad = True
 
     if config.attn_bias_type not in ["no_bias", "alibi"]:
-        attn_bias_shape = (1, 1, config.max_seqlen_q, config.max_seqlen_kv)
+        bias_shape_map = {
+            "1hss": (1, config.num_heads, config.max_seqlen_q, config.max_seqlen_kv),
+            "11ss": (1, 1, config.max_seqlen_q, config.max_seqlen_kv),
+            "b1ss": (config.batch_size, 1, config.max_seqlen_q, config.max_seqlen_kv),
+            "bhss": (
+                config.batch_size,
+                config.num_heads,
+                config.max_seqlen_q,
+                config.max_seqlen_kv,
+            ),
+            "111s": (1, 1, 1, config.max_seqlen_kv),
+        }
+        attn_bias_shape = bias_shape_map.get(config.bias_shape)
+        if attn_bias_shape is None:
+            assert False, f"cuDNN does not support {config.bias_shape=}"
         bias = torch.randn(*attn_bias_shape, dtype=dtypes[dtype]).cuda()
+        # cuDNN does not support dbias calculation for 111s as of cuDNN 9.18
+        # TODO(KshitijLakhani): Set requires_grad to True for all shapes once 111s is supported
+        bias.requires_grad = True if config.bias_shape != "111s" else False
     else:
         bias = None
 
@@ -333,15 +355,20 @@ def run_dpa_with_cp(
         )
         if config.return_max_logit:
             out, max_logit = out
-        if fp8_bwd and fp8_mha:
-            dout_fp8 = dout_quantizer(dout)
-            out.backward(dout_fp8)
-        else:
-            out.backward(dout)
-    dq, dk, dv = q.grad, k.grad, v.grad
-    d_softmax_offset = None
-    if config.softmax_type != "vanilla":
-        d_softmax_offset = core_attn.softmax_offset.grad
+        if is_training:
+            if fp8_bwd and fp8_mha:
+                dout_fp8 = dout_quantizer(dout)
+                out.backward(dout_fp8)
+            else:
+                out.backward(dout)
+    if is_training:
+        dq, dk, dv, dbias = q.grad, k.grad, v.grad, bias.grad if bias is not None else None
+        d_softmax_offset = (
+            core_attn.softmax_offset.grad if config.softmax_type != "vanilla" else None
+        )
+    else:
+        dq, dk, dv, dbias = None, None, None, None
+        d_softmax_offset = None
 
     ############ run with CP ############
     logging.info(f"[Rank {rank}] Run with context parallelism")
@@ -387,13 +414,30 @@ def run_dpa_with_cp(
         dout_quantizer.amax.fill_(0.0)
     if fp8_mha:
         q_, k_, v_ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
-    q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
+    if is_training:
+        q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:
-        bias_ = bias_.view(
-            *bias_.shape[:-2], 2 * world_size, bias_.shape[-2] // (2 * world_size), bias_.shape[-1]
-        )
-        bias_ = bias_.index_select(2, seq_idx)
-        bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
+        ndim = bias_.ndim
+        seq_q_dim = ndim - 2
+        if qkv_format == "thd":
+            bias_seq_idx = seq_idx_q
+        else:
+            bias_seq_idx = seq_idx
+        shape_before_seq = bias_.shape[:seq_q_dim]
+        seq_q_size = bias_.shape[seq_q_dim]
+        seq_kv_size = bias_.shape[-1]
+        if seq_q_size == 1:
+            # TODO(KshitijLakhani): Set to True always once cuDNN supports dbias for 111s
+            bias_.requires_grad = False
+            # Bias is broadcast, no need to partition along sequence dimension
+            pass
+        else:
+            bias_ = bias_.view(
+                *shape_before_seq, 2 * world_size, seq_q_size // (2 * world_size), seq_kv_size
+            )
+            bias_ = bias_.index_select(seq_q_dim, bias_seq_idx)
+            bias_ = bias_.view(*shape_before_seq, -1, seq_kv_size)
+            bias_.requires_grad = True
     # set up environment
     core_attn.set_context_parallel_group(
         cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
@@ -428,90 +472,143 @@ def run_dpa_with_cp(
         )
         if config.return_max_logit:
             out_, max_logit_ = out_
-        if fp8_bwd and fp8_mha:
-            dout_fp8_ = dout_quantizer(dout_)
-            out_.backward(dout_fp8_)
-        else:
-            out_.backward(dout_)
-    dq_, dk_, dv_ = q_.grad, k_.grad, v_.grad
-    d_softmax_offset_ = None
-    if config.softmax_type != "vanilla":
-        d_softmax_offset_ = core_attn.softmax_offset.grad.clone()
+        if is_training:
+            if fp8_bwd and fp8_mha:
+                dout_fp8_ = dout_quantizer(dout_)
+                out_.backward(dout_fp8_)
+            else:
+                out_.backward(dout_)
+    if is_training:
+        dq_, dk_, dv_, dbias_ = (
+            q_.grad,
+            k_.grad,
+            v_.grad,
+            bias_.grad if bias_ is not None else None,
+        )
+        d_softmax_offset_ = (
+            core_attn.softmax_offset.grad.clone() if config.softmax_type != "vanilla" else None
+        )
+    else:
+        dq_, dk_, dv_, dbias_ = None, None, None, None
+        d_softmax_offset_ = None
 
     # get outputs
-    tensors = [out, dq, dk, dv, out_, dq_, dk_, dv_]
+    tensors = [out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_]
     if fp8_mha:
         tensors_to_deq = [out, out_] if not fp8_bwd else tensors
         for i, tensor in enumerate(tensors_to_deq):
-            tensors_to_deq[i] = tensor.dequantize()
+            # dbias/dbias_ could be None, so skip check for it
+            if tensor is not None:
+                tensors_to_deq[i] = tensor.dequantize()
         if not fp8_bwd:
-            tensors[0], tensors[4] = tensors_to_deq
+            tensors[0], tensors[5] = tensors_to_deq
     for tensor in tensors:
-        assert torch.all(~torch.isnan(tensor))
-        assert torch.all(~torch.isinf(tensor))
-    out, dq, dk, dv, out_, dq_, dk_, dv_ = tensors
+        # dbias/dbias_ could be None, so skip check for it
+        if tensor is not None:
+            assert torch.all(~torch.isnan(tensor))
+            assert torch.all(~torch.isinf(tensor))
+    out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############
     if qkv_format == "bshd" or qkv_format == "sbhd":
-        dq, dk, dv, out = [
-            x.view(
-                *x.shape[:seq_dim],
+        if is_training:
+            dq, dk, dv, out = [
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                for x in [dq, dk, dv, out]
+            ]
+            dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
+            dq_, dk_, dv_, out_ = [
+                x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
+                for x in [dq_, dk_, dv_, out_]
+            ]
+            if dbias is not None and dbias_ is not None:
+                ndim = dbias.ndim
+                # Query seq is at dim -2
+                seq_q_dim = ndim - 2
+                shape_before_seq = dbias.shape[:seq_q_dim]
+                seq_q_size = dbias.shape[seq_q_dim]
+                seq_kv_size = dbias.shape[-1]
+                # Reshape to split seq_q dimension
+                dbias = dbias.view(
+                    *shape_before_seq, 2 * world_size, seq_q_size // (2 * world_size), seq_kv_size
+                )
+                # Index select on the newly created dimension (now at position seq_q_dim)
+                dbias = dbias.index_select(seq_q_dim, seq_idx)
+                dbias_ = dbias_.view(
+                    *shape_before_seq, 2, dbias_.shape[seq_q_dim] // 2, seq_kv_size
+                )
+        else:
+            # Forward-only: reshape only out/out_ for comparison
+            out = out.view(
+                *out.shape[:seq_dim],
                 2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
+                out.shape[seq_dim] // (2 * world_size),
+                *out.shape[(seq_dim + 1) :],
             )
-            for x in [dq, dk, dv, out]
-        ]
-        dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
-        dq_, dk_, dv_, out_ = [
-            x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
-            for x in [dq_, dk_, dv_, out_]
-        ]
+            out = out.index_select(seq_dim, seq_idx)
+            out_ = out_.view(
+                *out_.shape[:seq_dim], 2, out_.shape[seq_dim] // 2, *out_.shape[(seq_dim + 1) :]
+            )
+
     elif qkv_format == "thd":
-        dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
-        dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
-        dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
-        cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
-        cu_seqlens_q = get_cu_seqlens_on_cp_rank(
-            cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
-        )
-        cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
-        num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
-        for x in [dq, out, dq_, out_]:
-            assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
-            for b in range(config.batch_size):
-                assert (
-                    num_pads_q[b] == 0
-                    or torch.count_nonzero(
-                        x[(cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[b + 1]]
-                    ).item()
-                    == 0
-                )
-        cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
-        cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
-            cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
-        )
-        cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
-        num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
-        for x in [dk, dv, dk_, dv_]:
-            assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
-            for b in range(config.batch_size):
-                assert (
-                    num_pads_kv[b] == 0
-                    or torch.count_nonzero(
-                        x[
-                            (cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]) : cu_seqlens_kv_padded[
-                                b + 1
+        if is_training:
+            dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
+            dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
+            dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
+            cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
+            cu_seqlens_q = get_cu_seqlens_on_cp_rank(
+                cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
+            )
+            cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
+            num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
+            for x in [dq, out, dq_, out_]:
+                assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
+                for b in range(config.batch_size):
+                    assert (
+                        num_pads_q[b] == 0
+                        or torch.count_nonzero(
+                            x[
+                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
+                                    b + 1
+                                ]
                             ]
-                        ]
-                    ).item()
-                    == 0
-                )
+                        ).item()
+                        == 0
+                    )
+            cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
+            cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
+                cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
+            )
+            cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
+            num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
+            for x in [dk, dv, dk_, dv_]:
+                assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
+                for b in range(config.batch_size):
+                    assert (
+                        num_pads_kv[b] == 0
+                        or torch.count_nonzero(
+                            x[
+                                (
+                                    cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
+                                ) : cu_seqlens_kv_padded[b + 1]
+                            ]
+                        ).item()
+                        == 0
+                    )
+        else:
+            # Forward-only: reshape only out/out_ for comparison
+            out = out.index_select(0, seq_idx_q).contiguous()
+            out_ = out_
 
     atol, rtol, rmse_tol = get_tols(config, dtype)
-    tensors_cp = [out_, dq_, dk_, dv_, d_softmax_offset_, max_logit_]
-    tensors_no_cp = [out, dq, dk, dv, d_softmax_offset, max_logit]
-    names = ["out", "dq", "dk", "dv", "d_softmax_offset", "max_logit"]
+    tensors_cp = [out_, dq_, dk_, dv_, dbias_, d_softmax_offset_, max_logit_]
+    tensors_no_cp = [out, dq, dk, dv, dbias, d_softmax_offset, max_logit]
+    names = ["out", "dq", "dk", "dv", "dbias", "d_softmax_offset", "max_logit"]
     names_cp = [x + "_cp" for x in names]
     names_no_cp = [x + "_no_cp" for x in names]
     is_fp8 = dtype == "fp8"
@@ -519,47 +616,113 @@ def run_dpa_with_cp(
         if t is not None:
             if "softmax_offset" not in names[i] and "max_logit" not in names[i]:
                 if qkv_format == "bshd":
-                    compare_and_assert(
-                        t[:, 0],
-                        tensors_cp[i][:, 0],
-                        names_no_cp[i],
-                        names_cp[i],
-                        atol,
-                        rtol,
-                        rmse_tol,
-                        is_fp8,
-                    )
-                    compare_and_assert(
-                        t[:, 1],
-                        tensors_cp[i][:, 1],
-                        names_no_cp[i],
-                        names_cp[i],
-                        atol,
-                        rtol,
-                        rmse_tol,
-                        is_fp8,
-                    )
+                    # Compare the two sequence chunks separately
+                    # Compare dbias
+                    if names[i] == "dbias":
+                        # Compare the two chunks along dimension 2 (the split sequence dimension)
+                        seq_q_dim_bias = 2
+                        ndim_bias = t.ndim
+                        slice_0 = [slice(None)] * ndim_bias
+                        slice_0[seq_q_dim_bias] = 0
+                        slice_1 = [slice(None)] * ndim_bias
+                        slice_1[seq_q_dim_bias] = 1
+                        compare_and_assert(
+                            t[tuple(slice_0)],
+                            tensors_cp[i][tuple(slice_0)],
+                            names_no_cp[i],
+                            names_cp[i],
+                            atol,
+                            rtol,
+                            rmse_tol,
+                            is_fp8,
+                        )
+                        compare_and_assert(
+                            t[tuple(slice_1)],
+                            tensors_cp[i][tuple(slice_1)],
+                            names_no_cp[i],
+                            names_cp[i],
+                            atol,
+                            rtol,
+                            rmse_tol,
+                            is_fp8,
+                        )
+                    # Compare Q/K/V/out
+                    else:
+                        #  Compare the two chunks along dimension 1 (the split sequence dimension)
+                        compare_and_assert(
+                            t[:, 0],
+                            tensors_cp[i][:, 0],
+                            names_no_cp[i],
+                            names_cp[i],
+                            atol,
+                            rtol,
+                            rmse_tol,
+                            is_fp8,
+                        )
+                        compare_and_assert(
+                            t[:, 1],
+                            tensors_cp[i][:, 1],
+                            names_no_cp[i],
+                            names_cp[i],
+                            atol,
+                            rtol,
+                            rmse_tol,
+                            is_fp8,
+                        )
                 elif qkv_format == "sbhd":
-                    compare_and_assert(
-                        t[0],
-                        tensors_cp[i][0],
-                        names_no_cp[i],
-                        names_cp[i],
-                        atol,
-                        rtol,
-                        rmse_tol,
-                        is_fp8,
-                    )
-                    compare_and_assert(
-                        t[1],
-                        tensors_cp[i][1],
-                        names_no_cp[i],
-                        names_cp[i],
-                        atol,
-                        rtol,
-                        rmse_tol,
-                        is_fp8,
-                    )
+                    # Compare the two sequence chunks separately
+                    # Compare dbias (same as BSHD)
+                    if names[i] == "dbias":
+                        # Same as bshd: Compare the two chunks along dimension 2 (the split sequence dimension)
+                        seq_q_dim_bias = 2
+                        ndim_bias = t.ndim
+                        slice_0 = [slice(None)] * ndim_bias
+                        slice_0[seq_q_dim_bias] = 0
+                        slice_1 = [slice(None)] * ndim_bias
+                        slice_1[seq_q_dim_bias] = 1
+                        compare_and_assert(
+                            t[tuple(slice_0)],
+                            tensors_cp[i][tuple(slice_0)],
+                            names_no_cp[i],
+                            names_cp[i],
+                            atol,
+                            rtol,
+                            rmse_tol,
+                            is_fp8,
+                        )
+                        compare_and_assert(
+                            t[tuple(slice_1)],
+                            tensors_cp[i][tuple(slice_1)],
+                            names_no_cp[i],
+                            names_cp[i],
+                            atol,
+                            rtol,
+                            rmse_tol,
+                            is_fp8,
+                        )
+                    # Compare Q/K/V/out
+                    else:
+                        #  Compare the two chunks along dimension 0 (the split sequence dimension)
+                        compare_and_assert(
+                            t[0],
+                            tensors_cp[i][0],
+                            names_no_cp[i],
+                            names_cp[i],
+                            atol,
+                            rtol,
+                            rmse_tol,
+                            is_fp8,
+                        )
+                        compare_and_assert(
+                            t[1],
+                            tensors_cp[i][1],
+                            names_no_cp[i],
+                            names_cp[i],
+                            atol,
+                            rtol,
+                            rmse_tol,
+                            is_fp8,
+                        )
                 elif qkv_format == "thd":
                     compare_and_assert(
                         t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8
