@@ -56,42 +56,36 @@ def get_nvfp4_quantizer_factory():
     enabled.
 
     Returns:
-        A factory function that takes a role string and returns a quantizer instance
+        A factory function that takes a QuantizerRole and returns a quantizer instance
     """
 
     def factory(role):
-        if ":" not in role:
-            raise ValueError(f"Invalid role: {role}, expected format: '<scope>:<tensor>'")
-        _, tensor_type = role.split(":", 1)
-        if tensor_type == "input":
+        if role.tensor_type == "input":
             return quantization_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
-                with_rht=True,  # RHT enabled for input
+                with_rht=True,
             )
-        elif tensor_type == "weight":
+        elif role.tensor_type == "weight":
             return quantization_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
-                quant_tile_shape=(16, 16),  # 2D quantization for weight
+                quant_tile_shape=(16, 16),
                 pow_2_scales=False,
                 with_rht=False,
             )
-        elif tensor_type == "output":
-            # Output quantization not used
+        elif role.tensor_type == "output":
             return None
-        elif tensor_type == "grad_output":
+        elif role.tensor_type == "grad_output":
             return quantization_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
-                with_rht=True,  # RHT enabled for grad_output
+                with_rht=True,
             )
-        elif tensor_type == "grad_input":
-            # Grad input quantization not used
+        elif role.tensor_type == "grad_input":
             return None
         else:
-            # For any other roles, return None
             return None
 
     return factory
