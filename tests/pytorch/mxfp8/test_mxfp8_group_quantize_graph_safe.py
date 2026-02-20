@@ -222,8 +222,7 @@ def check_grouped_tensor_mxfp8_versus_reference(
                     x_sx_t_ref_i = swizzle_mxfp8_scale(
                         split_sections[i], N, x_sx_t_ref_i, columnwise=True
                     )
-                # TODO: bug found, this shows that MXFP8 columnwise swizzle is not correct
-                # torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
+                torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
 
 
 def check_grouped_tensor_mxfp8_with_paged_stashing(
@@ -328,8 +327,7 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
                     x_sx_t_ref_i = swizzle_mxfp8_scale(
                         split_sections[i], N, x_sx_t_ref_i, columnwise=True
                     )
-                # TODO: bug found, this shows that MXFP8 columnwise swizzle is not correct
-                # torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
+                torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

@@ -277,6 +277,30 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
   // grouped tensor can be treated as continuous tensor for MXFP8
   const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
+  // For grouped tensors represented as a single logical tensor, scale swizzle must still be
+  // computed per tensor (expert) and then concatenated along dim-0.
+  const size_t tensor_base_for_scales = (is_single_tensor && num_tensors > 1)
+                                            ? static_cast<size_t>(offsets_ptr[tensor_id])
+                                            : tensor_base;
+
+  // In graph-safe paged stashing, the logical shape can include trailing garbage. Skip CTAs that
+  // map outside the current tensor's valid [rows, cols] region.
+  if (rows == 0 || cols == 0) {
+    return;
+  }
+  if (shape_rep != SAME_BOTH_DIMS) {
+    const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[tensor_id]);
+    const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
+    if (block_global_offset >= tensor_end_offset) {
+      return;
+    }
+    const size_t tensor_offset_from_start = block_global_offset - tensor_start_offset;
+    const size_t block_offset_Y_in_tensor = tensor_offset_from_start / cols;
+    const size_t block_offset_X_in_tensor = tensor_offset_from_start % cols;
+    if (block_offset_Y_in_tensor >= rows || block_offset_X_in_tensor >= cols) {
+      return;
+    }
+  }
 
   const CUtensorMap &tensor_map_input =
       is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[tensor_id];
@@ -481,7 +505,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
       size_t scale_idx = 0;
       if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        scale_idx = gemm_swizzled_scale_idx(global_scales_offset_X, global_scales_offset_Y,
+        const size_t tensor_base_row = tensor_base_for_scales / cols;
+        const size_t tensor_scales_offset_Y_base = tensor_base_row / SCALE_DIM_Y;
+        const size_t tensor_scales_offset_colwise_base = tensor_base_for_scales / SCALE_DIM_Y;
+        const size_t local_scales_offset_Y = global_scales_offset_Y - tensor_scales_offset_Y_base;
+        scale_idx = tensor_scales_offset_colwise_base +
+                    gemm_swizzled_scale_idx(global_scales_offset_X, local_scales_offset_Y,
                                             DIVUP(rows, static_cast<size_t>(128)));
       } else {
         scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
