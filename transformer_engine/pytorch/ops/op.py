@@ -95,7 +95,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         several of this function's arguments are lists of arguments to
         forward functions of corresponding basic ops.
 
-        Called by `OperationFuser`.
+        Called by ``OperationFuser``.
 
         Parameters
         ----------
@@ -142,7 +142,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         several of this function's arguments are lists of arguments to
         backward functions of corresponding basic ops.
 
-        Called by `OperationFuser`.
+        Called by ``OperationFuser``.
 
         Parameters
         ----------

@@ -15,7 +15,7 @@ import torch
 import transformer_engine
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch import InferenceParams
+from transformer_engine.pytorch import InferenceParams, QuantizedTensor
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
@@ -271,7 +271,6 @@ def get_available_attention_backends(
     os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
-
     alibi_slopes_shape = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
         if config.bias_shape == "1hss":
@@ -289,7 +288,9 @@ def get_available_attention_backends(
         and config.head_dim_qk <= 128
         and config.head_dim_v <= 128
     ):
-        core_attention_bias_requires_grad = True
+        # TODO(KshitijLakhani): Remove this guard when cuDNN starts support dbias calculation for bias shape 111s
+        if core_attention_bias_shape != "111s":
+            core_attention_bias_requires_grad = True
 
     fused_attn_backends = []
     available_backends = None
@@ -353,11 +354,56 @@ def get_available_attention_backends(
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
-    with logging_context(highest_level=AttentionLogging._log_level):
-        for i in range(3):
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-            _attention_backends["backend_selection_requires_update"] = True
-            available_backends, flash_attention_backend, fused_attention_backend = test()
-            if fused_attention_backend == FusedAttnBackend[backends[i]]:
-                fused_attn_backends.append(fused_attention_backend)
+
+    for i in range(3):
+        os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+        _attention_backends["backend_selection_requires_update"] = True
+        available_backends, flash_attention_backend, fused_attention_backend = test()
+        if fused_attention_backend == FusedAttnBackend[backends[i]]:
+            fused_attn_backends.append(fused_attention_backend)
     return available_backends, flash_attention_backend, fused_attn_backends
+
+
+@torch.no_grad
+def assert_close(
+    actual: Optional[torch.Tensor],
+    expected: Optional[torch.Tensor],
+    *,
+    check_device: bool = False,
+    check_dtype: bool = False,
+    check_layout: bool = False,
+    **kwargs,
+) -> None:
+    """Assert that two tensors are close.
+
+    This function is a wrapper around torch.testing.assert_close. It
+    changes the defaults for device and dtype checks (useful when the
+    reference implementation is computed in high precision on CPU) and
+    it can handle quantized tensors.
+
+    """
+    if isinstance(actual, QuantizedTensor):
+        actual = actual.dequantize()
+    if isinstance(expected, QuantizedTensor):
+        expected = expected.dequantize()
+    torch.testing.assert_close(
+        actual,
+        expected,
+        check_device=check_device,
+        check_dtype=check_dtype,
+        check_layout=check_layout,
+        **kwargs,
+    )
+
+
+def assert_close_grads(
+    actual: Optional[torch.Tensor],
+    expected: Optional[torch.Tensor],
+    **kwargs,
+) -> None:
+    """Assert that two tensors have close gradients."""
+    if actual is None and expected is None:
+        return
+    assert actual is not None
+    assert expected is not None
+    assert_close(actual.grad, expected.grad, **kwargs)

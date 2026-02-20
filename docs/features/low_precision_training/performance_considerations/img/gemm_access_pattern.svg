@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 280" width="100%" style="max-width: 340px;">
+  <defs>
+    <style>
+      .title { font: bold 12px sans-serif; fill: #333; text-anchor: middle; }
+      .label { font: 10px sans-serif; fill: #333; text-anchor: middle; }
+      .small-text { font: 9px sans-serif; fill: #555; }
+      .operator { font: bold 14px sans-serif; fill: #333; }
+      .equals { font: bold 14px sans-serif; fill: #333; }
+      
+      /* Matrix colors */
+      .matrix-cell { fill: #bbdefb; stroke: #1565c0; stroke-width: 1; }
+      .highlight-row { fill: #c8e6c9; stroke: #1565c0; stroke-width: 1; }
+      .highlight-col { fill: #fff3e0; stroke: #1565c0; stroke-width: 1; }
+      .highlight-result { fill: #ffcc80; stroke: #1565c0; stroke-width: 1; }
+    </style>
+  </defs>
+  
+  <!-- FIRST SCENARIO: A × B -->
+  
+  <!-- Title -->
+  <text x="170" y="16" class="title">NN GEMM</text>
+  
+  <!-- Matrix A (left) - centered -->
+  <g id="matrix-a1" transform="translate(40, 52)">
+    <text x="28" y="-14" class="label">A</text>
+    
+    <!-- Row 0 -->
+    <rect x="0" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="0" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 1 (highlighted - row i) -->
+    <rect x="0" y="14" width="14" height="14" class="highlight-row"/>
+    <rect x="14" y="14" width="14" height="14" class="highlight-row"/>
+    <rect x="28" y="14" width="14" height="14" class="highlight-row"/>
+    <rect x="42" y="14" width="14" height="14" class="highlight-row"/>
+    
+    <!-- Row 2 -->
+    <rect x="0" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="28" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 3 -->
+    <rect x="0" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Label -->
+    <text x="28" y="70" class="small-text" style="fill: #388e3c; font-weight: bold; text-anchor: middle;">rowwise</text>
+  </g>
+  
+  <!-- Matrix B (middle) - 4x4, centered -->
+  <g id="matrix-b1" transform="translate(136, 52)">
+    <text x="28" y="-14" class="label">B</text>
+    
+    <!-- Row 0 -->
+    <rect x="0" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="0" width="14" height="14" class="highlight-col"/>
+    <rect x="42" y="0" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 1 -->
+    <rect x="0" y="14" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="14" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="14" width="14" height="14" class="highlight-col"/>
+    <rect x="42" y="14" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 2 -->
+    <rect x="0" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="28" width="14" height="14" class="highlight-col"/>
+    <rect x="42" y="28" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 3 -->
+    <rect x="0" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="42" width="14" height="14" class="highlight-col"/>
+    <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Label -->
+    <text x="28" y="70" class="small-text" style="fill: #f57c00; font-weight: bold; text-anchor: middle;">columnwise</text>
+  </g>
+  
+  <!-- Result matrix 4x4 (right), centered -->
+  <g id="matrix-c1" transform="translate(232, 52)">
+    <text x="28" y="-14" class="label" style="font-weight: bold;">A×B</text>
+    <!-- Row 0 -->
+    <rect x="0" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="0" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 1 -->
+    <rect x="0" y="14" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="14" width="14" height="14" class="matrix-cell"/>
+    <!-- Highlighted result cell -->
+    <rect x="28" y="14" width="14" height="14" class="highlight-result"/>
+    <rect x="42" y="14" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 2 -->
+    <rect x="0" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="28" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 3 -->
+    <rect x="0" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
+  </g>
+  
+  <!-- SECOND SCENARIO: A × B^T -->
+  
+  <!-- Title -->
+  <text x="170" y="152" class="title">TN GEMM</text>
+  
+  <!-- Matrix A (left), centered -->
+  <g id="matrix-a2" transform="translate(40, 188)">
+    <text x="28" y="-14" class="label">A</text>
+    
+    <!-- Row 0 -->
+    <rect x="0" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="0" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 1 (highlighted - row i) -->
+    <rect x="0" y="14" width="14" height="14" class="highlight-row"/>
+    <rect x="14" y="14" width="14" height="14" class="highlight-row"/>
+    <rect x="28" y="14" width="14" height="14" class="highlight-row"/>
+    <rect x="42" y="14" width="14" height="14" class="highlight-row"/>
+    
+    <!-- Row 2 -->
+    <rect x="0" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="28" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 3 -->
+    <rect x="0" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Label -->
+    <text x="28" y="70" class="small-text" style="fill: #388e3c; font-weight: bold; text-anchor: middle;">rowwise</text>
+  </g>
+  
+  <!-- Matrix B (middle, shown with rowwise access for B^T) - 4x4, centered -->
+  <g id="matrix-b2" transform="translate(136, 188)">
+    <text x="28" y="-14" class="label">B</text>
+    
+    <!-- Row 0 -->
+    <rect x="0" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="0" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 1 (highlighted - rowwise access for transposed) -->
+    <rect x="0" y="14" width="14" height="14" class="highlight-row"/>
+    <rect x="14" y="14" width="14" height="14" class="highlight-row"/>
+    <rect x="28" y="14" width="14" height="14" class="highlight-row"/>
+    <rect x="42" y="14" width="14" height="14" class="highlight-row"/>
+    
+    <!-- Row 2 -->
+    <rect x="0" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="28" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 3 -->
+    <rect x="0" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Label -->
+    <text x="28" y="70" class="small-text" style="fill: #388e3c; font-weight: bold; text-anchor: middle;">rowwise</text>
+  </g>
+  
+  <!-- Result matrix 4x4 (right), centered -->
+  <g id="matrix-c2" transform="translate(232, 188)">
+    <text x="28" y="-14" class="label" style="font-weight: bold;">A×B<tspan baseline-shift="super" font-size="7">T</tspan></text>
+    <!-- Row 0 -->
+    <rect x="0" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="0" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="0" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 1 -->
+    <rect x="0" y="14" width="14" height="14" class="matrix-cell"/>
+    <!-- Highlighted result cell -->
+    <rect x="14" y="14" width="14" height="14" class="highlight-result"/>
+    <rect x="28" y="14" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="14" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 2 -->
+    <rect x="0" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="28" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="28" width="14" height="14" class="matrix-cell"/>
+    
+    <!-- Row 3 -->
+    <rect x="0" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="14" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="28" y="42" width="14" height="14" class="matrix-cell"/>
+    <rect x="42" y="42" width="14" height="14" class="matrix-cell"/>
+  </g>
+</svg>

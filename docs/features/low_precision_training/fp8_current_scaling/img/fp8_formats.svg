@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 280">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      .sign-bit { fill: #9db4d0; stroke: #333; stroke-width: 1; }
+      .exponent-bit { fill: #d9a066; stroke: #333; stroke-width: 1; }
+      .mantissa-bit { fill: #a8d99c; stroke: #333; stroke-width: 1; }
+      .bit-text { fill: #000; text-anchor: middle; dominant-baseline: middle; font-size: 16px; }
+      .header-text { fill: #555; font-weight: normal; text-anchor: middle; font-size: 18px; }
+      .value-text { fill: #333; font-size: 18px; }
+      .format-label { fill: #333; font-weight: bold; text-anchor: middle; dominant-baseline: middle; font-size: 20px; }
+    </style>
+  </defs>
+  
+  <!-- Header labels - centered -->
+  <text x="149" y="18" class="header-text">sign</text>
+  <text x="220" y="18" class="header-text">exponent</text>
+  <text x="420" y="18" class="header-text">mantissa</text>
+  
+  <!-- FP16 Format (16 bits: 1 + 5 + 10) -->
+  <text x="60" y="60" class="format-label">FP16</text>
+  
+  <!-- Sign bit (1) -->
+  <rect x="140" y="45" width="18" height="30" class="sign-bit"/>
+  <text x="149" y="60" class="bit-text">0</text>
+  
+  <!-- Exponent bits (5) -->
+  <rect x="163" y="45" width="18" height="30" class="exponent-bit"/>
+  <text x="172" y="60" class="bit-text">0</text>
+  <rect x="186" y="45" width="18" height="30" class="exponent-bit"/>
+  <text x="195" y="60" class="bit-text">1</text>
+  <rect x="209" y="45" width="18" height="30" class="exponent-bit"/>
+  <text x="218" y="60" class="bit-text">1</text>
+  <rect x="232" y="45" width="18" height="30" class="exponent-bit"/>
+  <text x="241" y="60" class="bit-text">0</text>
+  <rect x="255" y="45" width="18" height="30" class="exponent-bit"/>
+  <text x="264" y="60" class="bit-text">1</text>
+  
+  <!-- Mantissa bits (10) -->
+  <rect x="278" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="287" y="60" class="bit-text">1</text>
+  <rect x="301" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="310" y="60" class="bit-text">0</text>
+  <rect x="324" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="333" y="60" class="bit-text">0</text>
+  <rect x="347" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="356" y="60" class="bit-text">1</text>
+  <rect x="370" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="379" y="60" class="bit-text">0</text>
+  <rect x="393" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="402" y="60" class="bit-text">1</text>
+  <rect x="416" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="425" y="60" class="bit-text">0</text>
+  <rect x="439" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="448" y="60" class="bit-text">0</text>
+  <rect x="462" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="471" y="60" class="bit-text">1</text>
+  <rect x="485" y="45" width="18" height="30" class="mantissa-bit"/>
+  <text x="494" y="60" class="bit-text">1</text>
+  
+  <text x="540" y="60" class="value-text">= 0.395264</text>
+  
+  
+  <!-- BF16 Format (16 bits: 1 + 8 + 7) -->
+  <text x="60" y="120" class="format-label">BF16</text>
+  
+  <!-- Sign bit (1) -->
+  <rect x="140" y="105" width="18" height="30" class="sign-bit"/>
+  <text x="149" y="120" class="bit-text">0</text>
+  
+  <!-- Exponent bits (8) -->
+  <rect x="163" y="105" width="18" height="30" class="exponent-bit"/>
+  <text x="172" y="120" class="bit-text">0</text>
+  <rect x="186" y="105" width="18" height="30" class="exponent-bit"/>
+  <text x="195" y="120" class="bit-text">1</text>
+  <rect x="209" y="105" width="18" height="30" class="exponent-bit"/>
+  <text x="218" y="120" class="bit-text">1</text>
+  <rect x="232" y="105" width="18" height="30" class="exponent-bit"/>
+  <text x="241" y="120" class="bit-text">1</text>
+  <rect x="255" y="105" width="18" height="30" class="exponent-bit"/>
+  <text x="264" y="120" class="bit-text">1</text>
+  <rect x="278" y="105" width="18" height="30" class="exponent-bit"/>
+  <text x="287" y="120" class="bit-text">1</text>
+  <rect x="301" y="105" width="18" height="30" class="exponent-bit"/>
+  <text x="310" y="120" class="bit-text">0</text>
+  <rect x="324" y="105" width="18" height="30" class="exponent-bit"/>
+  <text x="333" y="120" class="bit-text">1</text>
+  
+  <!-- Mantissa bits (7) -->
+  <rect x="347" y="105" width="18" height="30" class="mantissa-bit"/>
+  <text x="356" y="120" class="bit-text">1</text>
+  <rect x="370" y="105" width="18" height="30" class="mantissa-bit"/>
+  <text x="379" y="120" class="bit-text">0</text>
+  <rect x="393" y="105" width="18" height="30" class="mantissa-bit"/>
+  <text x="402" y="120" class="bit-text">0</text>
+  <rect x="416" y="105" width="18" height="30" class="mantissa-bit"/>
+  <text x="425" y="120" class="bit-text">1</text>
+  <rect x="439" y="105" width="18" height="30" class="mantissa-bit"/>
+  <text x="448" y="120" class="bit-text">0</text>
+  <rect x="462" y="105" width="18" height="30" class="mantissa-bit"/>
+  <text x="471" y="120" class="bit-text">1</text>
+  <rect x="485" y="105" width="18" height="30" class="mantissa-bit"/>
+  <text x="494" y="120" class="bit-text">0</text>
+  
+  <text x="540" y="120" class="value-text">= 0.394531</text>
+  
+  
+  <!-- FP8 E4M3 Format (8 bits: 1 + 4 + 3) -->
+  <text x="60" y="180" class="format-label">FP8 E4M3</text>
+  
+  <!-- Sign bit (1) -->
+  <rect x="140" y="165" width="18" height="30" class="sign-bit"/>
+  <text x="149" y="180" class="bit-text">0</text>
+  
+  <!-- Exponent bits (4) -->
+  <rect x="163" y="165" width="18" height="30" class="exponent-bit"/>
+  <text x="172" y="180" class="bit-text">0</text>
+  <rect x="186" y="165" width="18" height="30" class="exponent-bit"/>
+  <text x="195" y="180" class="bit-text">1</text>
+  <rect x="209" y="165" width="18" height="30" class="exponent-bit"/>
+  <text x="218" y="180" class="bit-text">0</text>
+  <rect x="232" y="165" width="18" height="30" class="exponent-bit"/>
+  <text x="241" y="180" class="bit-text">1</text>
+  
+  <!-- Mantissa bits (3) -->
+  <rect x="255" y="165" width="18" height="30" class="mantissa-bit"/>
+  <text x="264" y="180" class="bit-text">1</text>
+  <rect x="278" y="165" width="18" height="30" class="mantissa-bit"/>
+  <text x="287" y="180" class="bit-text">0</text>
+  <rect x="301" y="165" width="18" height="30" class="mantissa-bit"/>
+  <text x="310" y="180" class="bit-text">1</text>
+  
+  <text x="355" y="180" class="value-text">= 0.40625</text>
+  
+  
+  <!-- FP8 E5M2 Format (8 bits: 1 + 5 + 2) -->
+  <text x="60" y="240" class="format-label">FP8 E5M2</text>
+  
+  <!-- Sign bit (1) -->
+  <rect x="140" y="225" width="18" height="30" class="sign-bit"/>
+  <text x="149" y="240" class="bit-text">0</text>
+  
+  <!-- Exponent bits (5) -->
+  <rect x="163" y="225" width="18" height="30" class="exponent-bit"/>
+  <text x="172" y="240" class="bit-text">0</text>
+  <rect x="186" y="225" width="18" height="30" class="exponent-bit"/>
+  <text x="195" y="240" class="bit-text">1</text>
+  <rect x="209" y="225" width="18" height="30" class="exponent-bit"/>
+  <text x="218" y="240" class="bit-text">1</text>
+  <rect x="232" y="225" width="18" height="30" class="exponent-bit"/>
+  <text x="241" y="240" class="bit-text">0</text>
+  <rect x="255" y="225" width="18" height="30" class="exponent-bit"/>
+  <text x="264" y="240" class="bit-text">1</text>
+  
+  <!-- Mantissa bits (2) -->
+  <rect x="278" y="225" width="18" height="30" class="mantissa-bit"/>
+  <text x="287" y="240" class="bit-text">1</text>
+  <rect x="301" y="225" width="18" height="30" class="mantissa-bit"/>
+  <text x="310" y="240" class="bit-text">0</text>
+  
+  <text x="355" y="240" class="value-text">= 0.375</text>
+  
+</svg>
+

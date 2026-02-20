@@ -104,6 +104,24 @@ class Float8TensorStorage(QuantizedTensorStorage):
                 t.data = _empty_tensor()
         self._transpose_invalid = True
 
+    def copy_from_storage(self, src: QuantizedTensorStorage) -> None:
+        """Copy data buffers from another Float8TensorStorage."""
+        if not isinstance(src, Float8TensorStorage):
+            raise TypeError("copy_from_storage expects Float8TensorStorage")
+        if self._fp8_dtype != src._fp8_dtype:
+            raise RuntimeError("FP8 dtype mismatch in copy_from_storage")
+
+        def _copy_optional(
+            dst: Optional[torch.Tensor],
+            src_tensor: Optional[torch.Tensor],
+        ):
+            if dst is not None and src_tensor is not None:
+                dst.copy_(src_tensor)
+
+        _copy_optional(self._data, src._data)
+        _copy_optional(self._transpose, src._transpose)
+        _copy_optional(self._scale_inv, src._scale_inv)
+
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {
