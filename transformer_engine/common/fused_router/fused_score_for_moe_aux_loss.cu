@@ -320,7 +320,7 @@ void fused_score_for_moe_aux_loss_backward(const Tensor &intermediate_output,
                                            int num_experts, int topk, int score_function,
                                            Tensor &grad_logits, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
-      grad_scores.data.dtype, DataType,
+      grad_logits.data.dtype, DataType,
       fused_score_for_moe_aux_loss_backward_kernel_launcher<DataType>(
           reinterpret_cast<float *>(intermediate_output.data.dptr),
           reinterpret_cast<float *>(grad_scores.data.dptr), num_tokens, num_experts, topk,
