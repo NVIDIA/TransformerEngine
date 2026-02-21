@@ -553,7 +553,7 @@ class Model(torch.nn.Module):
         return y
 
 
-class AdamTest:
+class TestAdam:
 
     def setup_method(self, *, seed: int = 0) -> None:
         torch.manual_seed(seed)
@@ -774,6 +774,34 @@ class AdamTest:
             optimizer_.zero_grad()
 
             self.model_.load_state_dict(copy.deepcopy(self.model.state_dict()))
+
+    def test_optimizer_get_moments_and_variance(self):
+        params_ = [p for p in self.model_.parameters() if p.requires_grad]
+        optimizer_ = te.optimizers.FusedAdam(params_, lr=self.lr, capturable=False)
+
+        for i in range(100):
+            x = torch.rand([32, 1, 28, 28]).cuda().to(memory_format=torch.channels_last)
+            x_ = x.clone()
+            gt = torch.rand([32, 10]).cuda()
+            gt_ = gt.clone()
+
+            # DUT
+            y = self.model_(x)
+            loss_ = ((gt_ - y) ** 2).mean()
+
+            loss_.backward()
+            optimizer_.step()
+
+            # Init for next iteration
+            optimizer_.zero_grad()
+        for param in [p for p in self.model_.parameters() if p.requires_grad]:
+            first_moment = optimizer_.get_unscaled_state(param, "exp_avg")
+            second_moment = optimizer_.get_unscaled_state(param, "exp_avg_sq")
+            assert first_moment is not None
+            assert second_moment is not None
+            expected_variance = second_moment - torch.square(first_moment)
+            variance = optimizer_.get_grad_variance_from_state(param)
+            torch.testing.assert_close(variance, expected_variance)
 
     @largeTensorTest("60GB", "cuda")
     def test_large_tensor(self):

@@ -360,6 +360,19 @@ class FusedAdam(torch.optim.Optimizer):
         else:
             state[state_name].copy_(unscaled_state)
 
+    def get_grad_variance_from_state(self, param):
+        """Return the unscaled state corresponding to the input `param` and `state_name`.
+
+        Arguments:
+            param (torch.nn.Parameter): One of parameters in this optimizer.
+            state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
+                and 'master_param`.
+        """
+        first_moment = self.get_unscaled_state(param, "exp_avg")
+        second_moment = self.get_unscaled_state(param, "exp_avg_sq")
+        variance = second_moment - torch.square(first_moment)
+        return variance
+
     def _initialize_state(
         self, param, state_name, zero_buffer: bool, store_param_remainders: bool = False
     ):
