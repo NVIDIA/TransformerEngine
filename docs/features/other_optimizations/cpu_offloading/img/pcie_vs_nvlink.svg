@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" width="100%" style="max-width: 800px;">
+  <defs>
+    <style>
+      .title { font: bold 16px sans-serif; fill: #333; text-anchor: middle; }
+      .subtitle { font: bold 14px sans-serif; fill: #555; text-anchor: middle; }
+      .label { font: 12px sans-serif; fill: #333; text-anchor: middle; }
+      .memory-label { font: 12px sans-serif; fill: #333; text-anchor: middle; }
+      .small-text { font: 11px sans-serif; fill: #555; text-anchor: middle; }
+      .speed-text { font: bold 11px sans-serif; fill: #fff; text-anchor: middle; }
+      
+      .cpu-box { fill: #9db4d0; stroke: #444; stroke-width: 2; }
+      .gpu-box { fill: #a8d99c; stroke: #444; stroke-width: 2; }
+      .frame-box { fill: #f8f9fa; stroke: #aaa; stroke-width: 1.5; rx: 8; }
+      .superchip-box { fill: none; stroke: #68d391; stroke-width: 2; stroke-dasharray: 6,3; rx: 10; }
+      
+      .memory-box { fill: #e2e8f0; stroke: #555; stroke-width: 1.5; }
+      .hbm-box { fill: #c6f6d5; stroke: #38a169; stroke-width: 1.5; }
+      
+      .pcie-bar { fill: #d9a066; stroke: #444; stroke-width: 2; }
+      .nvlink-bar { fill: #68d391; stroke: #444; stroke-width: 2; }
+      
+      .connector { stroke: #555; stroke-width: 2; }
+      .divider { stroke: #ccc; stroke-width: 1; stroke-dasharray: 6,4; }
+    </style>
+  </defs>
+
+  <!-- Divider -->
+  <line x1="400" y1="30" x2="400" y2="280" class="divider"/>
+
+  <!-- ===== LEFT: Traditional PCIe System ===== -->
+  <text x="200" y="28" class="title">Traditional PCIe System</text>
+
+  <!-- Host Frame (CPU + RAM) -->
+  <rect x="40" y="60" width="130" height="150" class="frame-box"/>
+  
+  <!-- CPU -->
+  <rect x="55" y="75" width="100" height="50" rx="5" class="cpu-box"/>
+  <text x="105" y="105" class="subtitle" fill="#333">CPU</text>
+
+  <!-- System RAM -->
+  <rect x="55" y="145" width="100" height="50" rx="5" class="memory-box"/>
+  <text x="105" y="175" class="memory-label" fill="#333">RAM</text>
+  
+  <!-- CPU-RAM Link -->
+  <line x1="105" y1="125" x2="105" y2="145" class="connector"/>
+
+
+  <!-- Device Frame (GPU + HBM) -->
+  <rect x="230" y="60" width="130" height="150" class="frame-box"/>
+
+  <!-- GPU -->
+  <rect x="245" y="75" width="100" height="50" rx="5" class="gpu-box"/>
+  <text x="295" y="105" class="subtitle" fill="#333">GPU</text>
+
+  <!-- HBM -->
+  <rect x="245" y="145" width="100" height="50" rx="5" class="hbm-box"/>
+  <text x="295" y="175" class="memory-label" fill="#333">HBM</text>
+
+  <!-- GPU-HBM Link -->
+  <line x1="295" y1="125" x2="295" y2="145" class="connector"/>
+
+  <!-- PCIe Connection (between frames) -->
+  <line x1="170" y1="135" x2="230" y2="135" class="connector"/>
+  <rect x="175" y="120" width="50" height="30" rx="4" class="pcie-bar"/>
+  <text x="200" y="139" class="speed-text">PCIe</text>
+  
+  <text x="200" y="235" class="small-text">128 GB/s</text>
+
+
+  <!-- ===== RIGHT: GH200 Superchip ===== -->
+  <text x="600" y="28" class="title">GH200 Superchip</text>
+  <text x="600" y="45" class="small-text" fill="#38a169">NVIDIA Grace Hopper</text>
+
+  <!-- Superchip Boundary -->
+  <rect x="430" y="55" width="340" height="170" class="superchip-box"/>
+
+  <!-- Grace Frame -->
+  <rect x="445" y="70" width="130" height="140" class="frame-box"/>
+  
+  <!-- CPU -->
+  <rect x="460" y="85" width="100" height="45" rx="5" class="cpu-box"/>
+  <text x="510" y="112" class="subtitle" fill="#333">Grace CPU</text>
+
+  <!-- RAM -->
+  <rect x="460" y="150" width="100" height="45" rx="5" class="memory-box"/>
+  <text x="510" y="177" class="memory-label" fill="#333">RAM</text>
+  
+  <line x1="510" y1="130" x2="510" y2="150" class="connector"/>
+
+  <!-- Blackwell Frame -->
+  <rect x="625" y="70" width="130" height="140" class="frame-box"/>
+  
+  <!-- GPU -->
+  <rect x="640" y="85" width="100" height="45" rx="5" class="gpu-box"/>
+  <text x="690" y="112" class="subtitle" fill="#333">Hopper GPU</text>
+
+  <!-- HBM -->
+  <rect x="640" y="150" width="100" height="45" rx="5" class="hbm-box"/>
+  <text x="690" y="177" class="memory-label" fill="#333">HBM</text>
+  
+  <line x1="690" y1="130" x2="690" y2="150" class="connector"/>
+
+  <!-- NVLink Connection (between frames) -->
+  <line x1="575" y1="140" x2="625" y2="140" class="connector"/>
+  <rect x="580" y="125" width="40" height="30" rx="4" class="nvlink-bar"/>
+  <text x="600" y="140" class="speed-text" style="font-size: 10px;">NVLink</text>
+  <text x="600" y="150" class="speed-text" style="font-size: 10px;">C2C</text>
+
+  <text x="600" y="245" class="small-text" fill="#68d391">900 GB/s</text>
+
+</svg>
