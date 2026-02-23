@@ -44,7 +44,7 @@ class PercentageGreaterThanThreshold(TEConfigAPIMapper):
         reduction_group = debug_api.get_tensor_reduction_group()
 
         # Compute percentage on local tensor
-        count = (tensor > threshold).sum().float()
+        count = (torch.abs(tensor) > threshold).sum().float()
         total = torch.tensor(tensor.numel(), dtype=torch.float32, device=tensor.device)
 
         # Perform reduction across the group if needed.
