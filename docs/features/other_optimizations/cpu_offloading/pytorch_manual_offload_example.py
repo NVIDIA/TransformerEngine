@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 # START_MANUAL_EXAMPLE
 import torch
 from transformer_engine.pytorch import get_cpu_offload_context
