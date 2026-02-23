@@ -1070,11 +1070,12 @@ def get_attention_backend(
         if (
             fused_attention_backend == FusedAttnBackend["FP8"]
             and is_training
-            and device_compute_capability < (9, 0)
+            and (
+                device_compute_capability < (9, 0)
+                or cudnn_version < (9, 19, 0)
+            )
         ):
-            logger.debug("Disabling FusedAttention for determinism reasons with FP8 on arch < sm90")
-            use_fused_attention = False
-            fused_attention_backend = None
+            logger.debug("Disabling FusedAttention for determinism reasons with FP8 on arch < sm90 or cuDNN < 9.19.0")
         if (
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and is_training
