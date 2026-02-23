@@ -164,6 +164,11 @@ class FP8EmulationFunc(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout):
         # pylint: disable=missing-function-docstring
+        if is_in_onnx_export_mode():
+            return FP8EmulationFunc.onnx_forward(
+                tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout
+            )
+
         if quantizer_name == "QKV_quantizer":
             query_layer, key_layer, value_layer = [
                 x.contiguous() for x in [tensor1, tensor2, tensor3]
@@ -201,6 +206,47 @@ class FP8EmulationFunc(torch.autograd.Function):
         else:
             tensors = grad1, grad2, grad3
         return tensors[0], tensors[1], tensors[2], None, None, None
+
+    @staticmethod
+    def onnx_forward(tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout=None):
+        """
+        ONNX-compatible forward for FP8 emulation using operations with defined ONNX translations.
+        """
+        # pylint: disable=unused-argument
+        is_qkv_quantizer = quantizer_name == "QKV_quantizer"
+        assert isinstance(
+            quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+        ), "ONNX FP8 emulation path supports only Float8 quantizers."
+
+        if is_qkv_quantizer:
+            # Flatten + concatenate + quantize + split. Equivalent to combine_and_quantize Case 3.
+            orig_dtype = tensor1.dtype
+            shapes = [tensor1.shape, tensor2.shape, tensor3.shape]
+            numels = [tensor1.numel(), tensor2.numel(), tensor3.numel()]
+
+            # Flatten and concatenate
+            combined = torch.cat(
+                [tensor1.reshape(-1), tensor2.reshape(-1), tensor3.reshape(-1)], dim=0
+            )
+
+            # Quantize + dequantize combined tensor using quantizer's ONNX methods
+            combined_fp8 = quantizer.onnx_quantize(combined)
+            out = quantizer.onnx_dequantize(combined_fp8).to(orig_dtype)
+
+            # Split back
+            out1 = out[: numels[0]].reshape(shapes[0])
+            out2 = out[numels[0] : numels[0] + numels[1]].reshape(shapes[1])
+            out3 = out[numels[0] + numels[1] :].reshape(shapes[2])
+
+            return out1, out2, out3
+        if quantizer_name in ["S_quantizer", "O_quantizer"]:
+            # Emulate FP8 on single tensor using quantizer's ONNX methods
+            orig_dtype = tensor1.dtype
+            t_fp8 = quantizer.onnx_quantize(tensor1)
+            out = quantizer.onnx_dequantize(t_fp8).to(orig_dtype)
+            return out, tensor2, tensor3
+        # Pass-through
+        return tensor1, tensor2, tensor3
 
 
 class UnfusedDotProductAttention(torch.nn.Module):

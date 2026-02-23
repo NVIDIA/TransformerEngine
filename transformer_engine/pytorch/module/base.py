@@ -1525,8 +1525,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
             del wgrad
             del bgrad
-            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-                wgrad_accumulation_and_reduce_hook()
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
+
+    def _trigger_wgrad_accumulation_and_reduce_hooks(self):
+        """
+        Trigger the wgrad accumulation and reduce hooks.
+        """
+        for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+            wgrad_accumulation_and_reduce_hook()
 
     def is_debug_iter(self) -> bool:
         """
