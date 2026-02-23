@@ -1072,9 +1072,7 @@ def get_attention_backend(
             and is_training
             and device_compute_capability < (9, 0)
         ):
-            logger.debug(
-                "Disabling FusedAttention for determinism reasons with FP8 on arch < sm90"
-            )
+            logger.debug("Disabling FusedAttention for determinism reasons with FP8 on arch < sm90")
             use_fused_attention = False
             fused_attention_backend = None
         if (
