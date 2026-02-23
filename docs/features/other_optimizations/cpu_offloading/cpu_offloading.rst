@@ -152,12 +152,6 @@ The ``ManualOffloadSynchronizer`` object provides the following methods:
 
 To skip offloading for a specific layer, simply do not call any of these methods for that layer.
 
-.. note::
-
-   ``offload_stream.synchronize()`` must be called after all ``start_offload_layer()`` calls
-   and **before** any ``release_activation_forward_gpu_memory()`` call. Releasing GPU memory
-   before the async copy completes will corrupt the offloaded data.
-
 .. tabs::
 
    .. tab:: PyTorch
