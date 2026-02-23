@@ -62,6 +62,7 @@ they can be arbitrary PyTorch modules. The API is as follows:
         manual_synchronization: bool = False,
         retain_pinned_cpu_buffers: bool = False,
         offload_stream: Optional[torch.cuda.Stream] = None,
+        # ... (legacy parameters omitted, see API reference)
     ) -> Union[Tuple[ContextManager, Callable], Tuple[ContextManager, Callable, ManualOffloadSynchronizer]]:
         ...
 
@@ -71,7 +72,7 @@ There are two modes of operation:
 1. **Default scheduling** — set ``num_layers`` to the number of layers to offload.
    The algorithm automatically schedules offload/reload operations to overlap with computation.
 
-2. **Manual synchronization** — set ``manual_synchronization=True`` (do not set ``num_layers``).
+2. **Manual synchronization** — set ``manual_synchronization=True`` (``num_layers`` is ignored in this mode).
    This mode provides explicit control over when to start offload/reload using the returned ``ManualOffloadSynchronizer``.
 
 The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns:
@@ -107,6 +108,9 @@ For ``num_layers`` layers offloaded of ``model_layers`` layers:
 - At most ``(model_layers - num_layers)`` sets of activations are on GPU at any time;
   both compute and reload may be stalled to enforce this limit.
 - Reloading must complete by the time the tensor is needed for the layer's backward pass.
+- ``num_layers`` must be at most ``model_layers - 2``. Setting it to ``model_layers - 1``
+  leaves only 1 activation set on GPU at a time — compute and transfers cannot overlap,
+  and a warning is raised. Setting it equal to ``model_layers`` raises an assertion error.
 
 Specifying a low enough ``num_layers`` enables full overlap of computation
 and offload/reload. The following two scenarios illustrate this — one with full overlap, and one with stalls.
@@ -147,6 +151,12 @@ The ``ManualOffloadSynchronizer`` object provides the following methods:
   to complete.
 
 To skip offloading for a specific layer, simply do not call any of these methods for that layer.
+
+.. note::
+
+   ``offload_stream.synchronize()`` must be called after all ``start_offload_layer()`` calls
+   and **before** any ``release_activation_forward_gpu_memory()`` call. Releasing GPU memory
+   before the async copy completes will corrupt the offloaded data.
 
 .. tabs::
 
