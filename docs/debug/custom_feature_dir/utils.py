@@ -6,6 +6,7 @@
 
 
 import os
+import re
 import matplotlib.pyplot as plt
 
 
@@ -20,8 +21,6 @@ def plot_stats(log_dir):
     custom_feature_values = []
 
     with open(stat_file, "r") as f:
-        import re
-
         number_pattern = re.compile(r"[-+]?\d*\.\d+|\d+")
 
         for line in f:
