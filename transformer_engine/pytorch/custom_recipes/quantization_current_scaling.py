@@ -28,10 +28,8 @@ def current_scaling_ref_quantizer_factory(role):
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
-    if role.tensor_type in ("grad_output", "grad_input"):
-        dtype = torch.float8_e5m2
-    else:
-        dtype = torch.float8_e4m3fn
+    is_backward = role is not None and role.tensor_type == "grad_output"
+    dtype = torch.float8_e5m2 if is_backward else torch.float8_e4m3fn
     return CurrentScalingQuantizerRef(
         dtype=dtype,
         rowwise=True,

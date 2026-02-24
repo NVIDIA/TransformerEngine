@@ -26,7 +26,12 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
         with autocast(recipe=custom_recipe):
             output = model(input)
     """
-    if role.is_gemm() and role.tensor_type == "weight":
+    is_weight_tensor_in_gemm = (
+        role is not None and
+        role.module_type in ("linear", "grouped_linear") and 
+        role.tensor_type == "weight"
+    )
+    if is_weight_tensor_in_gemm: # 2D quantization for weights in GEMM-based modules
         return NVFP4QuantizerRef(
             dtype=utils.Fp4Formats.E2M1,
             quant_tile_shape=(16, 16),
