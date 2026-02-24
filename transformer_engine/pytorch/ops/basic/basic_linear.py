@@ -48,8 +48,8 @@ def _wait_async(handle: Optional[Any]) -> None:
 class BasicLinear(BasicOperation):
     """Apply linear transformation: :math:`y = x A^T`
 
-    This is a drop-in replacement for `torch.nn.Linear` with
-    `bias=False`.
+    This is a drop-in replacement for ``torch.nn.Linear`` with
+    ``bias=False``.
 
     Parameters
     ----------
@@ -61,27 +61,27 @@ class BasicLinear(BasicOperation):
         Tensor device
     dtype : torch.dtype, default = default dtype
         Tensor datatype
-    tensor_parallel_mode : {`None`, "column", "row"}, default = `None`
+    tensor_parallel_mode : {None, "column", "row"}, default = None
         Mode for tensor parallelism
     tensor_parallel_group : torch.distributed.ProcessGroup, default = world group
         Process group for tensor parallelism
-    sequence_parallel : bool, default = `False`
+    sequence_parallel : bool, default = False
         Whether to apply sequence parallelism together with tensor
         parallelism, i.e. distributing input or output tensors along
         outer dimension (sequence or batch dim) when not distributing
         along inner dimension (embedding dim)
     rng_state_tracker_function : callable
-        Function that returns `CudaRNGStatesTracker`, which is used
+        Function that returns ``CudaRNGStatesTracker``, which is used
         for model-parallel weight initialization
-    accumulate_into_main_grad : bool, default = `False`
+    accumulate_into_main_grad : bool, default = False
         Whether to directly accumulate weight gradients into the
-        weight's `main_grad` attribute instead of relying on PyTorch
-        autograd. The weight's `main_grad` must be set externally and
-        there is no guarantee that `grad` will be set or be
-        meaningful. This is primarily intented to integrate with
+        weight's ``main_grad`` attribute instead of relying on PyTorch
+        autograd. The weight's ``main_grad`` must be set externally
+        and there is no guarantee that ``grad`` will be set or be
+        meaningful. This is primarily intended to integrate with
         Megatron-LM. This argument along with weight tensor having
-        attribute 'overwrite_main_grad' set to True will overwrite
-        `main_grad` instead of accumulating.
+        attribute ``overwrite_main_grad`` set to ``True`` will
+        overwrite ``main_grad`` instead of accumulating.
     userbuffers_options, dict, optional
         Options for overlapping tensor-parallel communication with
         compute using Userbuffers. This feature is highly
@@ -184,7 +184,7 @@ class BasicLinear(BasicOperation):
 
         Parameters
         ----------
-        mode: {`None`, "column", "row"}
+        mode: {None, "column", "row"}
             Mode for tensor parallelism
         process_group: torch.distributed.ProcessGroup
             Process group for tensor parallelism
@@ -200,7 +200,7 @@ class BasicLinear(BasicOperation):
 
         Returns
         -------
-        mode: {`None`, "column", "row"}
+        mode: {None, "column", "row"}
             Mode for tensor parallelism
         process_group: torch.distributed.ProcessGroup
             Process group for tensor parallelism
@@ -446,18 +446,18 @@ class BasicLinear(BasicOperation):
             Output tensor
         beta: float, optional
             Scaling factor applied to original value of out when accumulating into it
-        accumulate_into_out: bool, default = `False`
+        accumulate_into_out: bool, default = False
             Add result to output tensor instead of overwriting
-        tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+        tensor_parallel_mode: {None, "column", "row"}, default = None
             Mode for tensor parallelism
         tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
             Process group for tensor parallelism
-        sequence_parallel: bool, default = `False`
+        sequence_parallel: bool, default = False
             Whether to apply sequence parallelism together with tensor
             parallelism, i.e. distributing input or output tensors
             along outer dimension (sequence or batch dim) when not
             distributing along inner dimension (embedding dim)
-        with_quantized_compute: bool, default = `False`
+        with_quantized_compute: bool, default = False
             Whether to perform compute with quantized data.
         input_quantizer: Quantizer, optional
             Builder class for quantized input tensor.
@@ -465,10 +465,10 @@ class BasicLinear(BasicOperation):
             Builder class for quantized weight tensor.
         output_quantizer: Quantizer, optional
             Builder class for quantized output tensor.
-        input_requires_grad: bool, default = `True`
+        input_requires_grad: bool, default = True
             Whether the loss gradient w.r.t. the input tensor is
             required in the backward pass.
-        weight_requires_grad: bool, default = `True`
+        weight_requires_grad: bool, default = True
             Whether the loss gradient w.r.t. the weight tensor is
             required in the backward pass.
 
@@ -477,11 +477,11 @@ class BasicLinear(BasicOperation):
         torch.Tensor
             Output tensor
         torch.Tensor, optional
-            Input tensor, ready for use in backward pass. `None` is
+            Input tensor, ready for use in backward pass. ``None`` is
             returned if loss gradient w.r.t. the weight tensor is not
             required.
         torch.Tensor, optional
-            Weight tensor, ready for use in backward pass. `None` is
+            Weight tensor, ready for use in backward pass. ``None`` is
             returned if loss gradient w.r.t. the input tensor is not
             required.
 
@@ -682,24 +682,24 @@ class BasicLinear(BasicOperation):
             Loss gradient w.r.t. weight tensor
         grad_weight_beta: float, optional
             Scaling factor applied to original value of grad_weight when accumulating into it
-        accumulate_into_grad_weight: bool, default = `False`
+        accumulate_into_grad_weight: bool, default = False
             Add result to weight grad instead of overwriting
         grad_input: torch.Tensor, optional
             Loss gradient w.r.t. input tensor
         grad_input_beta: float, optional
             Scaling factor applied to original value of grad_input when accumulating into it
-        accumulate_into_grad_input: bool, default = `False`
+        accumulate_into_grad_input: bool, default = False
             Add result to input grad instead of overwriting
-        tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+        tensor_parallel_mode: {None, "column", "row"}, default = None
             Mode for tensor parallelism
         tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
             Process group for tensor parallelism
-        sequence_parallel: bool, default = `False`
+        sequence_parallel: bool, default = False
             Whether to apply sequence parallelism together with tensor
             parallelism, i.e. distributing input or output tensors
             along outer dimension (sequence or batch dim) when not
             distributing along inner dimension (embedding dim)
-        with_quantized_compute: bool, default = `False`
+        with_quantized_compute: bool, default = False
             Whether to perform compute with quantized data.
         input_quantizer: Quantizer, optional
             Builder class for quantized input tensor.
