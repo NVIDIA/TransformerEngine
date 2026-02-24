@@ -67,28 +67,6 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     return 0.0
 
 
-def get_tensor_device(tensor: torch.Tensor) -> int:
-    """
-    Returns tensor device as an integer.
-
-    This method is used because checking instances of
-    QuantizedTensor or Storage incurs more CPU overhead.
-    The order of attributes checked is important to also
-    minimize overhead.
-    """
-    if hasattr(tensor, "_rowwise_data") and tensor._rowwise_data is not None:
-        return tensor._rowwise_data.device.index
-    if hasattr(tensor, "_columnwise_data") and tensor._columnwise_data is not None:
-        return tensor._columnwise_data.device.index
-    if hasattr(tensor, "_data") and tensor._data is not None:
-        return tensor._data.device.index
-    if hasattr(tensor, "_transpose") and tensor._transpose is not None:
-        return tensor._transpose.device.index
-    if hasattr(tensor, "device"):
-        return tensor.device.index
-    return torch.cuda.current_device()
-
-
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -235,7 +213,7 @@ def general_grouped_gemm(
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
     sm_count = get_sm_count()
-    workspaces = get_cublas_workspace(get_tensor_device(A[0]), False, True)
+    workspaces = get_cublas_workspace(A[0].device, False, True)
 
     if grad and use_bias:
         grad_bias = [
