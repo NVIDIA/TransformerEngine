@@ -73,10 +73,10 @@ constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128
 
 __device__ __forceinline__ size_t get_current_tensor_id(
     const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t current_offset,
-    const size_t first_logical_dim, const size_t last_logical_dim,
+    const size_t block_Y, const size_t first_logical_dim, const size_t last_logical_dim,
     const int64_t *const __restrict__ offsets_ptr) {
   if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
-    const size_t current_row = current_offset / last_logical_dim;
+    const size_t current_row = block_Y * CHUNK_DIM_Y;
     const size_t rows_per_tensor = first_logical_dim / num_tensors;
     return current_row / rows_per_tensor;
   } else {
@@ -261,9 +261,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING && COLWISE_SCALING;
 
-  const size_t block_global_offset = blockIdx.x * ELTS_PER_CHUNK;
+  const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
-  const size_t tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset,
+  const size_t block_ID = blockIdx.y * gridDim.x + blockIdx.x;
+  const size_t block_global_offset = is_single_tensor
+                                     ? (blockIdx.y * CHUNK_DIM_Y * last_logical_dim + blockIdx.x * CHUNK_DIM_X)
+                                     : (block_ID * ELTS_PER_CHUNK);
+
+  const size_t tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset, blockIdx.y,
                                                  first_logical_dim, last_logical_dim, offsets_ptr);
 
   const size_t rows =
@@ -273,7 +278,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
   const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
 
-  const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
   // grouped tensor can be treated as continuous tensor for MXFP8
   const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
@@ -328,7 +332,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
   const size_t blocks_X_num_in_current_tensor = DIVUP(cols, static_cast<size_t>(128));
   const size_t block_id_in_current_tensor =
-      is_single_tensor ? blockIdx.x : (blockIdx.x - tensor_base / ELTS_PER_CHUNK);
+      is_single_tensor ? block_ID : (block_ID - tensor_base / ELTS_PER_CHUNK);
 
   const size_t block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
   const size_t block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
@@ -830,12 +834,12 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
   const size_t num_tensors = input->num_tensors;
 
-  size_t blocks = 0;
+  size_t blocks_X = 0;
+  size_t blocks_Y = 0;
 
   if (is_single_tensor) {
-    const size_t blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
-    const size_t blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
-    blocks = blocks_Y * blocks_X;
+    blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
+    blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
   } else {
     NVTE_CHECK(num_tensors < MAX_SUPPORTED_TENSOR_DESCRIPTORS,
                "Number of tensors in a group is larger than "
@@ -843,9 +847,10 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     // Only full tiles supported
     NVTE_CHECK(last_logical_dim % CHUNK_DIM_X == 0,
                "Last dimension of a grouped tensor should be divisible by 128.");
-    blocks = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
+    blocks_Y = 1;
+    blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
   }
-  const dim3 grid(blocks);
+  const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = THREADS_PER_CHUNK;
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;

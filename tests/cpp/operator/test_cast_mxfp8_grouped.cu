@@ -715,7 +715,10 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
         }
         offsets[t+1] = offsets[t] + first_dims[t] * last_dims[t];
         // Skips tests if tensor shape is not as required by the kernel
-        if ((first_dims[t] % 128 != 0) || (last_dims[t] % 32 != 0)) {
+        if (first_dims[t] % 128 != 0) {
+            GTEST_SKIP();
+        }
+        if (!is_single_tensor && (last_dims[t] % 128 != 0)) {
             GTEST_SKIP();
         }
     }
