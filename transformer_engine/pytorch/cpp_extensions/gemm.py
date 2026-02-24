@@ -67,7 +67,6 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     return 0.0
 
 
-
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
