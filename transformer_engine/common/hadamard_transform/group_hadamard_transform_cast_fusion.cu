@@ -13,8 +13,6 @@
 #include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>
-#include <cute/algorithm/gemm.hpp>
-#include <cute/arch/cluster_sm90.hpp>
 #include <cute/tensor.hpp>
 
 #include "common/common.h"
