@@ -1211,7 +1211,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         "necessary when using sequence parallelism with FP8."
                     )
 
-                if not defer_fp8_global_buffer_update and not FP8GlobalStateManager.fp8_graph_capturing():
+                if (
+                    not defer_fp8_global_buffer_update
+                    and not FP8GlobalStateManager.fp8_graph_capturing()
+                ):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.

@@ -25,6 +25,7 @@ class _SerializeContext:
             raise RuntimeError(f"FX serializer global name collision for '{name}'")
         self.globals[name] = value
 
+
 @singledispatch
 def _convert(value: object, ctx: _SerializeContext) -> str:
     try:
@@ -135,7 +136,7 @@ def _(value: QuantizedTensorStorage, ctx: _SerializeContext) -> str:
             f"fp8_dtype={_convert(getattr(value, '_fp8_dtype'), ctx)}, "
             f"data_transpose={_convert(getattr(value, '_transpose'), ctx)}, "
             f"quantizer={_convert_or_none(getattr(value, '_quantizer'), ctx)}"
-            f")"
+            ")"
         )
 
     if cls_name == "MXFP8TensorStorage":
@@ -148,7 +149,7 @@ def _(value: QuantizedTensorStorage, ctx: _SerializeContext) -> str:
             f"fp8_dtype={_convert(getattr(value, '_fp8_dtype'), ctx)}, "
             f"quantizer={_convert_or_none(getattr(value, '_quantizer'), ctx)}, "
             f"with_gemm_swizzled_scales={_convert(getattr(value, '_with_gemm_swizzled_scales'), ctx)}"
-            f")"
+            ")"
         )
 
     if cls_name == "Float8BlockwiseQTensorStorage":
@@ -161,7 +162,7 @@ def _(value: QuantizedTensorStorage, ctx: _SerializeContext) -> str:
             f"fp8_dtype={_convert(getattr(value, '_fp8_dtype'), ctx)}, "
             f"quantizer={_convert_or_none(getattr(value, '_quantizer'), ctx)}, "
             f"is_2D_scaled={_convert(getattr(value, '_is_2D_scaled'), ctx)}"
-            f")"
+            ")"
         )
 
     if cls_name == "NVFP4TensorStorage":
@@ -176,7 +177,7 @@ def _(value: QuantizedTensorStorage, ctx: _SerializeContext) -> str:
             f"fp4_dtype={_convert(getattr(value, '_fp4_dtype'), ctx)}, "
             f"quantizer={_convert_or_none(getattr(value, '_quantizer'), ctx)}, "
             f"with_gemm_swizzled_scales={_convert(getattr(value, '_with_gemm_swizzled_scales'), ctx)}"
-            f")"
+            ")"
         )
 
     # Fall back to generic object serializer for unknown storage subclasses.

@@ -398,7 +398,8 @@ class _Linear:
                 columnwise_usage = is_grad_enabled and inp.requires_grad
                 if not columnwise_usage:
                     columnwise_usage = (
-                        is_fp8_activation_recompute_enabled() and not in_fp8_activation_recompute_phase()
+                        is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase()
                     )
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             elif isinstance(weight, QuantizedTensor):
@@ -922,7 +923,9 @@ class _Linear:
         with get_nvtx_range_context("_Linear_backward"):
             inp_shape = tuple(inp_shape)
 
-            saved_tensors = real_ctx.saved_tensors if saved_tensors_override is None else saved_tensors_override
+            saved_tensors = (
+                real_ctx.saved_tensors if saved_tensors_override is None else saved_tensors_override
+            )
             restored_objects = restore_from_saved(tensor_objects, saved_tensors)
             if len(tensor_objects) == 2:
                 inputmat_saved, weight_fp8_saved = restored_objects
@@ -952,7 +955,10 @@ class _Linear:
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
                 main_grad_func()
-                if weight is not None and fuse_wgrad_accumulation and requires_wgrad and main_grad_func
+                if weight is not None
+                and fuse_wgrad_accumulation
+                and requires_wgrad
+                and main_grad_func
                 else None
             )
 
@@ -1027,11 +1033,7 @@ class _Linear:
             #       results in `Assertion failed: output_tensor->has_data(). Quantizing in only the columnwise direction not supported yet!`
             # NOTE: For `ctx.bias is True`, selected quantize kernel errors with
             #       `cast_kernels.cuh:1322 in function fp8_quantize_arch_l_100: Not implemented scaling mode or fusion: NVTE_DELAYED_TENSOR_SCALING or IS_DBIAS=true on GPU with compute capability < 10.0.`
-            if (
-                not use_bias
-                and not requires_wgrad
-                and grad_output_quantizer is not None
-            ):
+            if not use_bias and not requires_wgrad and grad_output_quantizer is not None:
                 grad_output_quantizer.set_usage(columnwise=False)
 
             # Prepare grad output tensor
@@ -1135,9 +1137,7 @@ class _Linear:
                 # Make sure required data is available
                 if isinstance(grad_output, QuantizedTensorStorage):
                     grad_output.update_usage(rowwise_usage=True)
-                if weight_quantizer is not None and isinstance(
-                    weight_fp8, QuantizedTensorStorage
-                ):
+                if weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensorStorage):
                     weight_fp8.update_usage(columnwise_usage=True)
 
                 # Choose whether to use GEMM kernel with split accumulator
@@ -1293,9 +1293,7 @@ class _Linear:
 
                 # Arguments to include in wgrad GEMM closure
                 wgrad_gemm_kwargs = {
-                    "out_dtype": (
-                        main_grad.dtype if fuse_wgrad_accumulation else activation_dtype
-                    ),
+                    "out_dtype": (main_grad.dtype if fuse_wgrad_accumulation else activation_dtype),
                     "quantization_params": grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
@@ -1487,9 +1485,7 @@ class _Linear:
 
 
 # Register _Linear.forward as a custom PyTorch operator
-_te_linear_forward = torch.library.custom_op(
-    "te::linear_forward", mutates_args=()
-)(_Linear.forward)
+_te_linear_forward = torch.library.custom_op("te::linear_forward", mutates_args=())(_Linear.forward)
 
 
 @_te_linear_forward.register_fake
@@ -1620,9 +1616,9 @@ def _te_linear_backward_impl(
     return [g if g is not None else grad_output.new_empty((0,)) for g in grads]
 
 
-_te_linear_backward = torch.library.custom_op(
-    "te::linear_backward", mutates_args=()
-)(_te_linear_backward_impl)
+_te_linear_backward = torch.library.custom_op("te::linear_backward", mutates_args=())(
+    _te_linear_backward_impl
+)
 
 
 @_te_linear_backward.register_fake
@@ -1647,6 +1643,7 @@ def _(
     if use_bias:
         grad_bias = grad_output.new_empty((grad_output.shape[-1],))
     return [wgrad, dgrad, grad_bias]
+
 
 _te_linear_forward.register_autograd(
     _Linear.backward,
@@ -2093,9 +2090,7 @@ class Linear(TransformerEngineBaseModule):
                 self.save_original_input,
                 debug,
             )
-            bias_arg = (
-                bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
-            )
+            bias_arg = bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             args = _LinearNonTensorArgs(non_tensor_args)
             result = _te_linear_forward(
                 weight_tensor,
