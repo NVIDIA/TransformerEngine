@@ -1429,7 +1429,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     name = "te_grouped_gemm_ffi"
     multiple_results = True
-    impl_static_args = (10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
+    impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
     inner_primitive = None
     outer_primitive = None
 
@@ -1441,8 +1441,6 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv_aval,
         bias_aval,
         group_sizes_aval,
-        group_offset_lhs_aval,
-        group_offset_out_aval,
         alpha,
         beta,
         *,
@@ -1482,7 +1480,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         Returns:
             A jnp.ndarray containing the result of the grouped GEMM operation
         """
-        del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_out_aval
+        del lhs_data_aval, rhs_data_aval, bias_aval
         del K, lhs_is_trans, rhs_is_trans, has_bias, use_async_d2h_group_sizes
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
@@ -1508,16 +1506,22 @@ class GroupedGemmPrimitive(BasePrimitive):
         workspace_size += get_grouped_gemm_setup_workspace_size(group_sizes_aval.size)
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
+        # Temporary buffer for int32 → int64 conversion of group_sizes on device.
+        int64_workspace_size = group_sizes_aval.size * jnp.dtype(jnp.int64).itemsize
+        int64_workspace_aval = jax.core.ShapedArray(
+            shape=(int64_workspace_size,), dtype=jnp.uint8
+        )
+
         out_shape = (M, N)
         if is_grouped_dense_wgrad:
             num_tensors = group_sizes_aval.size
             out_shape = (num_tensors, M, N)
         out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
-        return (out_aval, workspace_aval)
+        return (out_aval, workspace_aval, int64_workspace_aval)
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        (out_aval, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
+        (out_aval, _, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
         return (out_aval,)
 
     @staticmethod
@@ -1558,8 +1562,6 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset_lhs,
-        group_offset_out,
         alpha,
         beta,
         M,
@@ -1574,15 +1576,13 @@ class GroupedGemmPrimitive(BasePrimitive):
         use_async_d2h_group_sizes,
     ):
         assert GroupedGemmPrimitive.inner_primitive is not None
-        (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
+        (out, _, _) = GroupedGemmPrimitive.inner_primitive.bind(
             lhs_data,
             lhs_scale_inv,
             rhs_data,
             rhs_scale_inv,
             bias,
             group_sizes,
-            group_offset_lhs,
-            group_offset_out,
             alpha,
             beta,
             M=M,
@@ -1952,9 +1952,6 @@ def grouped_gemm(
     """
 
     assert group_offset is None, "group_offset is not yet implemented"
-    assert (
-        jax.config.jax_enable_x64
-    ), "Grouped GEMM currently requires jax_enable_x64 to be True for correct behavior"
 
     # TODO(Phuong): implement the precision
     del precision
@@ -2094,29 +2091,9 @@ def grouped_gemm(
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
-    # TODO(jberchtold): move the int64 and offset computation to C++ side in a kernel to avoid needing JAX to support int64
-    group_sizes = group_sizes.astype(jnp.int64)
-    # Compute group_offset as cumulative sum of group_sizes, starting with 0
-    group_offset = jnp.concatenate(
-        [jnp.array([0], dtype=jnp.int64), jnp.cumsum(group_sizes, dtype=jnp.int64)[:-1]]
-    )
-    if is_grouped_dense_wgrad:
-        group_offset_lhs = (
-            group_offset * M
-        )  # Offset is by number of elements total, not number of rows
-        # HACK: this _out is really the rhs in this case
-        group_offset_out = (
-            group_offset * N
-        )  # Offset is by number of elements total, not number of rows
-    else:
-        group_offset_lhs = (
-            group_offset * K_lhs
-        )  # Offset is by number of elements total, not number of rows
-        group_offset_out = (
-            group_offset * N
-        )  # Offset is by number of elements total, not number of rows
+    group_sizes = group_sizes.astype(jnp.int32)
 
-    num_gemms = group_sizes.shape[0]  # Due to interlaced zeros to support int64
+    num_gemms = group_sizes.shape[0]
     alpha = jnp.ones((num_gemms,), jnp.float32)
     beta = jnp.zeros((num_gemms,), jnp.float32)
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
@@ -2126,8 +2103,6 @@ def grouped_gemm(
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset_lhs,
-        group_offset_out,
         alpha,
         beta,
         M=M,

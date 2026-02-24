@@ -431,6 +431,9 @@ class JAXX_GroupedTensorWrapper {
   void set_rowwise(Buffer_Type const &data, std::optional<Buffer_Type> const &scale_inv);
   void set_group_info(Buffer_Type const &group_sizes, Buffer_Type const &group_offsets,
                       NVTEGroupedTensorParam group_sizes_param_name);
+  // Set only group sizes (no offsets); the setup kernel will compute offsets from sizes.
+  void set_group_sizes_only(const int64_t *sizes_ptr, size_t num_tensors,
+                            NVTEGroupedTensorParam group_sizes_param_name);
 
   operator NVTEGroupedTensor() const { return m_grouped_tensor; }
   NVTEGroupedTensor const &get_grouped_tensor() const;
@@ -524,6 +527,18 @@ void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const &group_sizes,
   nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedTensorOffsets, &m_offsets_tensor);
 }
 
+void JAXX_GroupedTensorWrapper::set_group_sizes_only(
+    const int64_t *sizes_ptr, size_t num_tensors,
+    NVTEGroupedTensorParam group_sizes_param_name) {
+  NVTEShape shape{};
+  shape.ndim = 1;
+  shape.data[0] = num_tensors;
+  m_sizes_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(const_cast<int64_t *>(sizes_ptr)),
+                                   NVTEDType::kNVTEInt64, shape};
+  nvte_set_grouped_tensor_param(&m_grouped_tensor, group_sizes_param_name, &m_sizes_tensor);
+  // Intentionally no offset tensor: offsets will be computed by the setup kernel.
+}
+
 NVTEGroupedTensor const &JAXX_GroupedTensorWrapper::get_grouped_tensor() const {
   return m_grouped_tensor;
 }
@@ -543,9 +558,9 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
-                          Buffer_Type group_sizes, Buffer_Type group_offset_lhs,
-                          Buffer_Type group_offset_out, Buffer_Type alpha, Buffer_Type beta,
-                          Result_Type output, Result_Type workspace, size_t m, size_t n, size_t k,
+                          Buffer_Type group_sizes, Buffer_Type alpha, Buffer_Type beta,
+                          Result_Type output, Result_Type workspace, Result_Type int64_workspace,
+                          size_t m, size_t n, size_t k,
                           bool lhs_is_trans, bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode,
                           bool has_bias, bool is_grouped_dense_wgrad,
                           bool use_async_d2h_group_sizes) {
@@ -579,6 +594,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   NVTE_CHECK(group_sizes.dimensions().size() == 1);
   size_t num_gemms = group_sizes.dimensions()[0];
+
+  // Convert int32 group_sizes to int64 into the dedicated output buffer.
+  NVTE_CHECK(group_sizes.element_type() == xla::ffi::DataType::S32,
+             "group_sizes must be int32.");
+  auto *int64_sizes_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
+  nvte_convert_int32_to_int64(reinterpret_cast<const int32_t *>(group_sizes.untyped_data()),
+                              int64_sizes_ptr, num_gemms, stream);
 
   NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
              "Only non-quantized grouped GEMM is supported in current implementation.");
@@ -691,13 +713,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     //// RHS
     NVTEShape rhsShape{.data = {k, n}, .ndim = 2};
     auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
-    rhs_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims);
+    rhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
 
     //// LHS
     NVTEShape lhsShape{.data = {k, m}, .ndim = 2};
     lhs_is_trans = true;
     auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-    lhs_tensor.set_group_info(group_sizes, group_offset_lhs, kNVTEGroupedFirstDims);
+    lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
 
     //// OUTPUT
     NVTEShape outShape{.data = {num_gemms * m, n}, .ndim = 2};
@@ -737,14 +759,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     std::swap(lhsShape.data[0], lhsShape.data[1]);
   }
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  lhs_tensor.set_group_info(group_sizes, group_offset_lhs,
-                            lhs_is_trans ? kNVTEGroupedLastDims : kNVTEGroupedFirstDims);
+  lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms,
+                                  lhs_is_trans ? kNVTEGroupedLastDims : kNVTEGroupedFirstDims);
 
   //// OUTPUT
   NVTEShape outShape{.data = {m, n}, .ndim = 2};
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,
                                         num_gemms, outShape);
-  out_tensor.set_group_info(group_sizes, group_offset_out, kNVTEGroupedFirstDims);
+  out_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
 
   // This memset is required because the group sizes may not fill the full buffer since we overallocate for the worst case. However, in theory unused space on the grouped axis should not be utilizied downstream, but it seems like somehow it is utilized.
   // TODO(jberchtold): try removing this
@@ -772,13 +794,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Arg<Buffer_Type>()      // rhs_data
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
-                                  .Arg<Buffer_Type>()      // group_sizes
-                                  .Arg<Buffer_Type>()      // group_offset_lhs
-                                  .Arg<Buffer_Type>()      // group_offset_out
+                                  .Arg<Buffer_Type>()      // group_sizes (int32)
                                   .Arg<Buffer_Type>()      // alpha
                                   .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // workspace
+                                  .Ret<Buffer_Type>()      // int64_workspace
                                   .Attr<int64_t>("M")
                                   .Attr<int64_t>("N")
                                   .Attr<int64_t>("K")
