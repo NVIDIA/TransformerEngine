@@ -658,8 +658,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                     f"got segment_ids.ndim={segment_ids.ndim}, segment_pos.ndim={segment_pos.ndim}"
                 )
                 assert segment_ids.shape[-segment_pos.ndim :] == segment_pos.shape, (
-                    "segment_pos must have same trailing shape as segment_ids when adding batch dims; "
-                    f"got segment_ids.shape={segment_ids.shape}, segment_pos.shape={segment_pos.shape}"
+                    "segment_pos must have same trailing shape as segment_ids when adding batch"
+                    f" dims; got segment_ids.shape={segment_ids.shape},"
+                    f" segment_pos.shape={segment_pos.shape}"
                 )
                 # Expand the segment_pos by as many batch dims as the segment_ids has
                 leading_bdim = segment_ids.ndim - segment_pos.ndim
@@ -1155,8 +1156,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                     f"got segment_ids.ndim={segment_ids.ndim}, segment_pos.ndim={segment_pos.ndim}"
                 )
                 assert segment_ids.shape[-segment_pos.ndim :] == segment_pos.shape, (
-                    "segment_pos must have same trailing shape as segment_ids when adding batch dims; "
-                    f"got segment_ids.shape={segment_ids.shape}, segment_pos.shape={segment_pos.shape}"
+                    "segment_pos must have same trailing shape as segment_ids when adding batch"
+                    f" dims; got segment_ids.shape={segment_ids.shape},"
+                    f" segment_pos.shape={segment_pos.shape}"
                 )
                 leading_bdim = segment_ids.ndim - segment_pos.ndim
                 target_shape = segment_ids.shape[:leading_bdim] + segment_pos.shape
