@@ -528,8 +528,7 @@ void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const &group_sizes,
 }
 
 void JAXX_GroupedTensorWrapper::set_group_sizes_only(
-    const int64_t *sizes_ptr, size_t num_tensors,
-    NVTEGroupedTensorParam group_sizes_param_name) {
+    const int64_t *sizes_ptr, size_t num_tensors, NVTEGroupedTensorParam group_sizes_param_name) {
   NVTEShape shape{};
   shape.ndim = 1;
   shape.data[0] = num_tensors;
@@ -556,16 +555,13 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
   return std::move(grouped_tensor_wrapper);
 }
 
-Error_Type GroupedGemmCudaGraphableFFI(cudaStream_t stream, Buffer_Type lhs_data,
-                                       Buffer_Type lhs_sinv, Buffer_Type rhs_data,
-                                       Buffer_Type rhs_sinv, Buffer_Type bias,
-                                       Buffer_Type group_sizes, Buffer_Type alpha, Buffer_Type beta,
-                                       Result_Type output, Result_Type workspace,
-                                       Result_Type int64_workspace, size_t m, size_t n, size_t k,
-                                       bool lhs_is_trans, bool rhs_is_trans,
-                                       JAXX_Scaling_Mode scaling_mode, bool has_bias,
-                                       bool is_grouped_dense_wgrad,
-                                       bool use_async_d2h_group_sizes) {
+Error_Type GroupedGemmCudaGraphableFFI(
+    cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv, Buffer_Type rhs_data,
+    Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type group_sizes, Buffer_Type alpha,
+    Buffer_Type beta, Result_Type output, Result_Type workspace, Result_Type int64_workspace,
+    size_t m, size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
+    JAXX_Scaling_Mode scaling_mode, bool has_bias, bool is_grouped_dense_wgrad,
+    bool use_async_d2h_group_sizes) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -598,8 +594,7 @@ Error_Type GroupedGemmCudaGraphableFFI(cudaStream_t stream, Buffer_Type lhs_data
   size_t num_gemms = group_sizes.dimensions()[0];
 
   // Convert int32 group_sizes to int64 into the dedicated output buffer.
-  NVTE_CHECK(group_sizes.element_type() == xla::ffi::DataType::S32,
-             "group_sizes must be int32.");
+  NVTE_CHECK(group_sizes.element_type() == xla::ffi::DataType::S32, "group_sizes must be int32.");
   auto *int64_sizes_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
   nvte_convert_int32_to_int64(reinterpret_cast<const int32_t *>(group_sizes.untyped_data()),
                               int64_sizes_ptr, num_gemms, stream);

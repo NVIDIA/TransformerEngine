@@ -1509,9 +1509,7 @@ class GroupedGemmCudaGraphablePrimitive(BasePrimitive):
 
         # Temporary buffer for int32 → int64 conversion of group_sizes on device.
         int64_workspace_size = group_sizes_aval.size * jnp.dtype(jnp.int64).itemsize
-        int64_workspace_aval = jax.core.ShapedArray(
-            shape=(int64_workspace_size,), dtype=jnp.uint8
-        )
+        int64_workspace_aval = jax.core.ShapedArray(shape=(int64_workspace_size,), dtype=jnp.uint8)
 
         out_shape = (M, N)
         if is_grouped_dense_wgrad:
@@ -2261,12 +2259,14 @@ def grouped_gemm(
     # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
     # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
     # feature-compatible with the main branch.
-    _use_cuda_graphable = (
-        scaling_mode == ScalingMode.NO_SCALING and lhs_data.dtype == jnp.bfloat16
-    )
+    _use_cuda_graphable = scaling_mode == ScalingMode.NO_SCALING and lhs_data.dtype == jnp.bfloat16
 
     if _use_cuda_graphable:
-        assert group_offset is None, "group_offset is not supported in the cuda graphable path and is instead computed internally assuming contiguous grouping. Any padding is included in the group_sizes and padded with zeros to not affect the result of the MoE block."
+        assert group_offset is None, (
+            "group_offset is not supported in the cuda graphable path and is instead computed"
+            " internally assuming contiguous grouping. Any padding is included in the group_sizes"
+            " and padded with zeros to not affect the result of the MoE block."
+        )
         group_sizes = group_sizes.astype(jnp.int32)
         num_gemms = group_sizes.shape[0]
         alpha = jnp.ones((num_gemms,), jnp.float32)

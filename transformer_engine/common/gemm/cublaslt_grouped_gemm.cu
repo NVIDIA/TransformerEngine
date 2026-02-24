@@ -446,7 +446,7 @@ inline cublasLtMatmulAlgo_t select_grouped_gemm_algo(cublasLtHandle_t handle,
 //   2. Per-tensor first/last dims provided but no offsets → cumulative sum of (first*last) products.
 //   3. Fully uniform shapes                        → idx * uniform_first * uniform_last.
 __forceinline__ __device__ int64_t compute_grouped_tensor_offset(const TensorShapeInfo &meta,
-                                                                  size_t idx) {
+                                                                 size_t idx) {
   if (meta.offsets) {
     return meta.offsets[idx];
   } else if (meta.first_dims != nullptr || meta.last_dims != nullptr) {
@@ -562,8 +562,7 @@ size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors) {
   return grouped_gemm_setup_workspace_size(num_tensors);
 }
 
-void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n,
-                                 cudaStream_t stream) {
+void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cudaStream_t stream) {
   if (n == 0) return;
   const int threads = 256;
   const int blocks = static_cast<int>((n + threads - 1) / threads);
