@@ -668,7 +668,7 @@ class TestEncoder(unittest.TestCase):
         """Test Transformer Engine with NVFP4"""
         result = self.exec(True, "NVFP4BlockScaling")
         assert result[0] < 0.451 and result[1] > 0.787
-    
+
 
 if __name__ == "__main__":
     train_and_evaluate(encoder_parser(None))
