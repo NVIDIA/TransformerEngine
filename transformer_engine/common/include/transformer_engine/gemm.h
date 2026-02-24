@@ -329,6 +329,19 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  * - Shape compatibility: if transa=false, transb=false:
  *   - A[i]: (M[i], K[i]), B[i]: (K[i], N[i]), D[i]: (M[i], N[i])
  */
+/*! \brief Return the required size in bytes for the setup workspace of grouped GEMM.
+ *
+ * The setup workspace stores pointer arrays and per-matrix dimension arrays used
+ * by the grouped GEMM kernel. Its size depends only on the number of tensors (GEMMs)
+ * in the group and is independent of matrix dimensions.
+ *
+ * Pass the result as the size of the workspace_setup tensor in nvte_grouped_gemm.
+ *
+ *  \param[in] num_tensors  Number of tensors (GEMMs) in the group.
+ *  \return Required size in bytes for workspace_setup.
+ */
+size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors);
+
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
                        const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
                        const NVTETensor beta, NVTETensor workspace_setup,

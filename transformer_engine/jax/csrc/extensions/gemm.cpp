@@ -667,7 +667,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
   }
 
-  constexpr size_t workspace_setup_size = 1024 * 1024;  // HACK: dummy workspace for setup
+  const size_t workspace_setup_size = nvte_grouped_gemm_setup_workspace_size(num_gemms);
   TensorWrapper workspace_setup(workspace_ptr, std::vector<size_t>{workspace_setup_size},
                                 DType::kByte);
   TensorWrapper workspace_cublas(workspace_ptr + workspace_setup_size,

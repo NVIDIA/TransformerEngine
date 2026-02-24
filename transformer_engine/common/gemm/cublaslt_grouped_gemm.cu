@@ -534,6 +534,10 @@ inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
 
 }  // namespace
 
+size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors) {
+  return grouped_gemm_setup_workspace_size(num_tensors);
+}
+
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
                        const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
                        const NVTETensor beta, NVTETensor workspace_setup,

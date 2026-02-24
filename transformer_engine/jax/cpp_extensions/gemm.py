@@ -1504,9 +1504,13 @@ class GroupedGemmPrimitive(BasePrimitive):
             workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
             workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
 
-        workspace_size += (
-            1024 * 1024
-        )  # HACK: properly make a workspace_setup buffer in addition to the workspace_cublas buffer
+        # Setup workspace: 6 pointer arrays (void*, 8 bytes each) + 6 int arrays (4 bytes each),
+        # aligned to 256 bytes. Layout: [A_ptrs, B_ptrs, C_ptrs, D_ptrs, alpha_ptrs, beta_ptrs,
+        #                                a_rows, a_cols, b_rows, b_cols, d_rows, d_cols]
+        num_tensors = group_sizes_aval.size
+        setup_workspace_size = 6 * num_tensors * 8 + 6 * num_tensors * 4  # 72 * num_tensors bytes
+        setup_workspace_size = ((setup_workspace_size + 255) // 256) * 256  # align to 256 bytes
+        workspace_size += setup_workspace_size
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         out_shape = (M, N)
