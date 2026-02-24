@@ -44,6 +44,7 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
+from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
@@ -2576,12 +2577,12 @@ _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = False
 _2X_ACC_WGRAD = False
 
-META_QKV = tex.FP8FwdTensors.GEMM1_OUTPUT
-META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
-META_O = tex.FP8FwdTensors.GEMM2_INPUT
-META_DO = tex.FP8BwdTensors.GRAD_INPUT2
-META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
-META_DP = tex.FP8BwdTensors.GRAD_INPUT3
+META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
+META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
+META_O = FP8FwdTensorIdx.GEMM2_INPUT
+META_DO = FP8BwdTensorIdx.GRAD_INPUT2
+META_S = FP8FwdTensorIdx.GEMM3_OUTPUT
+META_DP = FP8BwdTensorIdx.GRAD_INPUT3
 
 
 class _custom_mha_fp8(torch.autograd.Function):
@@ -2609,14 +2610,14 @@ class _custom_mha_fp8(torch.autograd.Function):
         d = in_features // h
         b = cu_seqlens.numel() - 1
 
-        input_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-        qkv_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
-        qkv_weight_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        o_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
-        dO_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
-        dQKV_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
-        s_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT2]
-        dP_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT3]
+        input_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
+        qkv_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_INPUT]
+        qkv_weight_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
+        o_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_OUTPUT]
+        dO_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT1]
+        dQKV_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
+        s_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT2]
+        dP_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT3]
 
         inp_fp8 = input_quantizer(inp)
 
