@@ -494,11 +494,13 @@ class MultiheadAttention(torch.nn.Module):
         dpa_name = self.core_attention.name or ""
         qkv_output_role = (
             QuantizerRole(module_type="dpa", tensor_type="qkv", name=dpa_name)
-            if qkv_fp8_output else None
+            if qkv_fp8_output
+            else None
         )
         proj_grad_input_role = (
             QuantizerRole(module_type="dpa", tensor_type="do", name=dpa_name)
-            if proj_fp8_grad else None
+            if proj_fp8_grad
+            else None
         )
         if self.attention_type == "self":
             if self.input_layernorm:
