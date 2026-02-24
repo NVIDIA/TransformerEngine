@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -57,12 +57,22 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
 
     """
 
+    # Row-scaled FP8 data
     _rowwise_data: Optional[torch.Tensor]
+    # Column-scaled FP8 data
     _columnwise_data: Optional[torch.Tensor]
-    _quantizer: Optional[Quantizer]
-    _fp8_dtype: TE_DType
+    # Scaling factors for row-scaled FP8 data
     _rowwise_scale_inv: torch.Tensor
+    # Scaling factors for column-scaled FP8 data
     _columnwise_scale_inv: torch.Tensor
+
+    # Builder class for casting to MXFP8
+    _quantizer: Optional[Quantizer]
+    # FP8 data type
+    _fp8_dtype: TE_DType
+    # Whether scaling factors are in the swizzled format expected by
+    # GEMM
+    _with_gemm_swizzled_scales: bool
 
     def __new__(
         cls,
@@ -72,6 +82,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         columnwise_scale_inv: Optional[torch.Tensor],
         fp8_dtype: TE_DType,
         quantizer: Optional[Quantizer],
+        with_gemm_swizzled_scales: bool,
         *args,
         **kwargs,
     ):
@@ -81,10 +92,11 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             instance = super().__new__(cls, *args, **kwargs)
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
-        instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = fp8_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
+        instance._quantizer = quantizer.copy() if quantizer is not None else None
+        instance._fp8_dtype = fp8_dtype
+        instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
         return instance
 
@@ -108,6 +120,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             "columnwise_scale_inv": self._columnwise_scale_inv,
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
+            "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorStorage]:
@@ -197,6 +210,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             columnwise_scale_inv=self._columnwise_scale_inv,
             fp8_dtype=self._fp8_dtype,
             quantizer=self._quantizer,
+            with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
         )
 
     def __repr__(self):
@@ -255,7 +269,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             self._columnwise_data = None
             self._columnwise_scale_inv = None
 
-    def get_usages(self) -> Tuple[bool, bool]:
+    def get_usages(self) -> Dict[str, bool]:
         """Get the usage of the tensor"""
         return {
             "rowwise": self._rowwise_data is not None,

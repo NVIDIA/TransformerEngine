@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -54,12 +54,16 @@ std::vector<InputType> create_transpose(const InputType* const input, const size
 }
 
 // Compute the global encode scale factor for a given global amax
-float compute_global_encode_scaling_factor_FP4(const float global_amax) {
+float compute_global_encode_scaling_factor_FP4(const float global_amax, const bool use_fast_math) {
   constexpr float fp8_max = 448.0f;     // 448.0f;
   constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
-  // If scale is infinity, return max value of float32
-  global_encode_scale = fminf(global_encode_scale, Numeric_Traits<float>::maxNorm);
+  // If scale is infinity, return the max normalized value
+  const float max_norm_clamp = use_fast_math
+                               ? Numeric_Traits<bf16>::maxNorm
+                               : Numeric_Traits<float>::maxNorm;
+
+  global_encode_scale = fminf(global_encode_scale, max_norm_clamp);
   // If global amax is 0 or infinity, return 1
   if (global_amax == 0.0f || global_encode_scale == 0.0f) {
     return 1.0f;
@@ -76,10 +80,11 @@ void quantize_nvfp4_1d(float (*OP)(const float),
                        const size_t rows,
                        const size_t cols,
                        const size_t scales_stride,
-                       const float global_amax) {
+                       const float global_amax,
+                       const bool use_fast_math) {
 
     // Compute a global encoding/decoding scaling factor for all S_dec_b
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math);
 
     constexpr size_t block_size_X = 16;
     const size_t blocks_X = divide_round_up(cols, block_size_X);
@@ -114,14 +119,20 @@ void quantize_nvfp4_1d(float (*OP)(const float),
             const float S_dec_b = block_amax / 6.0f;
 
             // Scale & Store per-block decoding scaling factor
-            const float S_dec_b_fp8 = S_dec_b * S_enc;
+            const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
+            const float S_dec_b_fp32 = static_cast<float>(S_dec_b_fp8);
 
             // Compute "correct" per-block encoding scaling factor
-            const float S_enc_b_fp8 = S_dec_b_fp8 == 0 ? 0.f : S_enc / S_dec_b_fp8;
+            const float S_enc_b_fp8 = S_dec_b_fp32 == 0.f ? 0.f : S_enc / S_dec_b_fp32;
 
             const size_t scale_idx = i * scales_stride + block_X;
-            scales[scale_idx] = static_cast<fp8e4m3>(S_dec_b_fp8);
-            const float scale_reciprocal = S_enc_b_fp8;
+            scales[scale_idx] = S_dec_b_fp8;
+
+            float scale_reciprocal = S_enc_b_fp8;
+            if (use_fast_math) {
+                // Numerical truncation to match GPU implementation, if mixed precision FMA instruction is used
+                scale_reciprocal = static_cast<float>(static_cast<bf16>(scale_reciprocal));
+            }
 
             for (size_t j = j_min; j < j_max; j += 2) {
                 const int idx_pair = (i * cols + j) / 2;
@@ -136,7 +147,7 @@ void quantize_nvfp4_1d(float (*OP)(const float),
                 fp4e2m1x2 casted_to_e2m1_pair(scaled_elt_pair);
                 output[idx_pair] = casted_to_e2m1_pair;
 
-                // const double2 truncated_pair = cvt_fp4x2_to_double2(casted_to_e2m1_pair);
+                const double2 truncated_pair = cvt_fp4x2_to_double2(casted_to_e2m1_pair);
             }
         }
     }
@@ -149,9 +160,10 @@ void compute_2d_mathematical_scales(float (*OP)(const float),
                                    const size_t rows,
                                    const size_t cols,
                                    const float global_amax,
-                                   std::vector<std::vector<fp8e4m3>>& math_scales) {
+                                   std::vector<std::vector<fp8e4m3>>& math_scales,
+                                   const bool use_fast_math) {
 
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
     const size_t blocks_Y = divide_round_up(rows, block_size_Y);
@@ -195,13 +207,14 @@ void quantize_nvfp4_2d(float (*OP)(const float),
                        const size_t rows,
                        const size_t cols,
                        const size_t scales_stride,
-                       const float global_amax) {
+                       const float global_amax,
+                       const bool use_fast_math) {
 
     // Step 1: Compute mathematical 8x8 scaling factors
     std::vector<std::vector<fp8e4m3>> math_scales;
-    compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales);
+    compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales, use_fast_math);
 
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
     const size_t blocks_Y = divide_round_up(rows, block_size_Y);
@@ -282,11 +295,12 @@ void quantize_nvfp4(float (*OP)(const float),
                     const size_t cols,
                     const size_t scales_stride,
                     const float global_amax,
+                    const bool use_fast_math,
                     const bool use_2d_quantization = false) {
     if (use_2d_quantization) {
-        quantize_nvfp4_2d(OP, input, output, scales, rows, cols, scales_stride, global_amax);
+        quantize_nvfp4_2d(OP, input, output, scales, rows, cols, scales_stride, global_amax, use_fast_math);
     } else {
-        quantize_nvfp4_1d(OP, input, output, scales, rows, cols, scales_stride, global_amax);
+        quantize_nvfp4_1d(OP, input, output, scales, rows, cols, scales_stride, global_amax, use_fast_math);
     }
 }
 
@@ -302,6 +316,7 @@ void compute_ref(float (*OP)(const float),
                  const size_t cols,
                  const size_t scales_stride,
                  const size_t scales_stride_t,
+                 const bool use_fast_math,
                  const bool use_2d_quantization = false)
 {
     std::vector<InputType> input_t = create_transpose(input, rows, cols);
@@ -309,7 +324,7 @@ void compute_ref(float (*OP)(const float),
     if (use_2d_quantization) {
         // Step 1: Compute mathematical 8×8 scaling factors
         std::vector<std::vector<fp8e4m3>> math_scales;
-        compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales);
+        compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales, use_fast_math);
 
         constexpr size_t block_size_Y = 16;
         constexpr size_t block_size_X = 16;
@@ -336,12 +351,16 @@ void compute_ref(float (*OP)(const float),
 
         // Step 4: Process quantized outputs using the same algorithm as quantize_nvfp4_2d
         // (This part processes the actual FP4 data using the mathematical scaling factors)
-        quantize_nvfp4_2d(OP, input, output, nullptr, rows, cols, scales_stride, global_amax); // scales already filled
-        quantize_nvfp4_2d(OP, input_t.data(), output_t, nullptr, cols, rows, scales_stride_t, global_amax); // scales_t already filled
+        quantize_nvfp4_2d(OP, input, output, nullptr, rows, cols, scales_stride, global_amax,
+                          use_fast_math); // scales already filled
+        quantize_nvfp4_2d(OP, input_t.data(), output_t, nullptr, cols, rows, scales_stride_t, global_amax,
+                          use_fast_math); // scales_t already filled
 
     } else {
-        quantize_nvfp4(OP, input, output, scales, rows, cols, scales_stride, global_amax, use_2d_quantization);
-        quantize_nvfp4(OP, input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, global_amax, use_2d_quantization);
+        quantize_nvfp4(OP, input, output, scales, rows, cols, scales_stride, global_amax,
+                       use_fast_math, use_2d_quantization);
+        quantize_nvfp4(OP, input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, global_amax,
+                       use_fast_math, use_2d_quantization);
     }
 }
 
@@ -349,6 +368,8 @@ void compare_nvfp4_tensors(const std::string& name,
                            const fp4e2m1 *test_data, const fp4e2m1 *ref_data,
                            const int rows, const int cols,
                            double atol = 1e-5, double rtol = 1e-8) {
+    constexpr int max_mismatches_to_print = 3;
+
     std::vector<std::string> mismatch_messages;
     size_t total_mismatches = 0;
 
@@ -362,29 +383,16 @@ void compare_nvfp4_tensors(const std::string& name,
                 const double t = (k == 0 ? test_data_pair.x : test_data_pair.y);
                 const double r = (k == 0 ? ref_data_pair.x : ref_data_pair.y);
 
-                bool mismatch = fabs(t - r) > atol && (r == 0 || fabs((t - r) / r) > rtol);
-                /* For Float32 the floating point comparison is enough to error out */
-                bool assertion = false;
-                if (mismatch && !assertion) {
-                    /* Check if it is just a failure of round to nearest choosing different
-                        side of the real value */
-                    const double mean = (t + r) / 2;
-                    const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
-                    const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
-                    const double cast_mean_p = static_cast<double>(static_cast<fp4e2m1>(mean_p));
-                    const double cast_mean_m = static_cast<double>(static_cast<fp4e2m1>(mean_m));
-                    assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
-                }
-                if (assertion) {
+                const bool mismatch = fabs(t - r) > (atol + fabs(r) * rtol);
+                if (mismatch) {
                     total_mismatches++;
-                    std::string msg = "Mismatch at place (" + std::to_string(idx + k) + "): " +
-                                    std::to_string(t) + " vs " + std::to_string(r) +
-                                    " (abs_diff: " + std::to_string(fabs(t - r)) +
-                                    ", rel_diff: " + std::to_string(r == 0 ? 0.0 : fabs((t - r) / r)) + ")";
-                    mismatch_messages.push_back(msg);
-
                     // Optional: limit number of detailed messages to avoid overwhelming output
-                    if (mismatch_messages.size() <= 100) {
+                    if (total_mismatches <= max_mismatches_to_print) {
+                        std::string msg = "Mismatch at place (" + std::to_string(idx + k) + "): " +
+                                          std::to_string(t) + " vs " + std::to_string(r) +
+                                          " (abs_diff: " + std::to_string(fabs(t - r)) +
+                                          ", rel_diff: " + std::to_string(r == 0 ? 0.0 : fabs((t - r) / r)) + ")";
+                        mismatch_messages.push_back(msg);
                         std::cout << "Error in tensor " << name << ": " << msg << std::endl;
                     }
                 }
@@ -400,8 +408,9 @@ void compare_nvfp4_tensors(const std::string& name,
         std::cout << "STATUS: FAILED for output" << std::endl;
         std::cout << "Total mismatches found: " << total_mismatches << std::endl;
         std::cout << "Mismatch rate: " << (100.0 * total_mismatches) / (rows * cols) << "%" << std::endl;
-        if (mismatch_messages.size() > 100) {
-            std::cout << "... and " << (mismatch_messages.size() - 100) << " more mismatches (showing first 100)" << std::endl;
+        if (mismatch_messages.size() > max_mismatches_to_print) {
+            std::cout << "... and " << (mismatch_messages.size() - max_mismatches_to_print)
+            << " more mismatches (showing first " << max_mismatches_to_print << ")" << std::endl;
         }
         std::cout << "============================" << std::endl;
 
@@ -519,7 +528,8 @@ void compareResults_nvfp4(const Tensor &test,
 
 template <typename InputType>
 void performTest(float (*OP)(const float),
-                 const std::vector<size_t>& shape) {
+                 const std::vector<size_t>& shape,
+                 const bool use_fast_math) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -580,15 +590,16 @@ void performTest(float (*OP)(const float),
                            cols,
                            scales_stride,
                            scales_stride_t,
+                           use_fast_math,
                            use_2d_quantization);
-
-    QuantizationConfigWrapper quant_config;
-
     // Initialize stochastic rounding
     Tensor rng_state("rng_state", std::vector<size_t>{2}, DType::kInt64);
     rng_state.rowwise_cpu_dptr<int64_t>()[0] = 123;  // rng_seed
     rng_state.rowwise_cpu_dptr<int64_t>()[1] = 321;  // rng_sequence
     rng_state.from_cpu();
+
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_use_fast_math(use_fast_math);
     quant_config.set_stochastic_rounding(false);
     quant_config.set_rng_state(rng_state.data());
 
@@ -619,8 +630,8 @@ void performTest(float (*OP)(const float),
     }
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    const double atol = 0.05;
-    const double rtol = 0.1;
+    const double atol = 1.0E-6;
+    const double rtol = 1.0E-6;
 
     // Set dump_data=true to enable dumping tensor data to files for analysis
     compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true, false);
@@ -671,7 +682,8 @@ std::vector<ActivationType> Activation_types = {
 class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
     <std::tuple<ActivationType,
                 std::vector<size_t>,
-                transformer_engine::DType>> {};
+                transformer_engine::DType,
+                bool>> {};
 
 TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     // Skip tests for pre-Blackwell architectures
@@ -685,6 +697,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     const ActivationType Act_type = std::get<0>(GetParam());
     const auto tensor_dims = std::get<1>(GetParam());
     const DType input_type = std::get<2>(GetParam());
+    const bool use_fast_math = std::get<3>(GetParam());
 
     // Skip tests if the input tensor is 1D
     if (tensor_dims.size() < 2) {
@@ -702,7 +715,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     }
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-        performTest<InputType>(OP, tensor_dims);
+        performTest<InputType>(OP, tensor_dims, use_fast_math);
     );
 }
 
@@ -724,7 +737,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(tensor_dims),
-        ::testing::Values(DType::kBFloat16)),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::Values(false)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param));
       const auto& shape = std::get<1>(info.param);
@@ -732,5 +746,8 @@ INSTANTIATE_TEST_SUITE_P(
         name += "X" + std::to_string(s);
       }
       name += "X" + test::typeName(std::get<2>(info.param));
+      if (std::get<3>(info.param)) {
+        name += "X_FAST_SCALING";
+      }
         return name;
     });

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -137,6 +137,7 @@ def fused_attn_fwd(
     attn_mask_type: str = "padding",
     softmax_type: str = "vanilla",
     window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = None,
     rng_gen: torch.Generator = None,
     softmax_offset: torch.Tensor = None,
     return_max_logit: bool = False,
@@ -212,6 +213,9 @@ def fused_attn_fwd(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
+    bottom_right_diagonal: bool, default = None
+                whether to align sliding window and ALiBi diagonal to the top left (False) or
+                bottom right (True) corner of the softmax matrix.
     rng_gen : torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -254,6 +258,12 @@ def fused_attn_fwd(
                     [seed, offset], dtype uint64
     max_logit : if return_max_logit = True, shape [h] and same data type as O; otherwise None
     """
+
+    if bottom_right_diagonal is None:
+        bottom_right_diagonal = attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }
 
     if attn_scale is None:
         d = q.size(-1)
@@ -306,6 +316,7 @@ def fused_attn_fwd(
         AttnMaskType[attn_mask_type],
         SoftmaxType[softmax_type],
         window_size,
+        bottom_right_diagonal,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
@@ -370,6 +381,7 @@ def fused_attn_bwd(
     attn_mask_type: str = "padding",
     softmax_type: str = "vanilla",
     window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = None,
     deterministic: bool = False,
     cuda_graph: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
@@ -442,6 +454,9 @@ def fused_attn_bwd(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
+    bottom_right_diagonal: bool, default = None
+                whether to align sliding window and ALiBi diagonal to the top left (False) or
+                bottom right (True) corner of the softmax matrix.
     deterministic : bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
     cuda_graph : bool, default = False
@@ -462,6 +477,12 @@ def fused_attn_bwd(
                 gradient tensor of softmax offset of shape [1, h_q, 1, 1].
                 See softmax_type in DotProductAttention for details.
     """
+    if bottom_right_diagonal is None:
+        bottom_right_diagonal = attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }
+
     if attn_scale is None:
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
@@ -500,6 +521,7 @@ def fused_attn_bwd(
         AttnMaskType[attn_mask_type],
         SoftmaxType[softmax_type],
         window_size,
+        bottom_right_diagonal,
         deterministic,
         cu_seqlens_q,
         cu_seqlens_kv,

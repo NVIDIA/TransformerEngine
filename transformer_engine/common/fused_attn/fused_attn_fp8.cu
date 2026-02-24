@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -1707,6 +1707,7 @@ void fused_attn_fp8_fwd_impl_v1(
                                0,
                                0,
                                true,
+                               true,
                                qkv_tensor_type,
                                o_tensor_type,
                                cudnn_frontend::DataType_t::NOT_SET,
@@ -2035,6 +2036,7 @@ void fused_attn_fp8_bwd_impl_v1(
                                NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX,
                                0,
                                0,
+                               true,
                                false,
                                qkv_tensor_type,
                                o_tensor_type,

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -29,7 +29,6 @@
 #include "cutlass/pipeline/pipeline.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/command_line.h"
-#include "cutlass/util/helper_cuda.hpp"
 #include "cutlass/util/print_error.hpp"
 
 // clang-format off
@@ -129,7 +128,8 @@ template <class MShape, class NShape, class KShape, class ClusterTileShape,
           class TC, class CStride, class CSmemLayout,
           class TSFC,
           class TiledMMA,
-          bool kEnableStochasticRounding = false>
+          bool kEnableStochasticRounding = false,
+          bool kUseFastMath = false>
 __global__ static
 void
 rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
@@ -426,7 +426,13 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
 
     const float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
     const float global_decode_scale = 1.0f / global_encode_scale;
-    auto sfd_converter = cutlass::NumericConverter<TSFC, float>{};
+
+    // Scaling factor for fast math path
+    float global_encode_scale_multiplier = 1.0f;
+    if constexpr (kUseFastMath) {
+      static constexpr float fp4_max_inv = 1.0f / fp4_max;
+      global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+    }
 
     do {
       for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n; ++k_tile) {
@@ -469,10 +475,13 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
 
         ++accumulator_pipe_consumer_state;
 
-        // Cast data from FP32 to BF16 to FP32.
-        auto convert_accum_to_bf16 = cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator, FragmentSize>{};
-        auto convert_bf16_to_accum = cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t, FragmentSize>{};
-        tTR_rAcc_frag(_0{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
+        if constexpr (!kUseFastMath) {
+          // Downcast to BF16 for bit-wise compatibility with unfused
+          // kernels
+          auto convert_accum_to_bf16 = cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator, FragmentSize>{};
+          auto convert_bf16_to_accum = cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t, FragmentSize>{};
+          tTR_rAcc_frag(_0{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
+        }
 
         auto compute_frgs = reinterpret_cast<cutlass::Array< ElementAccumulator, VectorSize> *>(tTR_rAcc_frag.data());
         auto output_frgs = reinterpret_cast<cutlass::Array< TC, VectorSize> *>(tDrC_frag.data());
@@ -481,14 +490,27 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
           vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
         }
 
-        pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
-        pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(pvscales, global_encode_scale);
+        if constexpr (kUseFastMath) {
+          // Fast math: multiply with precomputed reciprocal
+          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, global_encode_scale_multiplier);
+        } else {
+          // Accurate math: perform division
+          pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
+          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(pvscales, global_encode_scale);
+        }
         auto pvscales_cvted = cutlass::NumericArrayConverter<TSFC, ElementAccumulator, NumVecs>{}(pvscales);
 
         tC_rRowSFD_frg(_0{}) = pvscales_cvted;
         auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFC, NumVecs>{}(tC_rRowSFD_frg(_0{}));
         auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(qpvscale_ups, global_decode_scale);
-        auto acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
+        cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
+        if constexpr (kUseFastMath) {
+          // Fast math: compute approximate reciprocal
+          acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
+        } else {
+          // Accurate math: compute reciprocal with division
+          acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
+        }
 
         // Initialize RNG for tile
         const size_t rng_sequence
@@ -532,7 +554,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
 // B: 16 x 16: row-major
 // C: m x n: row-major
 // SFC: m x (n/16): row-major
-template <typename TA, typename TB, typename TC, typename TSFC, bool kEnableStochasticRounding = false>
+template <typename TA, typename TB, typename TC, typename TSFC, bool kEnableStochasticRounding = false, bool kUseFastMath = false>
 void
 rht_gemm_ntt_w_sfc(int m, int n,
         TA const* A,
@@ -644,16 +666,15 @@ rht_gemm_ntt_w_sfc(int m, int n,
                                   TC, decltype(dC), decltype(sC),
                                   TSFC,
                                   decltype(mma),
-                                  kEnableStochasticRounding>;
+                                  kEnableStochasticRounding,
+                                  kUseFastMath>;
 
-  bool status = cudaFuncSetAttribute(*kernel_ptr,
-                                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                smem_size);
+  NVTE_CHECK_CUDA(
+      cudaFuncSetAttribute(*kernel_ptr,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           smem_size)
+  );
 
-  if (status != cudaSuccess) {
-    std::cerr << "Error: Failed to set Shared Memory size." << std::endl;
-    return;
-  }
   (*kernel_ptr)
       <<< dimGrid, dimBlock, smem_size, stream >>>
       (M,  N,  k_tile_size, cga_tile_shape,
@@ -663,11 +684,12 @@ rht_gemm_ntt_w_sfc(int m, int n,
        SFC,
        mma, global_amax,
        rng_state);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 // this function is used to wrap the rht_gemm_ntt_w_sfc function
 //to transpose the input tensor A
-template <typename TA, typename TB, typename TC, typename TSFC, bool kEnableStochasticRounding = false>
+template <typename TA, typename TB, typename TC, typename TSFC, bool kEnableStochasticRounding = false, bool kUseFastMath = false>
 void
 rht_gemm_ttt_wrapper(int m, int n,
         TA const* A,
@@ -690,7 +712,7 @@ rht_gemm_ttt_wrapper(int m, int n,
   // B: 16 x 16: row-major
   // C: n x m: row-major
   // SFC: n x (m/16): row-major
-  rht_gemm_ntt_w_sfc<TA, TB, TC, TSFC, kEnableStochasticRounding>(
+  rht_gemm_ntt_w_sfc<TA, TB, TC, TSFC, kEnableStochasticRounding, kUseFastMath>(
     n, m,
     A, B, C,
     SFC, global_amax,
@@ -717,6 +739,7 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
   NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
              "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
+  NVTE_CHECK(!output_.with_gemm_swizzled_scales, "Output must have scales in compact format.");
   const SimpleTensor &input = input_.data;
   SimpleTensor &global_amax = output_.amax;
   SimpleTensor &output_t = output_.data;
@@ -800,20 +823,23 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
   } else if (m < 1024 || n < 1024) {
     k_tile_size = 512;
   }
+
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, kUseStochasticRounding,
-      detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding>(
-          /*m=*/m,
-          /*n=*/n,
-          /*A=*/reinterpret_cast<TA const *>(input.dptr),
-          /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-          /*C=*/reinterpret_cast<TC *>(output_t.dptr),
-          /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
-          /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
-          /*rng_state=*/rng_state,
-          /*sm_count=*/sm_count,
-          /*stream=*/stream,
-          /*k_tile_size=*/k_tile_size););
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          quant_config.use_fast_math, kUseFastMath,
+          detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding, kUseFastMath>(
+              /*m=*/m,
+              /*n=*/n,
+              /*A=*/reinterpret_cast<TA const *>(input.dptr),
+              /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+              /*C=*/reinterpret_cast<TC *>(output_t.dptr),
+              /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
+              /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
+              /*rng_state=*/rng_state,
+              /*sm_count=*/sm_count,
+              /*stream=*/stream,
+              /*k_tile_size=*/k_tile_size);););
 }
 
 }  // namespace transformer_engine

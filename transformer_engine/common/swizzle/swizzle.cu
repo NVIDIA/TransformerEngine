@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -340,6 +340,10 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   // Check tensors
   CheckInputTensor(*input, "scaling_factor_input");
   CheckInputTensor(*output, "scaling_factor_output");
+  NVTE_CHECK(!input->with_gemm_swizzled_scales,
+             "Expected input tensor with scales in compact format.");
+  NVTE_CHECK(output->with_gemm_swizzled_scales,
+             "Expected output tensor with scales in GEMM swizzled format.");
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
       NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP8, got ",
@@ -656,6 +660,11 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
     NVTE_CHECK(
         (is_fp8 && is_mxfp8_scaling(scaling_mode)) || (is_fp4 && is_nvfp4_scaling(scaling_mode)),
         "Not implemented scaling mode " + to_string(scaling_mode) + ".");
+    NVTE_CHECK(!input[i]->with_gemm_swizzled_scales,
+               "Expected input tensors with scales in compact format.");
+    NVTE_CHECK(output[i]->with_gemm_swizzled_scales,
+               "Expected output tensors with scales in GEMM swizzled format.");
+
     // We don't allow empty tensors. They should be filtered out before calling this function.
     NVTE_CHECK(input[i]->numel() != 0, "Tensor input[", i, "] is empty.");
     CheckInputTensor(*input[i], "scaling_factor_input[" + std::to_string(i) + "]");

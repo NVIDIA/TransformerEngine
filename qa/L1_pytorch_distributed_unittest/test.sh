@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -19,12 +19,6 @@ FAILED_CASES=""
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"
-
-
-# It is not installed as a requirement,
-# because it is not available on PyPI.
-pip uninstall -y nvdlfw-inspect
-pip install git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git
 
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 
