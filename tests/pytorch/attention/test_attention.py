@@ -1835,10 +1835,16 @@ qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 @pytest.mark.parametrize("is_training", [True, False])
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
 def test_mha_fp8_vs_f16(
-    dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, RoPE, is_training, scaling_mode
+    dtype,
+    model,
+    qkv_format,
+    input_layernorm,
+    fp8_dpa_bwd,
+    RoPE,
+    is_training,
+    scaling_mode,
 ):
     """Test MultiHeadAttention module in FP8"""
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
@@ -2095,7 +2101,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     #        config.dropout_p = 0.1
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "1"
 
     # Test backend availability
