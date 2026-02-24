@@ -2260,7 +2260,9 @@ def grouped_gemm(
     # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
     # feature-compatible with the main branch.
     # Bias can be supported in a kernel or in pure-JAX in the future.
-    use_cuda_graphable = scaling_mode == ScalingMode.NO_SCALING and lhs_data.dtype == jnp.bfloat16 and not has_bias
+    use_cuda_graphable = (
+        scaling_mode == ScalingMode.NO_SCALING and lhs_data.dtype == jnp.bfloat16 and not has_bias
+    )
 
     if use_cuda_graphable:
         assert group_offset is None, (
