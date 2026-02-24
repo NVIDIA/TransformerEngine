@@ -117,7 +117,7 @@ def general_gemm(
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
-    workspace = get_cublas_workspace(get_tensor_device(A), ub is not None, False)
+    workspace = get_cublas_workspace(A.device, ub is not None, False)
 
     if ub_type is not None:
         assert ub is not None, (

@@ -568,6 +568,15 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
     data = property(_get_data, _set_data)
 
     @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("MXFP8Tensor has no data!")
+
+    @property
     def shape(self):
         """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
         if self._rowwise_data is not None:
