@@ -927,15 +927,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         return out, all_gather_outputs
 
     @property
-    def device(self):
-        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
-        if self._data is not None:
-            return self._data.device
-        if self._transpose is not None:
-            return self._transpose.device
-        raise RuntimeError("Float8Tensor has no data!")
-
-    @property
     def shape(self):
         """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
         if self._data is not None:
