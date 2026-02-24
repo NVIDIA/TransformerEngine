@@ -770,10 +770,10 @@ void nvte_fused_attn_bwd_qkvpacked(
     Tensor dV_view = make_tensor_view(output_dQKV, unpacked_shape, 2 * stride);
 
     fused_attn_fp8_bwd(b, h, h, max_seqlen, max_seqlen, d, attn_scale, dropout, qkv_layout,
-                       bias_type, attn_mask_type, &Q_view, &K_view, &V_view, input_O, input_dO,
-                       input_M, input_ZInv, input_S, input_output_dP, &dQ_view, &dK_view, &dV_view,
-                       input_cu_seqlens, input_cu_seqlens, input_rng_state, wkspace, stream,
-                       handle);
+                       bias_type, attn_mask_type, deterministic, &Q_view, &K_view, &V_view, input_O,
+                       input_dO, input_M, input_ZInv, input_S, input_output_dP, &dQ_view, &dK_view,
+                       &dV_view, input_cu_seqlens, input_cu_seqlens, input_rng_state, wkspace,
+                       stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
@@ -1087,10 +1087,10 @@ void nvte_fused_attn_bwd_kvpacked(
     Tensor dV_view = make_tensor_view(output_dKV, unpacked_kv_shape, stride);
 
     fused_attn_fp8_bwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout,
-                       qkv_layout, bias_type, attn_mask_type, input_Q, &K_view, &V_view, input_O,
-                       input_dO, input_M, input_ZInv, input_S, input_output_dP, output_dQ, &dK_view,
-                       &dV_view, input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state, wkspace,
-                       stream, handle);
+                       qkv_layout, bias_type, attn_mask_type, deterministic, input_Q, &K_view,
+                       &V_view, input_O, input_dO, input_M, input_ZInv, input_S, input_output_dP,
+                       output_dQ, &dK_view, &dV_view, input_cu_seqlens_q, input_cu_seqlens_kv,
+                       input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
@@ -1323,9 +1323,9 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     const Tensor *input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, attn_scale, dropout,
-                       qkv_layout, bias_type, attn_mask_type, input_Q, input_K, input_V, input_O,
-                       input_dO, input_M, input_ZInv, input_S, input_output_dP, output_dQ,
-                       output_dK, output_dV, input_cu_seqlens_q, input_cu_seqlens_kv,
+                       qkv_layout, bias_type, attn_mask_type, deterministic, input_Q, input_K,
+                       input_V, input_O, input_dO, input_M, input_ZInv, input_S, input_output_dP,
+                       output_dQ, output_dK, output_dV, input_cu_seqlens_q, input_cu_seqlens_kv,
                        input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
