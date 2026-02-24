@@ -1679,10 +1679,6 @@ if te.is_bf16_available():
 @pytest.mark.parametrize("topK", [2, 5])
 @pytest.mark.parametrize("num_out_tokens", [None, 2039])
 @pytest.mark.parametrize("use_torch_compile", [False, True])
-@pytest.mark.skipif(
-    torch.__version__ < "2",
-    reason="torch.compile not available - skipping torch.compile tests",
-)
 def test_permutation_index_map(
     te_dtype,
     num_tokens,
@@ -1692,8 +1688,6 @@ def test_permutation_index_map(
     num_out_tokens,
     use_torch_compile,
 ):
-    if use_torch_compile and torch.__version__ < "2":
-        pytest.skip("torch.compile not available")
     if use_torch_compile and (num_expert != 7 or topK != 2):
         pytest.skip("torch.compile tested with single config only")
     with_probs = True
@@ -1943,10 +1937,6 @@ def test_permutation_mask_map_fp8(
 @pytest.mark.parametrize("num_expert", [7, 16])
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("use_torch_compile", [False, True])
-@pytest.mark.skipif(
-    torch.__version__ < "2",
-    reason="torch.compile not available - skipping torch.compile tests",
-)
 def test_permutation_index_map_topk1_no_probs(
     te_dtype,
     num_tokens,
@@ -1954,8 +1944,6 @@ def test_permutation_index_map_topk1_no_probs(
     hidden_size,
     use_torch_compile,
 ):
-    if use_torch_compile and torch.__version__ < "2":
-        pytest.skip("torch.compile not available")
     if use_torch_compile and num_expert != 7:
         pytest.skip("torch.compile tested with single config only")
     topK = 1
