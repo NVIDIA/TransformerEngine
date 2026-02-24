@@ -264,12 +264,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
   const size_t block_ID = blockIdx.y * gridDim.x + blockIdx.x;
-  const size_t block_global_offset = is_single_tensor
-                                     ? (blockIdx.y * CHUNK_DIM_Y * last_logical_dim + blockIdx.x * CHUNK_DIM_X)
-                                     : (block_ID * ELTS_PER_CHUNK);
+  const size_t block_global_offset =
+      is_single_tensor ? (blockIdx.y * CHUNK_DIM_Y * last_logical_dim + blockIdx.x * CHUNK_DIM_X)
+                       : (block_ID * ELTS_PER_CHUNK);
 
-  const size_t tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset, blockIdx.y,
-                                                 first_logical_dim, last_logical_dim, offsets_ptr);
+  const size_t tensor_id =
+      get_current_tensor_id(shape_rep, num_tensors, block_global_offset, blockIdx.y,
+                            first_logical_dim, last_logical_dim, offsets_ptr);
 
   const size_t rows =
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
@@ -277,7 +278,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
   const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
   const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
-
 
   // grouped tensor can be treated as continuous tensor for MXFP8
   const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
