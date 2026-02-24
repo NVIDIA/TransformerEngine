@@ -842,15 +842,14 @@ def autocast(
                           are reduced at the end of each training step.
     """
 
-    effective_enabled = enabled and getattr(recipe, "quantize_forward", True)
-    if effective_enabled:
+    if enabled:
         check_recipe_support(recipe)
 
     # Save current state so we always restore it on exit.
     fp8_state = FP8GlobalStateManager.get_autocast_state()
 
     FP8GlobalStateManager.autocast_enter(
-        enabled=effective_enabled,
+        enabled=enabled,
         calibrating=calibrating,
         fp8_recipe=recipe,
         fp8_group=amax_reduction_group,
@@ -860,7 +859,7 @@ def autocast(
         yield
     finally:
         FP8GlobalStateManager.set_autocast_state(fp8_state)
-        FP8GlobalStateManager.autocast_exit(effective_enabled, _graph=_graph)
+        FP8GlobalStateManager.autocast_exit(enabled, _graph=_graph)
 
 
 def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:

@@ -124,12 +124,11 @@ class Bias(BasicOperation):
         b = self.bias.view([1] * (x.dim() - 1) + [self.local_size])
 
         if ctx.requires_grad:
-            keep_backward_unquantized = FP8GlobalStateManager.is_fp8_enabled() and (
-                not FP8GlobalStateManager.get_fp8_recipe().quantize_backward
-            )
-            ctx.grad_input_quantizer = (
-                None if keep_backward_unquantized else prev_op_grad_output_quantizer
-            )
+            ctx.grad_input_quantizer = prev_op_grad_output_quantizer
+            if FP8GlobalStateManager.is_fp8_enabled():
+                fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+                if fp8_recipe.backward_mode in ("unquant", "dequant"):
+                    ctx.grad_input_quantizer = None
 
         return x + b
 
