@@ -17,9 +17,6 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
-# Allow warnings.warn inside torch.compile without graph breaks
-torch._dynamo.config.reorderable_logging_functions.add(warnings.warn)
-
 __all__ = [
     "moe_permute",
     "moe_unpermute",
