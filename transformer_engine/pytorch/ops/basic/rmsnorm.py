@@ -32,7 +32,7 @@ class RMSNorm(BasicOperation):
 
     Applies Root Mean Square Layer Normalization over a mini-batch of
     inputs as described in the paper
-    `Root Mean Square Layer Normalization <https://arxiv.org/abs/1910.07467>`__
+    `Root Mean Square Layer Normalization <https://arxiv.org/abs/1910.07467>`__ .
 
     .. math::
         y = \frac{x}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * \gamma
@@ -50,8 +50,8 @@ class RMSNorm(BasicOperation):
         Tensor device
     dtype : torch.dtype, default = default dtype
         Tensor datatype
-    zero_centered_gamma : bool, default = 'False'
-        If `True`, the :math:`\gamma` parameter is initialized to zero
+    zero_centered_gamma : bool, default = False
+        If ``True``, the :math:`\gamma` parameter is initialized to zero
         and the calculation changes to
 
             .. math::

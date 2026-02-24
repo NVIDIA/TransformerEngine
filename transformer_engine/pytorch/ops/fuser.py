@@ -31,7 +31,7 @@ _is_graph_capturing_function: Optional[Callable[[], bool]] = None
 
 
 def _is_graph_capturing() -> bool:
-    """Whether function is called within `make_graphed_callables`
+    """Whether function is called within ``make_graphed_callables``
 
     Avoid circular import with lazy import.
 
@@ -519,6 +519,8 @@ def register_forward_fusion(
 
     The fusion function should have the following signature:
 
+    .. code-block:: python
+
         func(ops, *, recipe) -> updated ops
 
     Parameters
@@ -544,6 +546,8 @@ def register_backward_fusion(
     """Register function to perform operation fusion for backward pass.
 
     The fusion function should have the following signature:
+
+    .. code-block:: python
 
         func(ops, *, recipe) -> updated ops
 

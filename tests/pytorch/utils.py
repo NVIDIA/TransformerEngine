@@ -271,7 +271,6 @@ def get_available_attention_backends(
     os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
-
     alibi_slopes_shape = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
         if config.bias_shape == "1hss":
@@ -289,7 +288,9 @@ def get_available_attention_backends(
         and config.head_dim_qk <= 128
         and config.head_dim_v <= 128
     ):
-        core_attention_bias_requires_grad = True
+        # TODO(KshitijLakhani): Remove this guard when cuDNN starts support dbias calculation for bias shape 111s
+        if core_attention_bias_shape != "111s":
+            core_attention_bias_requires_grad = True
 
     fused_attn_backends = []
     available_backends = None

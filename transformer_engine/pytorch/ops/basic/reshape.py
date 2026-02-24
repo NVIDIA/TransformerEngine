@@ -20,7 +20,7 @@ from ...tensor import Quantizer
 class Reshape(BasicOperation):
     """Reshape tensor
 
-    See `torch.reshape`.
+    See ``torch.reshape``.
 
     Parameters
     ----------

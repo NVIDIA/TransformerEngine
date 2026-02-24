@@ -115,16 +115,16 @@ class UserbuffersForwardLinear(FusedOperation):
             Tensor device
         dtype: torch.dtype
             Tensor datatype
-        tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+        tensor_parallel_mode: {None, "column", "row"}, default = None
             Mode for tensor parallelism
         tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
             Process group for tensor parallelism
-        sequence_parallel: bool, default = `False`
+        sequence_parallel: bool, default = False
             Whether to apply sequence parallelism together with tensor
             parallelism, i.e. distributing input or output tensors
             along outer dimension (sequence or batch dim) when not
             distributing along inner dimension (embedding dim)
-        with_quantized_compute: bool, default = `False`
+        with_quantized_compute: bool, default = False
             Whether to perform compute with quantized data.
         input_quantizer: Quantizer, optional
             Builder class for quantized input tensor.
@@ -132,10 +132,10 @@ class UserbuffersForwardLinear(FusedOperation):
             Builder class for quantized weight tensor.
         output_quantizer: Quantizer, optional
             Builder class for quantized output tensor.
-        input_requires_grad: bool, default = `True`
+        input_requires_grad: bool, default = True
             Whether the loss gradient w.r.t. the input tensor is
             required in the backward pass.
-        weight_requires_grad: bool, default = `True`
+        weight_requires_grad: bool, default = True
             Whether the loss gradient w.r.t. the weight tensor is
             required in the backward pass.
         ub_comm_name: str

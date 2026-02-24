@@ -1318,11 +1318,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ):
                     core_attention_bias_shape = "b1ss"
                 elif core_attention_bias.shape[0] == 1 and core_attention_bias.shape[1] == 1:
-                    core_attention_bias_shape = "11ss"
+                    if core_attention_bias.shape[2] == 1:
+                        core_attention_bias_shape = "111s"
+                    else:
+                        core_attention_bias_shape = "11ss"
                 else:
                     assert (
                         False
-                    ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss} shapes"
+                    ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss, 111s} shapes"
 
             # check if there is padding between sequences when qkv_format='thd'
             if pad_between_seqs is None:
