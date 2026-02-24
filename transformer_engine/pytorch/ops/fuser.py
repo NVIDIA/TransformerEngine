@@ -338,6 +338,7 @@ class OperationFuser:
         # Cache and detect change of state relevant for fusing operations
         self.recipe_type = None
         self.first_op_requiring_backward = 0
+        self.backward_mode = "default"
         self._last_amax_history_len = 0
 
         # Flatten list of parameters
@@ -414,9 +415,14 @@ class OperationFuser:
         # Early exit if fusion parameters haven't changed
         need_reset = False
         recipe_type = type(recipe)
-        fusion_params = (recipe_type, first_op_requiring_backward)
-        if fusion_params != (self.recipe_type, self.first_op_requiring_backward):
-            # Recipe type or grad requirmenets have changed
+        backward_mode = recipe.backward_mode if recipe is not None else "default"
+        fusion_params = (recipe_type, first_op_requiring_backward, backward_mode)
+        if fusion_params != (
+            self.recipe_type,
+            self.first_op_requiring_backward,
+            self.backward_mode,
+        ):
+            # Recipe type, backward mode, or grad requirements have changed
             need_reset = True
         elif (
             recipe is not None
@@ -450,7 +456,7 @@ class OperationFuser:
         )
 
         # Save current fusion params
-        self.recipe_type, self.first_op_requiring_backward = fusion_params
+        self.recipe_type, self.first_op_requiring_backward, self.backward_mode = fusion_params
 
         # Save amax history length
         if isinstance(recipe, DelayedScaling):

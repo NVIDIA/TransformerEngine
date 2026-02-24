@@ -141,9 +141,10 @@ class _LayerNormLinear(torch.autograd.Function):
             symmetric_ar_type,
             debug,
         ) = non_tensor_args
-        keep_backward_unquantized = fp8 and (
-            not FP8GlobalStateManager.get_fp8_recipe().quantize_backward
-        )
+        if fp8:
+            backward_mode = FP8GlobalStateManager.get_fp8_recipe().backward_mode
+        else:
+            backward_mode = "default"
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._LayerNormLinear.forward"
@@ -205,7 +206,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 raise ValueError("Missing quantizer for input tensor")
             input_quantizer.set_usage(
                 rowwise=True,
-                columnwise=backward_needs_input and not keep_backward_unquantized,
+                columnwise=backward_needs_input and backward_mode == "default",
             )
             if with_input_all_gather and input_quantizer.supports_only_rowwise_all_gather():
                 # All-gather is not supported with FP8 column-wise data
@@ -219,7 +220,7 @@ class _LayerNormLinear(torch.autograd.Function):
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not keep_backward_unquantized
+            and backward_mode == "default"
             and not custom  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
         )
 
@@ -243,7 +244,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_out_return = None
         if return_layernorm_output or return_layernorm_output_gathered:
             ln_out_return = ln_out
-        ln_out_hp = ln_out if keep_backward_unquantized else None
+        ln_out_hp = ln_out if backward_mode == "unquant" else None
 
         # ------------------------------------------------------
         # Prepare GEMM input tensor
@@ -304,7 +305,10 @@ class _LayerNormLinear(torch.autograd.Function):
             if is_weight_param_quantized:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
-                weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+                weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=is_grad_enabled and backward_mode == "default",
+                )
 
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -418,7 +422,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             ln_out_to_save = ln_out
-            if keep_backward_unquantized:
+            if backward_mode == "unquant":
                 ln_out_to_save = ln_out_hp
             ctx.weight_quantizer = weight_quantizer
             ctx.ln_out_needs_gather = (
@@ -426,7 +430,7 @@ class _LayerNormLinear(torch.autograd.Function):
             )
 
             # Input with column-wise usage is needed for wgrad GEMM.
-            if backward_needs_input and not keep_backward_unquantized:
+            if backward_needs_input and backward_mode == "default":
                 if isinstance(ln_out, QuantizedTensorStorage):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
@@ -504,7 +508,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-            ctx.keep_backward_unquantized = keep_backward_unquantized
+            ctx.backward_mode = backward_mode
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
@@ -535,9 +539,9 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
 
-            # keep_backward_unquantized overrides
-            if keep_backward_unquantized:
-                ctx.fp8 = ctx.fp8 and not keep_backward_unquantized
+            # Non-quantized backward mode overrides
+            if backward_mode in ("unquant", "dequant"):
+                ctx.fp8 = False
                 ctx.ub_overlap_ag = False
                 ctx.ub_overlap_rs_dgrad = False
                 ctx.ub_bulk_dgrad = False
@@ -686,6 +690,11 @@ class _LayerNormLinear(torch.autograd.Function):
             # --------------------------------------------------
             ln_out_total = None
             ln_out_total_work = None
+            if ctx.backward_mode == "dequant":
+                if isinstance(ln_out, QuantizedTensorStorage):
+                    ln_out = ln_out.dequantize(dtype=ctx.activation_dtype)
+                else:
+                    ln_out = cast_if_needed(ln_out, ctx.activation_dtype)
             if ctx.ln_out_needs_gather:
                 quantizer = None
                 if ctx.input_quantizer is not None and ctx.fp8:
@@ -758,7 +767,12 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: dx = dy * w
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
             weight_for_dgrad = weight
-            if ctx.keep_backward_unquantized:
+            if ctx.backward_mode == "dequant":
+                if isinstance(weight_for_dgrad, QuantizedTensorStorage):
+                    weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
+                else:
+                    weight_for_dgrad = cast_if_needed(weight_for_dgrad, ctx.activation_dtype)
+            elif ctx.backward_mode == "unquant":
                 weight_for_dgrad = origin_weight
             gemm_out, *_, reduce_scatter_out = general_gemm(
                 weight_for_dgrad,
@@ -1658,6 +1672,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_output_quantizer.optimize_for_gemm = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_recipe.backward_mode == "dequant" and (fp8_recipe.mxfp8() or fp8_recipe.nvfp4()):
+            input_quantizer.optimize_for_gemm = False
+            if grad_output_quantizer is not None:
+                grad_output_quantizer.optimize_for_gemm = False
 
         return (
             input_quantizer,

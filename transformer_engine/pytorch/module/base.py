@@ -1135,7 +1135,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         grad_output = grad_output.reshape((-1, grad_output.shape[-1]))
         grad_output = grad_output.contiguous()
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
-        use_fp8_bwd = ctx.fp8 and not ctx.keep_backward_unquantized
+        use_fp8_bwd = ctx.fp8 and ctx.backward_mode == "default"
 
         # Non-FP8 case: bgrad is fused with wgrad for this case.
         if not use_fp8_bwd and not ctx.debug:

@@ -235,12 +235,13 @@ class _LayerNormMLP(torch.autograd.Function):
             debug,
             recompute_for_bwd,
         ) = non_tensor_args
-        keep_backward_unquantized = fp8 and (
-            not FP8GlobalStateManager.get_fp8_recipe().quantize_backward
-        )
+        if fp8:
+            backward_mode = FP8GlobalStateManager.get_fp8_recipe().backward_mode
+        else:
+            backward_mode = "default"
         assert (
-            not keep_backward_unquantized
-        ), "NVTE_KEEP_BACKWARD_UNQUANTIZED is not implemented in LayerNormMLP"
+            backward_mode == "default"
+        ), "NVTE_BACKWARD_MODE=unquant/dequant is not implemented in LayerNormMLP"
 
         # if grad is enabled and this is not the bwd stage, we must save this so bwd knows which path to take
         if is_grad_enabled and not recompute_for_bwd:
@@ -787,7 +788,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.fc2_main_grad_func = lambda: fc2_weight.main_grad
 
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-            ctx.keep_backward_unquantized = keep_backward_unquantized
+            ctx.backward_mode = backward_mode
             ctx.fc1_grad_input_quantizer = fc1_grad_input_quantizer
             ctx.fc1_grad_weight_quantizer = fc1_grad_weight_quantizer
             ctx.fc1_grad_output_quantizer = fc1_grad_output_quantizer

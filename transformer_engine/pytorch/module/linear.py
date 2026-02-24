@@ -129,11 +129,12 @@ class _Linear(torch.autograd.Function):
             save_original_input,
             debug,
         ) = non_tensor_args
-        keep_backward_unquantized = fp8 and (
-            not FP8GlobalStateManager.get_fp8_recipe().quantize_backward
-        )
-        if keep_backward_unquantized:
-            # Note, NVTE_KEEP_BACKWARD_UNQUANTIZED is ignored when delayed scaling is used
+        if fp8:
+            backward_mode = FP8GlobalStateManager.get_fp8_recipe().backward_mode
+        else:
+            backward_mode = "default"
+        if backward_mode == "unquant":
+            # Note, NVTE_BACKWARD_MODE=unquant is ignored when delayed scaling is used.
             save_original_input = True
 
         # NVTX label for profiling
@@ -195,7 +196,10 @@ class _Linear(torch.autograd.Function):
                     raise ValueError("Missing quantizer for input tensor")
                 if not isinstance(inputmat, QuantizedTensorStorage) and not custom:
                     own_quantized_input = True
-                    input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
+                    input_quantizer.set_usage(
+                        rowwise=True,
+                        columnwise=backward_needs_input and backward_mode == "default",
+                    )
                     if isinstance(
                         input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                     ):
@@ -237,7 +241,12 @@ class _Linear(torch.autograd.Function):
                     if input_quantizer is None:
                         raise ValueError("Missing quantizer for input tensor")
                     input_quantizer.set_usage(
-                        rowwise=True, columnwise=backward_needs_input and not save_original_input
+                        rowwise=True,
+                        columnwise=(
+                            backward_needs_input
+                            and not save_original_input
+                            and backward_mode == "default"
+                        ),
                     )
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
@@ -261,6 +270,8 @@ class _Linear(torch.autograd.Function):
             # No need to set the quantizer states if weight is already quantized
             if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
                 columnwise_usage = is_grad_enabled and inp.requires_grad
+                if backward_mode in ("unquant", "dequant"):
+                    columnwise_usage = False
                 if not columnwise_usage:
                     columnwise_usage = (
                         is_fp8_activation_recompute_enabled()
@@ -394,7 +405,11 @@ class _Linear(torch.autograd.Function):
                 and own_quantized_input
                 and isinstance(inputmat, QuantizedTensorStorage)
             ):
-                if (
+                if backward_mode in ("unquant", "dequant"):
+                    # In dequant mode we should dequantize directly from the
+                    # fprop quantized tensor layout without retargeting usage.
+                    inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
+                elif (
                     ctx.backward_input_needs_gather
                     and weight_quantizer.supports_only_rowwise_all_gather()
                 ):
@@ -449,7 +464,7 @@ class _Linear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-            ctx.keep_backward_unquantized = keep_backward_unquantized
+            ctx.backward_mode = backward_mode
             ctx.input_quantizer = input_quantizer
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
@@ -493,9 +508,9 @@ class _Linear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
 
-            # keep_backward_unquantized overrides
-            if keep_backward_unquantized:
-                ctx.fp8 = ctx.fp8 and not keep_backward_unquantized
+            # Non-quantized backward mode overrides
+            if backward_mode in ("unquant", "dequant"):
+                ctx.fp8 = False
                 ctx.ub_overlap_ag = False
                 ctx.ub_overlap_rs_dgrad = False
                 ctx.ub_bulk_dgrad = False
@@ -741,7 +756,12 @@ class _Linear(torch.autograd.Function):
 
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
                 weight_for_dgrad = weight_fp8
-                if ctx.keep_backward_unquantized:
+                if ctx.backward_mode == "dequant":
+                    if isinstance(weight_for_dgrad, QuantizedTensorStorage):
+                        weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
+                    else:
+                        weight_for_dgrad = cast_if_needed(weight_for_dgrad, ctx.activation_dtype)
+                elif ctx.backward_mode == "unquant":
                     weight_for_dgrad = weight
                 gemm_out, *_, reduce_scatter_out = general_gemm(
                     weight_for_dgrad,
@@ -1519,6 +1539,11 @@ class Linear(TransformerEngineBaseModule):
                 grad_output_quantizer.optimize_for_gemm = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_recipe.backward_mode == "dequant" and (fp8_recipe.mxfp8() or fp8_recipe.nvfp4()):
+            input_quantizer.optimize_for_gemm = False
+            if grad_output_quantizer is not None:
+                grad_output_quantizer.optimize_for_gemm = False
         return (
             input_quantizer,
             weight_quantizer,

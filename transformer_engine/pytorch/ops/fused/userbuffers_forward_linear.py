@@ -388,6 +388,19 @@ class UserbuffersForwardLinear(FusedOperation):
 
         """
 
+        # Disable Userbuffers for non-quantized backward modes.
+        # In unquant/dequant modes we want to avoid all UB-specific overlap
+        # paths and run through the standard non-UB operator sequence instead.
+        recipe = unused.get("recipe", None)
+        if recipe is not None:
+            backward_mode = recipe.backward_mode
+        elif FP8GlobalStateManager.is_fp8_enabled():
+            backward_mode = FP8GlobalStateManager.get_fp8_recipe().backward_mode
+        else:
+            backward_mode = "default"
+        if backward_mode in ("unquant", "dequant"):
+            return ops
+
         # Return immediately if environment is not distributed
         if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
             return ops
