@@ -657,7 +657,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                     "segment_ids must have more dims than segment_pos when adding batch dims; "
                     f"got segment_ids.ndim={segment_ids.ndim}, segment_pos.ndim={segment_pos.ndim}"
                 )
-                assert segment_ids.shape[segment_pos.ndim :] == segment_pos.shape, (
+                assert segment_ids.shape[-segment_pos.ndim :] == segment_pos.shape, (
                     "segment_pos must have same trailing shape as segment_ids when adding batch dims; "
                     f"got segment_ids.shape={segment_ids.shape}, segment_pos.shape={segment_pos.shape}"
                 )
@@ -1154,7 +1154,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                     "segment_ids must have more dims than segment_pos when adding batch dims; "
                     f"got segment_ids.ndim={segment_ids.ndim}, segment_pos.ndim={segment_pos.ndim}"
                 )
-                assert segment_ids.shape[segment_pos.ndim :] == segment_pos.shape, (
+                assert segment_ids.shape[-segment_pos.ndim :] == segment_pos.shape, (
                     "segment_pos must have same trailing shape as segment_ids when adding batch dims; "
                     f"got segment_ids.shape={segment_ids.shape}, segment_pos.shape={segment_pos.shape}"
                 )
