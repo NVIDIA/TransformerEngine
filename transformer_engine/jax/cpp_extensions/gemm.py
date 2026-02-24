@@ -583,28 +583,28 @@ class GemmPrimitive(BasePrimitive):
             (lhs_aval.ndim, rhs_aval.ndim), (lhs_cdims, rhs_cdims)
         )
 
-        _lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
-        # lhs_contracting_size = (
-        #     reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
-        #     if lhs_transposed
-        #     else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
-        # )
-        # assert_cublas_requirements(
-        #     scaling_mode,
-        #     lhs_contracting_size,
-        #     f"LHS {lhs_aval.shape} with contracting dims {lhs_cdims}",
-        # )
-        # rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
-        # rhs_contracting_size = (
-        #     reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
-        #     if rhs_transposed
-        #     else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
-        # )
-        # assert_cublas_requirements(
-        #     scaling_mode,
-        #     rhs_contracting_size,
-        #     f"RHS {rhs_aval.shape} with contracting dims {rhs_cdims}",
-        # )
+        lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
+        lhs_contracting_size = (
+            reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
+            if lhs_transposed
+            else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
+        )
+        assert_cublas_requirements(
+            scaling_mode,
+            lhs_contracting_size,
+            f"LHS {lhs_aval.shape} with contracting dims {lhs_cdims}",
+        )
+        rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
+        rhs_contracting_size = (
+            reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
+            if rhs_transposed
+            else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
+        )
+        assert_cublas_requirements(
+            scaling_mode,
+            rhs_contracting_size,
+            f"RHS {rhs_aval.shape} with contracting dims {rhs_cdims}",
+        )
 
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta)
         kwargs = {
