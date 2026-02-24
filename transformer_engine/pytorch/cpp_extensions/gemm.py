@@ -67,6 +67,7 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     return 0.0
 
 
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -95,7 +96,7 @@ def general_gemm(
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
-    workspace = get_cublas_workspace(A.device, ub is not None, False)
+    workspace = get_cublas_workspace(A.device.index, ub is not None, False)
 
     if ub_type is not None:
         assert ub is not None, (
@@ -213,7 +214,7 @@ def general_grouped_gemm(
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
     sm_count = get_sm_count()
-    workspaces = get_cublas_workspace(A[0].device, False, True)
+    workspaces = get_cublas_workspace(A[0].device.index, False, True)
 
     if grad and use_bias:
         grad_bias = [
