@@ -7,6 +7,7 @@
 #include "../extensions.h"
 #include "cgemm_helper.h"
 #include "common/util/cuda_runtime.h"
+#include "transformer_engine/gemm.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -105,6 +106,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
+  m.def("get_grouped_gemm_setup_workspace_size", &nvte_grouped_gemm_setup_workspace_size);
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
