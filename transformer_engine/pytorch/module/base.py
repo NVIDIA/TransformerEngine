@@ -632,6 +632,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
         self.wgrad_store = None
+        self._output_quantizer_role: Optional[QuantizerRole] = None
+        self._grad_input_quantizer_role: Optional[QuantizerRole] = None
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -651,6 +653,72 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         parameters and buffers.
         """
         super().__setattr__(name, value)
+
+    @property
+    def output_quantizer_role(self) -> Optional[QuantizerRole]:
+        """Caller-configurable :class:`QuantizerRole` for the forward output quantizer.
+
+        When set, overrides the default role used by :meth:`get_quantizer_roles`
+        for the forward-pass output quantizer slot.  Setting this after
+        quantizers have been created forces their recreation on the next
+        forward pass.
+
+        See also :attr:`grad_input_quantizer_role` for the backward-pass
+        counterpart.
+        """
+        return self._output_quantizer_role
+
+    @output_quantizer_role.setter
+    def output_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
+        if role == self._output_quantizer_role:
+            return
+        self._output_quantizer_role = role
+        if self.fp8_meta_tensors_initialized:
+            self.fp8_meta_tensors_initialized = False
+
+    @property
+    def grad_input_quantizer_role(self) -> Optional[QuantizerRole]:
+        """Caller-configurable :class:`QuantizerRole` for the grad-input quantizer.
+
+        Backward-pass counterpart of :attr:`output_quantizer_role`.
+        """
+        return self._grad_input_quantizer_role
+
+    @grad_input_quantizer_role.setter
+    def grad_input_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
+        if role == self._grad_input_quantizer_role:
+            return
+        self._grad_input_quantizer_role = role
+        if self.fp8_meta_tensors_initialized:
+            self.fp8_meta_tensors_initialized = False
+
+    def _warn_missing_output_quantizer_role(
+        self,
+        fp8_output: bool,
+        fp8_grad: bool,
+    ) -> None:
+        """Warn when quantized output is requested but no consumer role is set.
+
+        Only relevant for ``CustomRecipe`` where the ``qfactory`` dispatches
+        on roles.  Built-in recipes ignore role metadata.
+        """
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if not recipe.custom():
+            return
+        if fp8_output and self._output_quantizer_role is None:
+            warnings.warn(
+                f"{type(self).__name__}: fp8_output=True but "
+                "output_quantizer_role is not set.  The CustomRecipe qfactory "
+                "will receive None for the output quantizer role.",
+                stacklevel=3,
+            )
+        if fp8_grad and self._grad_input_quantizer_role is None:
+            warnings.warn(
+                f"{type(self).__name__}: fp8_grad=True but "
+                "grad_input_quantizer_role is not set.  The CustomRecipe "
+                "qfactory will receive None for the grad-input quantizer role.",
+                stacklevel=3,
+            )
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """

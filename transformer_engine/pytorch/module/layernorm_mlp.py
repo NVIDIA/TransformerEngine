@@ -1989,6 +1989,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         Each internal GEMM (fc1, fc2) gets a distinct name suffix so that
         custom-recipe factories can target them individually.
+
+        The module's final output (fc2 fwd) and final grad (fc1 bwd)
+        slots default to ``None`` (unknown consumer).  Set
+        :attr:`output_quantizer_role` / :attr:`grad_input_quantizer_role`
+        to provide consumer identity.  Internal boundaries use fixed
+        roles with known consumer identity.
         """
         base_name = self.name or ""
         fc1_name = f"{base_name}.fc1" if base_name else "fc1"
@@ -1997,17 +2003,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
             base = [
                 QuantizerRole(module_type="linear", tensor_type="input", name=fc1_name),
                 QuantizerRole(module_type="linear", tensor_type="weight", name=fc1_name),
-                QuantizerRole(module_type="linear", tensor_type="output", name=fc1_name),
+                QuantizerRole(module_type="linear", tensor_type="input", name=fc2_name),
                 QuantizerRole(module_type="linear", tensor_type="input", name=fc2_name),
                 QuantizerRole(module_type="linear", tensor_type="weight", name=fc2_name),
-                QuantizerRole(module_type="linear", tensor_type="output", name=fc2_name),
+                self._output_quantizer_role,
             ]
         else:
             base = [
                 QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc1_name),
-                QuantizerRole(module_type="linear", tensor_type="grad_input", name=fc1_name),
+                self._grad_input_quantizer_role,
                 QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc2_name),
-                QuantizerRole(module_type="linear", tensor_type="grad_input", name=fc2_name),
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc1_name),
             ]
         return [base[i % len(base)] for i in range(num_quantizers)]
 
@@ -2218,6 +2224,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         return out
 
     def _get_quantizers(self, fp8_output, is_grad_enabled):
+        if self.fp8:
+            self._warn_missing_output_quantizer_role(fp8_output, False)
+
         (
             fc1_input_quantizer,
             fc1_output_quantizer,
