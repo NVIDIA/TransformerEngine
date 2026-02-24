@@ -1938,19 +1938,29 @@ def _fsdp_scatter_tensors(
     fsdp_group: dist_group_type,
     *tensors: torch.Tensor,
 ):
-    shapes = []
+    shapes = _collect_fsdp_tensor_shapes(*tensors)
     if fsdp_group is not None:
         for t in tensors:
             if isinstance(t, torch.Tensor):
                 targets = t.get_data_tensors() if isinstance(t, QuantizedTensor) else [t]
                 for target in targets:
-                    shapes.append(target.data.shape)
                     safely_set_viewless_tensor_data(
                         target,
                         split_tensor_into_1d_equal_chunks(target.data, fsdp_group, new_buffer=True),
                     )
-            else:
-                shapes.append(None)
+    return shapes
+
+
+def _collect_fsdp_tensor_shapes(*tensors: torch.Tensor) -> List[Optional[Tuple[int, ...]]]:
+    """Collect tensor data shapes in the same order used by FSDP scatter/gather helpers."""
+    shapes: List[Optional[Tuple[int, ...]]] = []
+    for t in tensors:
+        if isinstance(t, torch.Tensor):
+            targets = t.get_data_tensors() if isinstance(t, QuantizedTensor) else [t]
+            for target in targets:
+                shapes.append(target.data.shape)
+        else:
+            shapes.append(None)
     return shapes
 
 

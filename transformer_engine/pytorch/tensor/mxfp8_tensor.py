@@ -160,6 +160,41 @@ class MXFP8Quantizer(Quantizer):
             with_gemm_swizzled_scales=self.optimize_for_gemm,
         )
 
+    def make_empty_like_layout(
+        self,
+        source: Union[torch.Tensor, QuantizedTensor, QuantizedTensorStorage],
+        *,
+        internal: Optional[bool] = None,
+        requires_grad: bool = False,
+    ) -> Union[MXFP8Tensor, MXFP8TensorStorage]:
+        shape = tuple(source.size())
+        dtype = getattr(source, "dtype", torch.float32)
+        device = getattr(source, "device", None)
+
+        quantizer = self.copy()
+        if internal is None:
+            internal = quantizer.internal
+        quantizer.internal = internal
+
+        out = quantizer.make_empty(
+            shape=shape,
+            dtype=dtype,
+            device=device,
+            requires_grad=requires_grad,
+        )
+        if not internal:
+            return out
+
+        return MXFP8TensorStorage(
+            rowwise_data=out._rowwise_data,
+            rowwise_scale_inv=out._rowwise_scale_inv,
+            columnwise_data=out._columnwise_data,
+            columnwise_scale_inv=out._columnwise_scale_inv,
+            fp8_dtype=out._fp8_dtype,
+            quantizer=quantizer,
+            with_gemm_swizzled_scales=out._with_gemm_swizzled_scales,
+        )
+
     def calibrate(self, tensor: torch.Tensor) -> None:
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
