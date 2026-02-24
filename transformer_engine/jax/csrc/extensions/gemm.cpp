@@ -680,6 +680,10 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                             std::vector<size_t>{num_gemms},
                             convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
+  fprintf(stderr, "Before GEMM:\n");
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  // fflush(stderr);
+
   if (is_grouped_dense_wgrad) {
     NVTE_CHECK(lhs_is_trans && !rhs_is_trans,
                "For grouped dense wgrad, only TN GEMM is supported in TE/JAX currently.");
@@ -709,6 +713,10 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                       workspace_cublas.data(),
                       nullptr,  // config (use defaults)
                       stream);
+
+    fprintf(stderr, "After GEMM:\n");
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    // fflush(stderr);
 
     return ffi_with_cuda_error_check();
   }
@@ -748,6 +756,11 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                     nullptr,  // config (use defaults)
                     stream);
 
+
+  fprintf(stderr, "After GEMM:\n");
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  // fflush(stderr);
+                  
   return ffi_with_cuda_error_check();
 }
 
@@ -774,8 +787,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("has_bias")
                                   .Attr<bool>("is_grouped_dense_wgrad")
-                                  .Attr<bool>("use_async_d2h_group_sizes"),
-                              FFI_CudaGraph_Traits);
+                                  .Attr<bool>("use_async_d2h_group_sizes")/*,
+                              FFI_CudaGraph_Traits*/);
 
 }  // namespace jax
 }  // namespace transformer_engine
