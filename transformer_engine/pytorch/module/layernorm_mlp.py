@@ -2215,9 +2215,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_input_quantizer.internal = True
             fc2_input_quantizer.optimize_for_gemm = True
             if fp8_output:
-                fc2_output_quantizer = self.quantizers["scaling_fwd"][
-                    FP8FwdTensorIdx.GEMM2_OUTPUT
-                ]
+                fc2_output_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_OUTPUT]
             if is_grad_enabled:
                 fc2_grad_output_quantizer = self.quantizers["scaling_bwd"][
                     FP8BwdTensorIdx.GRAD_OUTPUT2
