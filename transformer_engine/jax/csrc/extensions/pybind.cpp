@@ -76,6 +76,9 @@ pybind11::dict Registrations() {
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
+  dict["te_grouped_gemm_cuda_graphable_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmCudaGraphableHandler));
 
   // Amax
   dict["te_rht_amax_ffi"] = pybind11::dict(

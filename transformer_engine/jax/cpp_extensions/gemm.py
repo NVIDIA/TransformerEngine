@@ -1422,12 +1422,12 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
 register_primitive(GroupedGemmCopySizesPrimitive)
 
 
-class GroupedGemmPrimitive(BasePrimitive):
+class GroupedGemmCudaGraphablePrimitive(BasePrimitive):
     """
-    Primitive for grouped GEMM
+    Primitive for grouped GEMM using nvte_grouped_gemm (cuda-graphable, BF16 only).
     """
 
-    name = "te_grouped_gemm_ffi"
+    name = "te_grouped_gemm_cuda_graphable_ffi"
     multiple_results = True
     impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
     inner_primitive = None
@@ -1456,7 +1456,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         use_async_d2h_group_sizes,
     ):
         """
-        Grouped GEMM operation.
+        Grouped GEMM operation (cuda-graphable via nvte_grouped_gemm).
 
         Args:
             lhs_data: Left-hand side input matrix data, 1D flattened array
@@ -1464,8 +1464,9 @@ class GroupedGemmPrimitive(BasePrimitive):
             rhs_data: Right-hand side input matrix data, 1D flattened array
             rhs_scale_inv: Right-hand side input scale_inv matrix, 1D flattened array
             bias: Bias matrix of shape (G, N)
-            group_sizes: 1D array containing the sizes of each group
-            group_offset: 1D array containing offsets for each group (not yet implemented)
+            group_sizes: 1D int32 array containing the sizes of each group
+            alpha: Per-group alpha scaling factors (float32)
+            beta: Per-group beta scaling factors (float32)
             M: Number of rows in the output matrix
             N: Number of columns in the output matrix
             K: Number of columns in the left-hand side matrix
@@ -1521,7 +1522,177 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        (out_aval, _, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
+        (out_aval, _, _) = GroupedGemmCudaGraphablePrimitive.abstract(*args, **kwargs)
+        return (out_aval,)
+
+    @staticmethod
+    def lowering(
+        ctx,
+        *args,
+        M,
+        N,
+        K,
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+        is_grouped_dense_wgrad,
+        use_async_d2h_group_sizes,
+    ):
+        del out_dtype
+        return jax.ffi.ffi_lowering(GroupedGemmCudaGraphablePrimitive.name)(
+            ctx,
+            *args,
+            M=M,
+            N=N,
+            K=K,
+            lhs_is_trans=lhs_is_trans,
+            rhs_is_trans=rhs_is_trans,
+            scaling_mode=scaling_mode.value,
+            has_bias=has_bias,
+            is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+        )
+
+    @staticmethod
+    def impl(
+        lhs_data,
+        lhs_scale_inv,
+        rhs_data,
+        rhs_scale_inv,
+        bias,
+        group_sizes,
+        alpha,
+        beta,
+        M,
+        N,
+        K,
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+        is_grouped_dense_wgrad,
+        use_async_d2h_group_sizes,
+    ):
+        assert GroupedGemmCudaGraphablePrimitive.inner_primitive is not None
+        (out, _, _) = GroupedGemmCudaGraphablePrimitive.inner_primitive.bind(
+            lhs_data,
+            lhs_scale_inv,
+            rhs_data,
+            rhs_scale_inv,
+            bias,
+            group_sizes,
+            alpha,
+            beta,
+            M=M,
+            N=N,
+            K=K,
+            lhs_is_trans=lhs_is_trans,
+            rhs_is_trans=rhs_is_trans,
+            scaling_mode=scaling_mode,
+            out_dtype=out_dtype,
+            has_bias=has_bias,
+            is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+        )
+        return (out,)
+
+
+register_primitive(GroupedGemmCudaGraphablePrimitive)
+
+
+class GroupedGemmPrimitive(BasePrimitive):
+    """
+    Primitive for grouped GEMM using nvte_multi_tensor_gemm (supports all scaling modes).
+    """
+
+    name = "te_grouped_gemm_ffi"
+    multiple_results = True
+    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        lhs_data_aval,
+        lhs_scale_inv_aval,
+        rhs_data_aval,
+        rhs_scale_inv_aval,
+        bias_aval,
+        group_sizes_aval,
+        group_offset_aval,
+        *,
+        M,
+        N,
+        K,
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+        is_grouped_dense_wgrad,
+        use_async_d2h_group_sizes,
+    ):
+        """
+        Grouped GEMM operation.
+
+        Args:
+            lhs_data: Left-hand side input matrix data, 1D flattened array
+            lhs_scale_inv: Left-hand side input scale_inv matrix, 1D flattened array
+            rhs_data: Right-hand side input matrix data, 1D flattened array
+            rhs_scale_inv: Right-hand side input scale_inv matrix, 1D flattened array
+            bias: Bias matrix of shape (G, N)
+            group_sizes: 1D array containing the sizes of each group
+            group_offset: 1D array containing offsets for each group (not yet implemented)
+            M: Number of rows in the output matrix
+            N: Number of columns in the output matrix
+            K: Number of columns in the left-hand side matrix
+            lhs_is_trans: Boolean indicating if the left-hand side matrix is transposed
+            rhs_is_trans: Boolean indicating if the right-hand side matrix is transposed
+            scaling_mode: Scaling mode for the GEMM operations
+            out_dtype: Data type of the output tensors
+            has_bias: Boolean indicating if bias tensors are provided
+            is_grouped_dense_wgrad: Boolean indicating if this is a grouped dense wgrad operation
+                                    where both lhs and rhs are 2D matrices and output is (G, M, N)
+
+        Returns:
+            A jnp.ndarray containing the result of the grouped GEMM operation
+        """
+        del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
+        del K, lhs_is_trans, rhs_is_trans, has_bias, use_async_d2h_group_sizes
+        # TODO(Phuong): move some shape checks from Cpp to here
+        workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
+        workspace_alignment_padding = 256
+        tensor_scaling_sinv_aligment = 16
+        mxfp8_scaling_sinv_alignment_padding = 256
+        # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
+        # necessarily 256 bytes aligned, we add some padding to ensure alignment.
+        workspace_size += workspace_alignment_padding
+        if scaling_mode in (
+            ScalingMode.DELAYED_TENSOR_SCALING.value,
+            ScalingMode.CURRENT_TENSOR_SCALING.value,
+        ):
+            # For tensor scaling, each matrix has a single scale value, but it
+            # needs to be aligned to 16 bytes for CUDA 12.9.1 and later.
+            workspace_size += lhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
+            workspace_size += rhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
+            # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
+            workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
+            workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
+        workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
+
+        out_shape = (M, N)
+        if is_grouped_dense_wgrad:
+            out_shape = (group_sizes_aval.size, M, N)
+        out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
+        return (out_aval, workspace_aval)
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        (out_aval, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
         return (out_aval,)
 
     @staticmethod
@@ -1562,8 +1733,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         group_sizes,
-        alpha,
-        beta,
+        group_offset,
         M,
         N,
         K,
@@ -1576,15 +1746,14 @@ class GroupedGemmPrimitive(BasePrimitive):
         use_async_d2h_group_sizes,
     ):
         assert GroupedGemmPrimitive.inner_primitive is not None
-        (out, _, _) = GroupedGemmPrimitive.inner_primitive.bind(
+        (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
             lhs_data,
             lhs_scale_inv,
             rhs_data,
             rhs_scale_inv,
             bias,
             group_sizes,
-            alpha,
-            beta,
+            group_offset,
             M=M,
             N=N,
             K=K,
@@ -1951,8 +2120,6 @@ def grouped_gemm(
         rhs: [G, N, K] or [G, K, N] or [G * K, N] or [N, G * K]
     """
 
-    assert group_offset is None, "group_offset is not yet implemented"
-
     # TODO(Phuong): implement the precision
     del precision
 
@@ -2091,29 +2258,60 @@ def grouped_gemm(
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
-    group_sizes = group_sizes.astype(jnp.int32)
-
-    num_gemms = group_sizes.shape[0]
-    alpha = jnp.ones((num_gemms,), jnp.float32)
-    beta = jnp.zeros((num_gemms,), jnp.float32)
-    (out,) = GroupedGemmPrimitive.outer_primitive.bind(
-        lhs_data,
-        lhs_scale_inv,
-        rhs_data,
-        rhs_scale_inv,
-        bias,
-        group_sizes,
-        alpha,
-        beta,
-        M=M,
-        N=N,
-        K=K_lhs,
-        lhs_is_trans=lhs_is_trans,
-        rhs_is_trans=rhs_is_trans,
-        scaling_mode=scaling_mode.value,
-        out_dtype=out_dtype,
-        has_bias=has_bias,
-        is_grouped_dense_wgrad=is_grouped_dense_wgrad,
-        use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+    # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
+    # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
+    # feature-compatible with the main branch.
+    _use_cuda_graphable = (
+        scaling_mode == ScalingMode.NO_SCALING and lhs_data.dtype == jnp.bfloat16
     )
+
+    if _use_cuda_graphable:
+        assert group_offset is None, "group_offset is not supported in the cuda graphable path and is instead computed internally assuming contiguous grouping. Any padding is included in the group_sizes and padded with zeros to not affect the result of the MoE block."
+        group_sizes = group_sizes.astype(jnp.int32)
+        num_gemms = group_sizes.shape[0]
+        alpha = jnp.ones((num_gemms,), jnp.float32)
+        beta = jnp.zeros((num_gemms,), jnp.float32)
+        (out,) = GroupedGemmCudaGraphablePrimitive.outer_primitive.bind(
+            lhs_data,
+            lhs_scale_inv,
+            rhs_data,
+            rhs_scale_inv,
+            bias,
+            group_sizes,
+            alpha,
+            beta,
+            M=M,
+            N=N,
+            K=K_lhs,
+            lhs_is_trans=lhs_is_trans,
+            rhs_is_trans=rhs_is_trans,
+            scaling_mode=scaling_mode.value,
+            out_dtype=out_dtype,
+            has_bias=has_bias,
+            is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+        )
+    else:
+        # TODO(Phuong): implement the group_offset
+        group_offset = group_offset or jnp.zeros((1,), jnp.int32)
+        assert group_offset.size == 1
+        (out,) = GroupedGemmPrimitive.outer_primitive.bind(
+            lhs_data,
+            lhs_scale_inv,
+            rhs_data,
+            rhs_scale_inv,
+            bias,
+            group_sizes,
+            group_offset,
+            M=M,
+            N=N,
+            K=K_lhs,
+            lhs_is_trans=lhs_is_trans,
+            rhs_is_trans=rhs_is_trans,
+            scaling_mode=scaling_mode.value,
+            out_dtype=out_dtype,
+            has_bias=has_bias,
+            is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+        )
     return out
