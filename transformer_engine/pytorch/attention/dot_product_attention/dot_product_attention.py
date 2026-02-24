@@ -284,6 +284,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                      <https://arxiv.org/pdf/2502.16982>`_).
                      :math:`\text{max_logit} = \max(S)`, where :math:`S = \text{mask}(Q \cdot K^T \cdot \text{softmax_scale} + \text{bias})` of shape ``[b, h, s_q, s_kv]``,
                      and :math:`\text{max_logit}` is of shape ``[h]``.
+    name : Optional[str], default = None
+                module instance name.
 
     Parallelism parameters
     ----------------------
@@ -343,8 +345,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = logging.getLogger("DotProductAttention")
         self.logger.setLevel(attn_log._log_level)

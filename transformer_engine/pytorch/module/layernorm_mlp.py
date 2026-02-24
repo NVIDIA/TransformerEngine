@@ -1985,18 +1985,29 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fwd: bool,
         num_quantizers: int,
     ) -> Optional[List[QuantizerRole]]:
-        """QuantizerRole list for quantizers used by ``LayerNormMLP``."""
-        name = self.name or ""
+        """QuantizerRole list for quantizers used by ``LayerNormMLP``.
+
+        Each internal GEMM (fc1, fc2) gets a distinct name suffix so that
+        custom-recipe factories can target them individually.
+        """
+        base_name = self.name or ""
+        fc1_name = f"{base_name}.fc1" if base_name else "fc1"
+        fc2_name = f"{base_name}.fc2" if base_name else "fc2"
         if fwd:
             base = [
-                QuantizerRole(module_type="linear", tensor_type="input", name=name),
-                QuantizerRole(module_type="linear", tensor_type="weight", name=name),
-                QuantizerRole(module_type="linear", tensor_type="output", name=name),
+                QuantizerRole(module_type="linear", tensor_type="input", name=fc1_name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=fc1_name),
+                QuantizerRole(module_type="linear", tensor_type="output", name=fc1_name),
+                QuantizerRole(module_type="linear", tensor_type="input", name=fc2_name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=fc2_name),
+                QuantizerRole(module_type="linear", tensor_type="output", name=fc2_name),
             ]
         else:
             base = [
-                QuantizerRole(module_type="linear", tensor_type="grad_output", name=name),
-                QuantizerRole(module_type="linear", tensor_type="grad_input", name=name),
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc1_name),
+                QuantizerRole(module_type="linear", tensor_type="grad_input", name=fc1_name),
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc2_name),
+                QuantizerRole(module_type="linear", tensor_type="grad_input", name=fc2_name),
             ]
         return [base[i % len(base)] for i in range(num_quantizers)]
 

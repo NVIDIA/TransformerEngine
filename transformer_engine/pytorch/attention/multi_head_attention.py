@@ -461,6 +461,7 @@ class MultiheadAttention(torch.nn.Module):
             layer_number=self.layer_number,
             attention_type=self.attention_type,
             softmax_type=self.softmax_type,
+            name=name + ".core_attention" if name is not None else None,
         )
 
         # Linear
