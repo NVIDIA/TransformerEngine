@@ -583,7 +583,7 @@ class GemmPrimitive(BasePrimitive):
             (lhs_aval.ndim, rhs_aval.ndim), (lhs_cdims, rhs_cdims)
         )
 
-        lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
+        _lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
         # lhs_contracting_size = (
         #     reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
         #     if lhs_transposed
@@ -1481,7 +1481,7 @@ class GroupedGemmCudaGraphablePrimitive(BasePrimitive):
         Returns:
             A jnp.ndarray containing the result of the grouped GEMM operation
         """
-        del lhs_data_aval, rhs_data_aval, bias_aval
+        del lhs_data_aval, rhs_data_aval, bias_aval, alpha, beta
         del K, lhs_is_trans, rhs_is_trans, has_bias, use_async_d2h_group_sizes
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
@@ -2259,9 +2259,10 @@ def grouped_gemm(
     # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
     # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
     # feature-compatible with the main branch.
-    _use_cuda_graphable = scaling_mode == ScalingMode.NO_SCALING and lhs_data.dtype == jnp.bfloat16
+    # Bias can be supported in a kernel or in pure-JAX in the future.
+    use_cuda_graphable = scaling_mode == ScalingMode.NO_SCALING and lhs_data.dtype == jnp.bfloat16 and not has_bias
 
-    if _use_cuda_graphable:
+    if use_cuda_graphable:
         assert group_offset is None, (
             "group_offset is not supported in the cuda graphable path and is instead computed"
             " internally assuming contiguous grouping. Any padding is included in the group_sizes"

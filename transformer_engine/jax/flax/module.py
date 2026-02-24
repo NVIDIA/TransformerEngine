@@ -1444,9 +1444,11 @@ def make_dot_general_cls(quantization_recipe):
 
 
 def make_ragged_dot_cls(quantization_recipe):
+    """Creates a ragged dot (grouped GEMM) class for use with TE state module."""
     assert quantization_recipe is None, "Ragged dot grouped GEMM does not support quantization yet"
 
     def te_grouped_dot_general(generate_quantizer_set, x, kernel, group_sizes, **kwargs):
+        del kwargs  # Unused
         num_groups = group_sizes.shape[0]
         quantizer_set = generate_quantizer_set(n_groups=num_groups)
 

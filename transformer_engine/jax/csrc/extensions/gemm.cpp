@@ -719,10 +719,6 @@ Error_Type GroupedGemmCudaGraphableFFI(
     auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,
                                           num_gemms, outShape);
 
-    // Output needs to be zeroed in case any group sizes have size zero, meaning the expert weight isn't used in the fwd, meaning the corresponding output gradient should be zero. But using the grouped GEMM, the output buffer contains uninitialized data.
-    // TODO(jberchtold): make this memset smaller by only zeroing the expert weights that correspond to groups with size zero.
-    cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
-
     nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                       alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
                       workspace_cublas.data(),
@@ -756,10 +752,6 @@ Error_Type GroupedGemmCudaGraphableFFI(
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,
                                         num_gemms, outShape);
   out_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
-
-  // This memset is required because the group sizes may not fill the full buffer since we overallocate for the worst case. However, in theory unused space on the grouped axis should not be utilizied downstream, but it seems like somehow it is utilized.
-  // TODO(jberchtold): try removing this
-  cudaMemsetAsync(output->untyped_data(), 0, output->size_bytes(), stream);
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),

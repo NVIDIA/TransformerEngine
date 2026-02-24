@@ -20,6 +20,7 @@ from .amax import AmaxScope, calculate_amax, calculate_post_rht_amax
 from .base import BasePrimitive, register_primitive
 from .misc import (
     get_padded_spec,
+    check_valid_batch_dims,
     te_dtype_to_jax_dtype,
     jax_dtype_to_te_dtype,
     multidim_transpose,
@@ -1250,8 +1251,7 @@ def grouped_quantize(
     ) = GroupedQuantizePrimitive.outer_primitive.bind(
         x,
         scale,
-        # TODO(jberchtold): Remove this int32 cast once GMM does not require JAX int64 dtype
-        group_sizes.astype(jnp.int32),
+        group_sizes,
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
         q_layout=q_layout,
