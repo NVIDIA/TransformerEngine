@@ -9,6 +9,7 @@ import queue
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
+from torch._opaque_base import OpaqueBase
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
@@ -195,7 +196,7 @@ class _ParameterInitMeta:
             self.init_fn = get_default_init_method()
 
 
-class WeightGradStore:
+class WeightGradStore(OpaqueBase):
     """
     A class to manage weight gradient storage and computation in Transformer modules.
     This class enables split backward propagation for better memory efficiency.

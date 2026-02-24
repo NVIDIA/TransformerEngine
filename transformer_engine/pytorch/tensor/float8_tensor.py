@@ -18,7 +18,7 @@ from transformer_engine.common.recipe import (
 )
 from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
-from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..constants import dist_group_type
 
@@ -152,6 +152,39 @@ class Float8Quantizer(Quantizer):
             requires_grad=requires_grad,
             data_transpose=data_transpose,
             quantizer=self,
+        )
+
+    def make_empty_like_layout(
+        self,
+        source: Union[torch.Tensor, QuantizedTensor, QuantizedTensorStorage],
+        *,
+        internal: Optional[bool] = None,
+        requires_grad: bool = False,
+    ) -> Union[Float8Tensor, Float8TensorStorage]:
+        shape = tuple(source.size())
+        dtype = getattr(source, "dtype", torch.float32)
+        device = getattr(source, "device", None)
+
+        quantizer = self.copy()
+        if internal is None:
+            internal = quantizer.internal
+        quantizer.internal = internal
+
+        out = quantizer.make_empty(
+            shape=shape,
+            dtype=dtype,
+            device=device,
+            requires_grad=requires_grad,
+        )
+        if not internal:
+            return out
+
+        return Float8TensorStorage(
+            data=out._data,
+            fp8_scale_inv=out._scale_inv,
+            fp8_dtype=out._fp8_dtype,
+            data_transpose=out._transpose,
+            quantizer=quantizer,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -372,6 +405,39 @@ class Float8CurrentScalingQuantizer(Quantizer):
             requires_grad=requires_grad,
             data_transpose=data_transpose,
             quantizer=self,
+        )
+
+    def make_empty_like_layout(
+        self,
+        source: Union[torch.Tensor, QuantizedTensor, QuantizedTensorStorage],
+        *,
+        internal: Optional[bool] = None,
+        requires_grad: bool = False,
+    ) -> Union[Float8Tensor, Float8TensorStorage]:
+        shape = tuple(source.size())
+        dtype = getattr(source, "dtype", torch.float32)
+        device = getattr(source, "device", None)
+
+        quantizer = self.copy()
+        if internal is None:
+            internal = quantizer.internal
+        quantizer.internal = internal
+
+        out = quantizer.make_empty(
+            shape=shape,
+            dtype=dtype,
+            device=device,
+            requires_grad=requires_grad,
+        )
+        if not internal:
+            return out
+
+        return Float8TensorStorage(
+            data=out._data,
+            fp8_scale_inv=out._scale_inv,
+            fp8_dtype=out._fp8_dtype,
+            data_transpose=out._transpose,
+            quantizer=quantizer,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:

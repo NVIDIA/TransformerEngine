@@ -57,6 +57,8 @@ from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
+from torch._opaque_base import OpaqueBase
+from torch._library.opaque_object import register_opaque_type
 
 __all__ = ["initialize_ub", "destroy_ub", "UserBufferQuantizationMode"]
 
@@ -603,6 +605,150 @@ def fill_userbuffers_buffer_for_all_gather(
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
 
 
+class WeightWorkspace(OpaqueBase):
+    """Opaque reference object holding the FP8 weight workspace cache.
+
+    This object is registered as a PyTorch opaque reference type so that
+    it can be passed through ``torch.library.custom_op`` schemas.  Inside
+    the custom-op forward the cached quantized weight is retrieved (and
+    updated when necessary) via :meth:`get_weight_workspace`.
+    """
+
+    def __init__(self) -> None:
+        self._workspaces: Dict[str, QuantizedTensor] = {}
+
+    # ------------------------------------------------------------------
+    # get_weight_workspace – moved from TransformerEngineBaseModule
+    # ------------------------------------------------------------------
+    def get_weight_workspace(
+        self,
+        *,
+        tensor: Optional[torch.Tensor] = None,
+        quantizer: Optional[Quantizer] = None,
+        cache_name: Optional[str] = None,
+        update_workspace: bool = True,
+        skip_update_flag: Optional[torch.Tensor] = None,
+        fsdp_group: Optional[dist_group_type] = None,
+        workspace_dtype: Optional[torch.dtype] = None,
+    ) -> QuantizedTensor:
+        """Get workspace buffer for weights and maybe update its values
+
+        The workspace buffer may be cached for future function calls.
+
+        Parameters
+        ----------
+        tensor : torch.Tensor, optional
+            Values to copy into workspace. Required if the workspace
+            is being constructed or updated.
+        quantizer: Quantizer, optional
+            Quantizer used to cast the weights. Required if the
+            workspace is being constructed or updated.
+        cache_name: str, optional
+            Key for caching.
+        update_workspace: bool, default = True
+            Update workspace with values from `tensor`.
+        skip_update_flag: torch.Tensor, optional
+            GPU flag to skip updating the workspace. Take precedence
+            over `update_workspace` if provided.
+        fsdp_group: bool, default = None
+            FSDP process group that the weights are distributed over.
+        workspace_dtype: torch.dtype, default = None
+            If weight workspace contains high-precision tensor - for example
+            for debug quantization, this is dtype of the tensor.
+        """
+
+        # Handle case where weights are already quantized
+        # Note: Make sure weights have required usages, but do not
+        # destroy unnecessary usages since they may be used later.
+        if isinstance(tensor, QuantizedTensor):
+            update_rowwise_usage = True if quantizer.rowwise_usage else None
+            update_columnwise_usage = True if quantizer.columnwise_usage else None
+            tensor.update_usage(
+                rowwise_usage=update_rowwise_usage,
+                columnwise_usage=update_columnwise_usage,
+            )
+            return tensor
+
+        # Try getting workspace from cache
+        out = None
+        if cache_name is not None:
+            out = self._workspaces.get(cache_name, None)
+
+        # Reset cache if workspace is invalid
+        if out is not None and quantizer is not None:
+            reset_cache = False
+            if isinstance(out, Float8TensorStorage):
+                if (
+                    not is_non_tn_fp8_gemm_supported()
+                    and quantizer.columnwise_usage
+                    and out._transpose is None
+                ):
+                    reset_cache = True
+            elif isinstance(out, MXFP8TensorStorage):
+                if quantizer.rowwise_usage and out._rowwise_data is None:
+                    reset_cache = True
+                elif quantizer.columnwise_usage and out._columnwise_data is None:
+                    reset_cache = True
+            elif isinstance(out, NVFP4TensorStorage):
+                if quantizer.rowwise_usage and out._rowwise_data is None:
+                    reset_cache = True
+                elif quantizer.columnwise_usage and out._columnwise_data is None:
+                    reset_cache = True
+            if isinstance(out, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
+                reset_cache = True
+            if reset_cache:
+                out = None
+                del self._workspaces[cache_name]
+
+        # Gather cached Fp8 workspace if it's distributed
+        # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
+        #       for models initialized with Fp8 primary weights.
+        if (
+            out is not None
+            and tensor is not None
+            and fsdp_group is not None
+            and out.data.shape != tensor.data.shape
+        ):
+            _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
+
+        # Construct workspace if needed
+        if out is None:
+            if tensor is None or quantizer is None:
+                raise ValueError(
+                    "tensor and quantizer kwargs must be provided to construct FP8 workspace"
+                )
+
+            if cache_name is not None:
+                # Ensure the tensor in the cache is an instance of torch.Tensor,
+                # as it persists beyond a single forward pass.
+                # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
+                quantizer_internal = quantizer.internal
+                quantizer.internal = False
+            out = quantizer.quantize(tensor, dtype=workspace_dtype)
+            if cache_name is not None:
+                quantizer.internal = quantizer_internal
+
+            # Update cache
+            if cache_name is not None:
+                self._workspaces[cache_name] = out
+            return out
+
+        # Update workspace if needed
+        if skip_update_flag is not None:
+            update_workspace = True
+        if update_workspace:
+            if tensor is None:
+                raise ValueError("tensor kwarg must be provided to update FP8 workspace")
+            if hasattr(out, "quantize_"):
+                out.quantize_(tensor, noop_flag=skip_update_flag)
+            else:
+                tex.quantize(tensor, quantizer, out, skip_update_flag)
+        return out
+
+
+register_opaque_type(WeightWorkspace, typ="reference")
+
+
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
@@ -627,7 +773,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.preserve_high_precision_init_val = FP8GlobalStateManager.with_high_precision_init_val()
         self.fsdp_wrapped = False
         self.fsdp_group = None
-        self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
+        self.weight_workspace = WeightWorkspace()
+        self._fp8_workspaces = self.weight_workspace._workspaces  # backward-compat alias
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
         self.wgrad_store = None
@@ -1034,6 +1181,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         num_gemms: int = 1,
         allow_non_contiguous: bool = False,
         allow_different_data_and_param_types: bool = False,
+        defer_fp8_global_buffer_update: bool = False,
     ) -> torch.Tensor:
         """Checks and prepares for FWD execution."""
         self.fast_setattr(
@@ -1063,7 +1211,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         "necessary when using sequence parallelism with FP8."
                     )
 
-                if not FP8GlobalStateManager.fp8_graph_capturing():
+                if (
+                    not defer_fp8_global_buffer_update
+                    and not FP8GlobalStateManager.fp8_graph_capturing()
+                ):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
                 # Activation recomputation is used and this is the first forward phase.
@@ -1343,130 +1494,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def forward(self):
         """Needs override."""
 
-    def get_weight_workspace(
-        self,
-        *,
-        tensor: Optional[torch.Tensor] = None,
-        quantizer: Optional[Quantizer] = None,
-        cache_name: Optional[str] = None,
-        update_workspace: bool = True,
-        skip_update_flag: Optional[torch.Tensor] = None,
-        fsdp_group: Optional[dist_group_type] = None,
-        workspace_dtype: Optional[torch.dtype] = None,
-    ) -> QuantizedTensor:
-        """Get workspace buffer for weights and maybe update its values
-
-        The workspace buffer may be cached for future function calls.
-
-        Parameters
-        ----------
-        tensor : torch.Tensor, optional
-            Values to copy into workspace. Required if the workspace
-            is being constructed or updated.
-        quantizer: Quantizer, optional
-            Quantizer used to cast the weights. Required if the
-            workspace is being constructed or updated.
-        cache_name: str, optional
-            Key for caching.
-        update_workspace: bool, default = True
-            Update workspace with values from `tensor`.
-        skip_update_flag: torch.Tensor, optional
-            GPU flag to skip updating the workspace. Take precedence
-            over `update_workspace` if provided.
-        fsdp_group: bool, default = None
-            FSDP process group that the weights are distributed over.
-        workspace_dtype: torch.dtype, default = None
-            If weight workspace contains high-precision tensor - for example
-            for debug quantization, this is dtype of the tensor.
-        """
-
-        # Handle case where weights are already quantized
-        # Note: Make sure weights have required usages, but do not
-        # destroy unnecessary usages since they may be used later.
-        if isinstance(tensor, QuantizedTensor):
-            update_rowwise_usage = True if quantizer.rowwise_usage else None
-            update_columnwise_usage = True if quantizer.columnwise_usage else None
-            tensor.update_usage(
-                rowwise_usage=update_rowwise_usage,
-                columnwise_usage=update_columnwise_usage,
-            )
-            return tensor
-
-        # Try getting workspace from cache
-        out = None
-        if cache_name is not None:
-            out = self._fp8_workspaces.get(cache_name, None)
-
-        # Reset cache if workspace is invalid
-        if out is not None and quantizer is not None:
-            reset_cache = False
-            if isinstance(out, Float8TensorStorage):
-                if (
-                    not is_non_tn_fp8_gemm_supported()
-                    and quantizer.columnwise_usage
-                    and out._transpose is None
-                ):
-                    reset_cache = True
-            elif isinstance(out, MXFP8TensorStorage):
-                if quantizer.rowwise_usage and out._rowwise_data is None:
-                    reset_cache = True
-                elif quantizer.columnwise_usage and out._columnwise_data is None:
-                    reset_cache = True
-            elif isinstance(out, NVFP4TensorStorage):
-                if quantizer.rowwise_usage and out._rowwise_data is None:
-                    reset_cache = True
-                elif quantizer.columnwise_usage and out._columnwise_data is None:
-                    reset_cache = True
-            if isinstance(out, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
-                reset_cache = True
-            if reset_cache:
-                out = None
-                del self._fp8_workspaces[cache_name]
-
-        # Gather cached Fp8 workspace if it's distributed
-        # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
-        #       for models initialized with Fp8 primary weights.
-        if (
-            out is not None
-            and tensor is not None
-            and fsdp_group is not None
-            and out.data.shape != tensor.data.shape
-        ):
-            _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
-
-        # Construct workspace if needed
-        if out is None:
-            if tensor is None or quantizer is None:
-                raise ValueError(
-                    "tensor and quantizer kwargs must be provided to construct FP8 workspace"
-                )
-
-            if cache_name is not None:
-                # Ensure the tensor in the cache is an instance of torch.Tensor,
-                # as it persists beyond a single forward pass.
-                # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
-                quantizer_internal = quantizer.internal
-                quantizer.internal = False
-            out = quantizer.quantize(tensor, dtype=workspace_dtype)
-            if cache_name is not None:
-                quantizer.internal = quantizer_internal
-
-            # Update cache
-            if cache_name is not None:
-                self._fp8_workspaces[cache_name] = out
-            return out
-
-        # Update workspace if needed
-        if skip_update_flag is not None:
-            update_workspace = True
-        if update_workspace:
-            if tensor is None:
-                raise ValueError("tensor kwarg must be provided to update FP8 workspace")
-            if hasattr(out, "quantize_"):
-                out.quantize_(tensor, noop_flag=skip_update_flag)
-            else:
-                tex.quantize(tensor, quantizer, out, skip_update_flag)
-        return out
+    def get_weight_workspace(self, **kwargs) -> QuantizedTensor:
+        """Delegate to self.weight_workspace.get_weight_workspace(...)."""
+        return self.weight_workspace.get_weight_workspace(**kwargs)
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs

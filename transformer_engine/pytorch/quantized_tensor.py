@@ -11,6 +11,7 @@ import warnings
 import math
 
 import torch
+from torch._opaque_base import OpaqueBaseMeta
 from torch.utils._pytree import tree_map
 
 from transformer_engine.common.recipe import Recipe
@@ -173,7 +174,11 @@ def restore_from_saved(
     return tensor_objects
 
 
-class Quantizer(abc.ABC):
+class _TEQuantizerMeta(OpaqueBaseMeta, abc.ABCMeta):
+    """Metaclass that combines PyTorch opaque-type and abstract-class behavior."""
+
+
+class Quantizer(metaclass=_TEQuantizerMeta):
     """Builder class for quantized tensors.
 
     This class is typically used to convert a high-precision tensor
@@ -290,6 +295,40 @@ class Quantizer(abc.ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement make_empty function, "
             "required for construction of unintialized quantized tensor"
+        )
+
+    def make_empty_like_layout(
+        self,
+        source: Union[torch.Tensor, "QuantizedTensor", QuantizedTensorStorage],
+        *,
+        internal: Optional[bool] = None,
+        requires_grad: bool = False,
+    ) -> Union["QuantizedTensor", QuantizedTensorStorage]:
+        """Create an empty quantized object with layout matching ``source``.
+
+        Default implementation builds a tensor variant and does not support
+        storage-only construction. Subclasses with dedicated storage classes
+        should override this for ``internal=True``.
+        """
+        shape = tuple(source.size())
+        dtype = getattr(source, "dtype", torch.float32)
+        device = getattr(source, "device", None)
+
+        quantizer = self.copy() if hasattr(self, "copy") else self
+        if internal is None:
+            internal = quantizer.internal
+        quantizer.internal = internal
+
+        if internal:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not implement storage construction "
+                "for internal=True in make_empty_like_layout"
+            )
+        return quantizer.make_empty(
+            shape=shape,
+            dtype=dtype,
+            device=device,
+            requires_grad=requires_grad,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -445,7 +484,6 @@ class QuantizedTensor(torch.Tensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
-
         # Detach op
         if func == torch.ops.aten.detach.default:
             return args[0].detach()
