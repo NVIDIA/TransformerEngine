@@ -145,14 +145,6 @@ class BasePrimitive(metaclass=ABCMeta):
 
     @staticmethod
     @abstractmethod
-    def infer_sharding_from_operands():
-        """
-        to describe infer_sharding_from_operands for custom_partitioning
-        """
-        return NotImplemented
-
-    @staticmethod
-    @abstractmethod
     def partition():
         """
         to describe partition for custom_partitioning
@@ -209,7 +201,6 @@ def register_primitive(cls, outer_only=False):
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
     outer_p_lower.def_partition(
-        infer_sharding_from_operands=cls.infer_sharding_from_operands,
         partition=cls.partition,
         sharding_rule=cls.shardy_sharding_rule,
     )

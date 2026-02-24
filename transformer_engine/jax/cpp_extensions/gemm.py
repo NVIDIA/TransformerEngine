@@ -998,51 +998,6 @@ class GemmPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(
-        out_dtype,
-        contracting_dims,
-        scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
-        use_split_accumulator,
-        transpose_batch_sequence,
-        sequence_dim,
-        is_outer,
-        collective_op,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        del (
-            out_dtype,
-            scaling_mode,
-            use_split_accumulator,
-            result_infos,
-            is_outer,
-            sequence_dim,
-        )
-
-        (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
-            GemmPrimitive._parse_operand_output_specs(
-                arg_infos, contracting_dims, transpose_batch_sequence, collective_op
-            )
-        )
-        out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
-
-        # Discard dbias gradient spec if there is no bias and grad fusion
-        if not (fuse_bias and grad):
-            dbias_specs = (None,)
-        dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_specs))
-
-        # Discard pre-GeLU output spec if there is no GeLU fusion
-        if not fuse_gelu:
-            pre_gelu_specs = (None,)
-        pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_specs))
-
-        return [out_sharding, dbias_sharding, pre_gelu_sharding]
-
-    @staticmethod
     def partition(
         out_dtype,
         contracting_dims,

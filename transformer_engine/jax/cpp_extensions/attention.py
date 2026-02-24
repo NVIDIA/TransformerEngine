@@ -637,56 +637,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(config, mesh, arg_infos, result_infos):
-        del result_infos
-        q_spec = get_padded_spec(arg_infos[0])
-
-        # when supported softmax_aux shape is (b, s, h, 1) for thd on cudnn 9.6+
-        # otherwise softmax_aux shape is (b, h, s, 1) or (b, h, s, max_segments)
-        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
-
-        if config.qkv_layout.is_qkvpacked():
-            # q_spec = (...batch, q_seqlen, 3, head, hidden)
-            out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec[:-3], *q_spec[-2:]))
-            if not is_packed_softmax:
-                softmax_aux_sharding = NamedSharding(
-                    mesh, PartitionSpec(*q_spec[:-4], q_spec[-2], q_spec[-4], None)
-                )
-            else:
-                softmax_aux_sharding = NamedSharding(
-                    mesh, PartitionSpec(*q_spec[:-4], q_spec[-4], q_spec[-2], None)
-                )
-        elif config.qkv_layout.is_kvpacked():
-            # q_spec = (...batch, q_seqlen, head, hidden)
-            # k_spec = (...batch, kv_seqlen, 2, num_gqa_groups, hidden)
-            out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-            if not is_packed_softmax:
-                softmax_aux_sharding = NamedSharding(
-                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
-                )
-            else:
-                softmax_aux_sharding = NamedSharding(
-                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-3], q_spec[-2], None)
-                )
-        elif config.qkv_layout.is_separate():
-            # q_spec = (...batch, q_seqlen, head, hidden)
-            # k_spec = (...batch, kv_seqlen, num_gqa_groups, hidden)
-            out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-            if not is_packed_softmax:
-                softmax_aux_sharding = NamedSharding(
-                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
-                )
-            else:
-                softmax_aux_sharding = NamedSharding(
-                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-3], q_spec[-2], None)
-                )
-        else:
-            raise ValueError(f"Unsupported {config.qkv_layout=}")
-
-        rng_state_sharding = NamedSharding(mesh, PartitionSpec(get_all_mesh_axes(), None))
-        return (out_sharding, softmax_aux_sharding, rng_state_sharding)
-
-    @staticmethod
     def partition(config, mesh, arg_infos, result_infos):
         out_sharding = result_infos[0].sharding
         softmax_aux_sharding = result_infos[1].sharding
@@ -706,7 +656,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     def shardy_sharding_rule(config, mesh, value_types, result_types):
         del mesh, result_types
 
-        # Keep in sync with `infer_sharding_from_operands`.
         # We only need the first input. Fill up the rest with placeholders.
         input_spec = [(f"…{x}",) for x in range(len(value_types))]
         # The RNG state sharding cannot be expressed as a Shardy rule. We use with_sharding_constraint
@@ -1092,21 +1041,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(config, mesh, arg_infos, result_infos):
-        del config, result_infos
-        q_spec = get_padded_spec(arg_infos[0])
-        k_spec = get_padded_spec(arg_infos[1])
-        v_spec = get_padded_spec(arg_infos[2])
-        bias_spec = get_padded_spec(arg_infos[3])
-        softmax_offset_spec = get_padded_spec(arg_infos[4])
-        dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-        dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
-        dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
-        dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
-        dsoftmax_offset_sharding = NamedSharding(mesh, PartitionSpec(*softmax_offset_spec))
-        return (dq_sharding, dk_sharding, dv_sharding, dbias_sharding, dsoftmax_offset_sharding)
-
-    @staticmethod
     def partition(config, mesh, arg_infos, result_infos):
         del result_infos
         q_spec = get_padded_spec(arg_infos[0])
@@ -1187,7 +1121,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(config, mesh, value_types, result_types):
         del config, mesh
-        # Keep in sync with `infer_sharding_from_operands`.
         input_spec = tuple((f"…{x}",) for x in range(len(value_types)))
         output_spec = tuple((f"…{x}",) for x in range(len(result_types)))
         return SdyShardingRule(input_spec, output_spec)

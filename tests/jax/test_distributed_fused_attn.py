@@ -68,9 +68,7 @@ class TestDistributedSelfAttn:
         attn_mask_type,
         dtype,
         softmax_type,
-        use_shardy,
     ):
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         dropout_prob = 0.0
         is_training = True
         batch, seqlen, num_head, hidden = data_shape
@@ -178,48 +176,6 @@ class TestDistributedSelfAttn:
             attn_mask_type,
             dtype,
             softmax_type,
-            use_shardy=False,
-        )
-
-    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize(
-        "attn_bias_type, bias_shape",
-        [
-            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
-            pytest.param(AttnBiasType.PRE_SCALE_BIAS, BiasShape._1HSS, id="PRE_SCALE_BIAS-1HSS"),
-        ],
-    )
-    @pytest.mark.parametrize(
-        "softmax_type",
-        [
-            pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
-            pytest.param(AttnSoftmaxType.OFF_BY_ONE_SOFTMAX, id="OFF_BY_ONE_SOFTMAX"),
-            pytest.param(AttnSoftmaxType.LEARNABLE_SOFTMAX, id="LEARNABLE_SOFTMAX"),
-        ],
-    )
-    def test_self_attn_shardy(
-        self,
-        device_count,
-        mesh_shape,
-        mesh_axes,
-        mesh_resource,
-        attn_bias_type,
-        bias_shape,
-        softmax_type,
-    ):
-        data_shape = (32, 512, 12, 64)
-        self.impl_test_self_attn(
-            device_count,
-            mesh_shape,
-            mesh_axes,
-            mesh_resource,
-            data_shape,
-            attn_bias_type,
-            bias_shape,
-            AttnMaskType.PADDING_MASK,
-            jnp.bfloat16,
-            softmax_type,
-            use_shardy=True,
         )
 
 
@@ -348,7 +304,6 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
         cp_strategy,
-        use_shardy,
         use_scan_ring=False,
         window_size=None,
         stripe_size=None,
@@ -366,8 +321,6 @@ class TestDistributedContextParallelSelfAttn:
             os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "1"
         else:
             os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
-
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         attn_bias_type = AttnBiasType.NO_BIAS
         bias_shape = None
         dropout_prob = 0.0
@@ -452,49 +405,6 @@ class TestDistributedContextParallelSelfAttn:
         runner.test_backward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
-    @pytest_parametrize_wrapper(
-        "device_count,mesh_shape,mesh_axes,mesh_resource",
-        generate_context_parallel_configs_for_attn(),
-    )
-    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
-    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
-    @pytest.mark.parametrize(
-        "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
-    )
-    def test_context_parallel_allgather_attn_shardy(
-        self,
-        device_count,
-        mesh_shape,
-        mesh_axes,
-        mesh_resource,
-        data_shape,
-        attn_mask_type,
-        dtype,
-        qkv_layout,
-    ):
-        if qkv_layout.is_thd():
-            pytest.skip("Only BSHD layout is supported for CP + AG + Dual chunk attention")
-        kv_groups = 8
-        self.impl_test_context_parallel_attn(
-            device_count,
-            mesh_shape,
-            mesh_axes,
-            mesh_resource,
-            data_shape,
-            kv_groups,
-            attn_mask_type,
-            dtype,
-            qkv_layout,
-            load_balanced=True,
-            cp_strategy=CPStrategy.ALL_GATHER,
-            use_shardy=True,
-        )
-
-    @pytest_parametrize_wrapper(
-        "device_count,mesh_shape,mesh_axes,mesh_resource",
-        generate_context_parallel_configs_for_attn(),
-    )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
     @pytest.mark.parametrize("kv_groups", [1, 8])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
@@ -551,7 +461,6 @@ class TestDistributedContextParallelSelfAttn:
             qkv_layout,
             load_balanced,
             CPStrategy.ALL_GATHER,
-            use_shardy=False,
             window_size=window_size,
             stripe_size=stripe_size,
             num_segments_per_seq=num_segments_per_seq,
@@ -599,7 +508,6 @@ class TestDistributedContextParallelSelfAttn:
             qkv_layout,
             load_balanced,
             CPStrategy.ALL_GATHER,
-            use_shardy=False,
         )
 
     @pytest_parametrize_wrapper(
@@ -664,50 +572,8 @@ class TestDistributedContextParallelSelfAttn:
             qkv_layout,
             load_balanced,
             CPStrategy.RING,
-            use_shardy=False,
             use_scan_ring=use_scan,
             window_size=window_size,
-            stripe_size=stripe_size,
-        )
-
-    @pytest_parametrize_wrapper(
-        "device_count,mesh_shape,mesh_axes,mesh_resource",
-        generate_context_parallel_configs_for_attn(),
-    )
-    @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
-    @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
-    @pytest.mark.parametrize(
-        "qkv_layout, attn_mask_type",
-        DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS,
-    )
-    def test_context_parallel_ring_attn_shardy(
-        self,
-        device_count,
-        mesh_shape,
-        mesh_axes,
-        mesh_resource,
-        data_shape,
-        attn_mask_type,
-        dtype,
-        qkv_layout,
-    ):
-        kv_groups = 8
-        # Set the stripe size to 1 (ring attention only support stripe_size=1)
-        stripe_size = 1 if qkv_layout.is_thd() else None
-        self.impl_test_context_parallel_attn(
-            device_count,
-            mesh_shape,
-            mesh_axes,
-            mesh_resource,
-            data_shape,
-            kv_groups,
-            attn_mask_type,
-            dtype,
-            qkv_layout,
-            load_balanced=True,
-            cp_strategy=CPStrategy.RING,
-            use_shardy=False,
-            use_scan_ring=True,
             stripe_size=stripe_size,
         )
 

@@ -427,68 +427,6 @@ class NormFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(
-        norm_type,
-        zero_centered_gamma,
-        epsilon,
-        out_dtype,
-        scaling_mode,
-        quantize_layout,
-        scale_dtype,
-        amax_scope,
-        transpose_batch_sequence,
-        output_amax_when_no_scaling,
-        is_outer,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        del zero_centered_gamma, epsilon, out_dtype, result_infos
-        del scale_dtype, is_outer, amax_scope, transpose_batch_sequence, output_amax_when_no_scaling
-        x_spec = get_padded_spec(arg_infos[0])
-        scale_spec = get_padded_spec(arg_infos[1])
-        amax_spec = get_padded_spec(arg_infos[2])
-        out_spec = (*x_spec[:-1], None)
-        if x_spec[-1] is not None:
-            warnings.warn(
-                f"Does not support to shard hidden dim in {NormFwdPrimitive.name}! "
-                "Force to not shard the hidden dim, which might introduce extra collective ops, "
-                "and hurt performance."
-            )
-
-        out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="NormFwdPrimitive.out")
-        colwise_out_spec = out_spec if quantize_layout.has_colwise else (None,)
-        colwise_out_sharding = NamedSharding(
-            mesh, PartitionSpec(*colwise_out_spec), desc="NormFwdPrimitive.colwise_out"
-        )
-        rsigma_sharding = NamedSharding(
-            mesh, PartitionSpec(*x_spec[:-1]), desc="NormFwdPrimitive.rsigma"
-        )
-        mu_spec = x_spec[:-1] if norm_type == NVTE_Norm_Type.LayerNorm else (None,)
-        mu_sharding = NamedSharding(mesh, PartitionSpec(*mu_spec), desc="NormFwdPrimitive.mu")
-
-        scale_inv_spec = (None,)
-        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-            scale_inv_spec = scale_spec
-        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
-            scale_inv_spec = out_spec
-
-        scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*scale_inv_spec), desc="NormFwdPrimitive.scale_inv"
-        )
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="NormFwdPrimitive.amax")
-        output = (
-            out_sharding,
-            colwise_out_sharding,
-            scale_inv_sharding,  # rowwise
-            scale_inv_sharding,  # colwise
-            amax_sharding,
-            mu_sharding,
-            rsigma_sharding,
-        )
-        return output
-
-    @staticmethod
     def partition(
         norm_type,
         zero_centered_gamma,
@@ -800,32 +738,6 @@ class NormBwdPrimitive(BasePrimitive):
             ),
             out_bdims,
         )
-
-    @staticmethod
-    def infer_sharding_from_operands(norm_type, zero_centered_gamma, mesh, arg_infos, result_infos):
-        del norm_type, zero_centered_gamma, result_infos
-        x_spec = get_padded_spec(arg_infos[1])
-        if x_spec[-1] is not None:
-            warnings.warn(
-                f"Does not support to shard hidden dim in {NormBwdPrimitive.name}! "
-                "Force to not shard the hidden dim, which might introduce extra collective ops, "
-                "and hurt performance."
-            )
-        g_b_spec = get_padded_spec(arg_infos[4])
-        if g_b_spec[-1] is not None:
-            warnings.warn(
-                f"{NormBwdPrimitive.name} does not support sharding of gradients "
-                "of gamma and beta of  "
-                "Enforcing no sharding of parameters hidden dim! "
-            )
-
-        dx_sharding = NamedSharding(
-            mesh, PartitionSpec(*x_spec[:-1], None), desc="NormBwdPrimitive.dx"
-        )
-        dgamma_sharding = dbeta_sharding = NamedSharding(
-            mesh, PartitionSpec(None), desc="NormBwdPrimitive.dgamma"
-        )
-        return dx_sharding, dgamma_sharding, dbeta_sharding
 
     @staticmethod
     def partition(norm_type, zero_centered_gamma, mesh, arg_infos, result_infos):
