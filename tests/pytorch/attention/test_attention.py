@@ -2085,9 +2085,7 @@ def _run_mha_fp8_vs_f16(
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
-def test_dpa_fp8_vs_f16(
-    dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode
-):
+def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
 
