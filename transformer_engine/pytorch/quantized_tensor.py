@@ -69,7 +69,9 @@ class QuantizedTensorStorage:
             f"{self.__class__.__name__} class does not implement get_usages function"
         )
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
+    def prepare_for_saving(
+        self,
+    ) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
         """Prepare the tensor base for saving for backward"""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement prepare_for_saving function"
@@ -115,11 +117,18 @@ class QuantizedTensorStorage:
             warnings.warn("Quantizer is being updated, this may affect model behavior")
             self._quantizer = quantizer
 
+    def copy_from_storage(self, src: QuantizedTensorStorage) -> None:
+        """Copy data from another QuantizedTensorStorage."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement copy_from_storage function"
+        )
+
 
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorStorage],
 ) -> Tuple[
-    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], list[Optional[QuantizedTensorStorage]]
+    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
+    list[Optional[QuantizedTensorStorage]],
 ]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
@@ -144,7 +153,10 @@ def restore_from_saved(
     return_saved_tensors: bool = False,
 ) -> (
     list[Optional[torch.Tensor | QuantizedTensorStorage]]
-    | tuple[list[Optional[torch.Tensor | QuantizedTensorStorage]], list[Optional[torch.Tensor]]]
+    | tuple[
+        list[Optional[torch.Tensor | QuantizedTensorStorage]],
+        list[Optional[torch.Tensor]],
+    ]
 ):
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []

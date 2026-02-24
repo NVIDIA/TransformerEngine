@@ -183,9 +183,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
 
-    PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass), args.ptr(),
-                      kwargs.ptr());
+    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
+                                     args.ptr(), kwargs.ptr());
     if (result == nullptr) {
       PyErr_Print();
     }
@@ -207,9 +206,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
     kwargs["device"] = py::cast(device);
-    PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass), args.ptr(),
-                      kwargs.ptr());
+    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass),
+                                     args.ptr(), kwargs.ptr());
     if (result == nullptr) {
       PyErr_Print();
     }
@@ -423,9 +421,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     kwargs["quantizer"] = this->quantizer;
 
     py::tuple args(0);
-    PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass), args.ptr(),
-                      kwargs.ptr());
+    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
+                                     args.ptr(), kwargs.ptr());
     if (result == nullptr) {
       PyErr_Print();
     }
@@ -446,9 +443,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     kwargs["quantizer"] = this->quantizer;
     kwargs["device"] = py::cast(device);
     py::tuple args(0);
-    PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass), args.ptr(),
-                      kwargs.ptr());
+    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorPythonClass),
+                                     args.ptr(), kwargs.ptr());
     if (result == nullptr) {
       PyErr_Print();
     }
@@ -714,9 +710,9 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
 
     py::tuple args(0);
-    PyObject* result = PyObject_Call(
-        reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass), args.ptr(),
-        kwargs.ptr());
+    PyObject* result =
+        PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorStoragePythonClass),
+                      args.ptr(), kwargs.ptr());
     if (result == nullptr) {
       PyErr_Print();
     }
@@ -1032,9 +1028,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
 
-    PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass), args.ptr(),
-                      kwargs.ptr());
+    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass),
+                                     args.ptr(), kwargs.ptr());
     if (result == nullptr) {
       PyErr_Print();
     }
@@ -1358,9 +1353,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
 
     py::tuple args(0);
 
-    PyObject* result =
-        PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorStoragePythonClass), args.ptr(),
-                      kwargs.ptr());
+    PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorStoragePythonClass),
+                                     args.ptr(), kwargs.ptr());
     if (result == nullptr) {
       PyErr_Print();
     }
