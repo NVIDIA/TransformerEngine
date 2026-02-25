@@ -48,16 +48,19 @@ namespace {
 
 using namespace cute;
 
-// Ensure Tensor refers to cute::Tensor, not transformer_engine::Tensor
-using cute::Tensor;
-
 struct CLCResponse { uint32_t data[4] = {0}; };
+
+constexpr int kFp4ConvertChunkElements = 8;
+constexpr int kFp4ConvertFullElements = 16;
+constexpr int kFp4RbitsPerChunk = 2;
+constexpr int kFp4ChunkCount = kFp4ConvertFullElements / kFp4ConvertChunkElements;
 
 
 CUTLASS_DEVICE
-cutlass::Array<cutlass::float_e2m1_t, 8> StochasticNumericConverterBase(
-    cutlass::Array<float, 8> const &input, cutlass::Array<uint32_t, 2> const &rbits) {
-  using result_type = cutlass::Array<cutlass::float_e2m1_t, 8>;
+cutlass::Array<cutlass::float_e2m1_t, kFp4ConvertChunkElements> StochasticNumericConverterBase(
+    cutlass::Array<float, kFp4ConvertChunkElements> const &input,
+    cutlass::Array<uint32_t, kFp4RbitsPerChunk> const &rbits) {
+  using result_type = cutlass::Array<cutlass::float_e2m1_t, kFp4ConvertChunkElements>;
   result_type output;
   auto output_ptr = reinterpret_cast<uint16_t *>(&output);
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
@@ -79,15 +82,19 @@ cutlass::Array<cutlass::float_e2m1_t, 8> StochasticNumericConverterBase(
 }
 
 CUTLASS_DEVICE
-cutlass::Array<cutlass::float_e2m1_t, 16>
-StochasticNumericConverter(cutlass::Array<float, 16> const &input, cutlass::Array<uint32_t, 4> const &rbits) {
-  using result_type = cutlass::Array<cutlass::float_e2m1_t, 16>;
+cutlass::Array<cutlass::float_e2m1_t, kFp4ConvertFullElements>
+StochasticNumericConverter(cutlass::Array<float, kFp4ConvertFullElements> const &input,
+                           cutlass::Array<uint32_t, kFp4RbitsPerChunk * kFp4ChunkCount> const &rbits) {
+  using result_type = cutlass::Array<cutlass::float_e2m1_t, kFp4ConvertFullElements>;
   result_type output;
-  cutlass::Array<cutlass::float_e2m1_t, 8> *result_ptr = reinterpret_cast<cutlass::Array<cutlass::float_e2m1_t, 8> *>(&output);
-  cutlass::Array<float, 8> const *source_ptr = reinterpret_cast<cutlass::Array<float, 8> const *>(&input);
-  cutlass::Array<uint32_t, 2> const *rbits_ptr = reinterpret_cast<cutlass::Array<uint32_t, 2> const *>(&rbits);
+  cutlass::Array<cutlass::float_e2m1_t, kFp4ConvertChunkElements> *result_ptr =
+      reinterpret_cast<cutlass::Array<cutlass::float_e2m1_t, kFp4ConvertChunkElements> *>(&output);
+  cutlass::Array<float, kFp4ConvertChunkElements> const *source_ptr =
+      reinterpret_cast<cutlass::Array<float, kFp4ConvertChunkElements> const *>(&input);
+  cutlass::Array<uint32_t, kFp4RbitsPerChunk> const *rbits_ptr =
+      reinterpret_cast<cutlass::Array<uint32_t, kFp4RbitsPerChunk> const *>(&rbits);
   CUTLASS_PRAGMA_UNROLL
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < kFp4ChunkCount; i++) {
     result_ptr[i] = StochasticNumericConverterBase(source_ptr[i], rbits_ptr[i]);
   }
   return output;
@@ -491,19 +498,19 @@ __global__ static void row_col_rht_gemm_device(
 
   if (is_dma_warp) {
     cutlass::arch::warpgroup_reg_dealloc<32>();
-    Tensor mA = tma_load_a.get_tma_tensor(make_shape(M,N));
-    Tensor mB = tma_load_b.get_tma_tensor(make_shape(RhtTensorSize, RhtTensorSize));
+    cute::Tensor mA = tma_load_a.get_tma_tensor(make_shape(M,N));
+    cute::Tensor mB = tma_load_b.get_tma_tensor(make_shape(RhtTensorSize, RhtTensorSize));
 
-    Tensor gA_mk = local_tile(mA, mainloop_tiler, make_coord(_,_, _), Step<_1, X,_1>{});
-    Tensor gB_nk = local_tile(mB, cluster_tile, make_coord(_,_, _), Step< X,_1,_1>{}); // (BLK_N,BLK_K,k)
+    cute::Tensor gA_mk = local_tile(mA, mainloop_tiler, make_coord(_,_, _), Step<_1, X,_1>{});
+    cute::Tensor gB_nk = local_tile(mB, cluster_tile, make_coord(_,_, _), Step< X,_1,_1>{}); // (BLK_N,BLK_K,k)
 
-    Tensor tCsA = make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()), sAlayout); // (MMA,MMA_M,MMA_N,PIPE)
-    Tensor tCsB = make_tensor(make_smem_ptr(shared_storage.tensors.smem_B.data()), sBlayout); // (MMA,MMA_N,MMA_K,PIPE)
+    cute::Tensor tCsA = make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()), sAlayout); // (MMA,MMA_M,MMA_N,PIPE)
+    cute::Tensor tCsB = make_tensor(make_smem_ptr(shared_storage.tensors.smem_B.data()), sBlayout); // (MMA,MMA_N,MMA_K,PIPE)
 
     int block_rank_in_cluster = cute::block_rank_in_cluster();
     ThrMMA thr_mma = mma.get_slice(block_rank_in_cluster);               // blk idx
-    Tensor tCgA = thr_mma.partition_A(gA_mk);                                                    // (MMA,MMA_M,MMA_K,k)
-    Tensor tCgB = thr_mma.partition_B(gB_nk);                                                    // (MMA,MMA_N,MMA_K,k)
+    cute::Tensor tCgA = thr_mma.partition_A(gA_mk);                                                    // (MMA,MMA_M,MMA_K,k)
+    cute::Tensor tCgB = thr_mma.partition_B(gB_nk);                                                    // (MMA,MMA_N,MMA_K,k)
 
     Layout cta_layout_mnk  = make_layout(cluster_shape);
     Layout cta_layout_vmnk = tiled_divide(cta_layout_mnk, make_tile(typename TiledMMA::AtomThrID{}));
@@ -569,14 +576,14 @@ __global__ static void row_col_rht_gemm_device(
   } else if (is_mma_warp) {
     cutlass::arch::warpgroup_reg_dealloc<32>();
     if constexpr (kEnableRHTColQuant) {
-      Tensor tCsA = make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()), sAlayout); // (MMA,MMA_M,MMA_N,PIPE)
-      Tensor tCsB = make_tensor(make_smem_ptr(shared_storage.tensors.smem_B.data()), sBlayout); // (MMA,MMA_N,MMA_K,PIPE)
+      cute::Tensor tCsA = make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()), sAlayout); // (MMA,MMA_M,MMA_N,PIPE)
+      cute::Tensor tCsB = make_tensor(make_smem_ptr(shared_storage.tensors.smem_B.data()), sBlayout); // (MMA,MMA_N,MMA_K,PIPE)
 
       int block_rank_in_cluster = cute::block_rank_in_cluster();
       ThrMMA thr_mma = mma.get_slice(block_rank_in_cluster);               // blk idx
       // Allocate "fragments" -- these are actually umma smem descriptors
-      Tensor tCrA = thr_mma.make_fragment_A(tCsA);                                              // (MMA,MMA_M,MMA_K,PIPE)
-      Tensor tCrB = thr_mma.make_fragment_B(tCsB);                                              // (MMA,MMA_M,MMA_K,PIPE)
+      cute::Tensor tCrA = thr_mma.make_fragment_A(tCsA);                                              // (MMA,MMA_M,MMA_K,PIPE)
+      cute::Tensor tCrB = thr_mma.make_fragment_B(tCsB);                                              // (MMA,MMA_M,MMA_K,PIPE)
 
       mma.accumulate_ = UMMA::ScaleOut::Zero;
 
@@ -673,28 +680,28 @@ __global__ static void row_col_rht_gemm_device(
         rng_offset = rng_state != nullptr ? __ldg(rng_state + 1) : 0;
       }
 
-      Tensor mD = make_tensor(
+      cute::Tensor mD = make_tensor(
         cute::subbyte_iterator<TD>(D),
         make_shape(M,N),
         dD); // (M,N)
-      Tensor gD_mn = local_tile(
+      cute::Tensor gD_mn = local_tile(
         mD,
         epilogue_tiler,
         make_coord(_,_, _),
         Step<_1,_1, X>{}); // (BLK_M,BLK_N)
-      Tensor pD = make_identity_tensor(mD.shape());
-      Tensor pD_mn = local_tile(
+      cute::Tensor pD = make_identity_tensor(mD.shape());
+      cute::Tensor pD_mn = local_tile(
         pD,
         epilogue_tiler,
         make_coord(_,_, _),
         Step<_1,_1, X>{}); // (BLK_M,BLK_N)
-      Tensor mSFD = make_tensor(make_gmem_ptr(SFD), sfd_layout);
-      Tensor gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});           // (BLK_M,BLK_N)
-      Tensor pSFD = make_identity_tensor(mSFD.shape());
-      Tensor pSFD_mn = local_tile(pSFD, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});           // (BLK_M,BLK_N)
+      cute::Tensor mSFD = make_tensor(make_gmem_ptr(SFD), sfd_layout);
+      cute::Tensor gSFD_mn = local_tile(mSFD, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});           // (BLK_M,BLK_N)
+      cute::Tensor pSFD = make_identity_tensor(mSFD.shape());
+      cute::Tensor pSFD_mn = local_tile(pSFD, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});           // (BLK_M,BLK_N)
 
-      Tensor gD_mn_view = tiled_divide(gD_mn, take<0,2>(epilogue_tiler));
-      Tensor pD_mn_view = tiled_divide(pD_mn, take<0,2>(epilogue_tiler));
+      cute::Tensor gD_mn_view = tiled_divide(gD_mn, take<0,2>(epilogue_tiler));
+      cute::Tensor pD_mn_view = tiled_divide(pD_mn, take<0,2>(epilogue_tiler));
       auto tiled_t2r = make_tmem_copy(TMEM_LOAD_NEW{}, bulk_tmem_epilogue(_,_,_,_0{}));
       auto tiled_r2g = make_tiled_copy_D(
         Copy_Atom<SM100_STORE_256bit_CACHE_NOALLOCATION, TD>{},
@@ -724,41 +731,41 @@ __global__ static void row_col_rht_gemm_device(
         scheduler.fetch_next_work(clc_pipeline, clc_pipeline_consumer_state);
         ++clc_pipeline_consumer_state;
         for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + scheduler.tile_n_base() < scheduler.tiles_n(); ++k_tile) {
-          Tensor tDgD_mn = gD_mn_view(_,_,_,scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
-          Tensor tDgSFD_mn = gSFD_mn(_,_,scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
-          Tensor tDpD_mn = pD_mn_view(_,_,_,scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
-          Tensor tDpSFD_mn = pSFD_mn(_,_,scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
+          cute::Tensor tDgD_mn = gD_mn_view(_,_,_,scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
+          cute::Tensor tDgSFD_mn = gSFD_mn(_,_,scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
+          cute::Tensor tDpD_mn = pD_mn_view(_,_,_,scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
+          cute::Tensor tDpSFD_mn = pSFD_mn(_,_,scheduler.tile_m(), scheduler.tile_n_base() + k_tile);
 
           accumulator_pipeline.consumer_wait(accumulator_pipe_consumer_state);
 
           auto Acc = bulk_tmem_epilogue(_,_,_,accumulator_pipe_consumer_state.index());
-          Tensor tDtAcc = thr_t2r.partition_S(Acc); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
-          Tensor tDgD = thr_t2r.partition_D(tDgD_mn); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
-          Tensor tDpD = thr_t2r.partition_D(tDpD_mn); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
-          Tensor tTR_rAcc = make_tensor<ElementAccumulator>(shape(tDgD)); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
-          Tensor tDrD = make_tensor<TD>(shape(tDgD));
-          Tensor tTR_rAcc_frag = recast<cutlass::Array<ElementAccumulator, FragmentSize>>(coalesce(tTR_rAcc));
-          Tensor tDrD_frag = recast<cutlass::Array<TD, FragmentSize>>(coalesce(tDrD));
+          cute::Tensor tDtAcc = thr_t2r.partition_S(Acc); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
+          cute::Tensor tDgD = thr_t2r.partition_D(tDgD_mn); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
+          cute::Tensor tDpD = thr_t2r.partition_D(tDpD_mn); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
+          cute::Tensor tTR_rAcc = make_tensor<ElementAccumulator>(shape(tDgD)); // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
+          cute::Tensor tDrD = make_tensor<TD>(shape(tDgD));
+          cute::Tensor tTR_rAcc_frag = recast<cutlass::Array<ElementAccumulator, FragmentSize>>(coalesce(tTR_rAcc));
+          cute::Tensor tDrD_frag = recast<cutlass::Array<TD, FragmentSize>>(coalesce(tDrD));
 
-          Tensor src = thr_r2g.retile_S(tDrD);
-          Tensor dst = thr_r2g.retile_D(tDgD);
-          Tensor pSrc = thr_r2g.retile_D(tDpD);
+          cute::Tensor src = thr_r2g.retile_S(tDrD);
+          cute::Tensor dst = thr_r2g.retile_D(tDgD);
+          cute::Tensor pSrc = thr_r2g.retile_D(tDpD);
 
-          Tensor tDgSFD_view = make_tensor(
+          cute::Tensor tDgSFD_view = make_tensor(
             tDgSFD_mn.data(),
               make_layout(
                 make_shape(shape(tDgSFD_mn), Int<1>{}, Int<1>{}),
                 make_stride(stride(tDgSFD_mn), Int<0>{}, Int<0>{})));
-          Tensor tDpSFD_view = make_tensor(
+          cute::Tensor tDpSFD_view = make_tensor(
             tDpSFD_mn.data(),
               make_layout(
                 make_shape(shape(tDpSFD_mn), Int<1>{}, Int<1>{}),
                 make_stride(stride(tDpSFD_mn), Int<0>{}, Int<0>{})));
-          Tensor tDgSFD = filter(thr_t2r.partition_D(tDgSFD_view));
-          Tensor tDrSFD = make_tensor<TSFD>(shape(tDgSFD));
-          Tensor tDpSFD = filter(thr_t2r.partition_D(tDpSFD_view));
+          cute::Tensor tDgSFD = filter(thr_t2r.partition_D(tDgSFD_view));
+          cute::Tensor tDrSFD = make_tensor<TSFD>(shape(tDgSFD));
+          cute::Tensor tDpSFD = filter(thr_t2r.partition_D(tDpSFD_view));
           static int constexpr NumVecs = size(tDgD) / VectorSize;
-          Tensor tD_rRowSFD_frg = recast<cutlass::Array<TSFD, NumVecs>>(tDrSFD);
+          cute::Tensor tD_rRowSFD_frg = recast<cutlass::Array<TSFD, NumVecs>>(tDrSFD);
 
           cutlass::maximum_absolute_value_reduction<cutlass::Array<ElementAccumulator, VectorSize>, true> amax_reduction;
           cutlass::Array<ElementAccumulator, NumVecs> vec_maxs;
@@ -841,19 +848,19 @@ __global__ static void row_col_rht_gemm_device(
 
           }
 
-          Tensor pred_pSrc = cute::lazy::transform(make_tensor(counting_iterator<int>{}, replace<0>(shape(dst), _1{})), [&](auto coord){
-            Tensor pSrc_view = group_modes<1,rank(pSrc)>(pSrc);
+          cute::Tensor pred_pSrc = cute::lazy::transform(make_tensor(counting_iterator<int>{}, replace<0>(shape(dst), _1{})), [&](auto coord){
+            cute::Tensor pSrc_view = group_modes<1,rank(pSrc)>(pSrc);
             return elem_less(pSrc_view(_0{},coord), shape(mD));
           });
           copy_if(tiled_r2g, pred_pSrc, src, dst);
           // 32bit vectorization copy 4 e4m3 SFD for per 64 or(16,4):(0, 1) element
 
           constexpr int vec_len = 32 / sizeof_bits_v<TSFD>;
-          Tensor  tDrSFD_v = recast<uint_bit_t<32>>(tDrSFD);
-          Tensor  tDgSFD_v = recast<uint_bit_t<32>>(tDgSFD);
+          cute::Tensor  tDrSFD_v = recast<uint_bit_t<32>>(tDrSFD);
+          cute::Tensor  tDgSFD_v = recast<uint_bit_t<32>>(tDgSFD);
           copy_if(
                   [&](auto coord){
-                    Tensor tDpSFD_view = group_modes<1,rank(tDpSFD)>(tDpSFD);
+                    cute::Tensor tDpSFD_view = group_modes<1,rank(tDpSFD)>(tDpSFD);
                     return elem_less(tDpSFD_view(_0{}, coord * vec_len), shape(mSFD));
                   },
                   tDrSFD_v, tDgSFD_v);
@@ -874,16 +881,16 @@ __global__ static void row_col_rht_gemm_device(
         rng_seed = rng_state != nullptr ? __ldg(rng_state) : 0;
         rng_offset = rng_state != nullptr ? __ldg(rng_state + 1) : 0;
       }
-      Tensor mQA = make_tensor(cute::subbyte_iterator<TQA>(QA), make_layout(make_shape(M, N), dQA));
-      Tensor gQA_mn = local_tile(mQA, epilogue_tiler, make_coord(_,_, _), Step<_1,X,_1>{});
-      Tensor pQA = make_identity_tensor(mQA.shape());
-      Tensor pQA_mn = local_tile(pQA, epilogue_tiler, make_coord(_,_, _), Step<_1,X,_1>{});
+      cute::Tensor mQA = make_tensor(cute::subbyte_iterator<TQA>(QA), make_layout(make_shape(M, N), dQA));
+      cute::Tensor gQA_mn = local_tile(mQA, epilogue_tiler, make_coord(_,_, _), Step<_1,X,_1>{});
+      cute::Tensor pQA = make_identity_tensor(mQA.shape());
+      cute::Tensor pQA_mn = local_tile(pQA, epilogue_tiler, make_coord(_,_, _), Step<_1,X,_1>{});
 
-      Tensor mSFA = make_tensor(make_gmem_ptr(SFA), sfa_layout);
-      Tensor gSFA_mn = local_tile(mSFA, epilogue_tiler, make_coord(_,_, _), Step<_1,X,_1>{});           // (BLK_M,BLK_N)
-      Tensor pSFA = make_identity_tensor(mSFA.shape());
-      Tensor pSFA_mn = local_tile(pSFA, epilogue_tiler, make_coord(_,_, _), Step<_1,X,_1>{});
-      Tensor sA = as_position_independent_swizzle_tensor(
+      cute::Tensor mSFA = make_tensor(make_gmem_ptr(SFA), sfa_layout);
+      cute::Tensor gSFA_mn = local_tile(mSFA, epilogue_tiler, make_coord(_,_, _), Step<_1,X,_1>{});           // (BLK_M,BLK_N)
+      cute::Tensor pSFA = make_identity_tensor(mSFA.shape());
+      cute::Tensor pSFA_mn = local_tile(pSFA, epilogue_tiler, make_coord(_,_, _), Step<_1,X,_1>{});
+      cute::Tensor sA = as_position_independent_swizzle_tensor(
                     group_modes<0,2>(coalesce(make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()), sAlayout)))); // (BLOCK_M, BLOCK_M,PIPE)
       using S2RWarpLayout = Layout<Shape<_2,_16>>;
       using WarpGroupLayout = Layout<Shape<_1,_8>>;
@@ -898,17 +905,17 @@ __global__ static void row_col_rht_gemm_device(
       auto thr_s2r = tiled_s2r.get_slice(local_thread_idx);
       auto thr_r2g_QA = tiled_r2g_QA.get_slice(local_thread_idx);
 
-      Tensor tQAsA = thr_s2r.partition_S(sA); // (Copy, Copy_M, Copy_N, PIPE)
+      cute::Tensor tQAsA = thr_s2r.partition_S(sA); // (Copy, Copy_M, Copy_N, PIPE)
 
-      Tensor tQArA = make_tensor_like<TA>(make_layout(tQAsA(_, _, _, _0{}).shape())); // (Copy, Copy_M, Copy_N)
+      cute::Tensor tQArA = make_tensor_like<TA>(make_layout(tQAsA(_, _, _, _0{}).shape())); // (Copy, Copy_M, Copy_N)
       // Tensor tQArA_PI = thr_s2r.partition_S(sA_PI);
-      Tensor tQAgQA = thr_r2g_QA.partition_D(gQA_mn);
-      Tensor tQArQA = make_tensor_like(tQAgQA(_, _, _, _0{}, _0{}));
-      Tensor tQApQA = thr_r2g_QA.partition_D(pQA_mn);
+      cute::Tensor tQAgQA = thr_r2g_QA.partition_D(gQA_mn);
+      cute::Tensor tQArQA = make_tensor_like(tQAgQA(_, _, _, _0{}, _0{}));
+      cute::Tensor tQApQA = thr_r2g_QA.partition_D(pQA_mn);
 
-      Tensor tQAgSFA = thr_s2r.partition_D(gSFA_mn);
-      Tensor tQArSFA = make_tensor_like(tQAgSFA(_, _, _, _0{}, _0{}));
-      Tensor tQApSFA = thr_s2r.partition_D(pSFA_mn);
+      cute::Tensor tQAgSFA = thr_s2r.partition_D(gSFA_mn);
+      cute::Tensor tQArSFA = make_tensor_like(tQAgSFA(_, _, _, _0{}, _0{}));
+      cute::Tensor tQApSFA = thr_s2r.partition_D(pSFA_mn);
 
       // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
       static constexpr float fp4_max = 6.0f;
@@ -995,18 +1002,18 @@ __global__ static void row_col_rht_gemm_device(
             }
           }
 
-          Tensor pred_tQApQA = cute::lazy::transform(make_tensor(counting_iterator<int>{}, replace<0>(shape(tQAgQA_mn), _1{})), [&](auto coord){
-            Tensor tQApQA_view = group_modes<1,rank(tQApQA_mn)>(tQApQA_mn);
+          cute::Tensor pred_tQApQA = cute::lazy::transform(make_tensor(counting_iterator<int>{}, replace<0>(shape(tQAgQA_mn), _1{})), [&](auto coord){
+            cute::Tensor tQApQA_view = group_modes<1,rank(tQApQA_mn)>(tQApQA_mn);
             return elem_less(tQApQA_view(_0{}, coord), shape(mQA));
           });
           copy_if(tiled_r2g_QA, pred_tQApQA, tQArQA, tQAgQA_mn);
           // 32bit vectorization copy 4 e4m3 SFA for per 64 or (16,4):(0, 1)  element
           constexpr int vec_len = 32 / sizeof_bits_v<TSFD>;
-          Tensor  tQArSFA_v = recast<uint_bit_t<32>>(filter(tQArSFA));
-          Tensor  tQAgSFA_v = recast<uint_bit_t<32>>(filter(tQAgSFA_mn));
+          cute::Tensor  tQArSFA_v = recast<uint_bit_t<32>>(filter(tQArSFA));
+          cute::Tensor  tQAgSFA_v = recast<uint_bit_t<32>>(filter(tQAgSFA_mn));
           copy_if(
                   [&](auto coord){
-                    Tensor tQApSFA_view = filter(tQApSFA_mn);
+                    cute::Tensor tQApSFA_view = filter(tQApSFA_mn);
                     return elem_less(tQApSFA_view(_0{}, coord * vec_len), shape(mSFA));
                   },
                   tQArSFA_v, tQAgSFA_v);
@@ -1075,12 +1082,12 @@ void row_col_rht_gemm_ntt_w_sfc(
   // Define shapes (dynamic)
   auto M = hidden_size;
   auto N = sequence_length;
-  Tensor tensorA = make_tensor(A, make_shape(hidden_size, sequence_length), LayoutLeft{});
-  Tensor tensorB = make_tensor(B, make_shape(RhtTensorSize, RhtTensorSize), LayoutLeft{});
-  Tensor tensorD = make_tensor(D, make_shape(hidden_size, sequence_length), LayoutRight{});
-  Tensor tensorQA = make_tensor(QA, make_shape(hidden_size, sequence_length), LayoutLeft{});
-  Tensor tensorSFD = make_tensor(SFD, sfd_layout);
-  Tensor tensorSFA = make_tensor(SFA, sfa_layout);
+  cute::Tensor tensorA = make_tensor(A, make_shape(hidden_size, sequence_length), LayoutLeft{});
+  cute::Tensor tensorB = make_tensor(B, make_shape(RhtTensorSize, RhtTensorSize), LayoutLeft{});
+  cute::Tensor tensorD = make_tensor(D, make_shape(hidden_size, sequence_length), LayoutRight{});
+  cute::Tensor tensorQA = make_tensor(QA, make_shape(hidden_size, sequence_length), LayoutLeft{});
+  cute::Tensor tensorSFD = make_tensor(SFD, sfd_layout);
+  cute::Tensor tensorSFA = make_tensor(SFA, sfa_layout);
   // Define strides (from tensors)
   auto dA = stride(tensorA);   // (dM,dK)
   auto dB = stride(tensorB);   // (dN,dK)
