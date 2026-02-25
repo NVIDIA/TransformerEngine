@@ -937,7 +937,7 @@ def cp_p2p_fwd_flash_attn(
     elif section == "upper-triangle":
         max_seqlen_q_ = max_seqlen_q // 2
     if section in ["lower-triangle", "upper-triangle"]:
-        if (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
+        if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
             fa_forward_kwargs["window_size"] = (-1, -1)
         elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
             fa_forward_kwargs["window_size_left"] = -1
@@ -1189,7 +1189,7 @@ def cp_p2p_bwd_flash_attn(
 ):
     """Per-tile backward call of CP P2P with FlashAttention backend"""
     dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
-    if (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
+    if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size"] = (-1, -1)
     elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size_left"] = -1
@@ -1201,7 +1201,7 @@ def cp_p2p_bwd_flash_attn(
     softmax_lse__ = softmax_lse
     causal_ = False
     if section == "diagonal":
-        if (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
+        if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
             fa_backward_kwargs["window_size"] = (-1, 0)
         elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
             fa_backward_kwargs["window_size_left"] = -1
@@ -2989,7 +2989,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             max_seqlen_q=max_seqlen_q,
                             max_seqlen_kv=max_seqlen_kv_,
                         )
-                        if (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
+                        if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
                             fa_forward_kwargs["window_size"] = window_size_per_step[i]
                         elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
                             fa_forward_kwargs["window_size_left"] = window_size_per_step[i][0]
@@ -3210,9 +3210,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         )
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[i]
-                        if (
-                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-                        ):
+                        if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size"] = window_size_per_step[i]
                         elif ctx.use_flash_attn_3 or fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = window_size_per_step[i][0]
