@@ -194,15 +194,13 @@ std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &ten
 
 namespace {
 
-std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>>
-bulk_allocate_fp8_blockwise_tensors(std::vector<std::vector<size_t>> &shape_list,
-                                    std::vector<py::handle> &quantizer_py_list,
-                                    std::vector<Float8BlockQuantizer *> &quantizer_cpp_list) {
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp8_blockwise_tensors(
+    std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
+    std::vector<Float8BlockQuantizer *> &quantizer_cpp_list) {
   init_extension();
-  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>> retval;
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
   auto &tensor_py_list = std::get<0>(retval);
   auto &tensor_cpp_list = std::get<1>(retval);
-  auto &buffer_list = std::get<2>(retval);  // Buffers for offload
 
   // Number of tensors
   const size_t num_tensors = shape_list.size();
@@ -263,7 +261,6 @@ bulk_allocate_fp8_blockwise_tensors(std::vector<std::vector<size_t>> &shape_list
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
         at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -307,7 +304,6 @@ bulk_allocate_fp8_blockwise_tensors(std::vector<std::vector<size_t>> &shape_list
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
         at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -350,15 +346,13 @@ bulk_allocate_fp8_blockwise_tensors(std::vector<std::vector<size_t>> &shape_list
   return retval;
 }
 
-std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>>
-bulk_allocate_mxfp8_tensors(std::vector<std::vector<size_t>> &shape_list,
-                            std::vector<py::handle> &quantizer_py_list,
-                            std::vector<MXFP8Quantizer *> &quantizer_cpp_list) {
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mxfp8_tensors(
+    std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
+    std::vector<MXFP8Quantizer *> &quantizer_cpp_list) {
   init_extension();
-  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, std::vector<at::Tensor>> retval;
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
   auto &tensor_py_list = std::get<0>(retval);
   auto &tensor_cpp_list = std::get<1>(retval);
-  auto &buffer_list = std::get<2>(retval);  // Buffers for offload
 
   // Number of tensors
   const size_t num_tensors = shape_list.size();
@@ -420,7 +414,6 @@ bulk_allocate_mxfp8_tensors(std::vector<std::vector<size_t>> &shape_list,
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
         at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -461,7 +454,6 @@ bulk_allocate_mxfp8_tensors(std::vector<std::vector<size_t>> &shape_list,
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
         at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -507,17 +499,14 @@ bulk_allocate_mxfp8_tensors(std::vector<std::vector<size_t>> &shape_list,
 // allocate fp4 data, fp8 scalings, and amax values
 // layout: [fp4_data0, ..., fp4_dataN, fp8_scaling0, ..., fp8_scalingN, amax0, ..., amaxN]
 // amax buffer will be zeroed out by later amax kernels, so we can use empty to allocate
-std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool, std::vector<at::Tensor>>
-bulk_allocate_nvfp4_tensors(std::vector<std::vector<size_t>> &shape_list,
-                            std::vector<py::handle> &quantizer_py_list,
-                            std::vector<NVFP4Quantizer *> &quantizer_cpp_list) {
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_allocate_nvfp4_tensors(
+    std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
+    std::vector<NVFP4Quantizer *> &quantizer_cpp_list) {
   init_extension();
-  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool, std::vector<at::Tensor>>
-      retval;
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> retval;
   auto &tensor_py_list = std::get<0>(retval);
   auto &tensor_cpp_list = std::get<1>(retval);
   auto &contiguous_data_and_scale = std::get<2>(retval);
-  auto &buffer_list = std::get<3>(retval);  // Buffers for offload
   contiguous_data_and_scale = true;
 
   // Number of tensors
@@ -602,7 +591,6 @@ bulk_allocate_nvfp4_tensors(std::vector<std::vector<size_t>> &shape_list,
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
         at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -665,7 +653,6 @@ bulk_allocate_nvfp4_tensors(std::vector<std::vector<size_t>> &shape_list,
     // Allocate full buffer
     auto buffer = std::make_shared<at::Tensor>(
         at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    buffer_list.push_back(*buffer);  // Save buffer for offload
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -1112,9 +1099,10 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 
 }  // namespace
 
-std::tuple<std::vector<py::object>, std::vector<at::Tensor>> split_quantize(
-    const at::Tensor &tensor, const std::vector<size_t> &split_sections,
-    std::vector<py::handle> quantizer_list, bool disable_bulk_allocation) {
+std::vector<py::object> split_quantize(const at::Tensor &tensor,
+                                       const std::vector<size_t> &split_sections,
+                                       std::vector<py::handle> quantizer_list,
+                                       bool disable_bulk_allocation) {
   init_extension();
 
   // Check number of tensors
@@ -1122,7 +1110,7 @@ std::tuple<std::vector<py::object>, std::vector<at::Tensor>> split_quantize(
   NVTE_CHECK(quantizer_list.size() == num_splits, "Expected ", num_splits, " quantizers, but got ",
              quantizer_list.size());
   if (num_splits == 0) {
-    return {{}, {}};
+    return {};
   }
 
   // Input tensor properties
@@ -1189,7 +1177,6 @@ std::tuple<std::vector<py::object>, std::vector<at::Tensor>> split_quantize(
   // Allocate output tensors
   std::vector<TensorWrapper> output_cpp_list;
   std::vector<py::object> output_py_list;
-  std::vector<at::Tensor> buffer_list;  // Buffers for offload (can be used for record_stream)
   switch (allocation_method) {
     case AllocationMethod::BULK_FP8_BLOCKWISE: {
       // Bulk allocation for FP8 block-scaling tensors
@@ -1197,7 +1184,7 @@ std::tuple<std::vector<py::object>, std::vector<at::Tensor>> split_quantize(
       for (auto &quantizer : quantizer_cpp_list) {
         blockwise_quantizers.push_back(static_cast<Float8BlockQuantizer *>(quantizer.get()));
       }
-      std::tie(output_py_list, output_cpp_list, buffer_list) =
+      std::tie(output_py_list, output_cpp_list) =
           bulk_allocate_fp8_blockwise_tensors(split_shapes, quantizer_list, blockwise_quantizers);
       break;
     }
@@ -1207,7 +1194,7 @@ std::tuple<std::vector<py::object>, std::vector<at::Tensor>> split_quantize(
       for (auto &quantizer : quantizer_cpp_list) {
         mxfp8_quantizers.push_back(static_cast<MXFP8Quantizer *>(quantizer.get()));
       }
-      std::tie(output_py_list, output_cpp_list, buffer_list) =
+      std::tie(output_py_list, output_cpp_list) =
           bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
       break;
     }
@@ -1218,7 +1205,7 @@ std::tuple<std::vector<py::object>, std::vector<at::Tensor>> split_quantize(
         nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
       }
       bool contiguous_data_and_scale;
-      std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale, buffer_list) =
+      std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
       if (!contiguous_data_and_scale) {
         // Avoid fused quantize kernel if data is not contiguous
@@ -1255,7 +1242,7 @@ std::tuple<std::vector<py::object>, std::vector<at::Tensor>> split_quantize(
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
   }
 
-  return {output_py_list, buffer_list};
+  return output_py_list;
 }
 
 }  // namespace pytorch

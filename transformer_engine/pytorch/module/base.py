@@ -1508,13 +1508,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         return self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
 
-    def trigger_backward_dw(self):
-        """
-        Trigger the wgrad accumulation and reduce hooks.
-        """
-        for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-            wgrad_accumulation_and_reduce_hook()
-
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.

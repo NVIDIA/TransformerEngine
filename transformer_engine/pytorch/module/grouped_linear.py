@@ -49,8 +49,6 @@ from ..quantized_tensor import (
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
-    get_columnwise_subview_info,
-    restore_columnwise_subviews,
 )
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
@@ -144,24 +142,16 @@ class _GroupedLinear(torch.autograd.Function):
             )
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
-        offload_buffer: torch.Tensor = None
-        subview_restore_info: list = []
         if fp8 and not debug:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
             # tensors (like scales), but bulk allocation shares storage across all tensors,
             # so if scales can't be offloaded, nothing in the group can be offloaded.
-            inputmats, buffer_list = tex.split_quantize(inp_view, m_splits, input_quantizers)
-            if cpu_offloading:
-                # Mark inputmats as not offload - we offload the buffer instead
-                mark_not_offload(*inputmats)
-                # buffer_list layout: [rowwise_buffer?, columnwise_buffer?]
-                # columnwise buffer is always last if present; we only offload it
-                # since rowwise data is discarded when weight_requires_grad is True
-                if buffer_list and input_quantizers[0].columnwise_usage:
-                    offload_buffer = buffer_list[-1]
-                # Get subview boundary info for restoration in backward
-                if offload_buffer is not None:
-                    subview_restore_info = get_columnwise_subview_info(inputmats, offload_buffer)
+            inputmats = tex.split_quantize(
+                inp_view,
+                m_splits,
+                input_quantizers,
+                disable_bulk_allocation=cpu_offloading,
+            )
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
@@ -170,12 +160,7 @@ class _GroupedLinear(torch.autograd.Function):
             inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
 
         if cpu_offloading:
-            if offload_buffer is not None:
-                # Offload the buffer instead of individual tensors
-                # (rowwise data is discarded when weight_requires_grad is True)
-                start_offload(offload_buffer)
-            else:
-                start_offload(*inputmats)
+            start_offload(*inputmats)
 
         # Initialize weights
         weights_fp8: list
@@ -250,15 +235,10 @@ class _GroupedLinear(torch.autograd.Function):
                 if save_original_input:
                     inputmats = [None] * num_gemms
                     inputmats[0] = inp
-                    offload_buffer = None
-                    subview_restore_info = []
                 else:
                     for inputmat in inputmats:
                         if isinstance(inputmat, QuantizedTensorStorage):
-                            if cpu_offloading and offload_buffer is not None:
-                                inputmat.update_usage(rowwise_usage=False, columnwise_usage=False)
-                            else:
-                                inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+                            inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
             else:
                 inputmats = [None] * num_gemms
 
@@ -280,7 +260,6 @@ class _GroupedLinear(torch.autograd.Function):
                 *weights_fp8,
                 *weights,
                 *biases,
-                offload_buffer,
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -327,7 +306,6 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.debug = debug
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
-            ctx.subview_restore_info = subview_restore_info
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -342,12 +320,7 @@ class _GroupedLinear(torch.autograd.Function):
             weights = saved_tensors[N : 2 * N]
             origin_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
-            offload_buffer = saved_tensors[4 * N] if len(saved_tensors) > 4 * N else None
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
-
-            # Restore subviews from reloaded buffer
-            if ctx.cpu_offloading and ctx.subview_restore_info and offload_buffer is not None:
-                restore_columnwise_subviews(inputmats, offload_buffer, ctx.subview_restore_info)
 
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
@@ -378,14 +351,14 @@ class _GroupedLinear(torch.autograd.Function):
                         # Unfused bias grad and multi-tensor quantize
                         for i in range(ctx.num_gemms):
                             grad_biases[i] = grad_output_mats[i].sum(dim=0)
-                        grad_output, _ = tex.split_quantize(
+                        grad_output = tex.split_quantize(
                             grad_output_view,
                             ctx.m_splits,
                             ctx.grad_output_quantizers,
                         )
                 else:
                     # Multi-tensor quantize
-                    grad_output, _ = tex.split_quantize(
+                    grad_output = tex.split_quantize(
                         grad_output_view,
                         ctx.m_splits,
                         ctx.grad_output_quantizers,
@@ -473,9 +446,7 @@ class _GroupedLinear(torch.autograd.Function):
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
                     if ctx.fp8 and not ctx.debug:
-                        inputmats, _ = tex.split_quantize(
-                            inp_view, ctx.m_splits, ctx.input_quantizers
-                        )
+                        inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view, ctx.input_quantizers, ctx.m_splits, ctx.activation_dtype
