@@ -293,7 +293,8 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Configure quantizer
             # If weight is already quantized, no need to set quantizer states
-            if is_weight_param_quantized:
+            # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
+            if is_weight_param_quantized and not debug:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)

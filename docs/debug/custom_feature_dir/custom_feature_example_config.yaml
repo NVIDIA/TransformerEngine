@@ -1,0 +1,15 @@
+stats:
+  enabled: True
+  layers:
+    layer_name_regex_pattern: .*
+  transformer_engine:
+    PercentageGreaterThanThreshold:
+      enabled: True
+      tensors: [activation]
+      threshold: 0.1
+      freq: 5
+    LogTensorStats:
+      enabled: True
+      tensors: [activation]
+      stats: [min]
+      freq: 5

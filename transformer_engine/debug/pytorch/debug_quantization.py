@@ -267,7 +267,7 @@ class DebugQuantizer(Quantizer):
             "rowwise_quantized_tensor": rowwise_gemm_tensor,
             "quantizer": self.parent_quantizer,
         }
-        if tensor is not None and self.inspect_tensor_enabled:
+        if self.inspect_tensor_enabled:
             debug_api.transformer_engine.inspect_tensor(**args)
 
         if self.output_tensor:
@@ -558,6 +558,30 @@ class DebugQuantizer(Quantizer):
         super().set_usage(rowwise=rowwise, columnwise=columnwise)
         if not self.output_tensor:
             self._update_parent_quantizer_usage()
+
+    def wrap_quantized_tensor(self, tensor: QuantizedTensor):
+        """
+        Wraps the quantized tensor with the debug quantizer.
+        It is used for weight tensors when fp8 model parameters are enabled.
+        """
+
+        assert (
+            self.rowwise_tensor_plan == STANDARD_QUANTIZE
+            and self.columnwise_tensor_plan == STANDARD_QUANTIZE
+        ), (
+            "[NVTORCH INSPECT ERROR] Weight tensor with fp8 model parameters enabled cannot be"
+            " modified by any feature."
+        )
+
+        self._call_inspect_tensor_api(None, tensor, tensor)
+
+        return DebugQuantizedTensor(
+            rowwise_gemm_tensor=tensor,
+            columnwise_gemm_tensor=tensor,
+            quantizer=self,
+            layer_name=self.layer_name,
+            tensor_name=self.tensor_name,
+        )
 
     @classmethod
     def multi_tensor_quantize(

@@ -140,19 +140,24 @@ class FusedAdam(torch.optim.Optimizer):
         if exp_avg_sq_dtype not in [torch.float32, torch.float16, torch.bfloat16, torch.uint8]:
             raise RuntimeError("FusedAdam only supports fp32/fp16/bf16/fp8 exp_avg_sq.")
 
-        # Currently, capturable mode only supports fp32 master weights and optimizer states.
-        # The reason is, if the master weights or optimizer states are not in fp32 dtype,
-        # they will be copied to temporary fp32 buffers first. These fp32 buffers are then
-        # used as inputs for the kernel. Consequently, the pointer for earch `.step()` differs,
-        # making CUDA Graph inapplicable in this scenario.
+        # Capturable mode requires fp32 master weights, and optimizer states (exp_avg/exp_avg_sq)
+        # must both be fp32 or both be bf16. This is because master weights in non-fp32 dtypes
+        # or optimizer states in non-fp32/bf16 dtypes require copying to temporary fp32 buffers
+        # before kernel execution, causing different pointers on each `.step()` call and making
+        # CUDA Graph inapplicable.
         if capturable and master_weights and master_weight_dtype != torch.float32:
             raise RuntimeError("Capturable mode only supports fp32 master weights.")
-        if capturable and exp_avg_dtype != torch.float32:
-            raise RuntimeError("Capturable mode only supports fp32 exp_avg.")
-        if capturable and exp_avg_sq_dtype != torch.float32:
-            raise RuntimeError("Capturable mode only supports fp32 exp_avg_sq")
-        if capturable and store_param_remainders:
-            raise RuntimeError("Capturable mode doesn't support storing param remainders")
+        if capturable:
+            valid_moment_dtypes = (
+                exp_avg_dtype == exp_avg_sq_dtype == torch.float32
+                or exp_avg_dtype == exp_avg_sq_dtype == torch.bfloat16
+            )
+            if not valid_moment_dtypes:
+                raise RuntimeError(
+                    "Capturable mode requires exp_avg_dtype and exp_avg_sq_dtype to be "
+                    "both torch.float32 or both torch.bfloat16, but got "
+                    f"exp_avg_dtype={exp_avg_dtype} and exp_avg_sq_dtype={exp_avg_sq_dtype}."
+                )
 
         # If the optimizer is capturable then LR should be a tensor (on GPU)
         lr = torch.tensor(lr, dtype=torch.float32) if capturable else lr
@@ -207,6 +212,11 @@ class FusedAdam(torch.optim.Optimizer):
         self.store_param_remainders = (
             store_param_remainders and master_weights and master_weight_dtype == torch.float32
         )
+        if self.capturable and self.store_param_remainders:
+            raise RuntimeError("Capturable mode doesn't support storing param remainders")
+        # If the exp_avg and exp_avg_sq dtypes are bfloat16, we can fuse the unscaling/scaling
+        # operations into the fused Adam kernel.
+        self.fuse_unscale = self.exp_avg_dtype == self.exp_avg_sq_dtype == torch.bfloat16
 
         # Deprecated options
         self.set_grad_none = set_grad_none
@@ -268,10 +278,9 @@ class FusedAdam(torch.optim.Optimizer):
         dtype = self.name_to_dtype_map[state_name]
         if dtype == torch.uint8:
             assert isinstance(scaled_state, Float8Tensor)
-            assert len(scaled_state._quantizer.scale) == 1, (
-                "Only scaling with one scaling factor                per tensor is supported by the"
-                " FusedAdam."
-            )
+            assert (
+                len(scaled_state._quantizer.scale) == 1
+            ), "Only scaling with one scaling factor per tensor is supported by the FusedAdam."
         else:
             assert scaled_state.dtype == dtype
 
@@ -293,13 +302,22 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled_state.mul_(rscale)
             scaled_state.copy_(unscaled_state)
 
-    def get_unscaled_state(self, param, state_name):
+    def get_unscaled_state(
+        self, param: torch.nn.Parameter, state_name: str, skip_unscale: bool = False
+    ) -> torch.Tensor:
         """Return the unscaled state corresponding to the input `param` and `state_name`.
 
         Arguments:
             param (torch.nn.Parameter): One of parameters in this optimizer.
             state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
                 and 'master_param`.
+            skip_unscale (optional, bool): Whether to skip the unscaling operation.
+                Should only be True if 'self.fuse_unscale' is True. Default is False.
+
+        Returns:
+            torch.Tensor: The unscaled state. Note that if the state is in BF16, the returned
+            tensor is still in BF16 because it doesn't require to be "unscaled", otherwise it
+            will be unscaled to FP32.
         """
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
@@ -321,7 +339,10 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled = state[state_name]
         elif dtype == torch.bfloat16:
             assert state[state_name].dtype == torch.bfloat16
-            unscaled = state[state_name].float()
+            if skip_unscale:
+                unscaled = state[state_name]
+            else:
+                unscaled = state[state_name].float()
         else:
             raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/bf16/fp32.")
         return unscaled
@@ -565,7 +586,9 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_state[name] = self.state[p][name]
                             assert unscaled_state[name].dtype == torch.int16
                         else:
-                            unscaled = self.get_unscaled_state(p, name)
+                            unscaled = self.get_unscaled_state(
+                                p, name, skip_unscale=self.fuse_unscale
+                            )
                             unscaled_state[name] = unscaled
                         if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
@@ -748,6 +771,10 @@ class FusedAdam(torch.optim.Optimizer):
 
             # Scaling
             for name in ["exp_avg", "exp_avg_sq", "master_param"]:
+                if self.fuse_unscale and name in ["exp_avg", "exp_avg_sq"]:
+                    # When fused_unscale is True, the scaling is fused into the Adam kernel.
+                    # The momentums are updated inplace, so we don't need to scale here.
+                    continue
                 if len(unscaled_lists[name]) > 0:
                     for unscaled, scaled, scale in zip(
                         unscaled_lists[name], scaled_lists[name], state_scales[name]

@@ -90,12 +90,19 @@ class _Buffer:
         if self.modified[0] and not self.reduce_within_microbatch:
             return
 
-        if (
-            tensor.numel() == 0
-            if hasattr(tensor, "numel")
-            else all((t is None or t.numel() == 0) for t in tensor.get_data_tensors())
-        ):
-            return
+        if tensor is not None:
+            # tensor can be None if we compute fp8 stats for weight and fp8 model parameters are used
+            # then high precision is not provided and quantized tensor from aux_dict is used.
+
+            # This condition prevents computation of stats for empty tensor.
+            # This will not happen for weight - since it is the only situation then tensor can be None,
+            # we do not need to check similar condition for weight.
+            if (
+                tensor.numel() == 0
+                if hasattr(tensor, "numel")
+                else all((t is None or t.numel() == 0) for t in tensor.get_data_tensors())
+            ):
+                return
 
         # save stats for tensor to tmp buffer
         for stat_name in self.stats_to_compute:

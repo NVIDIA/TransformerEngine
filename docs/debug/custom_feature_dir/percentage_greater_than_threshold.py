@@ -1,0 +1,78 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+"""PercentageGreaterThanThreshold Feature support for nvidia-dlframework-inspect"""
+
+from typing import Dict, Optional
+
+import torch
+
+from nvdlfw_inspect.registry import Registry, api_method
+from nvdlfw_inspect.logging import MetricLogger
+import nvdlfw_inspect.api as debug_api
+
+from transformer_engine.debug.features.api import TEConfigAPIMapper
+from transformer_engine.pytorch.tensor import QuantizedTensor, Quantizer
+
+
+# Class should inherit from TEConfigAPIMapper and be registered to the transformer_engine namespace.
+@Registry.register_feature(namespace="transformer_engine")
+class PercentageGreaterThanThreshold(TEConfigAPIMapper):
+
+    @api_method
+    def inspect_tensor(
+        self,
+        config: Dict,
+        layer_name: str,
+        tensor_name: str,
+        iteration: int,
+        tp_group: torch.distributed.ProcessGroup,
+        tensor: torch.Tensor,
+        rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
+        columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
+        quantizer: Optional[Quantizer] = None,
+    ):
+        # API call inspect_tensor is used to gather the data about the tensor.
+        # All API calls are documented in the `Precision debug tools / API / Calls to Nvidia-DL-Framework-Inspect`
+        # section of the documentation.
+
+        threshold = config["threshold"]
+
+        # Get the reduction group from the debug tool
+        # one can set it using debug_api.set_tensor_reduction_group(group)
+        reduction_group = debug_api.get_tensor_reduction_group()
+
+        # Compute percentage on local tensor
+        count = (torch.abs(tensor) > threshold).sum().float()
+        total = torch.tensor(tensor.numel(), dtype=torch.float32, device=tensor.device)
+
+        # Perform reduction across the group if needed.
+        # Note that we perform all_reduce twice per every tensor, which is suboptimal.
+        # For guidance on implementing efficient statistics reduction, see the implementation in the `LogTensorStats` feature.
+        # In this tutorial we only showcase basic implementation of the feature.
+        if reduction_group is not None:
+            torch.distributed.all_reduce(count, group=reduction_group)
+            torch.distributed.all_reduce(total, group=reduction_group)
+
+        percentage = count / total
+
+        # MetricLogger is a class from nvidia-dlframework-inspect.
+        # By using it we can also use functionalities provided by nvidia-dlframework-inspect,
+        # like logging to TensorBoard, etc.
+        MetricLogger.log_scalar(
+            f"{layer_name}_{tensor_name}_percentage_greater_than_threshold", percentage, iteration
+        )
+
+    @api_method
+    def inspect_tensor_enabled(
+        self, config: Dict, layer_name: str, tensor_name: str, iteration: int
+    ):
+        # This call is used by TE to determine if the unfused debug layer - which is slower - needs to be run.
+        # It returns a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled
+        # and bool indicates if the feature should be enabled at the current iteration.
+
+        run_current = iteration % config["freq"] == 0
+        # run in next multiple of freq
+        next_iter = iteration + (config["freq"] - iteration % config["freq"])
+        return run_current, next_iter
