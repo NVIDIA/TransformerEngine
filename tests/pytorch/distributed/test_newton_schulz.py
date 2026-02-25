@@ -41,7 +41,7 @@ def test_newton_schulz(dtype, matrix_size, num_iterations):
         or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
     ):
         raise AssertionError(
-            f"Newton-Schulz test failed.\n"
+            "Newton-Schulz test failed.\n"
             f"stdout: {result.stdout.decode()}\n"
             f"stderr: {result.stderr.decode()}"
         )

@@ -27,9 +27,7 @@ def _get_nccl_comm_ptr(group: dist.ProcessGroup) -> int:
     """Extract the raw NCCL communicator pointer from a PyTorch process group."""
     backend = dist.get_backend(group)
     if backend != "nccl":
-        raise RuntimeError(
-            f"newton_schulz requires NCCL backend, got '{backend}'"
-        )
+        raise RuntimeError(f"newton_schulz requires NCCL backend, got '{backend}'")
     nccl_backend = group._get_backend(torch.device("cuda"))
     return nccl_backend._comm_ptr()
 

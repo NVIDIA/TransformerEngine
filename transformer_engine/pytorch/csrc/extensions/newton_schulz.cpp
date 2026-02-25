@@ -32,8 +32,8 @@ void cusolvermp_ctx_destroy(int64_t ctx_ptr) {
 #endif
 }
 
-void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x,
-                   int64_t num_iterations, std::vector<float> coefficients) {
+void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t num_iterations,
+                   std::vector<float> coefficients) {
 #ifdef NVTE_WITH_CUSOLVERMP
   auto* ctx = reinterpret_cast<NVTECusolverMpCtx*>(ctx_ptr);
 

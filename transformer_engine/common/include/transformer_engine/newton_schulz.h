@@ -62,8 +62,8 @@ void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx);
  *                                  Used for event-based synchronisation with the internal stream.
  */
 void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor x,
-                        int64_t num_iterations, const float* coefficients,
-                        int64_t num_coefficients, cudaStream_t caller_stream);
+                        int64_t num_iterations, const float* coefficients, int64_t num_coefficients,
+                        cudaStream_t caller_stream);
 
 #ifdef __cplusplus
 }  // extern "C"
