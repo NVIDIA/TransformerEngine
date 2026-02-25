@@ -2082,6 +2082,30 @@ def grouped_gemm_copy_group_sizes(
     )
     return out
 
+def _can_use_cuda_graphable_grouped_gemm(
+    scaling_mode: ScalingMode,
+    dtype: jnp.dtype,
+    has_bias: bool,
+) -> bool:
+    """Determine whether the cuda-graphable grouped GEMM implementation can be used based on the input parameters.
+    
+    """
+    # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
+    # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
+    # feature-compatible with the main branch.
+    # Bias can be supported in a kernel or in pure-JAX in the future.
+
+    try:
+        get_grouped_gemm_setup_workspace_size(1)
+    except RuntimeError as e:
+        if "cublas" in str(e).lower():
+            # If the workspace size function is not available, it means the cuda-graphable implementation is not available.
+            return False
+        raise e
+
+    return (
+        scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
+    )
 
 def grouped_gemm(
     lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
@@ -2256,13 +2280,7 @@ def grouped_gemm(
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
-    # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
-    # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
-    # feature-compatible with the main branch.
-    # Bias can be supported in a kernel or in pure-JAX in the future.
-    use_cuda_graphable = (
-        scaling_mode == ScalingMode.NO_SCALING and lhs_data.dtype == jnp.bfloat16 and not has_bias
-    )
+    use_cuda_graphable = _can_use_cuda_graphable_grouped_gemm(scaling_mode, lhs_data.dtype, has_bias)
 
     if use_cuda_graphable:
         assert group_offset is None, (
