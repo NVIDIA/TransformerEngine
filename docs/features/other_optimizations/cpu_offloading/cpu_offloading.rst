@@ -38,12 +38,11 @@ between CPU and GPU, which limits offloading benefits.
 With **NVLink-C2C** (GB200), bandwidth jumps to **900 GB/s** bidirectional per link,
 making offloading increasingly attractive on modern NVIDIA superchips.
 The GB200 pairs a Grace CPU with 480 GB LPDDR5X memory and two Blackwell GPUs,
-each with 192 GB HBM3e (384 GB total). The two GPUs are interconnected via
-**NVLink** at **1.8 TB/s**, providing ample CPU memory for offloading activations.
+each with 192 GB HBM3e (384 GB total), providing ample CPU memory for offloading
+activations.
 
 Offloading/reloading consumes HBM bandwidth, which may compete with
-other GPU operations — even when transfers are asynchronous. At full speed, this takes
-up to **900 GB/s** out of **~8 TB/s** per-GPU HBM bandwidth on GB200.
+other GPU operations — even when transfers are asynchronous.
 This is unlikely to affect compute-bound operations like GEMMs, but the impact on
 memory-bound operations like quantization may be noticeable.
 
@@ -57,7 +56,7 @@ consumes the output of the previous one — which is the case for most LLM archi
 .. raw:: html
    :file: img/layer_sequence.svg
 
-*Figure 2. CPU offloading supports sequential layer pipelines (top), but not graphs with branching or merging (bottom). Note that inside the layer, arbtitrary control flow is allowed.*
+*Figure 2. CPU offloading supports sequential layer pipelines (top), but not graphs with branching or merging (bottom). Note that inside the layer, arbitrary control flow is allowed.*
 
 The example below shows how to offload activations for a sequence of ``torch.nn.Linear`` layers using the default scheduling algorithm:
 
@@ -121,9 +120,10 @@ For ``num_layers`` layers offloaded of ``model_layers`` layers:
 - At most ``(model_layers - num_layers)`` sets of activations are on GPU at any time;
   both compute and reload may be stalled to enforce this limit.
 - Reloading must complete by the time the tensor is needed for the layer's backward pass.
-- ``num_layers`` must be at most ``model_layers - 2``. Setting it to ``model_layers - 1``
-  leaves only 1 activation set on GPU at a time — compute and transfers cannot overlap,
-  and a warning is raised. Setting it equal to ``model_layers`` raises an assertion error.
+- ``num_layers`` must be at most ``model_layers - 1`` (setting it to ``model_layers``
+  raises an assertion error). However, ``model_layers - 1`` leaves only 1 activation set
+  on GPU at a time — compute and transfers cannot overlap, and a warning is raised.
+  For full overlap, use ``model_layers - 2`` or less.
 
 Specifying a low enough ``num_layers`` enables full overlap of computation
 and offload/reload. The following two scenarios illustrate this — one with full overlap, and one with stalls.
@@ -131,14 +131,14 @@ and offload/reload. The following two scenarios illustrate this — one with ful
 .. raw:: html
    :file: img/scheduling.svg
 
-*Figure 2. With* ``num_layers=2`` *and* ``model_layers=5`` *, at most 3 sets of activations are on GPU. Layer 1 offloading starts during its forward pass (when the first tensor is saved for backward). Offloading fully overlaps with forward, reloading fully overlaps with backward.*
+*Figure 3. With* ``num_layers=2`` *and* ``model_layers=5`` *, at most 3 sets of activations are on GPU. Layer 1 offloading starts during its forward pass (when the first tensor is saved for backward). Offloading fully overlaps with forward, reloading fully overlaps with backward.*
 
 When ``num_layers`` is too high, the GPU memory limit forces stalls:
 
 .. raw:: html
    :file: img/scheduling_stall.svg
 
-*Figure 3. With* ``num_layers=3`` *and* ``model_layers=5`` *, at most 2 sets of activations can be on GPU (5-3=2), which causes stalls. In forward, Layer 4 cannot start until Layer 2 is offloaded, otherwise there would be 3 sets of activations on GPU (Layers 2, 3, 4). In backward, Layer 3 cannot start immediately — its activations are still on CPU and must be reloaded first. Some tensors may finish reloading earlier, allowing parts of the layer (e.g., a sublayer) to run while the rest waits. The same applies to Layers 2 and 1.*
+*Figure 4. With* ``num_layers=3`` *and* ``model_layers=5`` *, at most 2 sets of activations can be on GPU (5-3=2), which causes stalls. In forward, Layer 4 cannot start until Layer 2 is offloaded, otherwise there would be 3 sets of activations on GPU (Layers 2, 3, 4). In backward, Layer 3 cannot start immediately — its activations are still on CPU and must be reloaded first. Some tensors may finish reloading earlier, allowing parts of the layer (e.g., a sublayer) to run while the rest waits. The same applies to Layers 2 and 1.*
 
 
 Manual Synchronization

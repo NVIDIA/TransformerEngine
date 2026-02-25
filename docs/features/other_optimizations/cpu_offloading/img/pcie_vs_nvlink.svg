@@ -72,7 +72,7 @@
   <text x="650" y="45" class="small-text" fill="#38a169">NVIDIA Grace Blackwell</text>
 
   <!-- Superchip Boundary -->
-  <rect x="395" y="55" width="510" height="180" class="superchip-box"/>
+  <rect x="395" y="55" width="470" height="180" class="superchip-box"/>
 
   <!-- Blackwell GPU 1 Frame -->
   <rect x="410" y="70" width="110" height="140" class="frame-box"/>
