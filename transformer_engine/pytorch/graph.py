@@ -856,6 +856,13 @@ def _make_graphed_callables(
 
                 skip_fp8_weight_update = not user_kwargs["is_first_microbatch"]
 
+            # The cuda_graph_stream and cuda_graph_event are used in the TE CUDA graph replay.
+            # When replaying the graph in the cuda graph stream, the graph replay could overlap
+            # with the work on main stream.
+            # When cuda_graph_event is given, it should be an external event recorded
+            # in the cuda graph and is used to sync-back to the main stream.
+            # If cuda_graph_event is not given, it will be None and the graph replay will block
+            # the main stream until it is finished.
             if "cuda_graph_stream" in user_kwargs:
                 cuda_graph_stream = user_kwargs["cuda_graph_stream"]
                 user_kwargs.pop("cuda_graph_stream")
@@ -895,9 +902,6 @@ def _make_graphed_callables(
         def backward_dw():
             if need_bwd_dw_graph.get(graph_idx, False):
                 bwd_dw_graphs[graph_idx].replay()
-                for module in te_modules:
-                    if hasattr(module, "trigger_backward_dw"):
-                        module.trigger_backward_dw()
 
         # Attach reset as an attribute to the graphed callable.
         def reset():
@@ -982,7 +986,7 @@ def _make_graphed_callables(
         else:
             ret.append(graphed)
 
-        backward_dw_func, reset_func = make_graphed_attribute_functions(i, te_modules)
+        backward_dw_func, reset_func = make_graphed_attribute_functions(i)
         setattr(ret[-1], "backward_dw", backward_dw_func)
         setattr(ret[-1], "reset", reset_func)
 
