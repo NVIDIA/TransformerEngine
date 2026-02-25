@@ -97,9 +97,9 @@ def test_custom_recipe_sanity(module_type):
 
     # Single factory: map roles to quantizers
     def quantizer_factory(role):
-        if role.tensor_type in ("input", "weight", "output"):
+        if role is None:
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role.tensor_type in ("grad_output", "grad_input"):
+        if role.tensor_type in ("grad_output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -134,9 +134,9 @@ def test_custom_recipe_grouped_linear_sanity():
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     def quantizer_factory(role):
-        if role.tensor_type in ("input", "weight", "output"):
+        if role is None:
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role.tensor_type in ("grad_output", "grad_input"):
+        if role.tensor_type in ("grad_output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -196,9 +196,9 @@ def test_custom_recipe_matches_current_scaling():
 
     # Custom: single factory returning quantizers per role to match Float8CurrentScaling
     def quantizer_factory(role):
-        if role.tensor_type in ("input", "weight", "output"):
+        if role is None:
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role.tensor_type in ("grad_output", "grad_input"):
+        if role.tensor_type in ("grad_output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -206,7 +206,12 @@ def test_custom_recipe_matches_current_scaling():
 
     with autocast(enabled=True, recipe=custom_recipe):
         out_custom = model_custom(inp_custom)
-    # Assert dtypes for custom quantizers match reference mapping
+    # Assert dtypes for custom quantizers match reference mapping.
+    # The output (fwd) and grad_input (bwd) slots receive role=None
+    # (unknown consumer) and get E4M3 from our factory.  The reference
+    # recipe uses E4M3 for fwd output and E5M2 for bwd grad_input,
+    # but these quantizers are typically unused so the mismatch doesn't
+    # affect GEMM results.
     cus_fwd_in = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
     cus_fwd_w = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
     cus_fwd_out = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
@@ -216,7 +221,7 @@ def test_custom_recipe_matches_current_scaling():
     assert cus_fwd_w.dtype == tex.DType.kFloat8E4M3
     assert cus_fwd_out.dtype == tex.DType.kFloat8E4M3
     assert cus_bwd_go.dtype == tex.DType.kFloat8E5M2
-    assert cus_bwd_gi.dtype == tex.DType.kFloat8E5M2
+    assert cus_bwd_gi.dtype == tex.DType.kFloat8E4M3  # role=None fallback
 
     loss_custom = (out_custom.float() * scale.view(1, -1)).sum()
     loss_custom.backward()
@@ -253,9 +258,9 @@ def test_custom_recipe_ops_linear_2_1_layout():
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     def quantizer_factory(role):
-        if role.tensor_type in ("input", "weight", "output"):
+        if role is None:
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role.tensor_type in ("grad_output", "grad_input"):
+        if role.tensor_type in ("grad_output"):
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -283,41 +288,46 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     op = Linear(in_features, out_features, params_dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
-    # Counters per tensor_type
+    # Counters per tensor_type.  The output (fwd) and grad_input (bwd)
+    # slots have role=None by default (unknown consumer), so we count
+    # those separately.
     counts = {
         "input": 0,
         "weight": 0,
-        "output": 0,
         "grad_output": 0,
-        "grad_input": 0,
+        None: 0,
     }
 
     def quantizer_factory(role):
+        if role is None:
+            counts[None] += 1
+            return Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device=torch.device("cuda")
+            )
         assert isinstance(role, QuantizerRole), f"Expected QuantizerRole, got {type(role)}"
         assert role.module_type == "linear"
         if role.tensor_type in counts:
             counts[role.tensor_type] += 1
-        if role.tensor_type in ("input", "weight", "output"):
-            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
-        if role.tensor_type in ("grad_output", "grad_input"):
-            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device=torch.device("cuda"))
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
+        if role.tensor_type == "grad_output":
+            return Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device=torch.device("cuda")
+            )
+        return Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3, device=torch.device("cuda")
+        )
 
     custom = recipe.CustomRecipe(qfactory=quantizer_factory)
 
-    # Run fwd+bwd once; for a single GEMM, expect forward to build 3 quantizers (cycled from 1 factory),
-    # and backward to build 2 quantizers (cycled from 1 factory).
     with autocast(enabled=True, recipe=custom):
         out = op(inp)
     loss = out.float().sum()
     loss.backward()
 
-    # Single GEMM: forward should request input, weight, output; backward grad_output, grad_input
+    # Forward: input, weight, output(None); backward: grad_output, grad_input(None)
     assert counts["input"] == 1
     assert counts["weight"] == 1
-    assert counts["output"] == 1
     assert counts["grad_output"] == 1
-    assert counts["grad_input"] == 1
+    assert counts[None] == 2, f"Expected 2 None roles (output + grad_input), got {counts[None]}"
 
 
 def test_factories_return_distinct_instances_and_buffers():
