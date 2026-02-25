@@ -168,6 +168,7 @@ list(APPEND transformer_engine_cuda_sources
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
+     activation/glu.cu
      activation/relu.cu
      activation/swiglu.cu
      cast/cast.cu
@@ -286,20 +287,18 @@ endif()
 option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
-    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${NVSHMEM_DIR}/include)
+    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp
                  PATHS ${CUBLASMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
-    find_library(NVSHMEM_HOST_LIB
-                 NAMES nvshmem_host libnvshmem_host.so.3
-                 PATHS ${NVSHMEM_DIR}
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-  target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${NVSHMEM_HOST_LIB})
+  target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
   message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
-  message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
 endif()
 
 # Hack to enable dynamic loading in cuDNN frontend
@@ -354,6 +353,7 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/glu.cu
                                           activation/relu.cu
                                           activation/swiglu.cu)
 endif()

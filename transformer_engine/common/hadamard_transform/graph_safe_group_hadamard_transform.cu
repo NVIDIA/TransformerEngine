@@ -340,8 +340,6 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
                           is_master_thread);
       }
 
-      ptx::fence_proxy_async_shared_cta();
-
       // Wait for the data to have arrived
       ptx::mbarrier_wait_parity(&mbar[stage], 0);
 
@@ -373,6 +371,9 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
         // memory.
         __syncthreads();
       }
+
+      // Ensure generic shared-memory accesses are visible before the next TMA write.
+      ptx::fence_proxy_async_shared_cta();
     }
   }
 

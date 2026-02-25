@@ -6,6 +6,7 @@
 from typing import Union, Optional, Callable, Tuple, List
 from itertools import chain
 import warnings
+import os
 
 import functools
 import torch
@@ -122,8 +123,9 @@ class _GroupedLinear(torch.autograd.Function):
                     and not in_fp8_activation_recompute_phase()
                 )
             # No need to set the quantizer states if weight is already quantized
-            if weight_quantizers[0] is not None and not isinstance(
-                weights[0], QuantizedTensorStorage
+            # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
+            if weight_quantizers[0] is not None and (
+                not isinstance(weights[0], QuantizedTensorStorage) or debug
             ):
                 for weight_quantizer in weight_quantizers:
                     weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
@@ -793,7 +795,9 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
-        self.make_grouped_weights(defer_init=defer_init)
+        # Grouped tensor weights is an opt-in feature.
+        if bool(int(os.getenv("NVTE_ALLOC_CONTIGUOUS_GROUPED_LINEAR_WEIGHTS", "0"))):
+            self.make_grouped_weights(defer_init=defer_init)
 
     def set_tensor_parallel_attributes(self, defer_init=False) -> None:
         """Set attributes needed for TP"""
@@ -870,9 +874,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 if self.no_debug_features_active(list(chain(*quantizers))):
                     debug = False
                     quantizers = self._get_quantizers()
-
-                if isinstance(weight_tensors, QuantizedTensorStorage):
-                    raise RuntimeError("FP8 weights are not supported in debug mode.")
 
             (
                 input_quantizers,
