@@ -30,41 +30,65 @@ behind computation.
 .. raw:: html
    :file: img/pcie_vs_nvlink.svg
 
-*Figure 1. Traditional PCIe system vs GH200 Superchip with NVLink-C2C.*
+*Figure 1. Traditional PCIe system vs GB200 Superchip with NVLink-C2C.*
 
 Traditional **PCIe Gen5 x16** systems offer **128 GB/s** bidirectional bandwidth
 between CPU and GPU, which limits offloading benefits.
 
-With **NVLink-C2C** (GH200), bandwidth jumps to **900 GB/s** bidirectional,
+With **NVLink-C2C** (GB200), bandwidth jumps to **900 GB/s** bidirectional per link,
 making offloading increasingly attractive on modern NVIDIA superchips.
-The GH200 pairs a Grace CPU with 512 GB LPDDR5X memory and a Hopper GPU
-with 96 GB or 141 GB HBM3e, providing ample CPU memory for offloading activations.
+The GB200 pairs a Grace CPU with 480 GB LPDDR5X memory and two Blackwell GPUs,
+each with 192 GB HBM3e (384 GB total). The two GPUs are interconnected via
+**NVLink** at **1.8 TB/s**, providing ample CPU memory for offloading activations.
 
 Offloading/reloading consumes HBM bandwidth, which may compete with
-computation — even when transfers are asynchronous. At full speed, this takes
-up to **900 GB/s** of HBM bandwidth. However, GH200's HBM3e provides **~4.9 TB/s**,
-so offloading/reloading uses less than 20%, making the impact on compute minimal.
+other GPU operations — even when transfers are asynchronous. At full speed, this takes
+up to **900 GB/s** out of **~8 TB/s** per-GPU HBM bandwidth on GB200.
+This is unlikely to affect compute-bound operations like GEMMs, but the impact on
+memory-bound operations like quantization may be noticeable.
+
 
 CPU Offloading in Transformer Engine
 ------------------------------------
 
-Transformer Engine supports CPU offloading of activations for sequences of layers, where each layer
-consumes the output of the previous one — which is the case for most LLM architectures.
-These layers may be any PyTorch modules and not just TE layers.
-Here is an example usage of the API:
+Transformer Engine supports CPU offloading of activations for **sequential models**. By sequential, we mean that the model is a sequence of layers, where each layer
+consumes the output of the previous one — which is the case for most LLM architectures. These layers may be any PyTorch modules and not just TE layers.
 
-.. code-block:: python
+.. raw:: html
+   :file: img/layer_sequence.svg
 
-    def get_cpu_offload_context(
-        enabled: bool = False,
-        num_layers: Optional[int] = 1,
-        model_layers: int = 1,
-        manual_synchronization: bool = False,
-        retain_pinned_cpu_buffers: bool = False,
-        offload_stream: Optional[torch.cuda.Stream] = None,
-        # ... (legacy parameters omitted, see API reference)
-    ) -> Union[Tuple[ContextManager, Callable], Tuple[ContextManager, Callable, ManualOffloadSynchronizer]]:
-        ...
+*Figure 2. CPU offloading supports sequential layer pipelines (top), but not graphs with branching or merging (bottom). Note that inside the layer, arbtitrary control flow is allowed.*
+
+The example below shows how to offload activations for a sequence of ``torch.nn.Linear`` layers using the default scheduling algorithm:
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      .. literalinclude:: pytorch_basic_offload_example.py
+         :language: python
+         :start-after: # START_BASIC_EXAMPLE
+         :end-before: # END_BASIC_EXAMPLE
+
+
+
+Let's take a look at the API in detail:
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      .. code-block:: python
+
+          def get_cpu_offload_context(
+              enabled: bool = False,
+              num_layers: Optional[int] = 1,
+              model_layers: int = 1,
+              manual_synchronization: bool = False,
+              offload_stream: Optional[torch.cuda.Stream] = None,
+              # ... (legacy parameters omitted, see API reference)
+          ) -> Union[Tuple[ContextManager, Callable], Tuple[ContextManager, Callable, ManualOffloadSynchronizer]]:
+              ...
 
 The ``model_layers`` parameter must always be set to the total number of layers in the model.
 There are two modes of operation:
@@ -79,17 +103,6 @@ The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns:
 
 - **context manager** — wrap each layer's forward pass with it to enable activation capture.
 - **sync function** — call on the output tensor after each layer, as shown in the example below.
-
-The example below shows how to offload activations for a sequence of ``torch.nn.Linear`` layers using the default scheduling algorithm:
-
-.. tabs::
-
-   .. tab:: PyTorch
-
-      .. literalinclude:: pytorch_basic_offload_example.py
-         :language: python
-         :start-after: # START_BASIC_EXAMPLE
-         :end-before: # END_BASIC_EXAMPLE
 
 
 Default Offloading Scheduling
@@ -182,14 +195,10 @@ pinned CPU memory (via PCIe DMA, without CPU involvement).
 
 .. note::
 
-   The entire forward and backward pass must be captured in a single graph.
-   Per-layer graph capture is not supported due to cross-layer synchronization.
-
-.. note::
-
-   Allocating pinned CPU memory is currently not graphable. Use
-   ``retain_pinned_cpu_buffers=True`` and run a warm-up iteration before
-   capture to pre-allocate buffers that are reused during replay.
+   We recommend capturing the entire forward and backward pass in a single graph.
+   Async copy operations (offload/reload) must complete within the same graph where
+   they started. If the graph ends before copies finish, PyTorch will block waiting
+   for them, defeating the purpose of graph capture.
 
 .. tabs::
 
@@ -217,6 +226,13 @@ Caveats
    even after being copied to CPU (e.g., if the layer stores references in ``ctx``),
    resulting in wasted bandwidth with no memory savings.
 
+   To exclude specific tensors from offloading, use :func:`mark_not_offload`:
+
+   .. code-block:: python
+
+      from transformer_engine.pytorch import mark_not_offload
+      mark_not_offload(tensor)
+
 .. warning::
 
    **Memory layout changes**:
@@ -232,3 +248,5 @@ Caveats
    Issue (2) is not mitigated — custom kernels that assume adjacent tensors share
    contiguous memory may still fail.
 
+   If you encounter layout-related issues, use :func:`mark_not_offload` to exclude
+   problematic tensors from offloading.

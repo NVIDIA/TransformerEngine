@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 240" width="100%" style="max-width: 900px;">
+  <defs>
+    <style>
+      .layer-box { fill: #f8f9fa; stroke: #aaa; stroke-width: 1.5; rx: 6; }
+      .layer-text { font: bold 13px sans-serif; fill: #333; text-anchor: middle; }
+      .title { font: bold 14px sans-serif; fill: #555; text-anchor: middle; }
+      .divider { stroke: #ccc; stroke-width: 1; stroke-dasharray: 6,4; }
+      .conn { stroke: #888; stroke-width: 1.5; fill: none; marker-end: url(#arr); }
+    </style>
+    <marker id="arr" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#888"/>
+    </marker>
+  </defs>
+
+  <!-- ===== TOP: Sequential (supported) ===== -->
+  <text x="410" y="22" class="title">Sequential (supported)</text>
+
+  <!-- Layer 1 -->
+  <rect x="140" y="40" width="110" height="40" class="layer-box"/>
+  <text x="195" y="65" class="layer-text">Layer 1</text>
+
+  <path d="M250,60 L280,60" class="conn"/>
+
+  <!-- Layer 2 -->
+  <rect x="285" y="40" width="110" height="40" class="layer-box"/>
+  <text x="340" y="65" class="layer-text">Layer 2</text>
+
+  <path d="M395,60 L425,60" class="conn"/>
+
+  <!-- Layer 3 -->
+  <rect x="430" y="40" width="110" height="40" class="layer-box"/>
+  <text x="485" y="65" class="layer-text">Layer 3</text>
+
+  <path d="M540,60 L570,60" class="conn"/>
+
+  <!-- Dots -->
+  <text x="590" y="65" class="layer-text">···</text>
+
+  <path d="M610,60 L640,60" class="conn"/>
+
+  <!-- Layer N -->
+  <rect x="645" y="40" width="110" height="40" class="layer-box"/>
+  <text x="700" y="65" class="layer-text">Layer N</text>
+
+  <!-- Divider -->
+  <line x1="140" y1="105" x2="810" y2="105" class="divider"/>
+
+  <!-- ===== BOTTOM: Non-sequential (not supported) ===== -->
+  <text x="410" y="130" class="title">Non-sequential (not supported)</text>
+
+  <!-- Layer A -->
+  <rect x="200" y="160" width="110" height="40" class="layer-box"/>
+  <text x="255" y="185" class="layer-text">Layer A</text>
+
+  <!-- Branch A → B (curve up) -->
+  <path d="M310,172 C340,172 345,159 375,159" class="conn"/>
+
+  <!-- Branch A → C (curve down) -->
+  <path d="M310,188 C340,188 345,201 375,201" class="conn"/>
+
+  <!-- Layer B -->
+  <rect x="380" y="139" width="110" height="40" class="layer-box"/>
+  <text x="435" y="164" class="layer-text">Layer B</text>
+
+  <!-- Layer C -->
+  <rect x="380" y="181" width="110" height="40" class="layer-box"/>
+  <text x="435" y="206" class="layer-text">Layer C</text>
+
+  <!-- Merge B → D (curve down) -->
+  <path d="M490,159 C520,159 525,172 555,172" class="conn"/>
+
+  <!-- Merge C → D (curve up) -->
+  <path d="M490,201 C520,201 525,188 555,188" class="conn"/>
+
+  <!-- Layer D -->
+  <rect x="560" y="160" width="110" height="40" class="layer-box"/>
+  <text x="615" y="185" class="layer-text">Layer D</text>
+
+</svg>
