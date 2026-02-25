@@ -1225,10 +1225,10 @@ def cp_p2p_bwd_flash_attn(
         dk=dk,
         dv=dv,
     )
-    # if use_flash_attn_3:
-    #     fa_backward_kwargs["is_causal"] = causal_
-    # else:
-    #     fa_backward_kwargs["causal"] = causal_
+    if use_flash_attn_3:
+        fa_backward_kwargs["is_causal"] = causal_
+    else:
+        fa_backward_kwargs["causal"] = causal_
     flash_attn_bwd(
         dout_part,
         q_part,
@@ -1237,7 +1237,6 @@ def cp_p2p_bwd_flash_attn(
         out_part,
         softmax_lse__,
         *fa_backward_args_thd,
-        causal_,
         **fa_backward_kwargs,
     )
 
@@ -3000,7 +2999,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             k_,
                             v_,
                             *fa_forward_args_thd,
-                            causal,
+                            causal=causal,
                             **fa_forward_kwargs,
                         )
                         if not fa_utils.v2_7_0_plus:
@@ -3216,10 +3215,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         elif ctx.use_flash_attn_3 or fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = window_size_per_step[i][0]
                             fa_backward_kwargs["window_size_right"] = window_size_per_step[i][1]
-                        # if ctx.use_flash_attn_3:
-                        #     fa_backward_kwargs["is_causal"] = "causal" in ctx.attn_mask_type
-                        # else:
-                        #     fa_backward_kwargs["causal"] = "causal" in ctx.attn_mask_type
+                        if ctx.use_flash_attn_3:
+                            fa_backward_kwargs["is_causal"] = "causal" in ctx.attn_mask_type
+                        else:
+                            fa_backward_kwargs["causal"] = "causal" in ctx.attn_mask_type
                         flash_attn_bwd(
                             dout_,
                             q_,
@@ -3228,7 +3227,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             out_,
                             softmax_lse_per_step[i],
                             *fa_backward_args_thd,
-                            ctx.attn_mask_type,
                             **fa_backward_kwargs,
                         )
 
@@ -3539,7 +3537,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 k_part,
                 v_part,
                 *fa_forward_args_thd,
-                causal,
+                causal=causal,
                 **fa_forward_kwargs,
             )
             if not fa_utils.v2_7_0_plus:
@@ -3830,9 +3828,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             )
             if not ctx.use_flash_attn_3:
                 fa_backward_kwargs["rng_state"] = rng_state
-            #     fa_backward_kwargs["causal"] = causal
-            # else:
-            #     fa_backward_kwargs["is_causal"] = causal
+                fa_backward_kwargs["causal"] = causal
+            else:
+                fa_backward_kwargs["is_causal"] = causal
 
             flash_attn_bwd(
                 dout,
@@ -3842,7 +3840,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 out,
                 softmax_lse,
                 *fa_backward_args_thd,
-                causal,
                 **fa_backward_kwargs,
             )
 
