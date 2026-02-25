@@ -112,13 +112,12 @@
 
 #ifdef NVTE_WITH_CUSOLVERMP
 
-#define NVTE_CHECK_CUSOLVERMP(expr)                                \
-  do {                                                             \
-    const cusolverStatus_t status_NVTE_CHECK_CUSOLVERMP = (expr);  \
-    if (status_NVTE_CHECK_CUSOLVERMP != CUSOLVER_STATUS_SUCCESS) { \
-      NVTE_ERROR("cuSolverMp Error: ",                             \
-                 std::to_string(status_NVTE_CHECK_CUSOLVERMP));    \
-    }                                                              \
+#define NVTE_CHECK_CUSOLVERMP(expr)                                                   \
+  do {                                                                                \
+    const cusolverStatus_t status_NVTE_CHECK_CUSOLVERMP = (expr);                     \
+    if (status_NVTE_CHECK_CUSOLVERMP != CUSOLVER_STATUS_SUCCESS) {                    \
+      NVTE_ERROR("cuSolverMp Error: ", std::to_string(status_NVTE_CHECK_CUSOLVERMP)); \
+    }                                                                                 \
   } while (false)
 
 #endif  // NVTE_WITH_CUSOLVERMP

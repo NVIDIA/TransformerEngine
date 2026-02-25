@@ -448,8 +448,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Create cuSolverMp context for Newton-Schulz", py::arg("nccl_comm_ptr"), py::arg("nranks"),
         py::arg("rank"), py::call_guard<py::gil_scoped_release>());
   m.def("cusolvermp_ctx_destroy", &transformer_engine::pytorch::cusolvermp_ctx_destroy,
-        "Destroy cuSolverMp context", py::arg("ctx_ptr"),
-        py::call_guard<py::gil_scoped_release>());
+        "Destroy cuSolverMp context", py::arg("ctx_ptr"), py::call_guard<py::gil_scoped_release>());
   m.def("newton_schulz", &transformer_engine::pytorch::newton_schulz,
         "Newton-Schulz inverse square root", py::arg("ctx_ptr"), py::arg("m"), py::arg("n"),
         py::arg("x"), py::arg("num_iterations"), py::arg("coefficients"),
