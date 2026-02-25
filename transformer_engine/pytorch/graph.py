@@ -798,10 +798,16 @@ def _make_graphed_callables(
                         static_input_surface[i].copy_(inputs[i])
 
                 # Replay forward graph
-                cuda_graph_stream.wait_stream(torch.cuda.current_stream())
-                with cuda_graph_stream:
+                if cuda_graph_stream != torch.cuda.current_stream():
+                    cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                    with cuda_graph_stream:
+                        fwd_graph.replay()
+                    if cuda_graph_event is not None:
+                        torch.cuda.current_stream().wait_event(cuda_graph_event)
+                    else:
+                        torch.cuda.current_stream().wait_stream(cuda_graph_stream)
+                else:
                     fwd_graph.replay()
-                torch.cuda.current_stream().wait_event(cuda_graph_event)
                 assert isinstance(static_outputs, tuple)
                 return tuple(o.detach() for o in static_outputs)
 
@@ -818,10 +824,16 @@ def _make_graphed_callables(
                         # incoming grad is already in the right place
                         if g.data_ptr() != grad.data_ptr():
                             g.copy_(grad)
-                ctx.cuda_graph_stream.wait_stream(torch.cuda.current_stream())
-                with ctx.cuda_graph_stream:
+                if ctx.cuda_graph_stream != torch.cuda.current_stream():
+                    ctx.cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                    with ctx.cuda_graph_stream:
+                        bwd_graph.replay()
+                    if ctx.cuda_graph_event is not None:
+                        torch.cuda.current_stream().wait_event(ctx.cuda_graph_event)
+                    else:
+                        torch.cuda.current_stream().wait_stream(ctx.cuda_graph_stream)
+                else:
                     bwd_graph.replay()
-                torch.cuda.current_stream().wait_event(ctx.cuda_graph_event)
 
                 # Update FP8 scale factors if needed
                 if ctx.is_first_module:
@@ -850,10 +862,11 @@ def _make_graphed_callables(
             else:
                 cuda_graph_stream = torch.cuda.current_stream()
             if "cuda_graph_event" in user_kwargs:
+                assert cuda_graph_stream != torch.cuda.current_stream()
                 cuda_graph_event = user_kwargs["cuda_graph_event"]
                 user_kwargs.pop("cuda_graph_event")
             else:
-                cuda_graph_event = torch.cuda.Event()
+                cuda_graph_event = None
             # Check that required kwargs are provided
             for key in kwargs_keys:
                 if key not in user_kwargs:
