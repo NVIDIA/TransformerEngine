@@ -869,7 +869,6 @@ def _make_graphed_callables(
             else:
                 cuda_graph_stream = torch.cuda.current_stream()
             if "cuda_graph_event" in user_kwargs:
-                assert cuda_graph_stream != torch.cuda.current_stream()
                 cuda_graph_event = user_kwargs["cuda_graph_event"]
                 user_kwargs.pop("cuda_graph_event")
             else:
