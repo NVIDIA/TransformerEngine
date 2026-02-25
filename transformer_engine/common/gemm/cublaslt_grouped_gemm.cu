@@ -551,23 +551,10 @@ inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
   return GroupedGemmSetupWorkspace::required_setup_size(num_tensors, kGroupedGemmAlignment);
 }
 
-__global__ void convert_int32_to_int64_kernel(const int32_t *src, int64_t *dst, size_t n) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n) dst[idx] = static_cast<int64_t>(src[idx]);
-}
-
 }  // namespace
 
 size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors) {
   return grouped_gemm_setup_workspace_size(num_tensors);
-}
-
-void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cudaStream_t stream) {
-  if (n == 0) return;
-  const int threads = 256;
-  const int blocks = static_cast<int>((n + threads - 1) / threads);
-  convert_int32_to_int64_kernel<<<blocks, threads, 0, stream>>>(src, dst, n);
-  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
@@ -677,4 +664,28 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
              CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
 }
 
+size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors) {
+  NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.2+, but compile-time cuBLAS version is ",
+             CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+  return 0;
+}
+
+
 #endif  // CUBLAS_VERSION >= 130200
+
+namespace {
+
+__global__ void convert_int32_to_int64_kernel(const int32_t *src, int64_t *dst, size_t n) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < n) dst[idx] = static_cast<int64_t>(src[idx]);
+}
+
+}  // namespace
+
+void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cudaStream_t stream) {
+  if (n == 0) return;
+  const int threads = 256;
+  const int blocks = static_cast<int>((n + threads - 1) / threads);
+  convert_int32_to_int64_kernel<<<blocks, threads, 0, stream>>>(src, dst, n);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
