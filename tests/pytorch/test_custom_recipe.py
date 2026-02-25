@@ -18,7 +18,13 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.quantization import QuantizerRole
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import (
+from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import (
+    current_scaling_quantizer_factory,
+    mxfp8_quantizer_factory,
+    float8_block_scaling_quantizer_factory,
+    nvfp4_quantizer_factory,
+)
+from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import (
     nvfp4_ref_rht_2d_quantizer_factory,
 )
 
@@ -333,3 +339,114 @@ def test_factories_return_distinct_instances_and_buffers():
     # Mutating one should not affect the other
     q1.scale.fill_(123.0)
     assert not torch.equal(q1.scale, q2.scale)
+
+
+def _run_linear_fwd_bwd(model, inp, recipe):
+    """Run forward + backward with a given recipe and return (output, inp.grad, param grads)."""
+    with autocast(enabled=True, recipe=recipe):
+        out = model(inp)
+    loss = out.float().sum()
+    loss.backward()
+    param_grads = {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+    return out.clone(), inp.grad.clone(), param_grads
+
+
+def _make_pair(in_features=128, out_features=128, batch=32, seed=42):
+    """Create a pair of identical Linear models and matching inputs."""
+    torch.manual_seed(seed)
+    model_ref = Linear(in_features, out_features, params_dtype=torch.bfloat16, bias=False).cuda()
+    model_cus = Linear(in_features, out_features, params_dtype=torch.bfloat16, bias=False).cuda()
+    model_cus.load_state_dict(model_ref.state_dict())
+
+    base_inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16)
+    inp_ref = base_inp.clone().detach().requires_grad_(True)
+    inp_cus = base_inp.clone().detach().requires_grad_(True)
+    return model_ref, model_cus, inp_ref, inp_cus
+
+
+def _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus):
+    """Assert exact match of outputs and all gradients."""
+    assert torch.allclose(out_ref, out_cus, rtol=0.0, atol=0.0), (
+        f"Forward mismatch: max diff = {(out_ref - out_cus).abs().max()}"
+    )
+    assert torch.allclose(grad_ref, grad_cus, rtol=0.0, atol=0.0), (
+        f"Input grad mismatch: max diff = {(grad_ref - grad_cus).abs().max()}"
+    )
+    for name in pgrads_ref:
+        assert torch.allclose(pgrads_ref[name], pgrads_cus[name], rtol=0.0, atol=0.0), (
+            f"Param grad '{name}' mismatch: max diff = "
+            f"{(pgrads_ref[name] - pgrads_cus[name]).abs().max()}"
+        )
+
+
+def test_factory_matches_current_scaling():
+    """current_scaling_quantizer_factory should produce bit-identical results
+    to the built-in Float8CurrentScaling recipe."""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    model_ref, model_cus, inp_ref, inp_cus = _make_pair()
+
+    out_ref, grad_ref, pgrads_ref = _run_linear_fwd_bwd(
+        model_ref, inp_ref, recipe.Float8CurrentScaling()
+    )
+    out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=current_scaling_quantizer_factory)
+    )
+    _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
+
+
+def test_factory_matches_mxfp8():
+    """mxfp8_quantizer_factory should produce bit-identical results
+    to the built-in MXFP8BlockScaling recipe."""
+    available, reason = te.is_mxfp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"MXFP8 unsupported: {reason}")
+
+    model_ref, model_cus, inp_ref, inp_cus = _make_pair()
+
+    out_ref, grad_ref, pgrads_ref = _run_linear_fwd_bwd(
+        model_ref, inp_ref, recipe.MXFP8BlockScaling()
+    )
+    out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=mxfp8_quantizer_factory)
+    )
+    _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
+
+
+def test_factory_matches_block_scaling():
+    """float8_block_scaling_quantizer_factory should produce bit-identical results
+    to the built-in Float8BlockScaling recipe."""
+    available = te.is_fp8_block_scaling_available()
+    if not torch.cuda.is_available() or not available:
+        pytest.skip("Float8 block scaling unsupported on this device")
+
+    model_ref, model_cus, inp_ref, inp_cus = _make_pair()
+
+    out_ref, grad_ref, pgrads_ref = _run_linear_fwd_bwd(
+        model_ref, inp_ref, recipe.Float8BlockScaling()
+    )
+    out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=float8_block_scaling_quantizer_factory)
+    )
+    _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
+
+
+def test_factory_matches_nvfp4():
+    """nvfp4_quantizer_factory should produce bit-identical results
+    to the built-in NVFP4BlockScaling recipe."""
+    available = te.is_nvfp4_available()
+    if not torch.cuda.is_available() or not available:
+        pytest.skip("NVFP4 unsupported on this device")
+
+    model_ref, model_cus, inp_ref, inp_cus = _make_pair()
+
+    out_ref, grad_ref, pgrads_ref = _run_linear_fwd_bwd(
+        model_ref, inp_ref, recipe.NVFP4BlockScaling()
+    )
+    out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=nvfp4_quantizer_factory)
+    )
+
+    _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)

@@ -22,7 +22,7 @@ from transformer_engine.common.recipe import (
 )
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
-from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
+from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
 from transformer_engine.pytorch.custom_recipes import utils
 from run_layer_with_overlap import _compare_tensors
 
@@ -61,14 +61,14 @@ def get_nvfp4_quantizer_factory():
 
     def factory(role):
         if role.tensor_type == "input":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
                 with_rht=True,
             )
         elif role.tensor_type == "weight":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(16, 16),
                 pow_2_scales=False,
@@ -77,7 +77,7 @@ def get_nvfp4_quantizer_factory():
         elif role.tensor_type == "output":
             return None
         elif role.tensor_type == "grad_output":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,

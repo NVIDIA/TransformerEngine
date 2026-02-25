@@ -6,7 +6,7 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
+from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
 from transformer_engine.pytorch.custom_recipes import utils
 
 
@@ -81,14 +81,14 @@ def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bo
 
     def factory(role):
         if role.tensor_type == "input":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
                 with_rht=with_rht,
             )
         elif role.tensor_type == "weight":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(16, 16) if with_2d_quantization else (1, 16),
                 pow_2_scales=False,
@@ -97,7 +97,7 @@ def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bo
         elif role.tensor_type == "output":
             return None
         elif role.tensor_type == "grad_output":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
