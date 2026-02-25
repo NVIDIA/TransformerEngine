@@ -50,8 +50,8 @@ CPU Offloading in Transformer Engine
 
 Transformer Engine supports CPU offloading of activations for sequences of layers, where each layer
 consumes the output of the previous one — which is the case for most LLM architectures.
-These layers do not need to be TE layers —
-they can be arbitrary PyTorch modules. The API is as follows:
+These layers may be any PyTorch modules and not just TE layers.
+Here is an example usage of the API:
 
 .. code-block:: python
 
