@@ -1390,6 +1390,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 rowwise_usage=update_rowwise_usage,
                 columnwise_usage=update_columnwise_usage,
             )
+
+            if isinstance(quantizer, DebugQuantizer):
+                tensor = quantizer.wrap_quantized_tensor(tensor)
+
             return tensor
 
         # Try getting workspace from cache
@@ -1526,8 +1530,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
             del wgrad
             del bgrad
-            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-                wgrad_accumulation_and_reduce_hook()
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
+
+    def _trigger_wgrad_accumulation_and_reduce_hooks(self):
+        """
+        Trigger the wgrad accumulation and reduce hooks.
+        """
+        for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+            wgrad_accumulation_and_reduce_hook()
 
     def is_debug_iter(self) -> bool:
         """
@@ -1579,8 +1589,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not run_current:
             return True
 
-        if self.primary_weights_in_fp8:
-            raise RuntimeError("FP8 weights are not supported in debug mode.")
         return False
 
     def _validate_name(self):
