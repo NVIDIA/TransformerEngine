@@ -463,7 +463,7 @@ CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size
                 std::is_same_v<OutputType, __nv_fp8_e5m2>) {
     dataType = CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8;
   } else {
-    NVTE_CHECK(false, "Invalid Output type (must be FP8).");
+    NVTE_ERROR("Invalid output type for blockwise transpose (must be FP8: Float8E4M3 or Float8E5M2).");
   }
 
   CUtensorMap tensor_map_output_trans{};

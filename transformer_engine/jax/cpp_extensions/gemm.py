@@ -166,8 +166,8 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
             flatten_axis=flatten_axis,
         )
 
-    assert not isinstance(lhs_q, ScaledTensor2x)
-    assert not isinstance(rhs_q, ScaledTensor2x)
+    assert not isinstance(lhs_q, ScaledTensor2x), f"Expected lhs_q to not be ScaledTensor2x after quantization, but got type={type(lhs_q)}"
+    assert not isinstance(rhs_q, ScaledTensor2x), f"Expected rhs_q to not be ScaledTensor2x after quantization, but got type={type(rhs_q)}"
 
     def has_rht_applied(q: AbstractBaseTensor) -> bool:
         return isinstance(q, ScaledTensor1x) and q.has_rht_applied
@@ -529,8 +529,8 @@ class GemmPrimitive(BasePrimitive):
                     f"expected {pre_gelu_dtype} but found {gelu_input.dtype}."
                 )
         pre_gelu_out = jax.core.ShapedArray(shape=pre_gelu_shape, dtype=pre_gelu_dtype)
-        assert alpha.size == 1 and alpha.dtype == jnp.float32
-        assert beta.size == 1 and beta.dtype == jnp.float32
+        assert alpha.size == 1 and alpha.dtype == jnp.float32, f"Expected alpha to be a single float32 scalar, but got alpha.size={alpha.size}, alpha.dtype={alpha.dtype}"
+        assert beta.size == 1 and beta.dtype == jnp.float32, f"Expected beta to be a single float32 scalar, but got beta.size={beta.size}, beta.dtype={beta.dtype}"
 
         # Declare cuBLAS workspace
         workspace_size = get_cublas_workspace_size_bytes()
@@ -809,7 +809,7 @@ class GemmPrimitive(BasePrimitive):
         is_outer,
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
-        assert GemmPrimitive.outer_primitive is not None
+        assert GemmPrimitive.outer_primitive is not None, "GemmPrimitive.outer_primitive has not been registered"
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
         # Batched GEMM is not supported
@@ -1321,7 +1321,7 @@ def _te_gemm(
     alpha = jnp.ones((1,), jnp.float32)
     beta = jnp.zeros((1,), jnp.float32)
     if scaling_mode.is_nvfp4_scaling:
-        assert lhs_amax is not None and rhs_amax is not None
+        assert lhs_amax is not None and rhs_amax is not None, "NVFP4 scaling requires non-None amax for both LHS and RHS operands"
         lhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(lhs_amax)
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs_amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
@@ -1402,7 +1402,7 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
         group_sizes,
         num_gemms,
     ):
-        assert GroupedGemmCopySizesPrimitive.inner_primitive is not None
+        assert GroupedGemmCopySizesPrimitive.inner_primitive is not None, "GroupedGemmCopySizesPrimitive.inner_primitive has not been registered"
         out = GroupedGemmCopySizesPrimitive.inner_primitive.bind(
             group_sizes,
             num_gemms=num_gemms,
@@ -1555,7 +1555,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
     ):
-        assert GroupedGemmPrimitive.inner_primitive is not None
+        assert GroupedGemmPrimitive.inner_primitive is not None, "GroupedGemmPrimitive.inner_primitive has not been registered"
         (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
             lhs_data,
             lhs_scale_inv,
@@ -1693,7 +1693,7 @@ def _jax_scaled_matmul(
         lhs_3d, rhs_3d, lhs_scale_3d, rhs_scale_3d, preferred_element_type=out_dtype
     )
     if lhs.scaling_mode.is_nvfp4_scaling:
-        assert lhs.amax is not None and rhs.amax is not None
+        assert lhs.amax is not None and rhs.amax is not None, "NVFP4 scaling requires non-None amax for both LHS and RHS operands"
         lhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(lhs.amax)
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs.amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
@@ -1945,7 +1945,7 @@ def grouped_gemm(
         lhs_scale_inv = rhs_scale_inv = jnp.empty((0,), jnp.float32)
         scaling_mode = ScalingMode.NO_SCALING
     elif isinstance(lhs, GroupedScaledTensor1x):
-        assert isinstance(rhs, GroupedScaledTensor1x)
+        assert isinstance(rhs, GroupedScaledTensor1x), f"Expected rhs to be GroupedScaledTensor1x when lhs is GroupedScaledTensor1x, but got type={type(rhs)}"
         out_dtype = lhs.dq_dtype
         lhs_shape = lhs.original_shape
         rhs_shape = rhs.original_shape
@@ -1953,7 +1953,7 @@ def grouped_gemm(
         rhs_data = rhs.data
         lhs_scale_inv = lhs.scale_inv
         rhs_scale_inv = rhs.scale_inv
-        assert lhs.scaling_mode == rhs.scaling_mode
+        assert lhs.scaling_mode == rhs.scaling_mode, f"Mismatched scaling modes: lhs.scaling_mode={lhs.scaling_mode}, rhs.scaling_mode={rhs.scaling_mode}"
         scaling_mode = lhs.scaling_mode
     else:
         raise TypeError("Unsupported lhs type object!")
@@ -1990,8 +1990,8 @@ def grouped_gemm(
         and not isinstance(rhs, ScaledTensor)
         and quantizer_set != noop_quantizer_set
     ):
-        assert isinstance(quantizer_set.x, GroupedQuantizer)
-        assert type(quantizer_set.x) is type(quantizer_set.kernel)
+        assert isinstance(quantizer_set.x, GroupedQuantizer), f"Expected quantizer_set.x to be GroupedQuantizer, but got type={type(quantizer_set.x)}"
+        assert type(quantizer_set.x) is type(quantizer_set.kernel), f"Expected quantizer_set.x and quantizer_set.kernel to have the same type, but got {type(quantizer_set.x)} and {type(quantizer_set.kernel)}"
         scaling_mode = quantizer_set.x.scaling_mode
         if (
             quantizer_set.x.scaling_mode.is_tensor_scaling()
@@ -2057,19 +2057,19 @@ def grouped_gemm(
     # Calling GroupedGEMM Custom Call
     K_lhs = math.prod(lhs_shape[i] for i in lhs_contract_dim)
     K_rhs = math.prod(rhs_shape[i] for i in rhs_contract_dim)
-    assert K_lhs == K_rhs
+    assert K_lhs == K_rhs, f"Mismatched contracting dimensions: K_lhs={K_lhs}, K_rhs={K_rhs} (from lhs_shape={lhs_shape}, rhs_shape={rhs_shape})"
     M = math.prod(_calculate_remaining_shape(lhs_shape, lhs_contract_dim))
     N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim)[1:])  # Exclude G
 
     if is_grouped_dense_wgrad:
         N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim))
     else:
-        assert group_sizes.size == rhs_shape[0]
+        assert group_sizes.size == rhs_shape[0], f"Expected group_sizes.size == rhs_shape[0], but got group_sizes.size={group_sizes.size}, rhs_shape[0]={rhs_shape[0]}"
 
-    assert group_offset.size == 1
+    assert group_offset.size == 1, f"Expected group_offset.size == 1, but got group_offset.size={group_offset.size}"
 
     has_bias = bias is not None
-    assert not has_bias or bias.shape == (group_sizes.size, N)
+    assert not has_bias or bias.shape == (group_sizes.size, N), f"Expected bias.shape=({group_sizes.size}, {N}), but got bias.shape={bias.shape}"
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(

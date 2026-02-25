@@ -80,7 +80,8 @@ class UserBufferQuantizationMode(Enum):
 
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
     """Returns a dummy tensor of given shape."""
-    assert len(shape) == 2
+    if len(shape) != 2:
+        raise ValueError(f"Expected 2D shape, got {len(shape)}D: {shape}")
     global _dummy_wgrads
     if (shape[0], shape[1], dtype) not in _dummy_wgrads:
         _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(
@@ -156,10 +157,11 @@ def initialize_ub(
                         which also requires ``MPI_HOME=/path/to/mpi/root`` to be set at compile time.
     """
     if not tex.device_supports_multicast():
-        assert bool(int(os.getenv("UB_SKIPMC", "0"))), (
-            "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
-            + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
-        )
+        if not bool(int(os.getenv("UB_SKIPMC", "0"))):
+            raise RuntimeError(
+                "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap "
+                "with CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
+            )
 
     if not quantization_modes:
         warnings.warn(
@@ -171,34 +173,51 @@ def initialize_ub(
             UserBufferQuantizationMode.FP8 if use_fp8 else UserBufferQuantizationMode.NONE
         ]
     else:
-        assert isinstance(quantization_modes, list), "quantization_modes must be a list"
-        assert all(
-            isinstance(mode, UserBufferQuantizationMode) for mode in quantization_modes
-        ), "quantization_modes must be a list of UserBufferQuantizationMode"
+        if not isinstance(quantization_modes, list):
+            raise TypeError(
+                f"quantization_modes must be a list, got {type(quantization_modes).__name__}"
+            )
+        invalid_modes = [
+            mode for mode in quantization_modes
+            if not isinstance(mode, UserBufferQuantizationMode)
+        ]
+        if invalid_modes:
+            raise TypeError(
+                f"quantization_modes must be a list of UserBufferQuantizationMode, "
+                f"got invalid entries: {invalid_modes}"
+            )
 
     if isinstance(ub_cfgs, dict) or ub_cfgs is None:
         ub_cfgs = [ub_cfgs] * len(quantization_modes)
     else:
-        assert len(ub_cfgs) == len(
-            quantization_modes
-        ), "Number of ub_cfgs settings must match number of quantization configurations"
+        if len(ub_cfgs) != len(quantization_modes):
+            raise ValueError(
+                f"Number of ub_cfgs settings ({len(ub_cfgs)}) must match number of "
+                f"quantization configurations ({len(quantization_modes)})"
+            )
 
     global _ub_communicators
-    assert _ub_communicators is None, "UB communicators are already initialized."
+    if _ub_communicators is not None:
+        raise RuntimeError("UB communicators are already initialized.")
     _ub_communicators = {}
 
     if tex.ubuf_built_with_mpi():
         # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
         # an MPI_Init() here by creating a new MPI process group...
-        assert torch.distributed.is_mpi_available()
+        if not torch.distributed.is_mpi_available():
+            raise RuntimeError(
+                "MPI backend is not available in torch.distributed but is required "
+                "when Userbuffers is built with MPI support"
+            )
         _ = torch.distributed.new_group(backend="mpi")
         helper = tex.CommOverlapHelper()
     else:
         # Bootstrapping with torch.distributed API, so check backend and construct
         # intra/inter-node process groups...
-        assert (
-            torch.distributed.is_initialized()
-        ), "torch.distributed must be initialized before Userbuffers"
+        if not torch.distributed.is_initialized():
+            raise RuntimeError(
+                "torch.distributed must be initialized before using Userbuffers"
+            )
         if bootstrap_backend is None:
             bootstrap_backend = "nccl"
             if torch.distributed.is_mpi_available():
@@ -206,15 +225,16 @@ def initialize_ub(
             elif torch.distributed.is_gloo_available():
                 bootstrap_backend = "gloo"
         else:
-            assert bootstrap_backend in [
-                "gloo",
-                "mpi",
-                "nccl",
-            ], "Invalid torch.distributed backend for bootstrapping Userbuffers!"
-            assert torch.distributed.is_backend_available(bootstrap_backend), (
-                f"PyTorch must be compiled with '{bootstrap_backend}' support in order to "
-                f"bootstrap Userbuffers with '{bootstrap_backend}' collectives."
-            )
+            if bootstrap_backend not in ["gloo", "mpi", "nccl"]:
+                raise ValueError(
+                    f"Invalid torch.distributed backend '{bootstrap_backend}' for bootstrapping "
+                    f"Userbuffers. Must be one of: 'gloo', 'mpi', 'nccl'"
+                )
+            if not torch.distributed.is_backend_available(bootstrap_backend):
+                raise RuntimeError(
+                    f"PyTorch must be compiled with '{bootstrap_backend}' support in order to "
+                    f"bootstrap Userbuffers with '{bootstrap_backend}' collectives."
+                )
 
         world_group = torch.distributed.new_group(backend=bootstrap_backend)
         world_rank = torch.distributed.get_rank(world_group)
@@ -333,9 +353,11 @@ def initialize_ub(
             warnings.warn(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
             )
-            assert (
-                quantization_mode == UserBufferQuantizationMode.FP8
-            ), "Atomic GEMM overlap supported only for FP8 GEMM."
+            if quantization_mode != UserBufferQuantizationMode.FP8:
+                raise ValueError(
+                    f"Atomic GEMM overlap supported only for FP8 GEMM, "
+                    f"got quantization_mode={quantization_mode}"
+                )
             if method in ("bulk", "external"):
                 warnings.warn(
                     f"At {name}, atoimic GEMM not is supported for a bulk overlap."
@@ -360,20 +382,24 @@ def initialize_ub(
                 "for functionality."
             )
             if name in layers_atomic_ring_exchange:
-                assert atomic_gemm and method == "ring_exchange", assert_message
+                if not (atomic_gemm and method == "ring_exchange"):
+                    raise ValueError(assert_message)
             else:
                 if atomic_gemm and method == "ring_exchange":
-                    assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
+                    if rs_ag_pairs[name] not in layers_atomic_ring_exchange:
+                        raise ValueError(assert_message)
 
         if name in external_gemm_to_overlap:
-            assert method == "external", (
-                f"At {name}, `external` overlap method is specified, but the selected method is"
-                f" {method}"
-            )
-            assert external_gemm_to_overlap[name] in methods["ring_exchange"], (
-                f"At {name}, `external` overlap method is specified, but the external gemm"
-                f" {external_gemm_to_overlap[name]} is not using `ring_exchange` overlap method"
-            )
+            if method != "external":
+                raise ValueError(
+                    f"At {name}, `external` overlap method is specified, but the selected method "
+                    f"is {method}"
+                )
+            if external_gemm_to_overlap[name] not in methods["ring_exchange"]:
+                raise ValueError(
+                    f"At {name}, `external` overlap method is specified, but the external gemm "
+                    f"{external_gemm_to_overlap[name]} is not using `ring_exchange` overlap method"
+                )
 
         buffer_dtype = (
             torch.uint8
@@ -424,7 +450,12 @@ def initialize_ub(
                     and user_ub_cfg[name]["method"] != "bulk"
                 ):
                     wgrad_name = name.replace("dgrad", "wgrad")
-                    assert wgrad_name not in user_ub_cfg
+                    if wgrad_name in user_ub_cfg:
+                        raise ValueError(
+                            f"Cannot specify user UB config for '{wgrad_name}' when its "
+                            f"corresponding dgrad '{name}' uses a non-bulk overlap method "
+                            f"('{user_ub_cfg[name]['method']}')"
+                        )
                     layers_reduce_scatter_overlap.remove(wgrad_name)
                     layers_all_gather_overlap.remove(name)
                     layers_reduce_scatter_overlap.append(name)
@@ -451,8 +482,10 @@ def get_ub(name: str, use_fp8: bool):
     # So favour simplicity until the correct design becomes clear.
     # This is mainly an internal API so we don't need to worry about future changes
     key = (name, UserBufferQuantizationMode.FP8 if use_fp8 else UserBufferQuantizationMode.NONE)
-    assert _ub_communicators is not None, "UB manager is not initialized."
-    assert key in _ub_communicators, f"UB for {name} with use_fp8={use_fp8} is not registered."
+    if _ub_communicators is None:
+        raise RuntimeError("UB manager is not initialized.")
+    if key not in _ub_communicators:
+        raise KeyError(f"UB for {name} with use_fp8={use_fp8} is not registered.")
     return _ub_communicators[key]
 
 
@@ -608,7 +641,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def __init__(self, name: Optional[str] = None) -> None:
         super().__init__()
-        assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
+        if not torch.cuda.is_available():
+            raise RuntimeError("TransformerEngine needs CUDA.")
         self.name = name
         self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False
@@ -694,9 +728,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 ]
                 for pos, buffer_key in zip((fwd_pos, bwd_pos), (fwd_key, bwd_key)):
                     if buffer_key in FP8GlobalStateManager.global_amax_buffer:
-                        assert (
-                            buffer_key in FP8GlobalStateManager.global_amax_history_buffer
-                        ), "TE internal error during amax history change."
+                        if buffer_key not in FP8GlobalStateManager.global_amax_history_buffer:
+                            raise RuntimeError(
+                                f"TE internal error during amax history change: "
+                                f"buffer_key '{buffer_key}' found in global_amax_buffer "
+                                f"but missing from global_amax_history_buffer"
+                            )
                         FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = self.fp8_meta[
                             meta_key
                         ].amax_history[0]
@@ -745,10 +782,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Update the quantizers for the weight tensors."""
         weight_tensors = self._get_weight_tensors()
         weight_quantizers = self._get_weight_quantizers()
-        assert len(weight_tensors) == len(weight_quantizers), (
-            f"Number of weight tensors ({len(weight_tensors)}) and quantizers "
-            f"({len(weight_quantizers)}) must match"
-        )
+        if len(weight_tensors) != len(weight_quantizers):
+            raise ValueError(
+                f"Number of weight tensors ({len(weight_tensors)}) and quantizers "
+                f"({len(weight_quantizers)}) must match"
+            )
         for weight, quantizer in zip(weight_tensors, weight_quantizers):
             if quantizer is not None and isinstance(weight, QuantizedTensorStorage):
                 weight.update_quantizer(quantizer)
@@ -796,7 +834,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         torch.zeros_like(self.fp8_meta[key].amax_history)
                     )
                 else:
-                    assert key in fp8_meta_tensors, "Cannot reset fp8 tensors."
+                    if key not in fp8_meta_tensors:
+                        raise KeyError(
+                            f"Cannot reset fp8 tensors: key '{key}' not found in fp8_meta_tensors. "
+                            f"Available keys: {list(fp8_meta_tensors.keys())}"
+                        )
                     self.fp8_meta[key].scale.copy_(fp8_meta_tensors[key][0])
                     self.fp8_meta[key].amax_history.copy_(fp8_meta_tensors[key][1])
 
@@ -938,10 +980,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if not self.allow_different_data_and_param_types:
             for name, param in self.named_parameters():
                 if param is not None:
-                    assert dtype == param.dtype, (
-                        "Data types for parameters must match when outside of autocasted region. "
-                        f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
-                    )
+                    if dtype != param.dtype:
+                        raise TypeError(
+                            "Data types for parameters must match when outside of autocasted "
+                            f"region. Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
+                        )
         self.fast_setattr("activation_dtype", dtype)
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -1046,10 +1089,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             delayed_scaling_recipe = self.fp8_meta["recipe"].delayed()
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
-            assert inp.is_cuda, "TransformerEngine needs CUDA."
+            if not inp.is_cuda:
+                raise RuntimeError(
+                    f"TransformerEngine needs CUDA. Got input on device: {inp.device}"
+                )
 
             if self.tp_size > 1:
-                assert self.tp_group_initialized, "TP group not initialized."
+                if not self.tp_group_initialized:
+                    raise RuntimeError(
+                        "Tensor parallel group not initialized. Call "
+                        "set_tensor_parallel_group() before forward pass when tp_size > 1."
+                    )
 
             self.set_activation_dtype(inp)
             self.init_fp8_metadata(num_gemms=num_gemms)
@@ -1058,10 +1108,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
             if delayed_scaling_recipe:
                 if self.sequence_parallel:
-                    assert self.fp8_meta["recipe"].reduce_amax, (
-                        "Amax reduction across tensor parallel group is "
-                        "necessary when using sequence parallelism with FP8."
-                    )
+                    if not self.fp8_meta["recipe"].reduce_amax:
+                        raise ValueError(
+                            "Amax reduction across tensor parallel group is "
+                            "necessary when using sequence parallelism with FP8."
+                        )
 
                 if not FP8GlobalStateManager.fp8_graph_capturing():
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)

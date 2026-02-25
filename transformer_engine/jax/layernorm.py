@@ -31,7 +31,11 @@ def canonicalize_norm_type(x):
         Canonicalized normalization type string
     """
     canonicalized = x.lower().strip().replace("-", "").replace("_", "")
-    assert canonicalized in ["layernorm", "rmsnorm"]
+    if canonicalized not in ["layernorm", "rmsnorm"]:
+        raise ValueError(
+            f"Unsupported normalization type '{x}' (canonicalized: '{canonicalized}'). "
+            f"Valid options are: 'layernorm', 'rmsnorm'."
+        )
     return canonicalized
 
 

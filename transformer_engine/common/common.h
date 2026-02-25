@@ -38,6 +38,8 @@ namespace transformer_engine {
 std::string to_string(const DType type);
 std::string to_string(const NVTEScalingMode &mode);
 
+inline std::string to_string_like(const DType &val) { return to_string(val); }
+
 inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_DELAYED_TENSOR_SCALING;
 }
@@ -649,7 +651,11 @@ struct TypeInfo {
     } break;                                                 \
       SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)              \
     default:                                                 \
-      NVTE_ERROR("Invalid type.");                           \
+      NVTE_ERROR("Unsupported dtype ",                       \
+        to_string(static_cast<DType>(dtype)),                \
+        ". Expected one of: Byte, Int32, Int64, Float32, "   \
+        "Float16, BFloat16, Float8E4M3, Float8E5M2, "       \
+        "Float8E8M0, Float4E2M1.");                          \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...) \
@@ -676,7 +682,10 @@ struct TypeInfo {
       { __VA_ARGS__ }                                          \
     } break;                                                   \
     default:                                                   \
-      NVTE_ERROR("Invalid type.");                             \
+      NVTE_ERROR("Unsupported dtype ",                         \
+        to_string(static_cast<DType>(dtype)),                  \
+        ". Expected one of: Float32, Float16, BFloat16, "      \
+        "Float8E4M3, Float8E5M2.");                            \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, type, ...) \
@@ -703,7 +712,10 @@ struct TypeInfo {
       { __VA_ARGS__ }                                           \
     } break;                                                    \
     default:                                                    \
-      NVTE_ERROR("Invalid type.");                              \
+      NVTE_ERROR("Unsupported output dtype ",                   \
+        to_string(static_cast<DType>(dtype)),                   \
+        ". Expected one of: Float32, Float16, BFloat16, "       \
+        "Float8E5M2, Float8E4M3.");                             \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, type, ...) \
@@ -722,7 +734,9 @@ struct TypeInfo {
       { __VA_ARGS__ }                                                \
     } break;                                                         \
     default:                                                         \
-      NVTE_ERROR("Invalid type.");                                   \
+      NVTE_ERROR("Unsupported dtype ",                               \
+        to_string(static_cast<DType>(dtype)),                        \
+        ". Expected one of: Float32, Float16, BFloat16.");           \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(dtype, type, ...) \
@@ -737,7 +751,9 @@ struct TypeInfo {
       { __VA_ARGS__ }                                              \
     } break;                                                       \
     default:                                                       \
-      NVTE_ERROR("Invalid type, expected Float32 or BFloat16.");   \
+      NVTE_ERROR("Unsupported dtype ",                             \
+        to_string(static_cast<DType>(dtype)),                      \
+        ". Expected one of: Float32, BFloat16.");                  \
   }
 
 // Add a pack_size argument to select the packed type for FP4
@@ -749,7 +765,9 @@ struct TypeInfo {
       { __VA_ARGS__ }                                                          \
     } break;                                                                   \
     default:                                                                   \
-      NVTE_ERROR("Invalid type.");                                             \
+      NVTE_ERROR("Unsupported dtype ",                                         \
+        to_string(static_cast<DType>(dtype)),                                  \
+        ". Expected: Float4E2M1.");                                            \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(dtype, type, ...) \
@@ -764,7 +782,9 @@ struct TypeInfo {
       { __VA_ARGS__ }                                            \
     } break;                                                     \
     default:                                                     \
-      NVTE_ERROR("Invalid type.");                               \
+      NVTE_ERROR("Unsupported dtype ",                           \
+        to_string(static_cast<DType>(dtype)),                    \
+        ". Expected one of: Float8E5M2, Float8E4M3.");           \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, type, ...) \
@@ -784,13 +804,20 @@ struct TypeInfo {
     } break;                                                   \
     case DType::kFloat8E5M2:                                   \
     case DType::kFloat8E4M3: {                                 \
-      NVTE_ERROR("FP8 type not instantiated for input.");      \
+      NVTE_ERROR("FP8 dtype ",                                 \
+        to_string(static_cast<DType>(dtype)),                  \
+        " is not instantiated for input. "                     \
+        "Expected one of: Float32, Float16, BFloat16.");       \
     } break;                                                   \
     case DType::kFloat4E2M1: {                                 \
-      NVTE_ERROR("FP4 type not instantiated for input.");      \
+      NVTE_ERROR("FP4 dtype Float4E2M1 is not instantiated "   \
+        "for input. Expected one of: Float32, Float16, "       \
+        "BFloat16.");                                          \
     } break;                                                   \
     default:                                                   \
-      NVTE_ERROR("Invalid type.");                             \
+      NVTE_ERROR("Unsupported input dtype ",                   \
+        to_string(static_cast<DType>(dtype)),                  \
+        ". Expected one of: Float32, Float16, BFloat16.");     \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...) \
@@ -807,7 +834,9 @@ struct TypeInfo {
       break;                                                   \
     }                                                          \
     default:                                                   \
-      NVTE_ERROR("Invalid type for 16 bit.");                  \
+      NVTE_ERROR("Unsupported 16-bit dtype ",                  \
+        to_string(static_cast<DType>(dtype)),                  \
+        ". Expected one of: Float16, BFloat16.");              \
   }
 
 #define TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(SCALE_DIM, DIM, ...) \
@@ -821,7 +850,8 @@ struct TypeInfo {
       { __VA_ARGS__ }                                               \
     } break;                                                        \
     default: {                                                      \
-      NVTE_ERROR("Invalid size of the MX scaling factor.");         \
+      NVTE_ERROR("Unsupported MX scaling factor dimension ",        \
+        SCALE_DIM, ". Expected one of: 1, 32.");                    \
     }                                                               \
   }
 

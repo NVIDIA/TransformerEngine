@@ -326,17 +326,20 @@ void CutlassGroupedGemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
 
   // Check can implement the kernel.
   if (gemm.can_implement(arguments) != cutlass::Status::kSuccess) {
-    NVTE_CHECK(false, "Failed to implement CUTLASS Grouped GEMM");
+    NVTE_ERROR("Failed to implement CUTLASS Grouped GEMM with ",
+               num_gemms, " GEMMs");
   }
 
   // Initialize the kernel.
   if (gemm.initialize(arguments, kernel_workspace_ptr) != cutlass::Status::kSuccess) {
-    NVTE_CHECK(false, "Failed to initialize CUTLASS Grouped GEMM");
+    NVTE_ERROR("Failed to initialize CUTLASS Grouped GEMM with ",
+               num_gemms, " GEMMs");
   }
 
   // Execute the kernel in the current stream.
   if (gemm.run(stream) != cutlass::Status::kSuccess) {
-    NVTE_CHECK(false, "Failed to run CUTLASS Grouped GEMM");
+    NVTE_ERROR("Failed to run CUTLASS Grouped GEMM with ",
+               num_gemms, " GEMMs");
   }
 }
 

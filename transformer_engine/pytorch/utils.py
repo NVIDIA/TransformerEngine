@@ -147,7 +147,8 @@ def compare_tensors(a: torch.Tensor, b: torch.Tensor) -> None:
 
 def ensure_divisibility(numerator: int, denominator: int) -> None:
     """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, f"{numerator} is not divisible by {denominator}"
+    if numerator % denominator != 0:
+        raise ValueError(f"{numerator} is not divisible by {denominator}")
 
 
 def divide(numerator: int, denominator: int) -> int:
@@ -271,13 +272,16 @@ class SplitAlongDim(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *grad_outputs):
         # pylint: disable=missing-function-docstring
-        assert len(grad_outputs) > 0, "No gradients received for backprop!"
+        if len(grad_outputs) == 0:
+            raise RuntimeError("No gradients received for backprop!")
 
         if isinstance(ctx.split_size_or_sections, (list, tuple)):
             split_sizes = ctx.split_size_or_sections
-            assert len(grad_outputs) == len(
-                split_sizes
-            ), "Unequal number of gradients vs split sections for backprop!"
+            if len(grad_outputs) != len(split_sizes):
+                raise RuntimeError(
+                    f"Unequal number of gradients ({len(grad_outputs)}) vs "
+                    f"split sections ({len(split_sizes)}) for backprop!"
+                )
         if isinstance(ctx.split_size_or_sections, int):
             split_sizes = [ctx.split_size_or_sections] * len(grad_outputs)
         dims = len(grad_outputs[0].shape)
@@ -371,7 +375,10 @@ def validate_rng_states_func(get_rng_tracker: Callable) -> None:
     """Checks if passed in param function has everything
     required for tensor/model and sequence parallel.
     """
-    assert callable(get_rng_tracker), "get_rng_tracker is not a valid function"
+    if not callable(get_rng_tracker):
+        raise TypeError(
+            f"get_rng_tracker must be callable, got {type(get_rng_tracker).__name__}"
+        )
 
     rng_tracker = None
     try:
@@ -379,15 +386,15 @@ def validate_rng_states_func(get_rng_tracker: Callable) -> None:
     except Exception as e:
         raise RuntimeError("Cannot call get_rng_tracker function") from e
 
-    assert hasattr(rng_tracker, "get_states") and callable(
-        rng_tracker.get_states
-    ), "rng_tracker object does not have valid method get_states"
-    assert hasattr(rng_tracker, "set_states") and callable(
-        rng_tracker.set_states
-    ), "rng_tracker object does not have valid method set_states"
-    assert hasattr(rng_tracker, "fork") and callable(
-        rng_tracker.fork
-    ), "rng_tracker object does not have valid method fork"
+    for method_name in ("get_states", "set_states", "fork"):
+        if not hasattr(rng_tracker, method_name) or not callable(
+            getattr(rng_tracker, method_name)
+        ):
+            raise TypeError(
+                f"rng_tracker object ({type(rng_tracker).__name__}) does not have "
+                f"a valid callable method '{method_name}'. "
+                "Required methods: get_states, set_states, fork."
+            )
     validate_ctx_manager(rng_tracker.fork)
 
 
@@ -398,11 +405,12 @@ def assert_viewless_tensor(tensor: torch.Tensor, extra_msg: Optional[str] = None
         return [assert_viewless_tensor(t) for t in tensor]
     if not isinstance(tensor, torch.Tensor):
         return tensor
-    assert tensor._base is None, (
-        "Ensure tensor._base is None before setting tensor.data or storing "
-        "tensor to memory buffer. Otherwise, a memory leak will occur (and "
-        f"likely accumulate over iterations). {extra_msg}"
-    )
+    if tensor._base is not None:
+        raise ValueError(
+            "Ensure tensor._base is None before setting tensor.data or storing "
+            "tensor to memory buffer. Otherwise, a memory leak will occur (and "
+            f"likely accumulate over iterations). {extra_msg}"
+        )
     return tensor
 
 
@@ -440,11 +448,13 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
     """Assert that tensor or tensors dimensions are supported for FP8 TN GEMM."""
 
     for tensor in tensors:
-        assert math.prod(tensor.shape[:-1]) % 8 == 0 and tensor.shape[-1] % 16 == 0, (
-            "FP8 execution requires the product of all dimensions except the last to be divisible"
-            " by 8 and the last dimension to be divisible by 16, but got tensor with"
-            f" dims={list(tensor.size())}"
-        )
+        if math.prod(tensor.shape[:-1]) % 8 != 0 or tensor.shape[-1] % 16 != 0:
+            raise ValueError(
+                "FP8 execution requires the product of all dimensions except the last to be"
+                " divisible by 8 and the last dimension to be divisible by 16, but got tensor"
+                f" with dims={list(tensor.size())} (product of leading dims ="
+                f" {math.prod(tensor.shape[:-1])}, last dim = {tensor.shape[-1]})"
+            )
 
 
 def assert_dim_for_all_gather(
@@ -452,9 +462,12 @@ def assert_dim_for_all_gather(
 ) -> None:
     """Assert that tensor dimensions are supported for all-gather"""
     if with_all_gather:
-        assert quantizer.is_quantizable(tensor), (
-            "All-gather requires quantizable tensor for quantizer " + quantizer.__class__.__name__
-        )
+        if not quantizer.is_quantizable(tensor):
+            raise ValueError(
+                f"All-gather requires a quantizable tensor for quantizer"
+                f" {quantizer.__class__.__name__}, but got tensor with"
+                f" shape={list(tensor.shape)} and dtype={tensor.dtype}"
+            )
 
 
 def is_bf16_compatible() -> bool:
@@ -752,7 +765,11 @@ class _WeakRefTensor:
     def torch_dtype_to_np_typestr(self):
         """Convert PyTorch dtype to numpy typestr."""
         ret = _torch_dtype_to_np_typestr_dict.get(self.dtype)
-        assert ret is not None, f"Unsupported dtype: {self.dtype}"
+        if ret is None:
+            supported = ", ".join(str(d) for d in _torch_dtype_to_np_typestr_dict)
+            raise TypeError(
+                f"Unsupported dtype: {self.dtype}. Supported dtypes: {supported}"
+            )
         return ret
 
 
@@ -791,4 +808,7 @@ def make_weak_ref(x):
         return x
     if x is None:
         return None
-    raise TypeError(f"Invalid type {type(x)} to make weak ref")
+    raise TypeError(
+        f"Invalid type {type(x).__name__} to make weak ref. "
+        "Valid types are: torch.Tensor, tuple, list, dict, int, float, bool, and None."
+    )

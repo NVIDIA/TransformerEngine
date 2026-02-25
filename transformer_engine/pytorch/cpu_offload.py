@@ -124,7 +124,10 @@ class TensorGroupProcessor:
         """
         Call for a tensor group, just after reload logic.
         """
-        assert tensor_group.aux is not None
+        assert tensor_group.aux is not None, (
+            "TensorGroup.aux must be set before post-reload processing, "
+            f"but got aux=None for tensor_group with {len(tensor_group.tensor_list)} tensors"
+        )
         tensor_group = TensorGroupProcessor._restore_tensor_duplicates(tensor_group)
         tensor_group = TensorGroupProcessor._switch_to_views(tensor_group)
         return tensor_group
@@ -271,7 +274,11 @@ class OffloadableLayerState:
         )
 
         for tensor_id, tensor in enumerate(self.fwd_gpu_tensor_group.tensor_list):
-            assert tensor.is_contiguous()
+            assert tensor.is_contiguous(), (
+                f"Tensor at index {tensor_id} must be contiguous for CPU offloading, "
+                f"but got non-contiguous tensor with shape={tensor.shape}, "
+                f"stride={tensor.stride()}, dtype={tensor.dtype}"
+            )
 
             # Wait for the moment the tensor is ready to be offloaded.
             self.offload_stream.wait_event(self.fwd_gpu_tensor_group.events[tensor_id])  # type: ignore[arg-type]
@@ -420,7 +427,10 @@ class OffloadableLayerState:
             return self.fwd_gpu_tensor_group.tensor_list[tensor_or_tensor_id]
 
         # 4. the layer was offloaded
-        assert self.state == "reload_started"
+        assert self.state == "reload_started", (
+            f"Expected state='reload_started' when popping an offloaded tensor, "
+            f"but got state='{self.state}' for tensor={tensor_or_tensor_id}"
+        )
         # wait for the tensor to be reloaded
         torch.cuda.current_stream().wait_event(
             self.bwd_gpu_tensor_group.events[tensor_or_tensor_id]
@@ -882,8 +892,16 @@ def get_cpu_offload_context(
             """
             This function is used to catch the backward pass of the model.
             """
-            assert tensor.requires_grad is True
-            assert self.current_layer is not None
+            assert tensor.requires_grad is True, (
+                f"Tensor passed to synchronization_function must require grad to "
+                f"register backward hooks, but got requires_grad=False for tensor "
+                f"with shape={tensor.shape}, dtype={tensor.dtype}"
+            )
+            assert self.current_layer is not None, (
+                "synchronization_function called but no layer has been set via __enter__. "
+                f"inside_context={self.inside_context}, "
+                f"offload_synchronizer num_layers={self.offload_synchronizer.num_layers}"
+            )
             cur_layer = self.current_layer
             assert (
                 self.inside_context is False

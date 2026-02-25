@@ -232,7 +232,9 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
       { __VA_ARGS__ }                                     \
     } break;                                              \
     default:                                              \
-      NVTE_ERROR("Invalid type.");                        \
+      NVTE_ERROR("Unsupported router probs dtype ",       \
+        to_string(static_cast<DType>(dtype)),             \
+        ". Expected one of: Float32, Float16, BFloat16.");\
   }
 
 #define TE_ROUTER_INDEX_TYPE_SWITCH_ALL(dtype, type, ...) \
@@ -255,7 +257,10 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
       { __VA_ARGS__ }                                     \
     } break;                                              \
     default:                                              \
-      NVTE_ERROR("Invalid type.");                        \
+      NVTE_ERROR("Unsupported router index dtype ",       \
+        to_string(static_cast<DType>(dtype)),             \
+        ". Expected one of: Int32, Int64, BFloat16, "     \
+        "Float32.");                                      \
   }
 }  // namespace transformer_engine
 #endif
