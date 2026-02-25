@@ -272,8 +272,7 @@ at::Tensor allocateSpace(const NVTEShape& shape, const transformer_engine::DType
   } else if (size == 1) {
     return at::empty({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
   }
-  NVTE_ERROR("Unsupported tensor allocation: ndim=", size,
-             ", init_to_zeros=", init_to_zeros,
+  NVTE_ERROR("Unsupported tensor allocation: ndim=", size, ", init_to_zeros=", init_to_zeros,
              ". Only 1D and 2D tensors are supported.");
 }
 

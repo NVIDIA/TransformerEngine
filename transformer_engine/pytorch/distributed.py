@@ -155,7 +155,7 @@ def set_tensor_model_parallel_attributes(
         if hasattr(tensor, attribute):
             raise RuntimeError(
                 f"Tensor already has attribute '{attribute}' set. Cannot set "
-                f"tensor model parallel attributes on a tensor that already has them."
+                "tensor model parallel attributes on a tensor that already has them."
             )
     # Set the attributes.
     setattr(tensor, "tensor_model_parallel", is_parallel)
@@ -932,7 +932,7 @@ def reduce_scatter_along_first_dim(
     dim_size = list(inp.size())
     if dim_size[0] % world_size != 0:
         raise ValueError(
-            f"First dimension of the tensor should be divisible by tensor parallel size, "
+            "First dimension of the tensor should be divisible by tensor parallel size, "
             f"but got dim_size[0]={dim_size[0]} and world_size={world_size} "
             f"(remainder={dim_size[0] % world_size})."
         )
@@ -1002,7 +1002,7 @@ def _all_gather_fp8(
     if not isinstance(inp, Float8TensorStorage):
         if not isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
             raise TypeError(
-                f"Expected quantizer to be Float8Quantizer or Float8CurrentScalingQuantizer "
+                "Expected quantizer to be Float8Quantizer or Float8CurrentScalingQuantizer "
                 f"when input is not Float8TensorStorage, but got {type(quantizer).__name__}."
             )
         # we cannot directly gather the transposed fp8 tensor
@@ -1710,8 +1710,7 @@ def gather_along_first_dim(
     if isinstance(inp, MXFP8TensorStorage) or isinstance(quantizer, MXFP8Quantizer):
         if not isinstance(quantizer, MXFP8Quantizer):
             raise TypeError(
-                f"Expected MXFP8Quantizer for MXFP8 all-gather, "
-                f"but got {type(quantizer).__name__}."
+                f"Expected MXFP8Quantizer for MXFP8 all-gather, but got {type(quantizer).__name__}."
             )
         return _all_gather_mxfp8(
             inp,
@@ -1725,8 +1724,7 @@ def gather_along_first_dim(
     if isinstance(inp, NVFP4TensorStorage) or isinstance(quantizer, NVFP4Quantizer):
         if not isinstance(quantizer, NVFP4Quantizer):
             raise TypeError(
-                f"Expected NVFP4Quantizer for NVFP4 all-gather, "
-                f"but got {type(quantizer).__name__}."
+                f"Expected NVFP4Quantizer for NVFP4 all-gather, but got {type(quantizer).__name__}."
             )
         return _all_gather_nvfp4(
             inp,
@@ -2013,7 +2011,7 @@ def _fsdp_gather_tensors(
     if fsdp_group is not None:
         if len(shapes) != len(tensors):
             raise ValueError(
-                f"Number of tensors and tensor shapes must be equal, "
+                "Number of tensors and tensor shapes must be equal, "
                 f"but got {len(shapes)} shapes and {len(tensors)} tensors."
             )
         for s, t in zip(shapes, tensors):
@@ -2072,9 +2070,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
                FSDP-wrapped root module that may contain FSDP-wrapped TE modules.
     """
     if not isinstance(fsdp_root, FSDP):
-        raise TypeError(
-            f"Root module must be FSDP-wrapped, but got {type(fsdp_root).__name__}."
-        )
+        raise TypeError(f"Root module must be FSDP-wrapped, but got {type(fsdp_root).__name__}.")
 
     # If the root module is a TE module, inject FSDP information into it
     if _is_te_module(fsdp_root.module):
@@ -2088,7 +2084,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
         if root_state is None:
             raise RuntimeError(
                 f"Root module ({type(fsdp_root.module).__name__}) does not have a valid "
-                f"_FSDPState. Ensure the module is properly wrapped with FSDP."
+                "_FSDPState. Ensure the module is properly wrapped with FSDP."
             )
         fsdp_root.module.fast_setattr("fsdp_group", root_state.process_group)
 

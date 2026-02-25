@@ -178,12 +178,11 @@ def initialize_ub(
                 f"quantization_modes must be a list, got {type(quantization_modes).__name__}"
             )
         invalid_modes = [
-            mode for mode in quantization_modes
-            if not isinstance(mode, UserBufferQuantizationMode)
+            mode for mode in quantization_modes if not isinstance(mode, UserBufferQuantizationMode)
         ]
         if invalid_modes:
             raise TypeError(
-                f"quantization_modes must be a list of UserBufferQuantizationMode, "
+                "quantization_modes must be a list of UserBufferQuantizationMode, "
                 f"got invalid entries: {invalid_modes}"
             )
 
@@ -215,9 +214,7 @@ def initialize_ub(
         # Bootstrapping with torch.distributed API, so check backend and construct
         # intra/inter-node process groups...
         if not torch.distributed.is_initialized():
-            raise RuntimeError(
-                "torch.distributed must be initialized before using Userbuffers"
-            )
+            raise RuntimeError("torch.distributed must be initialized before using Userbuffers")
         if bootstrap_backend is None:
             bootstrap_backend = "nccl"
             if torch.distributed.is_mpi_available():
@@ -228,7 +225,7 @@ def initialize_ub(
             if bootstrap_backend not in ["gloo", "mpi", "nccl"]:
                 raise ValueError(
                     f"Invalid torch.distributed backend '{bootstrap_backend}' for bootstrapping "
-                    f"Userbuffers. Must be one of: 'gloo', 'mpi', 'nccl'"
+                    "Userbuffers. Must be one of: 'gloo', 'mpi', 'nccl'"
                 )
             if not torch.distributed.is_backend_available(bootstrap_backend):
                 raise RuntimeError(
@@ -355,7 +352,7 @@ def initialize_ub(
             )
             if quantization_mode != UserBufferQuantizationMode.FP8:
                 raise ValueError(
-                    f"Atomic GEMM overlap supported only for FP8 GEMM, "
+                    "Atomic GEMM overlap supported only for FP8 GEMM, "
                     f"got quantization_mode={quantization_mode}"
                 )
             if method in ("bulk", "external"):
@@ -730,9 +727,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     if buffer_key in FP8GlobalStateManager.global_amax_buffer:
                         if buffer_key not in FP8GlobalStateManager.global_amax_history_buffer:
                             raise RuntimeError(
-                                f"TE internal error during amax history change: "
+                                "TE internal error during amax history change: "
                                 f"buffer_key '{buffer_key}' found in global_amax_buffer "
-                                f"but missing from global_amax_history_buffer"
+                                "but missing from global_amax_history_buffer"
                             )
                         FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = self.fp8_meta[
                             meta_key

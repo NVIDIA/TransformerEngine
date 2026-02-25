@@ -1488,8 +1488,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       });
     } else {
       // raise error since it's not supported yet
-      NVTE_ERROR("Pre-RHT amax is not supported yet. "
-                 "Use with_post_rht_amax=true instead.");
+      NVTE_ERROR(
+          "Pre-RHT amax is not supported yet. "
+          "Use with_post_rht_amax=true instead.");
     }
   } else {  // Without RHT
     if (compute_amax) {

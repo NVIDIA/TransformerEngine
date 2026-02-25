@@ -72,7 +72,9 @@ def custom_gemm(
         assert sx is not None, "FPROP GEMM: activation scale (A.scale) is None"
         assert qw is not None, "FPROP GEMM: quantized weight data (B.data) is None"
         assert sw is not None, "FPROP GEMM: weight scale (B.scale) is None"
-        assert A.original_shape is not None, "FPROP GEMM: A.original_shape is None, cannot determine output shape"
+        assert (
+            A.original_shape is not None
+        ), "FPROP GEMM: A.original_shape is None, cannot determine output shape"
 
         # Call quantizer's qgemm method
         result = quantizer.qgemm(
@@ -115,9 +117,13 @@ def custom_gemm(
     elif gemm_type == GEMMType.WGRAD:
         qdy_t, sdy_t = A.data_t, A.scale_t
         qx_t, sx_t = B.data_t, B.scale_t
-        assert qdy_t is not None, "WGRAD GEMM: transposed quantized gradient data (A.data_t) is None"
+        assert (
+            qdy_t is not None
+        ), "WGRAD GEMM: transposed quantized gradient data (A.data_t) is None"
         assert sdy_t is not None, "WGRAD GEMM: transposed gradient scale (A.scale_t) is None"
-        assert qx_t is not None, "WGRAD GEMM: transposed quantized activation data (B.data_t) is None"
+        assert (
+            qx_t is not None
+        ), "WGRAD GEMM: transposed quantized activation data (B.data_t) is None"
         assert sx_t is not None, "WGRAD GEMM: transposed activation scale (B.scale_t) is None"
 
         result = quantizer.qgemm(

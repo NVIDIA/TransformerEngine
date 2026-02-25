@@ -116,8 +116,9 @@ void TeNormalizationPlan<BackwardKernelParams>::execute(Tensor* z, void* x_dptr,
                                                         void* beta_dptr, void* mean_dptr,
                                                         void* eps_dptr, void* rsigma_dptr,
                                                         void* workspace_dptr, cudaStream_t stream) {
-  NVTE_ERROR("Backward normalization should not call the forward execute function. "
-             "Use the backward-specific execute overload instead.");
+  NVTE_ERROR(
+      "Backward normalization should not call the forward execute function. "
+      "Use the backward-specific execute overload instead.");
 }
 
 template <typename KernelParamsType>
@@ -166,8 +167,9 @@ void TeNormalizationPlan<ForwardKernelParams>::execute(void* x_dptr, void* gamma
                                                        void* dx_dptr, void* dz_dptr, void* add_dptr,
                                                        void* dbeta_dptr, void* dgamma_dptr,
                                                        void* workspace_dptr, cudaStream_t stream) {
-  NVTE_ERROR("Forward normalization should not call the backward execute function. "
-             "Use the forward-specific execute overload instead.");
+  NVTE_ERROR(
+      "Forward normalization should not call the backward execute function. "
+      "Use the forward-specific execute overload instead.");
 }
 
 template <>

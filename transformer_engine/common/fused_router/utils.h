@@ -216,51 +216,49 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
 }
 
 // Current TE only support float32/bf16/fp16, float64 probs should be considered in the future
-#define TE_ROUTER_PROBS_TYPE_SWITCH_ALL(dtype, type, ...) \
-  switch (dtype) {                                        \
-    using namespace transformer_engine;                   \
-    case DType::kFloat32: {                               \
-      using type = float;                                 \
-      { __VA_ARGS__ }                                     \
-    } break;                                              \
-    case DType::kFloat16: {                               \
-      using type = fp16;                                  \
-      { __VA_ARGS__ }                                     \
-    } break;                                              \
-    case DType::kBFloat16: {                              \
-      using type = bf16;                                  \
-      { __VA_ARGS__ }                                     \
-    } break;                                              \
-    default:                                              \
-      NVTE_ERROR("Unsupported router probs dtype ",       \
-        to_string(static_cast<DType>(dtype)),             \
-        ". Expected one of: Float32, Float16, BFloat16.");\
+#define TE_ROUTER_PROBS_TYPE_SWITCH_ALL(dtype, type, ...)                                 \
+  switch (dtype) {                                                                        \
+    using namespace transformer_engine;                                                   \
+    case DType::kFloat32: {                                                               \
+      using type = float;                                                                 \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
+    case DType::kFloat16: {                                                               \
+      using type = fp16;                                                                  \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
+    case DType::kBFloat16: {                                                              \
+      using type = bf16;                                                                  \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
+    default:                                                                              \
+      NVTE_ERROR("Unsupported router probs dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Float32, Float16, BFloat16.");                       \
   }
 
-#define TE_ROUTER_INDEX_TYPE_SWITCH_ALL(dtype, type, ...) \
-  switch (dtype) {                                        \
-    using namespace transformer_engine;                   \
-    case DType::kInt32: {                                 \
-      using type = int32_t;                               \
-      { __VA_ARGS__ }                                     \
-    } break;                                              \
-    case DType::kInt64: {                                 \
-      using type = int64_t;                               \
-      { __VA_ARGS__ }                                     \
-    } break;                                              \
-    case DType::kBFloat16: {                              \
-      using type = bf16;                                  \
-      { __VA_ARGS__ }                                     \
-    } break;                                              \
-    case DType::kFloat32: {                               \
-      using type = float;                                 \
-      { __VA_ARGS__ }                                     \
-    } break;                                              \
-    default:                                              \
-      NVTE_ERROR("Unsupported router index dtype ",       \
-        to_string(static_cast<DType>(dtype)),             \
-        ". Expected one of: Int32, Int64, BFloat16, "     \
-        "Float32.");                                      \
+#define TE_ROUTER_INDEX_TYPE_SWITCH_ALL(dtype, type, ...)                                 \
+  switch (dtype) {                                                                        \
+    using namespace transformer_engine;                                                   \
+    case DType::kInt32: {                                                                 \
+      using type = int32_t;                                                               \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
+    case DType::kInt64: {                                                                 \
+      using type = int64_t;                                                               \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
+    case DType::kBFloat16: {                                                              \
+      using type = bf16;                                                                  \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
+    case DType::kFloat32: {                                                               \
+      using type = float;                                                                 \
+      { __VA_ARGS__ }                                                                     \
+    } break;                                                                              \
+    default:                                                                              \
+      NVTE_ERROR("Unsupported router index dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Int32, Int64, BFloat16, "                            \
+                 "Float32.");                                                             \
   }
 }  // namespace transformer_engine
 #endif

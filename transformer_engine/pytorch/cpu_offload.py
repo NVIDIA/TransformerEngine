@@ -428,7 +428,7 @@ class OffloadableLayerState:
 
         # 4. the layer was offloaded
         assert self.state == "reload_started", (
-            f"Expected state='reload_started' when popping an offloaded tensor, "
+            "Expected state='reload_started' when popping an offloaded tensor, "
             f"but got state='{self.state}' for tensor={tensor_or_tensor_id}"
         )
         # wait for the tensor to be reloaded
@@ -893,8 +893,8 @@ def get_cpu_offload_context(
             This function is used to catch the backward pass of the model.
             """
             assert tensor.requires_grad is True, (
-                f"Tensor passed to synchronization_function must require grad to "
-                f"register backward hooks, but got requires_grad=False for tensor "
+                "Tensor passed to synchronization_function must require grad to "
+                "register backward hooks, but got requires_grad=False for tensor "
                 f"with shape={tensor.shape}, dtype={tensor.dtype}"
             )
             assert self.current_layer is not None, (

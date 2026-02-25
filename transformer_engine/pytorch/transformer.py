@@ -375,7 +375,7 @@ class TransformerLayer(torch.nn.Module):
         if parallel_attention_mlp:
             if self.layer_type != "encoder":
                 raise ValueError(
-                    f"parallel_attention requires layer_type='encoder', "
+                    "parallel_attention requires layer_type='encoder', "
                     f"but got layer_type={self.layer_type!r}"
                 )
             if self.apply_residual_connection_post_layernorm:
@@ -820,8 +820,8 @@ class TransformerLayer(torch.nn.Module):
         if self.sequence_parallel and self.seq_length is not None:
             if hidden_states.shape[0] != self.seq_length // self.tp_size:
                 raise ValueError(
-                    f"Sequence dimension must be split across TP group when using "
-                    f"sequence parallel. Expected hidden_states.shape[0] to be "
+                    "Sequence dimension must be split across TP group when using "
+                    "sequence parallel. Expected hidden_states.shape[0] to be "
                     f"{self.seq_length // self.tp_size} "
                     f"(seq_length={self.seq_length} // tp_size={self.tp_size}), "
                     f"but got {hidden_states.shape[0]}."
@@ -830,24 +830,21 @@ class TransformerLayer(torch.nn.Module):
         if (
             "padding" in self_attn_mask_type or self_attn_mask_type == "arbitrary"
         ) and attention_mask is not None:
-            if not all(
-                attention_mask[i].dtype == torch.bool for i in range(len(attention_mask))
-            ):
+            if not all(attention_mask[i].dtype == torch.bool for i in range(len(attention_mask))):
                 non_bool_dtypes = [
                     (i, attention_mask[i].dtype)
                     for i in range(len(attention_mask))
                     if attention_mask[i].dtype != torch.bool
                 ]
                 raise TypeError(
-                    f"Attention mask must be a boolean tensor or a list/tuple of boolean "
+                    "Attention mask must be a boolean tensor or a list/tuple of boolean "
                     f"tensors, but found non-bool dtypes at indices: {non_bool_dtypes}"
                 )
         if (
             "padding" in enc_dec_attn_mask_type or enc_dec_attn_mask_type == "arbitrary"
         ) and enc_dec_attn_mask is not None:
             if not all(
-                enc_dec_attn_mask[i].dtype == torch.bool
-                for i in range(len(enc_dec_attn_mask))
+                enc_dec_attn_mask[i].dtype == torch.bool for i in range(len(enc_dec_attn_mask))
             ):
                 non_bool_dtypes = [
                     (i, enc_dec_attn_mask[i].dtype)
@@ -855,7 +852,7 @@ class TransformerLayer(torch.nn.Module):
                     if enc_dec_attn_mask[i].dtype != torch.bool
                 ]
                 raise TypeError(
-                    f"Encoder-decoder attention mask must be boolean tensor(s), "
+                    "Encoder-decoder attention mask must be boolean tensor(s), "
                     f"but found non-bool dtypes at indices: {non_bool_dtypes}"
                 )
 

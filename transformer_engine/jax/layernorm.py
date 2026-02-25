@@ -34,7 +34,7 @@ def canonicalize_norm_type(x):
     if canonicalized not in ["layernorm", "rmsnorm"]:
         raise ValueError(
             f"Unsupported normalization type '{x}' (canonicalized: '{canonicalized}'). "
-            f"Valid options are: 'layernorm', 'rmsnorm'."
+            "Valid options are: 'layernorm', 'rmsnorm'."
         )
     return canonicalized
 

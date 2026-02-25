@@ -147,11 +147,11 @@ def _make_graphed_callables(
     delay_wgrad_compute = False
     if _order is None:
         assert len(sample_args) == len(callables), (
-            f"Expected sample_args to have the same length as callables, "
+            "Expected sample_args to have the same length as callables, "
             f"but got {len(sample_args)} sample_args for {len(callables)} callables"
         )
         assert len(sample_kwargs) == len(callables), (
-            f"Expected sample_kwargs to have the same length as callables, "
+            "Expected sample_kwargs to have the same length as callables, "
             f"but got {len(sample_kwargs)} sample_kwargs for {len(callables)} callables"
         )
     else:
@@ -178,7 +178,7 @@ def _make_graphed_callables(
         num_model_chunks = max(_order_without_wgrad)
         num_microbatches = len(_order_without_wgrad) // num_model_chunks // 2
         assert num_model_chunks * num_microbatches * 2 == len(_order_without_wgrad), (
-            f"Pipeline-parallel order dimension mismatch: "
+            "Pipeline-parallel order dimension mismatch: "
             f"num_model_chunks ({num_model_chunks}) * num_microbatches ({num_microbatches}) * 2 "
             f"= {num_model_chunks * num_microbatches * 2}, "
             f"but len(_order_without_wgrad) = {len(_order_without_wgrad)}"
@@ -232,7 +232,7 @@ def _make_graphed_callables(
             _prefix_num_layers.append(_prefix_num_layers[-1] + num_layers)
 
         assert len(sample_kwargs) == len(sample_args), (
-            f"Pipeline-parallel schedule requires sample_kwargs and sample_args to have "
+            "Pipeline-parallel schedule requires sample_kwargs and sample_args to have "
             f"the same length, but got {len(sample_kwargs)} sample_kwargs "
             f"for {len(sample_args)} sample_args"
         )
@@ -368,7 +368,7 @@ def _make_graphed_callables(
                         else ()
                     )
         assert len(per_callable_module_params) == len(flatten_sample_args), (
-            f"Pipeline-parallel dimension mismatch: "
+            "Pipeline-parallel dimension mismatch: "
             f"per_callable_module_params has {len(per_callable_module_params)} entries, "
             f"but flatten_sample_args has {len(flatten_sample_args)} entries"
         )
@@ -819,9 +819,9 @@ def _make_graphed_callables(
 
                 # Replay forward graph
                 fwd_graph.replay()
-                assert isinstance(static_outputs, tuple), (
-                    f"Expected static_outputs to be a tuple, but got {type(static_outputs)}"
-                )
+                assert isinstance(
+                    static_outputs, tuple
+                ), f"Expected static_outputs to be a tuple, but got {type(static_outputs)}"
                 return tuple(o.detach() if o is not None else o for o in static_outputs)
 
             @staticmethod
@@ -831,7 +831,7 @@ def _make_graphed_callables(
 
                 # Replay backward graph
                 assert len(grads) == len(static_grad_outputs), (
-                    f"Backward graph grad dimension mismatch: "
+                    "Backward graph grad dimension mismatch: "
                     f"received {len(grads)} grads, "
                     f"but expected {len(static_grad_outputs)} static_grad_outputs"
                 )
@@ -848,9 +848,9 @@ def _make_graphed_callables(
                     FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
                 # Input args that didn't require grad expect a None gradient.
-                assert isinstance(static_grad_inputs, tuple), (
-                    f"Expected static_grad_inputs to be a tuple, but got {type(static_grad_inputs)}"
-                )
+                assert isinstance(
+                    static_grad_inputs, tuple
+                ), f"Expected static_grad_inputs to be a tuple, but got {type(static_grad_inputs)}"
                 return (None,) + tuple(
                     b.detach() if b is not None else b for b in static_grad_inputs
                 )

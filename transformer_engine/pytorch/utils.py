@@ -376,9 +376,7 @@ def validate_rng_states_func(get_rng_tracker: Callable) -> None:
     required for tensor/model and sequence parallel.
     """
     if not callable(get_rng_tracker):
-        raise TypeError(
-            f"get_rng_tracker must be callable, got {type(get_rng_tracker).__name__}"
-        )
+        raise TypeError(f"get_rng_tracker must be callable, got {type(get_rng_tracker).__name__}")
 
     rng_tracker = None
     try:
@@ -387,9 +385,7 @@ def validate_rng_states_func(get_rng_tracker: Callable) -> None:
         raise RuntimeError("Cannot call get_rng_tracker function") from e
 
     for method_name in ("get_states", "set_states", "fork"):
-        if not hasattr(rng_tracker, method_name) or not callable(
-            getattr(rng_tracker, method_name)
-        ):
+        if not hasattr(rng_tracker, method_name) or not callable(getattr(rng_tracker, method_name)):
             raise TypeError(
                 f"rng_tracker object ({type(rng_tracker).__name__}) does not have "
                 f"a valid callable method '{method_name}'. "
@@ -464,7 +460,7 @@ def assert_dim_for_all_gather(
     if with_all_gather:
         if not quantizer.is_quantizable(tensor):
             raise ValueError(
-                f"All-gather requires a quantizable tensor for quantizer"
+                "All-gather requires a quantizable tensor for quantizer"
                 f" {quantizer.__class__.__name__}, but got tensor with"
                 f" shape={list(tensor.shape)} and dtype={tensor.dtype}"
             )
@@ -767,9 +763,7 @@ class _WeakRefTensor:
         ret = _torch_dtype_to_np_typestr_dict.get(self.dtype)
         if ret is None:
             supported = ", ".join(str(d) for d in _torch_dtype_to_np_typestr_dict)
-            raise TypeError(
-                f"Unsupported dtype: {self.dtype}. Supported dtypes: {supported}"
-            )
+            raise TypeError(f"Unsupported dtype: {self.dtype}. Supported dtypes: {supported}")
         return ret
 
 

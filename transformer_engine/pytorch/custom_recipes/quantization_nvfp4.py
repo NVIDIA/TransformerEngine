@@ -325,9 +325,9 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         the second dimension by half. This method returns the logical shape that
         users expect, not the internal packed storage shape.
         """
-        assert self.original_shape is not None, (
-            "NVFP4TensorRef.size() called but original_shape has not been set"
-        )
+        assert (
+            self.original_shape is not None
+        ), "NVFP4TensorRef.size() called but original_shape has not been set"
         return torch.Size(self.original_shape)
 
 
@@ -448,9 +448,9 @@ class NVFP4QuantizerRef(Quantizer):
         eps: float,  # pylint: disable=unused-argument
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        assert x.ndim == 2, (
-            f"_quantize_blockwise_reference expects a 2D tensor, got {x.ndim}D with shape {x.shape}"
-        )
+        assert (
+            x.ndim == 2
+        ), f"_quantize_blockwise_reference expects a 2D tensor, got {x.ndim}D with shape {x.shape}"
         using_2d_quantization = tile_len_x == 16 and tile_len_y == 16
         m, n = x.shape
         # Compute vec_max based on the original x (before reshape)
@@ -771,7 +771,8 @@ class NVFP4QuantizerRef(Quantizer):
         TODO(etsykunov): Confirm docstring is correct.
         """
         raise NotImplementedError(
-            "NVFP4QuantizerRef.is_data_t_transposed_in_memory is not implemented for FP4 quantization"
+            "NVFP4QuantizerRef.is_data_t_transposed_in_memory is not implemented for FP4"
+            " quantization"
         )
 
     def qgemm(
@@ -820,19 +821,19 @@ class NVFP4QuantizerRef(Quantizer):
 
         else:
 
-            assert qresult_x is not None, (
-                "qresult_x is required for non-pow_2_scales NVFP4 GEMM (needed for global_amax)"
-            )
-            assert qresult_w is not None, (
-                "qresult_w is required for non-pow_2_scales NVFP4 GEMM (needed for global_amax)"
-            )
+            assert (
+                qresult_x is not None
+            ), "qresult_x is required for non-pow_2_scales NVFP4 GEMM (needed for global_amax)"
+            assert (
+                qresult_w is not None
+            ), "qresult_w is required for non-pow_2_scales NVFP4 GEMM (needed for global_amax)"
 
-            assert qresult_x.global_amax_row is not None, (
-                "qresult_x.global_amax_row must be set for non-pow_2_scales NVFP4 GEMM"
-            )
-            assert qresult_w.global_amax_col is not None, (
-                "qresult_w.global_amax_col must be set for non-pow_2_scales NVFP4 GEMM"
-            )
+            assert (
+                qresult_x.global_amax_row is not None
+            ), "qresult_x.global_amax_row must be set for non-pow_2_scales NVFP4 GEMM"
+            assert (
+                qresult_w.global_amax_col is not None
+            ), "qresult_w.global_amax_col must be set for non-pow_2_scales NVFP4 GEMM"
 
             sx = sx.to(torch.float32)
             sw = sw.to(torch.float32)

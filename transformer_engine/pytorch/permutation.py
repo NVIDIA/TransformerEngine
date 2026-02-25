@@ -43,13 +43,9 @@ class _moe_permute_index_map(torch.autograd.Function):
 
         # Device check
         if not inp.is_cuda:
-            raise ValueError(
-                f"inp must be a CUDA tensor, but got tensor on {inp.device}."
-            )
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
         if not index.is_cuda:
-            raise ValueError(
-                f"index must be a CUDA tensor, but got tensor on {index.device}."
-            )
+            raise ValueError(f"index must be a CUDA tensor, but got tensor on {index.device}.")
         # Shape check
         if inp.size(0) != index.size(0):
             raise ValueError(
@@ -130,9 +126,7 @@ class _moe_unpermute_index_map(torch.autograd.Function):
         # None probs check
         if probs is not None:
             if not probs.is_cuda:
-                raise ValueError(
-                    f"probs must be a CUDA tensor, but got tensor on {probs.device}."
-                )
+                raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
 
             if probs.dtype != torch.float32:
                 warnings.warn(
@@ -150,9 +144,7 @@ class _moe_unpermute_index_map(torch.autograd.Function):
 
         # Device check
         if not inp.is_cuda:
-            raise ValueError(
-                f"inp must be a CUDA tensor, but got tensor on {inp.device}."
-            )
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
         if not row_id_map.is_cuda:
             raise ValueError(
                 f"row_id_map must be a CUDA tensor, but got tensor on {row_id_map.device}."
@@ -218,18 +210,14 @@ class _moe_permute_mask_map(torch.autograd.Function):
             return inp, torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
 
         if not inp.is_cuda:
-            raise ValueError(
-                f"inp must be a CUDA tensor, but got tensor on {inp.device}."
-            )
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
         if not routing_map.is_cuda:
             raise ValueError(
                 f"routing_map must be a CUDA tensor, but got tensor on {routing_map.device}."
             )
         if probs is not None:
             if not probs.is_cuda:
-                raise ValueError(
-                    f"probs must be a CUDA tensor, but got tensor on {probs.device}."
-                )
+                raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
         if pad_offsets is not None:
             if not pad_offsets.is_cuda:
                 raise ValueError(
@@ -410,15 +398,13 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         if with_probs:
             if not merging_probs.is_cuda:
                 raise ValueError(
-                    f"merging_probs must be a CUDA tensor, but got tensor on "
+                    "merging_probs must be a CUDA tensor, but got tensor on "
                     f"{merging_probs.device}."
                 )
 
         # Device check
         if not inp.is_cuda:
-            raise ValueError(
-                f"inp must be a CUDA tensor, but got tensor on {inp.device}."
-            )
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
         if not row_id_map.is_cuda:
             raise ValueError(
                 f"row_id_map must be a CUDA tensor, but got tensor on {row_id_map.device}."
@@ -791,9 +777,7 @@ class _moe_chunk_sort(torch.autograd.Function):
             return inp, probs
 
         if not inp.is_cuda:
-            raise ValueError(
-                f"inp must be a CUDA tensor, but got tensor on {inp.device}."
-            )
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
         if not split_sizes.is_cuda:
             raise ValueError(
                 f"split_sizes must be a CUDA tensor, but got tensor on {split_sizes.device}."
@@ -804,9 +788,7 @@ class _moe_chunk_sort(torch.autograd.Function):
             )
         if probs is not None:
             if not probs.is_cuda:
-                raise ValueError(
-                    f"probs must be a CUDA tensor, but got tensor on {probs.device}."
-                )
+                raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
 
         num_tokens, hidden_size = inp.shape
         num_splits = split_sizes.size(0)
