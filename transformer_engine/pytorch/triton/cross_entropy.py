@@ -30,6 +30,7 @@ def cross_entropy_forward(
     reduce_loss: bool,
     dist_process_group: Union[dist.ProcessGroup, None],
     ignore_idx: int,
+    z_loss_weight: float = 0.0,
 ):
     """Forward implementation of Cross Entropy kernel"""
 
@@ -42,6 +43,9 @@ def cross_entropy_forward(
 
     # unreduced loss
     loss_1d = torch.zeros(n_rows, dtype=torch.float32, device=_input.device)
+
+    # log(sum(exp(logits))) per row; zero for ignored tokens (training_common.py masks with loss_mask)
+    log_sum_exp_1d = torch.zeros(n_rows, dtype=torch.float32, device=_input.device)
 
     # tensor to hold this rank's m/d/X_y values
     m_d_X_y = torch.zeros(n_rows * 3, dtype=torch.float32, device=_input.device)
@@ -92,6 +96,8 @@ def cross_entropy_forward(
         loss_stride=loss_1d.stride(-1),
         m_d_X_y_ptr=m_d_X_y_gathered,
         m_d_X_y_stride=m_d_X_y_gathered.stride(-1),
+        log_sum_exp_ptr=log_sum_exp_1d,
+        log_sum_exp_stride=log_sum_exp_1d.stride(-1),
         rank=rank,
         world_size=world_size,
         ignore_idx=ignore_idx,
@@ -100,6 +106,7 @@ def cross_entropy_forward(
         n_non_ignore=n_non_ignore,
         reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,
+        z_loss_weight=z_loss_weight,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=32,
     )
@@ -107,8 +114,9 @@ def cross_entropy_forward(
     loss = (
         torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_non_ignore)
     )
+    log_sum_exp = torch.reshape(log_sum_exp_1d, (B, SQ))
 
-    return loss, _input
+    return loss, _input, log_sum_exp
 
 
 def cross_entropy_backward(
