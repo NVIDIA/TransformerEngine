@@ -6,4 +6,4 @@
 	url = https://github.com/NVIDIA/cudnn-frontend.git
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
-	url = git@gitlab-master.nvidia.com:12051/dlarch-fastkernels/cutlass-gitlab-mirror.git
+	url = ../../../dlarch-fastkernels/cutlass-gitlab-mirror.git
