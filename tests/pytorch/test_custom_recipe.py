@@ -366,12 +366,12 @@ def _make_pair(in_features=128, out_features=128, batch=32, seed=42):
 
 def _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus):
     """Assert exact match of outputs and all gradients."""
-    assert torch.allclose(out_ref, out_cus, rtol=0.0, atol=0.0), (
-        f"Forward mismatch: max diff = {(out_ref - out_cus).abs().max()}"
-    )
-    assert torch.allclose(grad_ref, grad_cus, rtol=0.0, atol=0.0), (
-        f"Input grad mismatch: max diff = {(grad_ref - grad_cus).abs().max()}"
-    )
+    assert torch.allclose(
+        out_ref, out_cus, rtol=0.0, atol=0.0
+    ), f"Forward mismatch: max diff = {(out_ref - out_cus).abs().max()}"
+    assert torch.allclose(
+        grad_ref, grad_cus, rtol=0.0, atol=0.0
+    ), f"Input grad mismatch: max diff = {(grad_ref - grad_cus).abs().max()}"
     for name in pgrads_ref:
         assert torch.allclose(pgrads_ref[name], pgrads_cus[name], rtol=0.0, atol=0.0), (
             f"Param grad '{name}' mismatch: max diff = "
