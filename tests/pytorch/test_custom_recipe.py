@@ -301,20 +301,14 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     def quantizer_factory(role):
         if role is None:
             counts[None] += 1
-            return Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device=torch.device("cuda")
-            )
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
         assert isinstance(role, QuantizerRole), f"Expected QuantizerRole, got {type(role)}"
         assert role.module_type == "linear"
         if role.tensor_type in counts:
             counts[role.tensor_type] += 1
         if role.tensor_type == "grad_output":
-            return Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device=torch.device("cuda")
-            )
-        return Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3, device=torch.device("cuda")
-        )
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device=torch.device("cuda"))
+        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
 
     custom = recipe.CustomRecipe(qfactory=quantizer_factory)
 
