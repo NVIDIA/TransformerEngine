@@ -608,8 +608,12 @@ class TensorWrapper {
    *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
    *  \param[in] scaling_mode    Tensor data format.
    */
-  TensorWrapper(void *dptr, const NVTEShape &shape, const DType dtype, float *amax_dptr = nullptr,
-                float *scale_dptr = nullptr, float *scale_inv_dptr = nullptr,
+  TensorWrapper(void *dptr, 
+                const NVTEShape &shape, 
+                const DType dtype,
+                float *amax_dptr = nullptr,
+                float *scale_dptr = nullptr, 
+                float *scale_inv_dptr = nullptr,
                 NVTEShape scale_inv_shape = defaultShape,
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING) {
     tensor_ = nvte_create_tensor(scaling_mode);

@@ -81,6 +81,20 @@ pybind11::dict Registrations() {
       pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
       pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
 
+  // Router
+  dict["te_fused_topk_with_score_function_forward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionForwardHandler);
+  dict["te_fused_topk_with_score_function_backward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionBackwardHandler);
+  dict["te_fused_score_for_moe_aux_loss_forward_ffi"] =
+      EncapsulateFFI(FusedScoreForMoEAuxLossForwardHandler);
+  dict["te_fused_score_for_moe_aux_loss_backward_ffi"] =
+      EncapsulateFFI(FusedScoreForMoEAuxLossBackwardHandler);
+  dict["te_fused_moe_aux_loss_forward_ffi"] =
+      EncapsulateFFI(FusedMoEAuxLossForwardHandler);
+  dict["te_fused_moe_aux_loss_backward_ffi"] =
+      EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
+
   return dict;
 }
 
