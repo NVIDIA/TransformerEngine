@@ -72,9 +72,6 @@ def main():
     # Broadcast the full matrix to all ranks
     dist.broadcast(A, src=0)
 
-    # Keep a copy of the original matrix for verification
-    A_orig = A.clone()
-
     # Scatter rows to each rank
     local_rows = N // world_size
     x_local = A[rank * local_rows : (rank + 1) * local_rows, :].contiguous()
