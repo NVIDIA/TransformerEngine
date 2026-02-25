@@ -134,7 +134,6 @@ class _Linear(torch.autograd.Function):
         else:
             backward_mode = "default"
         if backward_mode == "unquant":
-            # Note, NVTE_BACKWARD_MODE=unquant is ignored when delayed scaling is used.
             save_original_input = True
 
         # NVTX label for profiling

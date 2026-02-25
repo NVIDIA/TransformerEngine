@@ -103,7 +103,6 @@ class _GroupedLinear(torch.autograd.Function):
         else:
             backward_mode = "default"
         if backward_mode == "unquant":
-            # Note, NVTE_BACKWARD_MODE=unquant is ignored when delayed scaling is used.
             save_original_input = True
 
         num_gemms = len(m_splits)
@@ -1111,8 +1110,9 @@ class GroupedLinear(TransformerEngineBaseModule):
             if fp8_recipe.backward_mode == "dequant" and (fp8_recipe.mxfp8() or fp8_recipe.nvfp4()):
                 for input_quantizer in input_quantizers:
                     input_quantizer.optimize_for_gemm = False
-                for grad_output_quantizer in grad_output_quantizers:
-                    grad_output_quantizer.optimize_for_gemm = False
+                if torch.is_grad_enabled():
+                    for grad_output_quantizer in grad_output_quantizers:
+                        grad_output_quantizer.optimize_for_gemm = False
         return (
             input_quantizers,
             weight_quantizers,

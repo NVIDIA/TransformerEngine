@@ -239,9 +239,10 @@ class _LayerNormMLP(torch.autograd.Function):
             backward_mode = FP8GlobalStateManager.get_fp8_recipe().backward_mode
         else:
             backward_mode = "default"
-        assert (
-            backward_mode == "default"
-        ), "NVTE_BACKWARD_MODE=unquant/dequant is not implemented in LayerNormMLP"
+        assert backward_mode == "default", (
+            "NVTE_BACKWARD_MODE=unquant/dequant is not implemented in LayerNormMLP. "
+            "Replace LayerNormMLP with LayerNormLinear + Linear to enable unquant/dequant backward."
+        )
 
         # if grad is enabled and this is not the bwd stage, we must save this so bwd knows which path to take
         if is_grad_enabled and not recompute_for_bwd:
