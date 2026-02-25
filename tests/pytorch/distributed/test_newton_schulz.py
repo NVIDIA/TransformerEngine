@@ -23,7 +23,7 @@ LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 @pytest.mark.parametrize("matrix_size", [256])
 @pytest.mark.parametrize("num_iterations", [5, 15])
 def test_newton_schulz(dtype, matrix_size, num_iterations):
-    """Test distributed Newton-Schulz inverse square root."""
+    """Test distributed Newton-Schulz matrix orthogonalization."""
     test_path = TEST_ROOT / "run_newton_schulz.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),

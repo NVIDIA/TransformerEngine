@@ -90,7 +90,7 @@ def main():
     dist.all_gather(gathered, x_local)
     X = torch.cat(gathered, dim=0)
 
-    # Check: if X = A^{-1/2}, then X @ A @ X should be the identity matrix
+    # Check: the resulting matrix should be orthogonal
     if rank == 0:
         XXT = X @ X.t()
         I = torch.eye(N, device=XXT.device, dtype=XXT.dtype)
