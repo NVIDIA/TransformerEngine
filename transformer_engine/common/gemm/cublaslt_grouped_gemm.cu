@@ -670,7 +670,6 @@ size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors) {
   return 0;
 }
 
-
 #endif  // CUBLAS_VERSION >= 130200
 
 namespace {
