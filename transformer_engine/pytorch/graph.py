@@ -442,13 +442,13 @@ def _make_graphed_callables(
                     else:
                         visited_te_modules[func_idx].update(modules)
 
+            if pre_warmup_hook is not None:
+                pre_warmup_hook()
             for warmup_iter in range(num_warmup_iters):
                 hooks = []
                 for module in func.modules():
                     hook = module.register_forward_hook(hook_fn)
                     hooks.append(hook)
-                if pre_warmup_hook is not None:
-                    pre_warmup_hook()
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:
                     hook.remove()
@@ -510,8 +510,8 @@ def _make_graphed_callables(
                 else:
                     grad_inputs = None
                 del outputs, grad_inputs
-                if post_warmup_hook is not None:
-                    post_warmup_hook()
+            if post_warmup_hook is not None:
+                post_warmup_hook()
             # The following code is added specifically for MCore's special requirements,
             # aimed at preventing warmup from altering the control flow.
             for module in func.modules():
@@ -870,6 +870,8 @@ def _make_graphed_callables(
                 cuda_graph_stream = torch.cuda.current_stream()
             if "cuda_graph_event" in user_kwargs:
                 cuda_graph_event = user_kwargs["cuda_graph_event"]
+                assert cuda_graph_stream != torch.cuda.current_stream(), \
+                    "cuda_graph_stream cannot be the main stream when cuda_graph_event is given."
                 user_kwargs.pop("cuda_graph_event")
             else:
                 cuda_graph_event = None
