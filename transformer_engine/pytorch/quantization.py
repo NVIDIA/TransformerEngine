@@ -53,6 +53,10 @@ class QuantizerRole:
     TE modules populate all fields they know about.
     User factories inspect only the fields they care about.
 
+    .. warning::
+        **EXPERIMENTAL**: QuantizerRole is experimental, still under active development,
+        and the API is subject to change without notice. Use at your own risk.
+
     Fields
     ------
     module_type : str
