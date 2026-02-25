@@ -1870,7 +1870,7 @@ def symmetric_all_reduce(
         - The second element is the async work handle if async_op=True,
           otherwise None.
     """
-    if async_op is not False:
+    if async_op:
         raise RuntimeError(
             f"Async symmetric ops are not supported yet, but async_op={async_op!r} was passed."
         )
