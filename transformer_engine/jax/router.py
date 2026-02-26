@@ -157,7 +157,7 @@ def _fused_topk_with_score_function_fwd(
 
 
 def _fused_topk_with_score_function_bwd(
-    topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,
+    topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,  # pylint: disable=unused-argument
     residuals, g,
 ):
     routing_map, intermediate_output = residuals
@@ -335,7 +335,7 @@ def _fused_moe_aux_loss_fwd(
 
 
 def _fused_moe_aux_loss_bwd(
-    total_num_tokens, num_experts, topk, coeff, residuals, g,
+    total_num_tokens, num_experts, topk, coeff, residuals, g,  # pylint: disable=unused-argument
 ):
     const_buf, tokens_per_expert, num_rows, num_cols = residuals
     # g is a scalar matching the squeezed output of _fwd
