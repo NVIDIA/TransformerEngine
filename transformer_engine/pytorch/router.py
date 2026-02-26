@@ -119,7 +119,7 @@ def fused_topk_with_score_function(
     scaling_factor : float, optional
     score_function : str
         currently support "softmax", "sigmoid" and "sqrtsoftplus".
-    expert_bias : torch.Tensor in fp32, optional
+    expert_bias : torch.Tensor, optional
         could be used with the sigmoid/sqrtsoftplus score functions.
 
     Returns
