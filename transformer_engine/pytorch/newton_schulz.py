@@ -42,25 +42,29 @@ def newton_schulz(
         Polynomial coefficients for the Newton-Schulz iteration.
     """
     QUINTIC_COEFFICIENTS = [
-            4.0848,
-            -6.8946,
-            2.9270,
-            3.9505,
-            -6.3029,
-            2.6377,
-            3.7418,
-            -5.5913,
-            2.3037,
-            2.8769,
-            -3.1427,
-            1.2046,
-            2.8366,
-            -3.0525,
-            1.2012,
+        4.0848,
+        -6.8946,
+        2.9270,
+        3.9505,
+        -6.3029,
+        2.6377,
+        3.7418,
+        -5.5913,
+        2.3037,
+        2.8769,
+        -3.1427,
+        1.2046,
+        2.8366,
+        -3.0525,
+        1.2012,
     ]
     if coefficients is None:
-        coefficients = QUINTIC_COEFFICIENTS if num_iterations==5 else [1.5, -0.5, 0.0] * num_iterations
-    assert len(coefficients) == num_iterations * 3, f"Unexpected number of coefficients: {len(coefficients)} for {num_iterations} iterations"
+        coefficients = (
+            QUINTIC_COEFFICIENTS if num_iterations == 5 else [1.5, -0.5, 0.0] * num_iterations
+        )
+    assert (
+        len(coefficients) == num_iterations * 3
+    ), f"Unexpected number of coefficients: {len(coefficients)} for {num_iterations} iterations"
 
     if x.dim() != 2:
         raise ValueError(f"Expected 2D tensor, got {x.dim()}D")
