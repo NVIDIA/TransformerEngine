@@ -1221,13 +1221,15 @@ def test_single_gpu_partial_cast_vs_full():
 
     # Compare amax
     amax_match = torch.equal(test_tensor._amax_rowwise, ref_amax)
+    assert amax_match, f"Amax mismatch: {test_tensor._amax_rowwise} vs {ref_amax}"
 
     # Compare scale
     scale_match = torch.equal(test_tensor._rowwise_scale_inv, ref_scale)
+    assert scale_match, f"Scale mismatch: {test_tensor._rowwise_scale_inv} vs {ref_scale}"
 
     # Compare data
     data_match = torch.equal(test_tensor._rowwise_data, ref_data)
-
+    assert data_match, f"Data mismatch"
 
 if __name__ == "__main__":
     main()
