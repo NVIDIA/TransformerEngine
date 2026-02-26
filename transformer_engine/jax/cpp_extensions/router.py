@@ -169,7 +169,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
                 "collective ops and hurt performance."
             )
         out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec[:-1], None))
-        return out_sharding, out_sharding, out_sharding
+        return [out_sharding, out_sharding, out_sharding]
 
     @staticmethod
     def partition(
@@ -205,7 +205,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
             scaling_factor=scaling_factor,
             score_function=score_function,
         )
-        return mesh, impl, (out_sharding, out_sharding, out_sharding), arg_shardings
+        return mesh, impl, [out_sharding, out_sharding, out_sharding], arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -429,7 +429,7 @@ class FusedScoreForMoEAuxLossFwdPrimitive(BasePrimitive):
                 "Forcing XLA to not shard the expert dim."
             )
         out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec[:-1], None))
-        return out_sharding, out_sharding, out_sharding
+        return [out_sharding, out_sharding, out_sharding]
 
     @staticmethod
     def partition(topk, score_function, mesh, arg_infos, result_infos):
@@ -446,7 +446,7 @@ class FusedScoreForMoEAuxLossFwdPrimitive(BasePrimitive):
         impl = partial(
             FusedScoreForMoEAuxLossFwdPrimitive.impl, topk=topk, score_function=score_function
         )
-        return mesh, impl, (out_sharding, out_sharding, out_sharding), arg_shardings
+        return mesh, impl, [out_sharding, out_sharding, out_sharding], arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -620,7 +620,7 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
     ):
         del total_num_tokens, num_experts, topk, coeff, arg_infos, result_infos
         replicated = NamedSharding(mesh, PartitionSpec())
-        return replicated, replicated
+        return [replicated, replicated]
 
     @staticmethod
     def partition(
@@ -628,7 +628,6 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
     ):
         del result_infos, arg_infos
         replicated = NamedSharding(mesh, PartitionSpec())
-        # Global reduction: all inputs must be replicated
         arg_shardings = (replicated, replicated)
         impl = partial(
             FusedMoEAuxLossFwdPrimitive.impl,
@@ -637,12 +636,12 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
             topk=topk,
             coeff=coeff,
         )
-        return mesh, impl, (replicated, replicated), arg_shardings
+        return mesh, impl, [replicated, replicated], arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "num_tokens num_experts, num_experts -> , "
+        return "num_tokens num_experts, num_experts -> aux_loss_one, const_buf_one"
 
 
 register_primitive(FusedMoEAuxLossFwdPrimitive)
@@ -725,7 +724,7 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return ", , -> num_tokens num_experts"
+        return "const_buf_one, num_experts, grad_one -> num_tokens num_experts"
 
 
 register_primitive(FusedMoEAuxLossBwdPrimitive)
