@@ -607,7 +607,7 @@ class MultiheadAttention(torch.nn.Module):
         """
         Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
         depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
-        
+
         TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
         integration with Torch DCP checkpointing. This method should only be invoked when
         using DTensor parameters, e.g. when using FSDP2 or DCP.
@@ -639,8 +639,10 @@ class MultiheadAttention(torch.nn.Module):
             # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
             assert (
                 tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
-                f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
-                f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                (
+                    f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                    f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                ),
             )
             # Set the tensor parallel group from the mesh.
             self.set_tensor_parallel_group(tp_mesh.get_group())

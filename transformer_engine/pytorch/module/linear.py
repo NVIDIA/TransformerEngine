@@ -1352,7 +1352,7 @@ class Linear(TransformerEngineBaseModule):
         """
         Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
         depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
-        
+
         TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
         integration with Torch DCP checkpointing. This method should only be invoked when
         using DTensor parameters, e.g. when using FSDP2 or DCP.
@@ -1384,14 +1384,17 @@ class Linear(TransformerEngineBaseModule):
             # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
             assert (
                 tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
-                f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
-                f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                (
+                    f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                    f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                ),
             )
             # Set the tensor parallel group from the mesh.
             self.set_tensor_parallel_group(tp_mesh.get_group())
 
             # Construct TP-sharded DTensors.
             from torch.distributed.tensor.placement_types import Replicate, Shard
+
             for weight in self.weight_names:
                 param = getattr(self, weight)
                 placements = (Replicate(),)
@@ -1399,21 +1402,21 @@ class Linear(TransformerEngineBaseModule):
                     placements = (Shard(dim=0),)
                 elif self.parallel_mode == "row":
                     placements = (Shard(dim=1),)
-                setattr(self, weight, _convert_param_to_dtensor_param(
-                    param,
-                    tp_mesh,
-                    placements=placements
-                ))
+                setattr(
+                    self,
+                    weight,
+                    _convert_param_to_dtensor_param(param, tp_mesh, placements=placements),
+                )
             for bias in self.bias_names:
                 param = getattr(self, bias)
                 placements = (Replicate(),)
                 if self.parallel_mode == "column":
                     placements = (Shard(dim=0),)
-                setattr(self, bias, _convert_param_to_dtensor_param(
-                    param,
-                    tp_mesh,
-                    placements=placements
-                ))
+                setattr(
+                    self,
+                    bias,
+                    _convert_param_to_dtensor_param(param, tp_mesh, placements=placements),
+                )
 
         # Set amax_reduction_group to the FSDP and/or TP sharding mesh
         # for per-tensor scaling recipes. Parameters must be registered.
@@ -1774,7 +1777,7 @@ class Linear(TransformerEngineBaseModule):
         weight_quantizer.internal = True
         return [weight_quantizer]
 
-    def _set_tensor_parallel_attributes(self, defer_init = False) -> None:
+    def _set_tensor_parallel_attributes(self, defer_init=False) -> None:
         """Set tensor and sequence parallelism attributes."""
         if not defer_init:
             # Set parallelism attributes for linear weights

@@ -143,7 +143,7 @@ class LayerNorm(_LayerNormOp):
         """
         Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
         depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
-        
+
         TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
         integration with Torch DCP checkpointing. This method should only be invoked when
         using DTensor parameters, e.g. when using FSDP2 or DCP.
@@ -169,15 +169,12 @@ class LayerNorm(_LayerNormOp):
             # with DTensor parameters in TP layers to support DTensor operations.
             from transformer_engine.pytorch.distributed import _convert_param_to_dtensor_param
             from torch.distributed.tensor.placement_types import Replicate
+
             self.weight = _convert_param_to_dtensor_param(
-                self.weight,
-                tp_mesh,
-                placements=(Replicate(),)
+                self.weight, tp_mesh, placements=(Replicate(),)
             )
             self.bias = _convert_param_to_dtensor_param(
-                self.bias,
-                tp_mesh,
-                placements=(Replicate(),)
+                self.bias, tp_mesh, placements=(Replicate(),)
             )
 
     @property

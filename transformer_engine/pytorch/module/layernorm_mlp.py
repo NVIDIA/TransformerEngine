@@ -2027,7 +2027,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """
         Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
         depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
-        
+
         TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
         integration with Torch DCP checkpointing. This method should only be invoked when
         using DTensor parameters, e.g. when using FSDP2 or DCP.
@@ -2059,47 +2059,38 @@ class LayerNormMLP(TransformerEngineBaseModule):
             # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
             assert (
                 tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
-                f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
-                f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                (
+                    f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                    f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                ),
             )
             # Set the tensor parallel group from the mesh.
             self.set_tensor_parallel_group(tp_mesh.get_group())
 
             # Construct TP-sharded DTensors.
             from torch.distributed.tensor.placement_types import Replicate, Shard
+
             # FC1 -> Column-Parallel -> Shard(dim=0)
             self.fc1_weight = _convert_param_to_dtensor_param(
-                self.fc1_weight,
-                tp_mesh,
-                placements=(Shard(dim=0),)
+                self.fc1_weight, tp_mesh, placements=(Shard(dim=0),)
             )
             self.fc1_bias = _convert_param_to_dtensor_param(
-                self.fc1_bias,
-                tp_mesh,
-                placements=(Shard(dim=0),)
+                self.fc1_bias, tp_mesh, placements=(Shard(dim=0),)
             )
             # FC2 Weight -> Row-Parallel -> Shard(dim=1)
             self.fc2_weight = _convert_param_to_dtensor_param(
-                self.fc2_weight,
-                tp_mesh,
-                placements=(Shard(dim=1),)
+                self.fc2_weight, tp_mesh, placements=(Shard(dim=1),)
             )
             # LN & FC2 Bias -> Replicate()
             self.fc2_bias = _convert_param_to_dtensor_param(
-                self.fc2_bias,
-                tp_mesh,
-                placements=(Replicate(),)
+                self.fc2_bias, tp_mesh, placements=(Replicate(),)
             )
             self.layer_norm_weight = _convert_param_to_dtensor_param(
-                self.layer_norm_weight,
-                tp_mesh,
-                placements=(Replicate(),)
+                self.layer_norm_weight, tp_mesh, placements=(Replicate(),)
             )
             if self.layer_norm_bias is not None:
                 self.layer_norm_bias = _convert_param_to_dtensor_param(
-                    self.layer_norm_bias,
-                    tp_mesh,
-                    placements=(Replicate(),)
+                    self.layer_norm_bias, tp_mesh, placements=(Replicate(),)
                 )
 
         # Set amax_reduction_group to the FSDP and/or TP sharding mesh
@@ -2584,7 +2575,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if isinstance(fc2_weight, DTensor):
             fc2_weight = fc2_weight.to_local()
         return [fc1_weight, fc2_weight]
-    
+
     def _get_bias_tensors(self) -> List[torch.Tensor]:
         """Get the bias tensors of the module."""
         fc1_bias = self.fc1_bias if self.use_bias else None
@@ -2594,7 +2585,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if isinstance(fc2_bias, DTensor):
             fc2_bias = fc2_bias.to_local()
         return [fc1_bias, fc2_bias]
-    
+
     def _get_layernorm_weight_and_bias(self) -> List[Optional[torch.Tensor]]:
         """Get the weight and bias of the layer norm."""
         ln_weight = self.layer_norm_weight
@@ -2652,7 +2643,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             del fc1_bias_grad
             self._trigger_wgrad_accumulation_and_reduce_hooks()
 
-    def _set_tensor_parallel_attributes(self, defer_init = False) -> None:
+    def _set_tensor_parallel_attributes(self, defer_init=False) -> None:
         """Set tensor and sequence parallelism attributes."""
         if not defer_init:
             # Set parallel attributes for layer norm parameters

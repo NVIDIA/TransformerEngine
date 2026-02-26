@@ -1301,7 +1301,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
             if is_dtensor:
-                # Recreate the DTensor from the Parameter, inheriting 
+                # Recreate the DTensor from the Parameter, inheriting
                 # all attributes originally set on the Parameter.
                 dtensor_param = _convert_param_to_dtensor_param(
                     param,
