@@ -454,3 +454,202 @@ def test_factory_matches_nvfp4():
     )
 
     _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
+
+
+def test_custom_recipe_quantization_targets():
+    """Validate fine-grained per-module quantization targeting via QuantizerRole.
+
+    Four transformer layers, each assembled at a different abstraction level.
+    The default recipe is NVFP4; specific modules are overridden:
+
+      Layer 0 - ``TransformerLayer`` (name="tl0")    -> all MXFP8
+      Layer 1 - ``TransformerLayer`` (name="tl1")    -> NVFP4 (default),
+                except fc2 overridden to MXFP8
+      Layer 2 - ``MultiheadAttention`` + ``LayerNormMLP``
+                (name prefix "tl2")                   -> NVFP4 (default),
+                except qkv and fc1 overridden to Float8 block-scaling
+      Layer 3 - Individual blocks (name prefix "tl3") -> NVFP4 (default),
+                except proj overridden to Float8 current-scaling
+
+    The test validates that:
+      * The factory receives QuantizerRole objects with correct names
+      * Different quantizer types are dispatched per module
+      * Forward + backward complete successfully through all four layers
+    """
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported on this device: {reason}")
+    if not te.is_mxfp8_available():
+        pytest.skip("MXFP8 unsupported on this device")
+    if not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+    if not te.is_fp8_block_scaling_available():
+        pytest.skip("Float8 block scaling unsupported on this device")
+
+    torch.manual_seed(42)
+
+    H = 64          # hidden_size
+    FFN = 64        # ffn_hidden_size
+    NH = 4          # num_heads
+    KV = H // NH    # kv_channels
+    B = 4           # batch
+    S = 8           # seq_len
+    common = dict(params_dtype=torch.bfloat16, bias=False)
+
+    # Layer 0: TransformerLayer -> MXFP8
+    tl0 = te.TransformerLayer(
+        H, FFN, NH, hidden_dropout=0.0, attention_dropout=0.0, name="tl0", **common,
+    ).cuda()
+
+    # Layer 1: TransformerLayer -> NVFP4 default, fc2 overridden to MXFP8
+    tl1 = te.TransformerLayer(
+        H, FFN, NH, hidden_dropout=0.0, attention_dropout=0.0, name="tl1", **common,
+    ).cuda()
+
+    # Layer 2: MHA + LayerNormMLP -> NVFP4 default, qkv and fc1 to block-scaling
+    tl2_mha = te.MultiheadAttention(
+        H, NH, KV, attention_dropout=0.0, input_layernorm=True, return_bias=True,
+        name="tl2.self_attention", **common,
+    ).cuda()
+    tl2_mlp = LayerNormMLP(H, FFN, name="tl2.layernorm_mlp", **common).cuda()
+
+    # Layer 3: Individual blocks with DPA -> NVFP4 default, proj to current-scaling
+    tl3_qkv = LayerNormLinear(H, 3 * H, name="tl3.qkv", **common).cuda()
+    tl3_dpa = te.DotProductAttention(NH, KV, attention_dropout=0.0, name="tl3.core_attention")
+    tl3_proj = Linear(H, H, name="tl3.proj", **common).cuda()
+    tl3_fc1 = LayerNormLinear(H, FFN, name="tl3.fc1", **common).cuda()
+    tl3_fc2 = Linear(FFN, H, name="tl3.fc2", **common).cuda()
+
+    # ------------------------------------------------------------------
+    # Recording + dispatching factory
+    # ------------------------------------------------------------------
+    recorded_roles = []
+
+    def targeting_factory(role):
+        recorded_roles.append(role)
+
+        if role is None:
+            return nvfp4_quantizer_factory(role)
+
+        assert isinstance(role, QuantizerRole), f"Expected QuantizerRole, got {type(role)}"
+
+        # Layer 0 (tl0.*): all MXFP8
+        if role.name.startswith("tl0"):
+            return mxfp8_quantizer_factory(role)
+
+        # Layer 1 (tl1.*): NVFP4 default, but fc2 overridden to MXFP8
+        if role.name == "tl1.layernorm_mlp.fc2":
+            return mxfp8_quantizer_factory(role)
+
+        # Layer 2: block scaling for qkv and fc1, rest falls through to default
+        if role.name == "tl2.self_attention.layernorm_linear_qkv":
+            return float8_block_scaling_quantizer_factory(role)
+        if role.name == "tl2.layernorm_mlp.fc1":
+            return float8_block_scaling_quantizer_factory(role)
+
+        # Layer 3: current-scaling for proj, rest falls through to default
+        if role.name == "tl3.proj":
+            return current_scaling_quantizer_factory(role)
+
+        # Default: NVFP4
+        return nvfp4_quantizer_factory(role)
+
+    custom_recipe = recipe.CustomRecipe(qfactory=targeting_factory)
+
+    # ------------------------------------------------------------------
+    # Forward + backward
+    # ------------------------------------------------------------------
+    inp = torch.randn(S, B, H, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    with autocast(enabled=True, recipe=custom_recipe):
+        # Layer 0 & 1: TransformerLayer
+        h = tl1(tl0(inp))
+
+        # Layer 2: MHA + residual + LayerNormMLP + residual
+        attn_out, _ = tl2_mha(h)
+        h = h + attn_out
+        h = h + tl2_mlp(h)
+
+        # Layer 3: individual blocks with DPA
+        residual = h
+        qkv = tl3_qkv(h).view(S, B, 3, NH, KV)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        attn = tl3_dpa(q, k, v).view(S, B, H)
+        h = residual + tl3_proj(attn)
+        residual = h
+        h = residual + tl3_fc2(torch.nn.functional.gelu(tl3_fc1(h)))
+
+    loss = h.float().sum()
+    loss.backward()
+
+    # ------------------------------------------------------------------
+    # Assertions
+    # ------------------------------------------------------------------
+
+    assert inp.grad is not None, "Input gradient is None"
+
+    # -- Name propagation check --
+    # The factory dispatches on role.name, so if a TE module fails to propagate
+    # names (e.g. TransformerLayer -> MHA -> LayerNormLinear) the factory would
+    # silently fall through to the default recipe.  The quantizer-type assertions
+    # below would catch that too, but checking names explicitly gives a clearer
+    # error message pointing at the broken name rather than a wrong quantizer type.
+    role_names = {r.name for r in recorded_roles if r is not None}
+
+    def _tl_names(prefix):
+        """Expected role names for a standard TransformerLayer with given prefix."""
+        return {
+            f"{prefix}.self_attention.layernorm_linear_qkv",
+            f"{prefix}.self_attention.proj",
+            f"{prefix}.layernorm_mlp.fc1",
+            f"{prefix}.layernorm_mlp.fc2",
+        }
+
+    all_expected = (
+        _tl_names("tl0") | _tl_names("tl1") | _tl_names("tl2")
+        | {"tl3.qkv", "tl3.proj", "tl3.fc1", "tl3.fc2"}
+    )
+    missing = all_expected - role_names
+    assert not missing, (
+        f"Expected module names not seen in QuantizerRole.name: {missing}\n"
+        f"Recorded names: {sorted(role_names)}"
+    )
+
+    for r in recorded_roles:
+        if r is not None and r.module_type:
+            assert r.module_type == "linear", (
+                f"Unexpected module_type={r.module_type} for role {r}"
+            )
+
+    # -- Quantizer-type checks --
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+    from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+
+    def _check_q(mod, expected_cls, label=""):
+        q = mod.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
+        assert isinstance(q, expected_cls), (
+            f"{mod.name}{' (' + label + ')' if label else ''}: "
+            f"expected {expected_cls.__name__}, got {type(q).__name__}"
+        )
+
+    # Layer 0: all MXFP8
+    _check_q(tl0.self_attention.layernorm_qkv, MXFP8Quantizer)
+    _check_q(tl0.self_attention.proj, MXFP8Quantizer)
+
+    # Layer 1: NVFP4 default, fc2 overridden to MXFP8
+    _check_q(tl1.self_attention.layernorm_qkv, NVFP4Quantizer, "default")
+    _check_q(tl1.self_attention.proj, NVFP4Quantizer, "default")
+    assert any(
+        r is not None and r.name == "tl1.layernorm_mlp.fc2" and r.tensor_type == "input"
+        for r in recorded_roles
+    ), "tl1.layernorm_mlp.fc2 input role not recorded"
+
+    # Layer 2: block-scaling on qkv and fc1, NVFP4 on proj and fc2
+    _check_q(tl2_mha.layernorm_qkv, Float8BlockQuantizer)
+    _check_q(tl2_mha.proj, NVFP4Quantizer, "default")
+
+    # Layer 3: current-scaling on proj, NVFP4 on everything else
+    _check_q(tl3_proj, Float8CurrentScalingQuantizer)
+    for mod in [tl3_qkv, tl3_fc1, tl3_fc2]:
+        _check_q(mod, NVFP4Quantizer, "default")
