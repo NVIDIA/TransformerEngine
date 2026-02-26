@@ -155,22 +155,21 @@ class MiniZero_1:
 
         self.weights_are_nvfp4 = isinstance(self.weights[0], NVFP4Tensor)
 
-        # Storage offsets operate on the packed representation (e.g., NVFP4 uint8 data).
-        self.storage_offsets = None
-        self.storage_sizes = None
-        self.storage_total = None
-        if self.weights_are_nvfp4:
-            self.storage_offsets = [0]
-            self.storage_sizes = []
-            for weight in self.weights:
+        # Storage offsets operate on the packed representation.
+        # For NVFP4: packed size (2 values per byte)
+        # For others: same as numel()
+        self.storage_offsets = [0]
+        self.storage_sizes = []
+        for weight in self.weights:
+            if self.weights_are_nvfp4:
                 storage_size = _get_raw_data(weight).view(-1).numel()
-                self.storage_sizes.append(storage_size)
-                self.storage_offsets.append(self.storage_offsets[-1] + storage_size)
-            if self.storage_offsets[-1] % self.world_size != 0:
-                self.storage_offsets[-1] += (
-                    self.world_size - self.storage_offsets[-1] % self.world_size
-                )
-            self.storage_total = self.storage_offsets[-1]
+            else:
+                storage_size = weight.numel()
+            self.storage_sizes.append(storage_size)
+            self.storage_offsets.append(self.storage_offsets[-1] + storage_size)
+        if self.storage_offsets[-1] % self.world_size != 0:
+            self.storage_offsets[-1] += self.world_size - self.storage_offsets[-1] % self.world_size
+        self.storage_total = self.storage_offsets[-1]
 
         self.master_weights = []
         # The start offset of the master weight in the weight
@@ -181,16 +180,13 @@ class MiniZero_1:
         self.storage_start_offsets = [None] * len(self.weights)
         self.storage_overlapping_areas = [None] * len(self.weights)
 
-        # The start and end of this rank's local buffer in the global buffer
+        # The start and end of this rank's local buffer in the global buffer (logical offsets)
         rank_start = self.offsets[-1] // self.world_size * self.rank
         rank_end = rank_start + self.offsets[-1] // self.world_size
 
-        # Needed for NVFP4 tensors which packs two values per byte.
-        storage_rank_start = None
-        storage_rank_end = None
-        if self.weights_are_nvfp4:
-            storage_rank_start = self.storage_total // self.world_size * self.rank
-            storage_rank_end = storage_rank_start + self.storage_total // self.world_size
+        # Storage-based rank boundaries (for NVFP4: packed size, for others: same as logical)
+        storage_rank_start = self.storage_total // self.world_size * self.rank
+        storage_rank_end = storage_rank_start + self.storage_total // self.world_size
         for weight, offset in zip(self.weights, self.offsets[:-1]):
             if offset >= rank_end or (offset + weight.numel()) <= rank_start:
                 # This weight is not in this rank's local buffer
@@ -241,23 +237,12 @@ class MiniZero_1:
         # Create global buffer for weights all-gather
         if isinstance(self.weights[0], QuantizedTensor):
             weight_buffer_dtype = torch.uint8
-            if self.weights_are_nvfp4:
-                weight_buffer_length = self.storage_total
-                buffer_rank_start = storage_rank_start
-                buffer_rank_end = storage_rank_end
-            else:
-                weight_buffer_length = self.offsets[-1]
-                buffer_rank_start = rank_start
-                buffer_rank_end = rank_end
         else:
             weight_buffer_dtype = weights[0].dtype
-            weight_buffer_length = self.offsets[-1]
-            buffer_rank_start = rank_start
-            buffer_rank_end = rank_end
         self.weight_buffer = torch.empty(
-            [weight_buffer_length], dtype=weight_buffer_dtype, device=weights[0].device
+            [self.storage_total], dtype=weight_buffer_dtype, device=weights[0].device
         )
-        self.weight_buffer_slice = self.weight_buffer[buffer_rank_start:buffer_rank_end]
+        self.weight_buffer_slice = self.weight_buffer[storage_rank_start:storage_rank_end]
 
     def step(self):
         # -----------------------------------------------------------------------------------------
