@@ -2229,7 +2229,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
                     rmse_tol,
                     True,
                 )
-    if  fused_attn_supported_fp8 and fused_attn_supported_f16:
+    if fused_attn_supported_fp8 and fused_attn_supported_f16:
         if config.dropout_p != 0.0:
             # test cuDNN FP8 dropout
             assert torch.all(
