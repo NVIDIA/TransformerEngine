@@ -488,28 +488,46 @@ def test_custom_recipe_quantization_targets():
 
     torch.manual_seed(42)
 
-    H = 64          # hidden_size
-    FFN = 64        # ffn_hidden_size
-    NH = 4          # num_heads
-    KV = H // NH    # kv_channels
-    B = 4           # batch
-    S = 8           # seq_len
+    H = 64  # hidden_size
+    FFN = 64  # ffn_hidden_size
+    NH = 4  # num_heads
+    KV = H // NH  # kv_channels
+    B = 4  # batch
+    S = 8  # seq_len
     common = dict(params_dtype=torch.bfloat16, bias=False)
 
     # Layer 0: TransformerLayer -> MXFP8
     tl0 = te.TransformerLayer(
-        H, FFN, NH, hidden_dropout=0.0, attention_dropout=0.0, name="tl0", **common,
+        H,
+        FFN,
+        NH,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        name="tl0",
+        **common,
     ).cuda()
 
     # Layer 1: TransformerLayer -> NVFP4 default, fc2 overridden to MXFP8
     tl1 = te.TransformerLayer(
-        H, FFN, NH, hidden_dropout=0.0, attention_dropout=0.0, name="tl1", **common,
+        H,
+        FFN,
+        NH,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        name="tl1",
+        **common,
     ).cuda()
 
     # Layer 2: MHA + LayerNormMLP -> NVFP4 default, qkv and fc1 to block-scaling
     tl2_mha = te.MultiheadAttention(
-        H, NH, KV, attention_dropout=0.0, input_layernorm=True, return_bias=True,
-        name="tl2.self_attention", **common,
+        H,
+        NH,
+        KV,
+        attention_dropout=0.0,
+        input_layernorm=True,
+        return_bias=True,
+        name="tl2.self_attention",
+        **common,
     ).cuda()
     tl2_mlp = LayerNormMLP(H, FFN, name="tl2.layernorm_mlp", **common).cuda()
 
@@ -606,7 +624,9 @@ def test_custom_recipe_quantization_targets():
         }
 
     all_expected = (
-        _tl_names("tl0") | _tl_names("tl1") | _tl_names("tl2")
+        _tl_names("tl0")
+        | _tl_names("tl1")
+        | _tl_names("tl2")
         | {"tl3.qkv", "tl3.proj", "tl3.fc1", "tl3.fc2"}
     )
     missing = all_expected - role_names
@@ -617,9 +637,7 @@ def test_custom_recipe_quantization_targets():
 
     for r in recorded_roles:
         if r is not None and r.module_type:
-            assert r.module_type == "linear", (
-                f"Unexpected module_type={r.module_type} for role {r}"
-            )
+            assert r.module_type == "linear", f"Unexpected module_type={r.module_type} for role {r}"
 
     # -- Quantizer-type checks --
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
