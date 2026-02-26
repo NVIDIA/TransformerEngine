@@ -14,13 +14,14 @@
 #include "utils.h"
 
 namespace transformer_engine {
+namespace fused_router {
 
 template <typename DataType>
 __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
                                                             int num_experts, int topk,
                                                             int score_function, float *scores,
                                                             bool *routing_map,
-                                                            float *intermediate_output) {
+                                                            CompType *intermediate_output) {
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
@@ -31,12 +32,13 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
   extern __shared__ float shmem_scores_for_aux_loss[];
-  float *logits_buf = shmem_scores_for_aux_loss;
-  float *topk_logits_buf = logits_buf + num_experts * num_token_per_block;
+  CompType *logits_buf = reinterpret_cast<CompType *>(shmem_scores_for_aux_loss);
+  CompType *topk_logits_buf =
+      reinterpret_cast<CompType *>(logits_buf + num_experts * num_token_per_block);
   int *topk_indices_buf = reinterpret_cast<int *>(topk_logits_buf + topk * num_token_per_block);
   // The address of buffers on the current warp
-  float *local_logits = logits_buf + warp_id * num_experts;
-  float *topk_logits = topk_logits_buf + warp_id * topk;
+  CompType *local_logits = logits_buf + warp_id * num_experts;
+  CompType *topk_logits = topk_logits_buf + warp_id * topk;
   int *topk_indices = topk_indices_buf + warp_id * topk;
 
   /***
@@ -60,12 +62,12 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
       routing_map[pos_offset + i] = false;
       if (score_function == 1) {
-        intermediate_output[pos_offset + i] = -std::numeric_limits<float>::infinity();
+        intermediate_output[pos_offset + i] = -std::numeric_limits<CompType>::infinity();
       }
     }
     // Load the logits to shmem
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-      local_logits[i] = static_cast<float>(logits[pos_offset + i]);
+      local_logits[i] = static_cast<CompType>(logits[pos_offset + i]);
     }
     __threadfence_block();
     __syncwarp();
@@ -142,13 +144,13 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
 template <typename DataType>
 void fused_score_for_moe_aux_loss_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
-    float *scores, bool *routing_map, float *intermediate_output, cudaStream_t stream) {
+    float *scores, bool *routing_map, CompType *intermediate_output, cudaStream_t stream) {
   // Meta data for the kernel
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t grid_size = (num_tokens + num_token_per_block - 1) / num_token_per_block;
-  size_t shared_memory_size = num_experts * num_token_per_block * sizeof(float)  // logits
-                              + topk * num_token_per_block * sizeof(float)       // topk_logits
-                              + topk * num_token_per_block * sizeof(int);        // topk_indices
+  size_t shared_memory_size = num_experts * num_token_per_block * sizeof(CompType)  // logits
+                              + topk * num_token_per_block * sizeof(CompType)       // topk_logits
+                              + topk * num_token_per_block * sizeof(int);           // topk_indices
   fused_score_for_moe_aux_loss_forward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
@@ -166,11 +168,11 @@ void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, 
           reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,
           score_function, reinterpret_cast<float *>(scores.data.dptr),
           reinterpret_cast<bool *>(routing_map.data.dptr),
-          reinterpret_cast<float *>(intermediate_output.data.dptr), stream););
+          reinterpret_cast<CompType *>(intermediate_output.data.dptr), stream););
 }
 
 template <typename DataType>
-__global__ void fused_score_for_moe_aux_loss_backward_kernel(const float *intermediate_output,
+__global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *intermediate_output,
                                                              const float *grad_scores,
                                                              int num_tokens, int num_experts,
                                                              int topk, int score_function,
@@ -185,14 +187,14 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const float *interm
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
   extern __shared__ float shmem[];
-  float *grad_scores_buf = shmem;
+  CompType *grad_scores_buf = reinterpret_cast<CompType *>(shmem);
   // To store the output of softmax/sigmoid from the fwd
-  float *act_from_fwd_buf = grad_scores_buf + num_experts * num_token_per_block;
-  float *comp_buf = act_from_fwd_buf + num_experts * num_token_per_block;
+  CompType *act_from_fwd_buf = grad_scores_buf + num_experts * num_token_per_block;
+  CompType *comp_buf = act_from_fwd_buf + num_experts * num_token_per_block;
   // The address of buffers on the current warp
-  float *local_grad = grad_scores_buf + warp_id * num_experts;
-  float *local_act_from_fwd = act_from_fwd_buf + warp_id * num_experts;
-  float *local_comp_buf = comp_buf + warp_id * num_experts;
+  CompType *local_grad = grad_scores_buf + warp_id * num_experts;
+  CompType *local_act_from_fwd = act_from_fwd_buf + warp_id * num_experts;
+  CompType *local_comp_buf = comp_buf + warp_id * num_experts;
 
   /***
      * Section: Main Loop
@@ -249,12 +251,12 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const float *interm
       // Select the correct activation output buffer:
       // - Sigmoid: local_act_from_fwd already contains sigmoid output
       // - Sqrtsoftplus: local_comp_buf contains sqrtsoftplus output computed above
-      float *act_output = (score_function == 0) ? local_act_from_fwd : local_comp_buf;
+      CompType *act_output = (score_function == 0) ? local_act_from_fwd : local_comp_buf;
 
       auto sum_fwd_input =
           warp_reduce_on_shmem(act_output, num_experts, ReduceFuncType::SUM, lane_id);
       // Compute sum of output * grad using registers
-      float local_sum_Output_x_Grad = 0.0f;
+      CompType local_sum_Output_x_Grad = 0.0;
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_sum_Output_x_Grad += local_grad[i] * act_output[i];
       }
@@ -262,7 +264,7 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const float *interm
       for (int s = 16; s > 0; s /= 2) {
         local_sum_Output_x_Grad += __shfl_xor_sync(0xffffffff, local_sum_Output_x_Grad, s);
       }
-      float sum_Output_x_Grad = local_sum_Output_x_Grad;
+      CompType sum_Output_x_Grad = local_sum_Output_x_Grad;
       // In-place update
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_grad[i] = local_grad[i] / (sum_fwd_input + epsilon) -
@@ -300,14 +302,15 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const float *interm
 
 template <typename DataType>
 void fused_score_for_moe_aux_loss_backward_kernel_launcher(
-    const float *intermediate_output, const float *grad_scores, int num_tokens, int num_experts,
+    const CompType *intermediate_output, const float *grad_scores, int num_tokens, int num_experts,
     int topk, int score_function, DataType *grad_logits, cudaStream_t stream) {
   // Meta data for the kernel
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t grid_size = (num_tokens + num_token_per_block - 1) / num_token_per_block;
-  size_t shared_memory_size = num_experts * num_token_per_block * sizeof(float)     // grad_scores
-                              + num_experts * num_token_per_block * sizeof(float)   // act_from_fwd
-                              + num_experts * num_token_per_block * sizeof(float);  // comp_buf
+  size_t shared_memory_size = num_experts * num_token_per_block * sizeof(CompType)  // grad_scores
+                              +
+                              num_experts * num_token_per_block * sizeof(CompType)  // act_from_fwd
+                              + num_experts * num_token_per_block * sizeof(CompType);  // comp_buf
   fused_score_for_moe_aux_loss_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           intermediate_output, grad_scores, num_tokens, num_experts, topk, score_function,
@@ -322,11 +325,12 @@ void fused_score_for_moe_aux_loss_backward(const Tensor &intermediate_output,
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       grad_logits.data.dtype, DataType,
       fused_score_for_moe_aux_loss_backward_kernel_launcher<DataType>(
-          reinterpret_cast<float *>(intermediate_output.data.dptr),
+          reinterpret_cast<CompType *>(intermediate_output.data.dptr),
           reinterpret_cast<float *>(grad_scores.data.dptr), num_tokens, num_experts, topk,
           score_function, reinterpret_cast<DataType *>(grad_logits.data.dptr), stream););
 }
 
+}  // namespace fused_router
 }  // namespace transformer_engine
 
 void nvte_fused_score_for_moe_aux_loss_forward(const NVTETensor logits, int num_tokens,
@@ -336,10 +340,10 @@ void nvte_fused_score_for_moe_aux_loss_forward(const NVTETensor logits, int num_
                                                cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_score_for_moe_aux_loss_forward);
   using namespace transformer_engine;
-  fused_score_for_moe_aux_loss_forward(*convertNVTETensorCheck(logits), num_tokens, num_experts,
-                                       topk, score_function, *convertNVTETensorCheck(scores),
-                                       *convertNVTETensorCheck(routing_map),
-                                       *convertNVTETensorCheck(intermediate_output), stream);
+  fused_router::fused_score_for_moe_aux_loss_forward(
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, score_function,
+      *convertNVTETensorCheck(scores), *convertNVTETensorCheck(routing_map),
+      *convertNVTETensorCheck(intermediate_output), stream);
 }
 
 void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_output,
@@ -348,7 +352,7 @@ void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_ou
                                                 NVTETensor grad_logits, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_score_for_moe_aux_loss_backward);
   using namespace transformer_engine;
-  fused_score_for_moe_aux_loss_backward(
+  fused_router::fused_score_for_moe_aux_loss_backward(
       *convertNVTETensorCheck(intermediate_output), *convertNVTETensorCheck(grad_scores),
       num_tokens, num_experts, topk, score_function, *convertNVTETensorCheck(grad_logits), stream);
 }

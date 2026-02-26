@@ -10,6 +10,13 @@
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
+namespace fused_router {
+
+// Using FP32 to handle all the calculations.
+// Currently, only FP32 is supported because
+//   1. The score functions (sigmoid, softmax, sqrtsoftplus) are implemented in FP32.
+//   2. The intermediate buffer is initialized in FP32.
+using CompType = float;
 
 constexpr size_t kThreadsPerWarp = 32;
 constexpr int kThreadsPerBlock =
@@ -35,19 +42,19 @@ template <typename T>
 __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, ReduceFuncType type,
                                          int lane_id) {
   T (*reduce_func)(T, T);
-  float default_val = 0.0f;
+  CompType default_val = 0.0;
   if (type == ReduceFuncType::SUM) {
     reduce_func = sum;
-    default_val = 0.0f;
+    default_val = 0.0;
   } else if (type == ReduceFuncType::MAX) {
     reduce_func = max;
-    default_val = -std::numeric_limits<float>::infinity();
+    default_val = -std::numeric_limits<CompType>::infinity();
   }
 
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  float val = lane_id < data_size ? data_ptr[lane_id] : default_val;
+  CompType val = lane_id < data_size ? data_ptr[lane_id] : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     val = reduce_func(val, data_ptr[i]);
   }
@@ -66,19 +73,19 @@ template <typename T>
 __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int data_size,
                                                 ReduceFuncType type, int lane_id) {
   T (*reduce_func)(T, T);
-  float default_val = 0.0f;
+  CompType default_val = 0.0;
   if (type == ReduceFuncType::SUM) {
     reduce_func = sum;
-    default_val = 0.0f;
+    default_val = 0.0;
   } else if (type == ReduceFuncType::MAX) {
     reduce_func = max;
-    default_val = -std::numeric_limits<float>::infinity();
+    default_val = -std::numeric_limits<CompType>::infinity();
   }
 
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  float val = lane_id < data_size && mask[lane_id] ? data_ptr[lane_id] : default_val;
+  CompType val = lane_id < data_size && mask[lane_id] ? data_ptr[lane_id] : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     if (mask[i]) {
       val = reduce_func(val, data_ptr[i]);
@@ -196,8 +203,8 @@ __device__ inline void apply_softmax_on_float(float *scores, int data_size, int 
   __syncwarp();
 }
 
-__device__ inline void naive_topk_and_mask(float *scores, int data_size, int topk,
-                                           int *topk_indices, float *topk_scores, int lane_id) {
+__device__ inline void naive_topk_and_mask(CompType *scores, int data_size, int topk,
+                                           int *topk_indices, CompType *topk_scores, int lane_id) {
   // Check if the index is masked by the later iteration
   auto is_masked = [&topk_indices](int k, int index) {
     if (k == 0) return false;
@@ -211,15 +218,15 @@ __device__ inline void naive_topk_and_mask(float *scores, int data_size, int top
   // After looping topk times, the topk_indices will be the topk indices
   for (int k = 0; k < topk; k++) {
     // Find the max value and its index
-    float val = (lane_id < data_size && !is_masked(k, lane_id))
+    CompType val = (lane_id < data_size && !is_masked(k, lane_id))
                     ? scores[lane_id]
-                    : -std::numeric_limits<float>::infinity();
+                    : -std::numeric_limits<CompType>::infinity();
     int index = (lane_id < data_size) ? lane_id : 0;
     // Some value is hanlded in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
     // Reduce the value in local thread
     for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-      float cur_val = (is_masked(k, i)) ? -std::numeric_limits<float>::infinity() : scores[i];
+      CompType cur_val = (is_masked(k, i)) ? -std::numeric_limits<CompType>::infinity() : scores[i];
       if (cur_val > val) {
         val = cur_val;
         index = i;
@@ -298,5 +305,7 @@ __device__ inline void naive_topk_and_mask(float *scores, int data_size, int top
     default:                                              \
       NVTE_ERROR("Invalid type.");                        \
   }
+}  // namespace fused_router
 }  // namespace transformer_engine
-#endif
+
+#endif  // TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_

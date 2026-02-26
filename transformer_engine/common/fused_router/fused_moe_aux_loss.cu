@@ -16,9 +16,7 @@
 #include "utils.h"
 
 namespace transformer_engine {
-
-// Using Double to hanld all the calculations
-using CompType = float;
+namespace fused_router {
 
 template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
@@ -265,6 +263,7 @@ void fused_moe_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_p
               reinterpret_cast<DataType*>(grad_probs.data.dptr), stream);););
 }
 
+}  // namespace fused_router
 }  // namespace transformer_engine
 
 void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
@@ -273,7 +272,7 @@ void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor to
                                      NVTETensor Const_buf, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_moe_aux_loss_forward);
   using namespace transformer_engine;
-  fused_moe_aux_loss_forward(
+  fused_router::fused_moe_aux_loss_forward(
       *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert), total_num_tokens,
       num_experts, num_rows, num_cols, topk, coeff, *convertNVTETensorCheck(aux_loss),
       *convertNVTETensorCheck(Const_buf), stream);
@@ -285,8 +284,8 @@ void nvte_fused_moe_aux_loss_backward(const NVTETensor Const_buf,
                                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_moe_aux_loss_backward);
   using namespace transformer_engine;
-  fused_moe_aux_loss_backward(*convertNVTETensorCheck(Const_buf),
-                              *convertNVTETensorCheck(tokens_per_expert), num_rows, num_cols,
-                              *convertNVTETensorCheck(grad_aux_loss),
-                              *convertNVTETensorCheck(grad_probs), stream);
+  fused_router::fused_moe_aux_loss_backward(*convertNVTETensorCheck(Const_buf),
+                                            *convertNVTETensorCheck(tokens_per_expert), num_rows,
+                                            num_cols, *convertNVTETensorCheck(grad_aux_loss),
+                                            *convertNVTETensorCheck(grad_probs), stream);
 }
