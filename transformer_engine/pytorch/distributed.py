@@ -1943,6 +1943,7 @@ def _convert_param_to_dtensor_param(
 ):
     """Convert the parameter into a DTensor."""
     from torch.distributed.tensor import DTensor
+
     # If the parameter is already a DTensor, extract local Tensor.
     # We overwrite the original DTensor's distributed configuration.
     param_tensor = param

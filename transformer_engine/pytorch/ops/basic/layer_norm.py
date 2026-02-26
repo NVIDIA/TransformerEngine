@@ -11,6 +11,7 @@ import os
 from typing import Optional
 
 import torch
+from torch.distributed.tensor import DTensor
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from ...constants import TE_DType
