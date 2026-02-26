@@ -555,7 +555,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         """
         Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
         depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
-        
+
         TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
         integration with Torch DCP checkpointing. This method should only be invoked when
         using DTensor parameters, e.g. when using FSDP2 or DCP.
@@ -579,8 +579,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
             assert (
                 tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
-                f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
-                f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                (
+                    f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                    f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                ),
             )
             # Set the tensor parallel group from the mesh.
             self.set_tensor_parallel_group(tp_mesh.get_group())
@@ -588,10 +590,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             # Construct TP-sharded DTensors.
             if self.softmax_type == "learnable":
                 from torch.distributed.tensor.placement_types import Shard
+
                 self.softmax_offset = _convert_param_to_dtensor_param(
-                    self.softmax_offset,
-                    tp_mesh,
-                    placements=(Shard(dim=0),)
+                    self.softmax_offset, tp_mesh, placements=(Shard(dim=0),)
                 )
 
     def set_context_parallel_group(
@@ -862,7 +863,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
-    
+
     def _get_softmax_offset(self) -> torch.Tensor:
         """Get the softmax offset."""
         softmax_offset = (
