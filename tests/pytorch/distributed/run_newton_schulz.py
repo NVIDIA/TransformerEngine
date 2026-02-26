@@ -36,27 +36,6 @@ def main():
     # Ensure N is divisible by world_size
     assert N % world_size == 0, f"Matrix size {N} must be divisible by world_size {world_size}"
 
-    quintic_coefficients = [
-        4.0848,
-        -6.8946,
-        2.9270,
-        3.9505,
-        -6.3029,
-        2.6377,
-        3.7418,
-        -5.5913,
-        2.3037,
-        2.8769,
-        -3.1427,
-        1.2046,
-        2.8366,
-        -3.0525,
-        1.2012,
-    ]
-    coefficients = (
-        quintic_coefficients if args.num_iterations == 5 else [1.5, -0.5, 0.0] * args.num_iterations
-    )
-
     # Create a random symmetric positive definite matrix on rank 0
     # A = Q @ diag(eigenvalues) @ Q^T with eigenvalues in (0, 1)
     # This ensures Newton-Schulz converges
@@ -80,7 +59,7 @@ def main():
     from transformer_engine.pytorch.newton_schulz import newton_schulz
 
     group = dist.group.WORLD
-    newton_schulz(x_local, group, args.num_iterations, coefficients)
+    newton_schulz(x_local, group, args.num_iterations)
 
     # Gather results
     gathered = [torch.empty_like(x_local) for _ in range(world_size)]

@@ -18,7 +18,6 @@ TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS = torch.cuda.device_count()
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 
-
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("matrix_size", [256])
 @pytest.mark.parametrize("num_iterations", [5, 15])
