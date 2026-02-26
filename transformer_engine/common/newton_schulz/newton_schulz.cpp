@@ -137,7 +137,8 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
                         int64_t num_iterations, const float* coefficients, int64_t num_coefficients,
                         cudaStream_t caller_stream) {
   NVTE_API_CALL(nvte_newton_schulz);
-  NVTE_CHECK(num_coefficients == num_iterations * 3, num_iterations, " iterations require ", num_iterations * 3, " coefficients, but ", num_coefficients, " are passed");
+  NVTE_CHECK(num_coefficients == num_iterations * 3, num_iterations, " iterations require ",
+             num_iterations * 3, " coefficients, but ", num_coefficients, " are passed");
   const auto* t = convertNVTETensorCheck(x);
 
   // Make the internal stream wait for the caller's stream so that
