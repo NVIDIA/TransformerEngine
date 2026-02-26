@@ -1124,6 +1124,10 @@ def make_graphed_callables(
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
+    pre_warmup_hook: callable, default = None
+                      A hook function that will be called before the warmup iterations.
+    post_warmup_hook: callable, default = None
+                      A hook function that will be called after the warmup iterations.
 
     Quantization parameters
     -----------------------
