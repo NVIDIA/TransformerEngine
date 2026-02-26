@@ -12,17 +12,6 @@ import torch.distributed as dist
 import transformer_engine_torch as tex
 
 
-# Default quintic polynomial coefficients for 5-iteration Newton-Schulz
-# from cuSolverMp sample: (3069/1024, -7175/1024, 9009/1024, -6435/1024, 2835/2048)
-_DEFAULT_COEFFICIENTS = [
-    3069.0 / 1024.0,
-    -7175.0 / 1024.0,
-    9009.0 / 1024.0,
-    -6435.0 / 1024.0,
-    2835.0 / 2048.0,
-]
-
-
 def _get_nccl_comm_ptr(group: dist.ProcessGroup) -> int:
     """Extract the raw NCCL communicator pointer from a PyTorch process group."""
     backend = dist.get_backend(group)
@@ -51,10 +40,27 @@ def newton_schulz(
         Number of Newton-Schulz iterations. Default: 5.
     coefficients : list of float, optional
         Polynomial coefficients for the Newton-Schulz iteration.
-        Default: quintic polynomial coefficients from cuSolverMp sample.
     """
+    QUINTIC_COEFFICIENTS = [
+            4.0848,
+            -6.8946,
+            2.9270,
+            3.9505,
+            -6.3029,
+            2.6377,
+            3.7418,
+            -5.5913,
+            2.3037,
+            2.8769,
+            -3.1427,
+            1.2046,
+            2.8366,
+            -3.0525,
+            1.2012,
+    ]
     if coefficients is None:
-        coefficients = _DEFAULT_COEFFICIENTS
+        coefficients = QUINTIC_COEFFICIENTS if num_iterations==5 else [1.5, -0.5, 0.0] * num_iterations
+    assert len(coefficients) == num_iterations * 3, f"Unexpected number of coefficients: {len(coefficients)} for {num_iterations} iterations"
 
     if x.dim() != 2:
         raise ValueError(f"Expected 2D tensor, got {x.dim()}D")
