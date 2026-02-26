@@ -98,8 +98,7 @@ DTYPES = {
     "L2": ALL_DTYPES,
 }
 
-seed = 42
-key = jax.random.PRNGKey(seed)
+SEED = 42
 
 
 # =============================================================================
@@ -459,15 +458,14 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     "num_tokens,num_experts,topk", AUX_LOSS_CASES,
 )
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
-    global key
-    key, subkey1 = jax.random.split(key)
+    key = jax.random.PRNGKey(SEED)
 
     offset = jnp.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype) * 1e-4
     probs = jnp.arange(-num_experts // 2, num_experts // 2, dtype=dtype) * 1e-2
     probs = probs[None, :].repeat(num_tokens, axis=0) + offset[:, None]
     probs = probs.reshape(num_tokens, num_experts)
 
-    tokens_per_expert = jax.random.randint(subkey1, (num_experts,), 1, 1000).astype(jnp.int32)
+    tokens_per_expert = jax.random.randint(key, (num_experts,), 1, 1000).astype(jnp.int32)
     coeff = 0.01
 
     # Forward: reference (jitted)
@@ -506,16 +504,3 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     grad_fused = jax.jit(jax.grad(loss_fused_fn))(probs)
     assert jnp.allclose(grad_ref, grad_fused, atol=1e-5, rtol=1e-5), \
         f"Grad mismatch: max diff = {jnp.abs(grad_ref - grad_fused).max()}"
-
-
-if __name__ == "__main__":
-    test_topk_softmax(
-        dtype=jnp.float32,
-        num_tokens=128,
-        num_experts=32,
-        topk=4,
-        use_pre_softmax=False,
-        group_topk=None,
-        scaling_factor=None,
-    )
-    print("All tests passed!")

@@ -316,11 +316,10 @@ def _fused_moe_aux_loss(
     topk: int,
     coeff: float,
 ) -> jnp.ndarray:
-    (aux_loss,), _ = _fused_moe_aux_loss_fwd(
+    aux_loss, _ = _fused_moe_aux_loss_fwd(
         probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff,
     )
-    # Squeeze from shape (1,) to scalar
-    return aux_loss.squeeze()
+    return aux_loss
 
 
 def _fused_moe_aux_loss_fwd(
@@ -332,23 +331,19 @@ def _fused_moe_aux_loss_fwd(
         probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff,
     )
     residuals = (const_buf, tokens_per_expert, num_rows, num_cols)
-    return (aux_loss,), residuals
+    return aux_loss.squeeze(), residuals
 
 
 def _fused_moe_aux_loss_bwd(
     total_num_tokens, num_experts, topk, coeff, residuals, g,
 ):
     const_buf, tokens_per_expert, num_rows, num_cols = residuals
-    # g is a tuple matching the output of fwd; the squeeze means g is a scalar
-    (grad_aux_loss,) = g
-    # Ensure grad_aux_loss has shape (1,) for the C kernel
-    grad_aux_loss = grad_aux_loss.reshape(1)
+    # g is a scalar matching the squeezed output of _fwd
+    grad_aux_loss = g.reshape(1)
 
     grad_probs = fused_moe_aux_loss_bwd(
         const_buf, tokens_per_expert, grad_aux_loss, num_rows, num_cols,
     )
-    # Return gradients for (probs, tokens_per_expert)
-    # tokens_per_expert is integer, no gradient
     return grad_probs, None
 
 
