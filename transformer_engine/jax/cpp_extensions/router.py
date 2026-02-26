@@ -5,7 +5,6 @@
 import warnings
 from functools import partial
 
-import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.sharding import PartitionSpec, NamedSharding
@@ -53,7 +52,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         score_function,
     ):
         """Abstract evaluation: describe output shapes and dtypes."""
-        del topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function
+        del expert_bias_aval, topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function
         i_dtype = dtypes.canonicalize_dtype(logits_aval.dtype)
         i_shape = logits_aval.shape
         assert len(i_shape) == 2, f"logits must be 2D [num_tokens, num_experts], got {i_shape}"
