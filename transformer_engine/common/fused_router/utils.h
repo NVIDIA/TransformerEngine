@@ -219,8 +219,8 @@ __device__ inline void naive_topk_and_mask(CompType *scores, int data_size, int 
   for (int k = 0; k < topk; k++) {
     // Find the max value and its index
     CompType val = (lane_id < data_size && !is_masked(k, lane_id))
-                    ? scores[lane_id]
-                    : -std::numeric_limits<CompType>::infinity();
+                       ? scores[lane_id]
+                       : -std::numeric_limits<CompType>::infinity();
     int index = (lane_id < data_size) ? lane_id : 0;
     // Some value is hanlded in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
@@ -255,21 +255,15 @@ __device__ inline void naive_topk_and_mask(CompType *scores, int data_size, int 
     using namespace transformer_engine;                   \
     case DType::kFloat32: {                               \
       using type = float;                                 \
-      {                                                   \
-        __VA_ARGS__                                       \
-      }                                                   \
+      { __VA_ARGS__ }                                     \
     } break;                                              \
     case DType::kFloat16: {                               \
       using type = fp16;                                  \
-      {                                                   \
-        __VA_ARGS__                                       \
-      }                                                   \
+      { __VA_ARGS__ }                                     \
     } break;                                              \
     case DType::kBFloat16: {                              \
       using type = bf16;                                  \
-      {                                                   \
-        __VA_ARGS__                                       \
-      }                                                   \
+      { __VA_ARGS__ }                                     \
     } break;                                              \
     default:                                              \
       NVTE_ERROR("Invalid type.");                        \
@@ -280,27 +274,19 @@ __device__ inline void naive_topk_and_mask(CompType *scores, int data_size, int 
     using namespace transformer_engine;                   \
     case DType::kInt32: {                                 \
       using type = int32_t;                               \
-      {                                                   \
-        __VA_ARGS__                                       \
-      }                                                   \
+      { __VA_ARGS__ }                                     \
     } break;                                              \
     case DType::kInt64: {                                 \
       using type = int64_t;                               \
-      {                                                   \
-        __VA_ARGS__                                       \
-      }                                                   \
+      { __VA_ARGS__ }                                     \
     } break;                                              \
     case DType::kBFloat16: {                              \
       using type = bf16;                                  \
-      {                                                   \
-        __VA_ARGS__                                       \
-      }                                                   \
+      { __VA_ARGS__ }                                     \
     } break;                                              \
     case DType::kFloat32: {                               \
       using type = float;                                 \
-      {                                                   \
-        __VA_ARGS__                                       \
-      }                                                   \
+      { __VA_ARGS__ }                                     \
     } break;                                              \
     default:                                              \
       NVTE_ERROR("Invalid type.");                        \
