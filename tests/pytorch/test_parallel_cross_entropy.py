@@ -174,7 +174,9 @@ class TestParallelCrossEntropy:
         batch, SQ, vocab = 2, 64, 8192
         z_loss_weight = 0.001
 
-        inp_test = torch.randn(batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True)
+        inp_test = torch.randn(
+            batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True
+        )
         inp_ref = inp_test.detach().clone().requires_grad_(True)
         tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
 
@@ -182,7 +184,9 @@ class TestParallelCrossEntropy:
             inp_test, tar, z_loss_weight=z_loss_weight, return_log_sum_exp=True
         )
 
-        ref_ce = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), reduction="none").view(batch, SQ)
+        ref_ce = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), reduction="none").view(
+            batch, SQ
+        )
         log_sum_exp_ref = torch.logsumexp(inp_ref, dim=-1)
         ref_loss = ref_ce + z_loss_weight * torch.square(log_sum_exp_ref)
 
@@ -202,7 +206,9 @@ class TestParallelCrossEntropy:
 
         loss_base = parallel_cross_entropy(inp.clone(), tar)
         loss_zero = parallel_cross_entropy(inp.clone(), tar, z_loss_weight=0.0)
-        assert torch.equal(loss_base, loss_zero), "z_loss_weight=0.0 must be bit-identical to the default"
+        assert torch.equal(
+            loss_base, loss_zero
+        ), "z_loss_weight=0.0 must be bit-identical to the default"
 
     def test_z_loss_with_label_smoothing(self):
         """Z-loss and label smoothing must compose correctly."""
@@ -210,13 +216,19 @@ class TestParallelCrossEntropy:
         z_loss_weight = 0.001
         label_smoothing = 0.1
 
-        inp_test = torch.randn(batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True)
+        inp_test = torch.randn(
+            batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True
+        )
         inp_ref = inp_test.detach().clone().requires_grad_(True)
         tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
 
-        loss_te = parallel_cross_entropy(inp_test, tar, label_smoothing=label_smoothing, z_loss_weight=z_loss_weight)
+        loss_te = parallel_cross_entropy(
+            inp_test, tar, label_smoothing=label_smoothing, z_loss_weight=z_loss_weight
+        )
 
-        ref_ce = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), label_smoothing=label_smoothing, reduction="none").view(batch, SQ)
+        ref_ce = F.cross_entropy(
+            inp_ref.view(-1, vocab), tar.view(-1), label_smoothing=label_smoothing, reduction="none"
+        ).view(batch, SQ)
         log_sum_exp_ref = torch.logsumexp(inp_ref, dim=-1)
         ref_loss = ref_ce + z_loss_weight * torch.square(log_sum_exp_ref)
 
@@ -232,7 +244,9 @@ class TestParallelCrossEntropy:
         batch, SQ, vocab = 2, 32, 4096
         z_loss_weight = 0.001
 
-        inp_test = torch.randn(batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True)
+        inp_test = torch.randn(
+            batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True
+        )
         tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
         tar[0, :5] = -100  # ignore first 5 positions in batch 0
 
@@ -250,19 +264,23 @@ class TestParallelCrossEntropy:
         """
         batch, SQ, vocab = 2, 32, 4096
 
-        inp_test = torch.randn(batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True)
+        inp_test = torch.randn(
+            batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True
+        )
         inp_ref = inp_test.detach().clone().requires_grad_(True)
         tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
 
         # Non-uniform grad_output simulating loss masking (some tokens have zero weight)
         grad_output = torch.rand(batch, SQ, device="cuda")
-        grad_output[0, :5] = 0.0   # mask first 5 positions in batch 0
+        grad_output[0, :5] = 0.0  # mask first 5 positions in batch 0
         grad_output[1, -3:] = 0.0  # mask last 3 positions in batch 1
 
         loss_te = parallel_cross_entropy(inp_test, tar, 0.0, False, None)
         loss_te.backward(grad_output)
 
-        loss_ref = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), reduction="none").view(batch, SQ)
+        loss_ref = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), reduction="none").view(
+            batch, SQ
+        )
         loss_ref.backward(grad_output)
 
         tols = dtype_tols(torch.float32)
@@ -286,8 +304,9 @@ class TestParallelCrossEntropy:
         _, log_sum_exp = parallel_cross_entropy(inp, tar, 0.0, False, None, return_log_sum_exp=True)
 
         for b, s in ignored:
-            assert log_sum_exp[b, s].item() == 0.0, \
-                f"log_sum_exp[{b},{s}] must be 0.0 for ignored token, got {log_sum_exp[b, s].item()}"
+            assert (
+                log_sum_exp[b, s].item() == 0.0
+            ), f"log_sum_exp[{b},{s}] must be 0.0 for ignored token, got {log_sum_exp[b, s].item()}"
 
         # Non-ignored positions must have non-zero log_sum_exp
         assert log_sum_exp[0, 0].item() != 0.0, "Non-ignored token must have non-zero log_sum_exp"
@@ -299,7 +318,9 @@ class TestParallelCrossEntropy:
         inp = torch.randn(batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True)
         tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
 
-        loss, log_sum_exp = parallel_cross_entropy(inp, tar, 0.0, False, None, return_log_sum_exp=True)
+        loss, log_sum_exp = parallel_cross_entropy(
+            inp, tar, 0.0, False, None, return_log_sum_exp=True
+        )
 
         assert not log_sum_exp.requires_grad, "log_sum_exp must not require gradients"
         assert log_sum_exp.grad_fn is None, "log_sum_exp must have no grad_fn"
@@ -310,7 +331,9 @@ class TestParallelCrossEntropy:
         batch, SQ, vocab = 2, 64, 8192
         z_loss_weight = 0.001
 
-        inp_bf16 = torch.randn(batch, SQ, vocab, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        inp_bf16 = torch.randn(
+            batch, SQ, vocab, dtype=torch.bfloat16, device="cuda", requires_grad=True
+        )
         inp_ref = inp_bf16.detach().float().requires_grad_(True)
         tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
 
@@ -318,7 +341,9 @@ class TestParallelCrossEntropy:
             inp_bf16, tar, 0.0, False, None, z_loss_weight=z_loss_weight, return_log_sum_exp=True
         )
 
-        ref_ce = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), reduction="none").view(batch, SQ)
+        ref_ce = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), reduction="none").view(
+            batch, SQ
+        )
         log_sum_exp_ref = torch.logsumexp(inp_ref, dim=-1)
         ref_loss = ref_ce + z_loss_weight * torch.square(log_sum_exp_ref)
 
