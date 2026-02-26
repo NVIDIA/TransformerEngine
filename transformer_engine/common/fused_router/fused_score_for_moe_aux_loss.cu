@@ -188,7 +188,7 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
   int lane_id = threadIdx.x % kThreadsPerWarp;
   extern __shared__ float shmem[];
   CompType *grad_scores_buf = reinterpret_cast<CompType *>(shmem);
-  // To store the output of softmax/sigmoid from the fwd
+  // To store the output of softmax/sigmoid from fwd, or original logits for sqrtsoftplus
   CompType *act_from_fwd_buf = grad_scores_buf + num_experts * num_token_per_block;
   CompType *comp_buf = act_from_fwd_buf + num_experts * num_token_per_block;
   // The address of buffers on the current warp

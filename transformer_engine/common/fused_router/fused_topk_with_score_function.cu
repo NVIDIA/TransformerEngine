@@ -114,7 +114,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
         intermediate_output[pos_offset + i] = scores[i];
       }
     } else if (score_function == 2) {  // score_function == 2 means sqrtsoftplus
-      // First save the original logits for backward (needed for sigmoid computation)
+      // First save the original logits for backward (needed for sqrtsoftplus gradient computation)
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         intermediate_output[pos_offset + i] = scores[i];  // Save original logits
       }
@@ -300,7 +300,7 @@ __global__ void fused_topk_with_score_function_backward_kernel(
   int lane_id = threadIdx.x % kThreadsPerWarp;
   extern __shared__ float shmem[];
   CompType *grad_probs_buf = reinterpret_cast<CompType *>(shmem);
-  // To store the output of softmax/sigmoid from the fwd
+  // To store the output of softmax/sigmoid from fwd, or original logits for sqrtsoftplus
   CompType *act_from_fwd_buf = grad_probs_buf + num_experts * num_token_per_block;
   CompType *comp_buf = act_from_fwd_buf + num_experts * num_token_per_block;
   // To store the routing_map from the fwd
