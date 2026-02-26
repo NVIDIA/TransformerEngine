@@ -305,6 +305,7 @@ class MiniZero_1:
                 self.master_weights,
                 self.start_offsets,
                 self.dp_group,
+                manual_post_all_gather_processing=self.manual_post_all_gather_processing,
             )
         elif isinstance(first_weight, (Float8Tensor, Float8BlockwiseQTensor, MXFP8Tensor)):
             for weight in self.weights:
@@ -966,7 +967,8 @@ def run_parallel_tests() -> None:
     nvfp4_available, _ = is_nvfp4_available(return_reason=True)
     if nvfp4_available:
         print("starting cast master weights to nvfp4 test")
-        _test_cast_master_weights_to_nvfp4(dp_group, False)
+        for post_ag_processing in manual_post_all_gather_processings:
+            _test_cast_master_weights_to_nvfp4(dp_group, post_ag_processing)
 
     dist.destroy_process_group()
 

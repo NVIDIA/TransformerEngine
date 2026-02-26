@@ -5,7 +5,6 @@
 """Helper functions for using fp8/nvfp4 tensors as weights"""
 
 from typing import Optional, Union, List
-import math
 import torch
 
 import transformer_engine_torch as tex
@@ -577,7 +576,6 @@ def _cast_master_weights_to_nvfp4_2d(
 
     cu_amax_sizes = [0]
     tile_shapes: List[tuple[int, int]] = []
-    row_sizes: List[int] = []
     tile_widths: List[int] = []
     scale_targets: List[torch.Tensor] = []
     amax_targets: List[Optional[torch.Tensor]] = []
@@ -590,7 +588,6 @@ def _cast_master_weights_to_nvfp4_2d(
         tile_h = (h + block_len - 1) // block_len
         tile_w = (w + block_len - 1) // block_len
         tile_shapes.append((tile_h, tile_w))
-        row_sizes.append(h)
         tile_widths.append(tile_w)
         scale_targets.append(model_weight._rowwise_scale_inv)
         amax_targets.append(model_weight._amax_rowwise)
@@ -682,7 +679,6 @@ def _cast_master_weights_to_nvfp4_2d(
     # First pass: collect all tensors and update usage
     zipped_meta = zip(
         tile_shapes,
-        row_sizes,
         tile_widths,
         scale_targets,
         amax_targets,
@@ -693,7 +689,6 @@ def _cast_master_weights_to_nvfp4_2d(
     )
     for idx, (
         tile_shape,
-        rows,
         tile_col_cnt,
         target_scale,
         target_amax,
@@ -940,8 +935,6 @@ def _nvfp4_2d_multi_tensor_transpose(nvfp4_tensors: List[NVFP4Tensor]):
     Batched columnwise creation for multiple NVFP4 tensors.
     Reduces CPU overhead by collecting all tensor metadata and dispatching to C++.
     """
-    TILE_SIZE = 16
-
     # Prepare tensor lists for batched C++ call
     rowwise_data_list = []
     columnwise_data_list = []
@@ -958,8 +951,6 @@ def _nvfp4_2d_multi_tensor_transpose(nvfp4_tensors: List[NVFP4Tensor]):
 
         logical_shape = tensor.size()
         M, K = logical_shape[0], logical_shape[-1]
-        M_tiles = (M + TILE_SIZE - 1) // TILE_SIZE
-        K_tiles = (K + TILE_SIZE - 1) // TILE_SIZE
 
         # Allocate columnwise_data if needed
         if tensor._columnwise_data is None:
