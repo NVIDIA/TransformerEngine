@@ -5,11 +5,10 @@
  ************************************************************************/
 
 /*! \file newton_schulz.h
- *  \brief Functions for distributed Newton-Schulz inverse square root.
+ *  \brief Functions for distributed Newton-Schulz matrix orthogonalization.
  *
  *  This API is a TE-native binding to the cuSolverMp library.
- *  It computes an iterative Newton-Schulz inverse square root
- *  approximation on a distributed matrix.
+ *  It computes an iterative Newton-Schulz matrix orthogonalization on a distributed matrix.
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_NEWTON_SCHULZ_H_
@@ -45,10 +44,7 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
  */
 void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx);
 
-/*! \brief Compute Newton-Schulz inverse square root in-place.
- *
- *  Performs iterative Newton-Schulz approximation of the inverse square root
- *  on a distributed matrix using cuSolverMp.
+/*! \brief Compute Newton-Schulz matrix orthogonalization in-place.
  *
  *  \param[in]     ctx              cuSolverMp context.
  *  \param[in]     m                Global number of rows.

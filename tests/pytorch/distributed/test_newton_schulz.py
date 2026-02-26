@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tests for distributed Newton-Schulz inverse square root."""
+"""Tests for distributed Newton-Schulz matrix orthogonalization."""
 
 import os
 import subprocess
