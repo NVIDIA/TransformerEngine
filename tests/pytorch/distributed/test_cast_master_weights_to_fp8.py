@@ -1231,5 +1231,6 @@ def test_single_gpu_partial_cast_vs_full():
     data_match = torch.equal(test_tensor._rowwise_data, ref_data)
     assert data_match, f"Data mismatch"
 
+
 if __name__ == "__main__":
     main()
