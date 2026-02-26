@@ -33,9 +33,9 @@ class _FromMXFP8Func(torch.autograd.Function):
         dtype = torch_to_transformer_engine_dtype[dtype]
 
         # Make sure FP8 data is in expected format
-        if tensor._rowwise_data is not None:
+        if tensor._rowwise_data is not None or tensor._columnwise_data is not None:
             return tex.dequantize(tensor, dtype)
-        raise NotImplementedError("Casting back from the transpose not implemented yet!")
+        raise ValueError("Cannot dequantize MXFP8 tensor with no data")
 
     @staticmethod
     def backward(
