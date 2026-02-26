@@ -121,6 +121,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+  m.def("create_empty_quantized_tensor",
+        &transformer_engine::pytorch::create_empty_quantized_tensor,
+        "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
+        py::arg("dtype"), py::arg("device"), py::arg("pin_memory"));
 
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));

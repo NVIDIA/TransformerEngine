@@ -101,7 +101,9 @@ class Quantizer {
 
   /*! @brief Construct a tensor with uninitialized data */
   virtual std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                             DType dtype) const = 0;
+                                                             DType dtype,
+                                                             at::Device device = torch::kCUDA,
+                                                             bool pin_memory = false) const = 0;
 
   /*! @brief Convert a PyTorch tensor into a Transformer Engine C++ tensor
    *
@@ -135,8 +137,9 @@ class NoneQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override {}
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     at::Device device = torch::kCUDA,
+                                                     bool pin_memory = false) const override;
 
   /*! @brief Construct a tensor with pre-initialized data */
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
@@ -161,14 +164,17 @@ class Float8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     at::Device device = torch::kCUDA,
+                                                     bool pin_memory = false) const override;
 
   /*! @brief Construct a tensor with pre-initialized data */
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
                                                      std::optional<at::Tensor> data,
                                                      std::optional<at::Tensor> transpose,
-                                                     std::optional<at::Tensor> scale_inv) const;
+                                                     std::optional<at::Tensor> scale_inv,
+                                                     at::Device device = torch::kCUDA,
+                                                     bool pin_memory = false) const;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
@@ -193,8 +199,9 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     at::Device device = torch::kCUDA,
+                                                     bool pin_memory = false) const override;
 
   /*! @brief Construct an unquantized tensor that shares the quantizer's amax pointer.
    *
@@ -250,8 +257,9 @@ class Float8BlockQuantizer : public Quantizer {
   // Create a python Float8BlockQuantized tensor and C++ wrapper
   // for the tensor. Should set quantized data, scales for rowwise
   // and optionally columnwise usage.
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     at::Device device = torch::kCUDA,
+                                                     bool pin_memory = false) const override;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
@@ -271,8 +279,9 @@ class MXFP8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     at::Device device = torch::kCUDA,
+                                                     bool pin_memory = false) const override;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
@@ -305,8 +314,9 @@ class NVFP4Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     at::Device device = torch::kCUDA,
+                                                     bool pin_memory = false) const override;
 
   /*! @brief Construct an unquantized tensor that shares NVFP4 tensor's amax pointer
    *
