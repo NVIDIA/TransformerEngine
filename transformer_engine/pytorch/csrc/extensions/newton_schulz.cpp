@@ -6,9 +6,9 @@
 
 #ifdef NVTE_WITH_CUSOLVERMP
 
-#include "../extensions.h"
-
 #include "transformer_engine/newton_schulz.h"
+
+#include "../extensions.h"
 
 namespace transformer_engine::pytorch {
 
