@@ -722,6 +722,8 @@ class FlashAttention(torch.nn.Module):
         qkv_layout: str = "sbh3d",
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
+        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
+        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
@@ -734,6 +736,7 @@ class FlashAttention(torch.nn.Module):
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
         quantizers=None,
+        pad_between_seqs: bool = False,
         inference_params: Optional[InferenceParams] = None,
         flash_attention_backend: Optional[PkgVersion] = PkgVersion("0"),
         fp8_output: bool = False,
@@ -980,8 +983,14 @@ class FlashAttention(torch.nn.Module):
                     else:
                         func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
                     if not use_flash_attn_3 or inference_params is None:
-                        fa_optional_forward_args_thd.append(cu_seqlens_q)
-                        fa_optional_forward_args_thd.append(cu_seqlens_kv)
+                        fa_optional_forward_args_thd.append(
+                            cu_seqlens_q_padded if cu_seqlens_q_padded is not None else cu_seqlens_q
+                        )
+                        fa_optional_forward_args_thd.append(
+                            cu_seqlens_kv_padded
+                            if cu_seqlens_kv_padded is not None
+                            else cu_seqlens_kv
+                        )
                         fa_optional_forward_args_thd.append(max_seqlen_q)
                         fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if not use_flash_attn_3:
@@ -1017,6 +1026,17 @@ class FlashAttention(torch.nn.Module):
                     fa_3_optional_forward_kwargs["num_splits"] = num_splits
                     if inference_params is None:
                         fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
+
+                        # if `pad_between_seqs` is True, provide flash_attn_3 with `seqused_q` and `seqused_k`
+                        # in addition to `cu_seqlens_q_padded` and `cu_seqlens_kv_padded` to avoid affecting the
+                        # padding positions.
+                        if pad_between_seqs:
+                            fa_3_optional_forward_kwargs["seqused_q"] = (
+                                cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                            )
+                            fa_3_optional_forward_kwargs["seqused_k"] = (
+                                cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                            )
                     else:
                         fa_3_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
                         fa_3_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q

@@ -1196,12 +1196,12 @@ def _run_dot_product_attention(
         block.softmax_offset.requires_grad = True
 
     # Run a forward and backward pass
-    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
+    if backend in ["UnfusedDotProductAttention"]:
         q = inp_orig[0]
         k = inp_orig[1]
         v = inp_orig[2]
         d_out = out_grad_orig
-    if backend == "FusedAttention":
+    if backend in ["FusedAttention", "FlashAttention"]:
         q = inp[0]
         k = inp[1]
         v = inp[2]
@@ -1217,14 +1217,19 @@ def _run_dot_product_attention(
         max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
-        cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend == "FusedAttention" else None,
-        cu_seqlens_kv_padded=cu_seqlens_kv_after_pad if backend == "FusedAttention" else None,
+        cu_seqlens_q_padded=(
+            cu_seqlens_q_after_pad if backend in ["FusedAttention", "FlashAttention"] else None
+        ),
+        cu_seqlens_kv_padded=(
+            cu_seqlens_kv_after_pad if backend in ["FusedAttention", "FlashAttention"] else None
+        ),
         attn_mask_type=config.attn_mask_type,
         checkpoint_core_attention=ckpt_attn,
         core_attention_bias_type=config.attn_bias_type,
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
+        pad_between_seqs=pad_between_seqs,
         # Only pass num_splits when exercising the FlashAttention path
         num_splits=config.num_splits if backend == "FlashAttention" else 1,
     )
@@ -1238,12 +1243,12 @@ def _run_dot_product_attention(
     if is_training and config.softmax_type != "vanilla":
         d_softmax_offset = block.softmax_offset.grad
 
-    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
+    if backend in ["UnfusedDotProductAttention"]:
         if is_training:
             return out, max_logit, (q.grad, k.grad, v.grad, d_softmax_offset)
         else:
             return out, max_logit, (None, None, None, d_softmax_offset)
-    if backend == "FusedAttention":
+    if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
             if is_training:
