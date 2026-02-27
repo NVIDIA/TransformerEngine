@@ -27,23 +27,22 @@ namespace transformer_engine::pytorch {
  **************************************************************************************************/
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
-    at::Tensor logits, int topk, bool use_pre_softmax, c10::optional<int> num_groups,
-    c10::optional<int> group_topk, c10::optional<float> scaling_factor, std::string score_function,
-    c10::optional<at::Tensor> expert_bias);
+    at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
+    std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
+    std::optional<at::Tensor> expert_bias);
 
-at::Tensor fused_topk_with_score_function_bwd(int num_tokens, int num_experts,
-                                              at::Tensor routing_map,
-                                              at::Tensor intermediate_output, at::Tensor grad_probs,
-                                              int topk, bool use_pre_softmax,
-                                              c10::optional<float> scaling_factor,
-                                              std::string score_function);
+void fused_topk_with_score_function_bwd(int num_tokens, int num_experts, at::Tensor routing_map,
+                                        at::Tensor intermediate_output, at::Tensor grad_probs,
+                                        at::Tensor grad_logits, int topk, bool use_pre_softmax,
+                                        std::optional<float> scaling_factor,
+                                        std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
     at::Tensor logits, int topk, std::string score_function);
 
-at::Tensor fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
-                                            at::Tensor intermediate_output, at::Tensor grad_probs,
-                                            int topk, std::string score_function);
+void fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
+                                      at::Tensor intermediate_output, at::Tensor grad_probs,
+                                      at::Tensor grad_logits, int topk, std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
                                                           at::Tensor tokens_per_expert,
@@ -254,6 +253,9 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
                     std::optional<at::Tensor> noop_flag);
 
 py::object dequantize(const py::handle &input, DType otype);
+
+py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
+                          std::optional<at::Tensor> first_dims);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
