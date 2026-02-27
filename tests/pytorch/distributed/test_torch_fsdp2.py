@@ -14,7 +14,7 @@ from transformer_engine.pytorch import fp8
 
 NUM_PROCS: int = torch.cuda.device_count()
 
-# Each entry: (recipe_class_name, hydra_overrides, check_fn)
+# Each entry: (recipe_class_name, check_fn)
 _FP8_RECIPE_CONFIGS = [
     ("DelayedScaling", fp8.check_fp8_support),
     ("Float8CurrentScaling", fp8.check_fp8_support),

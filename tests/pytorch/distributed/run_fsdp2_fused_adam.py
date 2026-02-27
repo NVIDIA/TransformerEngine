@@ -12,7 +12,6 @@ Launched via torchrun from test_fused_optimizer.py.
 import argparse
 import functools
 import os
-from collections import Counter
 
 import torch
 import torch.distributed as dist
