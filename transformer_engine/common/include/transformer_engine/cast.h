@@ -405,6 +405,19 @@ void nvte_group_quantize_dbias_dsrelu(const NVTEGroupedTensor input,
  */
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Casts input grouped tensor from reduced to higher precision.
+ *         If the scaling mode of the input tensor is set to NVTE_MXFP8_1D_SCALING,
+ *         the block dequantization (MXFP8) of the specified shape of the block will be used.
+ *         In case of the MXFP8 dequantization, the dequantized values are stored to the rowwise
+ *         data of the output tensor, regardless of whether the row- or columnwise scaling is used.
+ *
+ *  \param[in]     input     Input grouped FP8/MXFP8 tensor to be cast.
+ *  \param[in,out] output    Output grouped tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                           cudaStream_t stream);
+
 /*! \brief Casts multiple input tensors to quantized output tensors.
  *
  *  \param[in]      inputs           List of input tensors to be cast.
