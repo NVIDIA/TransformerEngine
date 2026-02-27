@@ -638,10 +638,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         assert FusedAttnFwdPrimitive.outer_primitive is not None
         q_bdim, _, _, _, _, seed_bdim, *_ = batch_dims
 
-        # Ensure segment_pos are batched like segment_ids so impl sees matching shapes.
-        # JAX may give segment_ids batch_dim=0 (i.e. batched) and segment_pos batch_dim=None (i.e. not batched) when
-        # segment_pos were generated inside a vmapped function (e.g. single or nested vmap).
-        # Check expansion per (q, kv) pair so q and kv can be batched/vmapped independently.
+        # When segment_ids are batched (vmap) and segment_pos are not, do not expand segment_pos to match. 
+        # The impl() layer treats segment_pos as replicated and computes seqlens/offsets per batch index
+        # without materializing the full expanded segment_pos array.
+        # Assert on invalid case (segment_ids.ndim < segment_pos.ndim)
         batched_args_list = list(batched_args)
         updated_batch_dims = list(batch_dims)
         for seg_id_idx, seg_pos_idx in zip(
@@ -656,32 +656,19 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 and batched_args_list[seg_id_idx].size > 0
                 and batched_args_list[seg_pos_idx].size > 0
             ):
-                # Do no batch dim expansion if there's no vmapped function
                 continue
             segment_ids = batched_args_list[seg_id_idx]
             segment_pos = batched_args_list[seg_pos_idx]
-            # The segment_ids, at the very least, must have the same number of dimensions as segment_pos.
-            # Either because the user created them or because TE generated them.
             if segment_ids.ndim < segment_pos.ndim:
                 raise AssertionError(
                     "segment_ids must not have fewer dims than segment_pos; "
                     f"got segment_ids.ndim={segment_ids.ndim}, segment_pos.ndim={segment_pos.ndim}"
                 )
-            if segment_ids.ndim == segment_pos.ndim:
-                # Do no batch dim expansion if there's no dim mismatch.
+            # Do not expand segment_pos: leave it unexpanded so the impl() layer
+            # treats it as replicated and computes seqlens/offsets per batch index
+            # without materializing the full expanded segment_pos array.
+            if segment_ids.ndim >= segment_pos.ndim:
                 continue
-            assert segment_ids.shape[-segment_pos.ndim :] == segment_pos.shape, (
-                "segment_pos must have same trailing shape as segment_ids when adding batch"
-                f" dims; got segment_ids.shape={segment_ids.shape},"
-                f" segment_pos.shape={segment_pos.shape}"
-            )
-            leading_bdim = segment_ids.ndim - segment_pos.ndim
-            target_shape = segment_ids.shape[:leading_bdim] + segment_pos.shape
-            expanded = segment_pos
-            for _ in range(leading_bdim):
-                expanded = lax.expand_dims(expanded, (0,))
-            batched_args_list[seg_pos_idx] = jnp.broadcast_to(expanded, target_shape)
-            updated_batch_dims[seg_pos_idx] = 0
         batch_dims = tuple(updated_batch_dims)
         batched_args = tuple(batched_args_list)
 
@@ -1146,10 +1133,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert FusedAttnBwdPrimitive.outer_primitive is not None
         q_bdim, k_bdim, v_bdim, bias_bdim, softmax_offset_bdim, *_ = batch_dims
 
-        # Ensure segment_pos are batched like segment_ids so impl sees matching shapes.
-        # JAX may give segment_ids batch_dim=0 (i.e. batched) and segment_pos batch_dim=None (i.e. not batched) when
-        # segment_pos were generated inside a vmapped function (e.g. single or nested vmap).
-        # Check expansion per (q, kv) pair so q and kv can be batched/vmapped independently.
+        # Option 3 (memory-efficient): do not expand segment_pos; conversion layer treats as replicated.
         batched_args_list = list(batched_args)
         updated_batch_dims = list(batch_dims)
         for seg_id_idx, seg_pos_idx in zip(
@@ -1172,20 +1156,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                     "segment_ids must not have fewer dims than segment_pos; "
                     f"got segment_ids.ndim={segment_ids.ndim}, segment_pos.ndim={segment_pos.ndim}"
                 )
-            if segment_ids.ndim == segment_pos.ndim:
+            if segment_ids.ndim >= segment_pos.ndim:
                 continue
-            assert segment_ids.shape[-segment_pos.ndim :] == segment_pos.shape, (
-                "segment_pos must have same trailing shape as segment_ids when adding batch"
-                f" dims; got segment_ids.shape={segment_ids.shape},"
-                f" segment_pos.shape={segment_pos.shape}"
-            )
-            leading_bdim = segment_ids.ndim - segment_pos.ndim
-            target_shape = segment_ids.shape[:leading_bdim] + segment_pos.shape
-            expanded = segment_pos
-            for _ in range(leading_bdim):
-                expanded = lax.expand_dims(expanded, (0,))
-            batched_args_list[seg_pos_idx] = jnp.broadcast_to(expanded, target_shape)
-            updated_batch_dims[seg_pos_idx] = 0
         batch_dims = tuple(updated_batch_dims)
         batched_args = tuple(batched_args_list)
 
