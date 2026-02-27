@@ -721,31 +721,28 @@ class SequenceDescriptor:
                 f"got q_segment_ids.shape={q_segment_ids.shape}, q_segment_pos.shape={q_segment_pos.shape}, "
                 f"kv_segment_ids.shape={kv_segment_ids.shape}, kv_segment_pos.shape={kv_segment_pos.shape}"
             )
-
+        # THD: compute seqlens/offsets. 
         if qkv_layout.is_thd():
-            # THD: compute seqlens/offsets. Replicated segment_pos (more leading dims on segment_ids, e.g. if vmap)
-            # i) Flatten leading batch dims so that segment_ids and segment_pos have the same number of leading dims,
-            # ii) vmap seqlens/offsets computation with segment_pos broadcast, 
-            # iii) reshape back to the original leading batch dims.
-            if (
-                q_segment_ids.ndim > q_segment_pos.ndim
-                or kv_segment_ids.ndim > kv_segment_pos.ndim
-            ):
-                n_batch_dims_q = q_segment_ids.ndim - q_segment_pos.ndim
-                n_batch_dims_kv = kv_segment_ids.ndim - kv_segment_pos.ndim
-                batch_shape_q = q_segment_ids.shape[:n_batch_dims_q]
-                batch_shape_kv = kv_segment_ids.shape[:n_batch_dims_kv]
-                flat_batch_q = jnp.prod(jnp.array(batch_shape_q))
-                flat_batch_kv = jnp.prod(jnp.array(batch_shape_kv))
+            # If there are more leading dims on segment_ids, e.g. vmap
+            if (q_segment_ids.ndim > q_segment_pos.ndim or kv_segment_ids.ndim > kv_segment_pos.ndim):
+                # Flatten leading batch dims so that segment_ids and segment_pos have the same number of leading dims,
+                # vmap seqlens/offsets computation with segment_pos broadcast, 
+                # reshape back to the original leading batch dims.
+                n_extra_batch_dims_q = q_segment_ids.ndim - q_segment_pos.ndim
+                n_extra_batch_dims_kv = kv_segment_ids.ndim - kv_segment_pos.ndim
+                extra_batch_shape_q = q_segment_ids.shape[:n_extra_batch_dims_q]
+                extra_batch_shape_kv = kv_segment_ids.shape[:n_extra_batch_dims_kv]
+                extra_flat_batch_size_q = jnp.prod(extra_batch_shape_q)
+                extra_flat_batch_size_kv = jnp.prod(extra_batch_shape_kv)
                 # vmap below requires same batch size on axis 0 for q_flat and kv_flat; JAX will raise if they differ.
                 q_flat = q_segment_ids.reshape(
-                    flat_batch_q, *q_segment_ids.shape[n_batch_dims_q:]
+                    extra_flat_batch_size_q, *q_segment_ids.shape[n_extra_batch_dims_q:]
                 )
                 kv_flat = kv_segment_ids.reshape(
-                    flat_batch_kv, *kv_segment_ids.shape[n_batch_dims_kv:]
+                    extra_flat_batch_size_kv, *kv_segment_ids.shape[n_extra_batch_dims_kv:]
                 )
 
-                def single_batch(seg_id_q, seg_id_kv, seg_pos_q, seg_pos_kv):
+                def single_extra_batch(seg_id_q, seg_id_kv, seg_pos_q, seg_pos_kv):
                     return _segment_ids_pos_to_seqlens_offsets(
                         seg_id_q,
                         seg_id_kv,
@@ -757,13 +754,13 @@ class SequenceDescriptor:
                     )
 
                 q_sl, kv_sl, q_off, kv_off = jax.vmap(
-                    single_batch, in_axes=(0, 0, None, None)
+                    single_extra_batch, in_axes=(0, 0, None, None)
                 )(q_flat, kv_flat, q_segment_pos, kv_segment_pos)
 
-                q_seqlens = q_sl.reshape(*batch_shape_q, *q_sl.shape[1:])
-                kv_seqlens = kv_sl.reshape(*batch_shape_kv, *kv_sl.shape[1:])
-                q_offsets = q_off.reshape(*batch_shape_q, *q_off.shape[1:])
-                kv_offsets = kv_off.reshape(*batch_shape_kv, *kv_off.shape[1:])
+                q_seqlens = q_sl.reshape(*extra_batch_shape_q, *q_sl.shape[1:])
+                kv_seqlens = kv_sl.reshape(*extra_batch_shape_kv, *kv_sl.shape[1:])
+                q_offsets = q_off.reshape(*extra_batch_shape_q, *q_off.shape[1:])
+                kv_offsets = kv_off.reshape(*extra_batch_shape_kv, *kv_off.shape[1:])
             else:
                 q_seqlens, kv_seqlens, q_offsets, kv_offsets = (
                     _segment_ids_pos_to_seqlens_offsets(
@@ -776,6 +773,7 @@ class SequenceDescriptor:
                         max_segments_per_seq,
                     )
                 )
+        # BSHD: compute seqlens/offsets.
         else:
             q_seqlens, kv_seqlens = _segment_ids_to_seqlens(
                 q_segment_ids,
