@@ -402,7 +402,7 @@ if __name__ == "__main__":
     test_topk_softmax(
         dtype=torch.float32,
         num_tokens=1024,
-        num_experts=128,
+        num_experts=3000,
         topk=4,
         use_pre_softmax=False,
         group_topk=None,

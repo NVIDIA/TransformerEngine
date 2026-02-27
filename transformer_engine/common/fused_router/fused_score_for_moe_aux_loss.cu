@@ -147,6 +147,8 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
   size_t shared_memory_size = num_experts * num_token_per_block * sizeof(DataType)  // logits
                               + topk * num_token_per_block * sizeof(DataType)       // topk_logits
                               + topk * num_token_per_block * sizeof(int);           // topk_indices
+  cudaFuncSetAttribute(fused_score_for_moe_aux_loss_forward_kernel<DataType>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
   fused_score_for_moe_aux_loss_forward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
@@ -283,6 +285,8 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(
                               +
                               num_experts * num_token_per_block * sizeof(DataType)  // act_from_fwd
                               + num_experts * num_token_per_block * sizeof(DataType);  // comp_buf
+  cudaFuncSetAttribute(fused_score_for_moe_aux_loss_backward_kernel<DataType>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
   fused_score_for_moe_aux_loss_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           intermediate_output, grad_scores, num_tokens, num_experts, topk, score_function,

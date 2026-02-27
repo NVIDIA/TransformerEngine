@@ -253,6 +253,8 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     shared_memory_size += num_groups * num_token_per_block * sizeof(DataType);   // group_scores
     shared_memory_size += num_experts * num_token_per_block * sizeof(DataType);  // maksed_scores
   }
+  cudaFuncSetAttribute(fused_topk_with_score_function_forward_kernel<DataType, BiasType>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
   fused_topk_with_score_function_forward_kernel<DataType, BiasType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
@@ -444,6 +446,8 @@ void fused_topk_with_score_function_backward_kernel_launcher(
                               num_experts * num_token_per_block * sizeof(DataType)  // act_from_fwd
                               + num_experts * num_token_per_block * sizeof(DataType)  // comp_buf
                               + num_experts * num_token_per_block * sizeof(bool);     // routing_map
+  cudaFuncSetAttribute(fused_topk_with_score_function_backward_kernel<DataType>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
   fused_topk_with_score_function_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           routing_map, intermediate_output, grad_probs, num_tokens, num_experts, topk,
