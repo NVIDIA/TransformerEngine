@@ -569,6 +569,8 @@ def _segment_ids_pos_to_seqlens_offsets(
     # using the segment ids and pos along with mask type (causal or brcm) is sufficient.
     # It does not need to involve SW for this mask's creation
 
+    # Currently, this function is only exercised for THD qkv_layout.
+
     # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
     if (attn_mask_type.is_causal() and window_size is None) or (
         window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
@@ -733,11 +735,9 @@ class SequenceDescriptor:
                 n_batch_dims_kv = kv_segment_ids.ndim - kv_segment_pos.ndim
                 batch_shape_q = q_segment_ids.shape[:n_batch_dims_q]
                 batch_shape_kv = kv_segment_ids.shape[:n_batch_dims_kv]
-                flat_batch_q = jnp.prod(batch_shape_q)
-                flat_batch_kv = jnp.prod(batch_shape_kv)
-                # assert flat_batch_q == flat_batch_kv, (
-                #     f"segment_ids batch size mismatch: {batch_shape_q} vs {batch_shape_kv}"
-                # )
+                flat_batch_q = jnp.prod(jnp.array(batch_shape_q))
+                flat_batch_kv = jnp.prod(jnp.array(batch_shape_kv))
+                # vmap below requires same batch size on axis 0 for q_flat and kv_flat; JAX will raise if they differ.
                 q_flat = q_segment_ids.reshape(
                     flat_batch_q, *q_segment_ids.shape[n_batch_dims_q:]
                 )
