@@ -463,6 +463,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::multi_tensor_compute_scale_inv_e8m0_cuda,
         "Fused compute E8M0 scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
+#ifdef NVTE_WITH_CUSOLVERMP
+  // Newton-Schulz (cuSolverMp)
+  m.def("cusolvermp_ctx_create", &transformer_engine::pytorch::cusolvermp_ctx_create,
+        "Create cuSolverMp context for Newton-Schulz", py::arg("nccl_comm_ptr"), py::arg("nranks"),
+        py::arg("rank"), py::call_guard<py::gil_scoped_release>());
+  m.def("cusolvermp_ctx_destroy", &transformer_engine::pytorch::cusolvermp_ctx_destroy,
+        "Destroy cuSolverMp context", py::arg("ctx_ptr"), py::call_guard<py::gil_scoped_release>());
+  m.def("newton_schulz", &transformer_engine::pytorch::newton_schulz,
+        "Newton-Schulz inverse square root", py::arg("ctx_ptr"), py::arg("m"), py::arg("n"),
+        py::arg("x"), py::arg("num_iterations"), py::arg("coefficients"),
+        py::call_guard<py::gil_scoped_release>());
+#endif  // NVTE_WITH_CUSOLVERMP
+
   // Comm+GEMM Overlap
   m.def("bulk_overlap_ag_with_external_gemm",
         &transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm,

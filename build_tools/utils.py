@@ -374,3 +374,50 @@ def copy_common_headers(
         new_path = dst_dir / path.relative_to(src_dir)
         new_path.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(path, new_path)
+
+
+def common_lib_has_symbol(symbol: str) -> bool:
+    """Check if the built libtransformer_engine.so exports a given symbol.
+
+    Searches for the library in known build/install locations and uses
+    ``nm -D --defined-only`` to inspect the dynamic symbol table.
+    """
+    root = Path(__file__).resolve().parent.parent
+
+    # Candidate paths: editable-install root, default CMake build dir,
+    # and user-specified CMake build dir.
+    candidates = [
+        root / "libtransformer_engine.so",
+        root / "build" / "cmake" / "libtransformer_engine.so",
+    ]
+    custom_build_dir = os.getenv("NVTE_CMAKE_BUILD_DIR")
+    if custom_build_dir:
+        candidates.append(Path(custom_build_dir) / "libtransformer_engine.so")
+
+    lib_path = None
+    for candidate in candidates:
+        if candidate.is_file():
+            lib_path = candidate
+            break
+
+    if lib_path is None:
+        raise FileNotFoundError(
+            "Could not find libtransformer_engine.so in any of the expected locations: "
+            + ", ".join(str(c) for c in candidates)
+        )
+
+    try:
+        result = subprocess.run(
+            ["nm", "-D", "--defined-only", str(lib_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("'nm' is not available on this system.") from e
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"'nm' failed on {lib_path} (exit code {e.returncode}):\n{e.stderr}"
+        ) from e
+
+    return symbol in result.stdout
