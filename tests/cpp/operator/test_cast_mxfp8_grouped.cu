@@ -466,7 +466,8 @@ void performTest(const ProcessingMethod processing_method,
         cudaMalloc((void**)&dbias_out_data_d, dbias_data_size);
         cudaMemset(dbias_out_data_d, 0, dbias_data_size);
         NVTEBasicTensor output_dbias_data_tensor = {dbias_out_data_d, static_cast<NVTEDType>(itype), dbias_logical_shape_};
-        nvte_set_grouped_tensor_param(output_dbias_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &output_dbias_data_tensor);
+        nvte_set_grouped_tensor_param(output_dbias_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData,
+                                      &output_dbias_data_tensor, sizeof(output_dbias_data_tensor));
     }
 
     // Reference (CPU)
