@@ -1307,7 +1307,6 @@ class FusedAttnFunc(torch.autograd.Function):
             # return appropriate tensors
             out_ret = out_fp8 if is_output_fp8 else out
 
-
             # save appropriate tensors
             fp8_tensors = (None, None, None, None)
             qkvo_tensors = (None, None, None, None)
