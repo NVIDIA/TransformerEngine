@@ -1583,11 +1583,14 @@ def get_full_cu_seqlens(
 
     if is_in_onnx_export_mode():
         return _get_cu_seqlens(batch_size, max_seqlen, device)
-    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
-        _cu_seqlens_cache[(batch_size, max_seqlen)] = _get_cu_seqlens(
+
+    is_inference = torch.is_inference_mode_enabled()
+    cu_seqlens_cache_key = (batch_size, max_seqlen, device, is_inference)
+    if cu_seqlens_cache_key not in _cu_seqlens_cache:
+        _cu_seqlens_cache[cu_seqlens_cache_key] = _get_cu_seqlens(
             batch_size, max_seqlen, device
         )
-    return _cu_seqlens_cache[(batch_size, max_seqlen)]
+    return _cu_seqlens_cache[cu_seqlens_cache_key]
 
 
 @jit_fuser
