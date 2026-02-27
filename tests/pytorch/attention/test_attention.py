@@ -1865,7 +1865,7 @@ def test_mha_fp8_vs_f16(
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout=qkv_format.replace("hd", "h3d"),
@@ -1875,20 +1875,18 @@ def test_mha_fp8_vs_f16(
         deterministic=_deterministic,
     )
     flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_format.replace("hd", "h3d"),
+        is_training=is_training,
+        deterministic=_deterministic,
+    )
+    _, fused_attn_supported_f16, _ = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
-    fused_attn_supported_f16 = False
-    if not fp8_dpa_bwd:
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config,
-            qkv_dtype=dtype,
-            qkv_layout=qkv_format.replace("hd", "h3d"),
-            is_training=is_training,
-            deterministic=_deterministic,
-        )
-        _, fused_attn_supported_f16, _ = available_backends
-        if not fused_attn_supported_f16:
-            pytest.skip("No attention backend available.")
+    if not fused_attn_supported_f16:
+        pytest.skip("No reference backend available.")
 
     if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -2118,7 +2116,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout=qkv_layout,
@@ -2128,20 +2126,18 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         deterministic=_deterministic,
     )
     flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        is_training=is_training,
+        deterministic=_deterministic,
+    )
+    _, fused_attn_supported_f16, _ = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
-    fused_attn_supported_f16 = False
-    if not fp8_dpa_bwd:
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config,
-            qkv_dtype=dtype,
-            qkv_layout=qkv_layout,
-            is_training=is_training,
-            deterministic=_deterministic,
-        )
-        _, fused_attn_supported_f16, _ = available_backends
-        if not fused_attn_supported_f16:
-            pytest.skip("No attention backend available.")
+    if not fused_attn_supported_f16:
+        pytest.skip("No reference backend available.")
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
 
