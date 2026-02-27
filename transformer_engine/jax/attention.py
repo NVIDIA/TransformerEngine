@@ -708,25 +708,29 @@ class SequenceDescriptor:
         # something like : segment_ids (B, batch, seq), segment_pos (batch, seq)).
         if q_segment_ids.ndim < q_segment_pos.ndim or kv_segment_ids.ndim < kv_segment_pos.ndim:
             raise AssertionError(
-                "segment_ids must not have fewer dims than segment_pos; "
-                f"got q_segment_ids.ndim={q_segment_ids.ndim}, q_segment_pos.ndim={q_segment_pos.ndim}, "
-                f"kv_segment_ids.ndim={kv_segment_ids.ndim}, kv_segment_pos.ndim={kv_segment_pos.ndim}"
+                "segment_ids must not have fewer dims than segment_pos; got"
+                f" q_segment_ids.ndim={q_segment_ids.ndim},"
+                f" q_segment_pos.ndim={q_segment_pos.ndim},"
+                f" kv_segment_ids.ndim={kv_segment_ids.ndim},"
+                f" kv_segment_pos.ndim={kv_segment_pos.ndim}"
             )
         if not (
             q_segment_ids.shape[-q_segment_pos.ndim :] == q_segment_pos.shape
             and kv_segment_ids.shape[-kv_segment_pos.ndim :] == kv_segment_pos.shape
         ):
             raise AssertionError(
-                "segment_pos trailing shape must match segment_ids; "
-                f"got q_segment_ids.shape={q_segment_ids.shape}, q_segment_pos.shape={q_segment_pos.shape}, "
-                f"kv_segment_ids.shape={kv_segment_ids.shape}, kv_segment_pos.shape={kv_segment_pos.shape}"
+                "segment_pos trailing shape must match segment_ids; got"
+                f" q_segment_ids.shape={q_segment_ids.shape},"
+                f" q_segment_pos.shape={q_segment_pos.shape},"
+                f" kv_segment_ids.shape={kv_segment_ids.shape},"
+                f" kv_segment_pos.shape={kv_segment_pos.shape}"
             )
-        # THD: compute seqlens/offsets. 
+        # THD: compute seqlens/offsets.
         if qkv_layout.is_thd():
             # If there are more leading dims on segment_ids, e.g. vmap
-            if (q_segment_ids.ndim > q_segment_pos.ndim or kv_segment_ids.ndim > kv_segment_pos.ndim):
+            if q_segment_ids.ndim > q_segment_pos.ndim or kv_segment_ids.ndim > kv_segment_pos.ndim:
                 # Flatten leading batch dims so that segment_ids and segment_pos have the same number of leading dims,
-                # vmap seqlens/offsets computation with segment_pos broadcast, 
+                # vmap seqlens/offsets computation with segment_pos broadcast,
                 # reshape back to the original leading batch dims.
                 n_extra_batch_dims_q = q_segment_ids.ndim - q_segment_pos.ndim
                 n_extra_batch_dims_kv = kv_segment_ids.ndim - kv_segment_pos.ndim
@@ -762,16 +766,14 @@ class SequenceDescriptor:
                 q_offsets = q_off.reshape(*extra_batch_shape_q, *q_off.shape[1:])
                 kv_offsets = kv_off.reshape(*extra_batch_shape_kv, *kv_off.shape[1:])
             else:
-                q_seqlens, kv_seqlens, q_offsets, kv_offsets = (
-                    _segment_ids_pos_to_seqlens_offsets(
-                        q_segment_ids,
-                        kv_segment_ids,
-                        q_segment_pos,
-                        kv_segment_pos,
-                        attn_mask_type,
-                        window_size,
-                        max_segments_per_seq,
-                    )
+                q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlens_offsets(
+                    q_segment_ids,
+                    kv_segment_ids,
+                    q_segment_pos,
+                    kv_segment_pos,
+                    attn_mask_type,
+                    window_size,
+                    max_segments_per_seq,
                 )
         # BSHD: compute seqlens/offsets.
         else:
