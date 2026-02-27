@@ -346,16 +346,16 @@ void performTest(const ProcessingMethod processing_method,
     const size_t last_dims_size = num_tensors * sizeof(size_t);
     const size_t offsets_size = (num_tensors + 1) * sizeof(size_t);
 
-    InputType* grad_data_d;
-    InputType* in_data_d;
-    InputType* dbias_out_data_d;
-    OutputType* out_data_rowwise_d;
-    OutputType* out_data_colwise_d;
-    fp8e8m0* out_scales_rowwise_d;
-    fp8e8m0* out_scales_colwise_d;
-    size_t* first_dims_d;
-    size_t* last_dims_d;
-    size_t* offsets_d;
+    InputType* grad_data_d = nullptr;
+    InputType* in_data_d = nullptr;
+    InputType* dbias_out_data_d = nullptr;
+    OutputType* out_data_rowwise_d = nullptr;
+    OutputType* out_data_colwise_d = nullptr;
+    fp8e8m0* out_scales_rowwise_d = nullptr;
+    fp8e8m0* out_scales_colwise_d = nullptr;
+    size_t* first_dims_d = nullptr;
+    size_t* last_dims_d = nullptr;
+    size_t* offsets_d = nullptr;
 
     cudaMalloc((void**)&grad_data_d, in_data_size);
     cudaMalloc((void**)&in_data_d, in_data_size);

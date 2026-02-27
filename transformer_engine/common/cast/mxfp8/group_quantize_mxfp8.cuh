@@ -841,8 +841,6 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
                "Number of tensors in a group is larger than "
                "the MAX number of supported descriptors (64).");
-    // Only full tiles supported
-    NVTE_CHECK(elts_total % ELTS_PER_CHUNK == 0, "Only full-tile grouped tensors supported.");
     blocks = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
   }
   const size_t block_size = THREADS_PER_CHUNK;
