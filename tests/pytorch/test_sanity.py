@@ -551,8 +551,6 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
 def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias):
-    if NVTE_TEST_NVINSPECT_ENABLED and fp8_model_params:
-        pytest.skip("Quantized model parameters are not supported in debug mode.")
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.max_seqlen_q
@@ -599,8 +597,6 @@ def test_sanity_grouped_linear(
     num_gemms,
     empty_split,
 ):
-    if NVTE_TEST_NVINSPECT_ENABLED and fp8_model_params:
-        pytest.skip("FP8 model parameters are not supported in debug mode.")
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
@@ -1222,8 +1218,6 @@ def test_inference_mode(
     quantization: Optional[str],
 ) -> None:
     """Test heuristics for initializing quantized weights"""
-    if NVTE_TEST_NVINSPECT_ENABLED and quantization is not None:
-        pytest.skip("Quantized model parameters are not supported in debug mode.")
 
     # Tensor dimensions
     sequence_length = 32

@@ -122,10 +122,11 @@ bool has_mnnvl_fabric(int device_id) {
     NVTE_CALL_CHECK_CUDA_NVML(nvmlDeviceGetHandleByIndex_v2, device_id, &local_device);
     nvmlGpuFabricInfoV_t fabricInfo = {};
     fabricInfo.version = nvmlGpuFabricInfo_v2;
-    fabricInfo.clusterUuid[0] = '\0';
     NVTE_CALL_CHECK_CUDA_NVML(nvmlDeviceGetGpuFabricInfoV, local_device, &fabricInfo);
     NVTE_CALL_CHECK_CUDA_NVML(nvmlShutdown);
-    if (fabricInfo.state >= NVML_GPU_FABRIC_STATE_COMPLETED && fabricInfo.clusterUuid[0] != '\0') {
+    const unsigned char zero_uuid[NVML_GPU_FABRIC_UUID_LEN] = {0};
+    if (fabricInfo.state == NVML_GPU_FABRIC_STATE_COMPLETED &&
+        memcmp(fabricInfo.clusterUuid, zero_uuid, NVML_GPU_FABRIC_UUID_LEN) != 0) {
       mnnvl_fabric_support = true;
     }
   }
