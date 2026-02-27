@@ -15,6 +15,7 @@ quantization, and distributed training through sharding constraints.
 
 from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -29,7 +30,6 @@ from .quantize import (
     noop_quantizer_set,
     TensorUsage,
 )
-import warnings
 
 
 def layernorm_mlp(
