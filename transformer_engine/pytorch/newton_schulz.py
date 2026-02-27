@@ -71,6 +71,11 @@ def newton_schulz(
     if not x.is_cuda:
         raise ValueError("Input tensor must be on CUDA device")
 
+    if not hasattr(tex, "newton_schulz"):
+        raise RuntimeError(
+            "newton_schulz requires Transformer Engine to be built with NVTE_WITH_CUSOLVERMP=1"
+        )
+
     nccl_comm_ptr = _get_nccl_comm_ptr(group)
     nranks = dist.get_world_size(group)
     rank = dist.get_rank(group)
