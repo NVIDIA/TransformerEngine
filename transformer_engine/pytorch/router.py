@@ -3,7 +3,18 @@
 # See LICENSE for license information.
 """
 Fused functions used in the MoE router
+
+Precision Notes:
+- FP64 is currently not supported.
+- Inputs are casted into FP32 when loading from global memory.
+- All the math/calculations/accumulations are in FP32 in the kernels.
+- "scores" is always in FP32 (match the MCore implementation).
+- "intermediate_output" is always in FP32 for better backward precision.
+- Only cast to low-precision when necessary and the casting only happens in writing to
+  global memory. For example, the gradient is required to have the same dtype as the input.
 """
+from typing import Optional
+
 import torch
 import transformer_engine_torch as tex
 
@@ -11,7 +22,7 @@ import transformer_engine_torch as tex
 class FusedTopkScoreFunction(torch.autograd.Function):
     """
     Fused Topk with Score Function router.
-    Currently, only support softmax and sigmoid.
+    Currently, support "softmax", "sigmoid" and "sqrtsoftplus".
     """
 
     @staticmethod
@@ -20,11 +31,11 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         logits: torch.Tensor,
         topk: int,
         use_pre_softmax: bool,
-        num_groups: int,
-        group_topk: int,
-        scaling_factor: float,
+        num_groups: Optional[int],
+        group_topk: Optional[int],
+        scaling_factor: Optional[float],
         score_function: str,
-        expert_bias: torch.Tensor,
+        expert_bias: Optional[torch.Tensor],
     ):
         # pylint: disable=missing-function-docstring
         # Save the shape of the logits
@@ -52,6 +63,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         ctx.topk = topk
         ctx.scaling_factor = scaling_factor
         ctx.score_function = score_function
+        ctx.logits_dtype = logits.dtype
         return probs, routing_map
 
     @staticmethod
@@ -62,12 +74,16 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         tensor_shape = grad_probs.shape
         # Adjust the shape of the grad_probs to 2D shape
         grad_probs = grad_probs.contiguous().view(-1, tensor_shape[-1])
-        grad_logits = tex.fused_topk_with_score_function_bwd(
+        grad_logits = torch.empty(
+            (ctx.num_tokens, ctx.num_experts), dtype=ctx.logits_dtype, device=grad_probs.device
+        )
+        tex.fused_topk_with_score_function_bwd(
             ctx.num_tokens,
             ctx.num_experts,
             routing_map,
             intermediate_output,
             grad_probs,
+            grad_logits,
             ctx.topk,
             ctx.use_pre_softmax,
             ctx.scaling_factor,
@@ -82,37 +98,37 @@ def fused_topk_with_score_function(
     logits: torch.Tensor,
     topk: int,
     use_pre_softmax: bool,
-    num_groups: int,
-    group_topk: int,
-    scaling_factor: float,
+    num_groups: Optional[int],
+    group_topk: Optional[int],
+    scaling_factor: Optional[float],
     score_function: str,
-    expert_bias: torch.Tensor,
+    expert_bias: Optional[torch.Tensor],
 ):
     """
     Fused topk with score function router.
     Parameters
     ----------
-    logits : torch.Tensor
+    logits : torch.Tensor in fp32/bf16/fp16
     topk : int
     use_pre_softmax : bool
-        if enabled, the computation order: softmax -> topk
-    num_groups : int
+        if enabled, the computation order: softmax -> topk.
+    num_groups : int, optional
         used in the group topk
-    group_topk : int
+    group_topk : int, optional
         used in the group topk
-    scaling_factor : float
+    scaling_factor : float, optional
     score_function : str
-        currently only support softmax and sigmoid
-    expert_bias : torch.Tensor
-        could be used in the sigmoid
+        currently support "softmax", "sigmoid" and "sqrtsoftplus".
+    expert_bias : torch.Tensor, optional
+        could be used with the sigmoid/sqrtsoftplus score functions.
 
     Returns
     -------
-    probs : torch.Tensor
-    routing_map : torch.Tensor
+    probs : torch.Tensor in the same dtype as the "logits".
+    routing_map : torch.Tensor in bool.
     """
     if logits.dtype == torch.float64:
-        raise ValueError("Current TE does not support float64 router type")
+        raise ValueError("Current TE does not support float64 router type.")
     return FusedTopkScoreFunction.apply(
         logits,
         topk,
@@ -154,6 +170,7 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         ctx.score_function = score_function
         ctx.num_tokens = num_tokens
         ctx.num_experts = num_experts
+        ctx.logits_dtype = logits.dtype
         return routing_map, scores
 
     @staticmethod
@@ -164,11 +181,15 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         tensor_shape = grad_scores.shape
         # Adjust the shape of the grad_scores to 2D shape
         grad_scores = grad_scores.contiguous().view(-1, tensor_shape[-1])
-        grad_logits = tex.fused_score_for_moe_aux_loss_bwd(
+        grad_logits = torch.empty(
+            (ctx.num_tokens, ctx.num_experts), dtype=ctx.logits_dtype, device=grad_scores.device
+        )
+        tex.fused_score_for_moe_aux_loss_bwd(
             num_tokens=ctx.num_tokens,
             num_experts=ctx.num_experts,
             intermediate_output=intermediate_output,
             grad_scores=grad_scores,
+            grad_logits=grad_logits,
             topk=ctx.topk,
             score_function=ctx.score_function,
         )
@@ -186,15 +207,15 @@ def fused_compute_score_for_moe_aux_loss(
     Fused compute scores for MoE aux loss, subset of the fused_topk_with_score_function.
     Parameters
     ----------
-    logits : torch.Tensor
+    logits : torch.Tensor in fp32/bf16/fp16
     topk : int
     score_function : str
-        currently only support softmax and sigmoid
+        currently support "softmax", "sigmoid" and "sqrtsoftplus".
 
     Returns
     -------
-    routing_map : torch.Tensor
-    scores : torch.Tensor
+    routing_map : torch.Tensor in bool
+    scores : torch.Tensor in fp32
     """
     return FusedComputeScoresForMoEAuxLoss.apply(logits, topk, score_function)
 
@@ -253,23 +274,24 @@ def fused_moe_aux_loss(
     num_experts: int,
     topk: int,
     coeff: float,
-):
+) -> torch.Tensor:
     """
     Fused MoE aux loss.
     Parameters
     ----------
-    probs : torch.Tensor
-    tokens_per_expert : torch.Tensor
-        the number of tokens per expert
+    probs : torch.Tensor in fp32/bf16/fp16
+    tokens_per_expert : torch.Tensor in int32/int64/fp32/bf16
+        the number of tokens per expert.
     total_num_tokens : int
-        the total number of tokens, involved in the aux loss calculation
+        the total number of tokens used in the aux loss calculation.
     num_experts : int
     topk : int
     coeff : float
-        the coefficient of the aux loss
+        the coefficient of the aux loss.
 
     Returns
     -------
-    aux_loss : torch.scalar
+    aux_loss : torch.Tensor.
+        A scalar tensor in the same dtype as the "probs".
     """
     return FusedAuxLoss.apply(probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff)

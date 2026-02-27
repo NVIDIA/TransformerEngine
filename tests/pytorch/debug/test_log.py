@@ -151,6 +151,58 @@ def test_sanity(feature_dirs):
         assert stat in output, f"Stat {stat} not found in output"
 
 
+LOG_FP8_MODEL_PARAMETERS_CONFIG_BASE = """
+log:
+    layers:
+        layer_name_regex_pattern: .*
+    enabled:
+        True
+    transformer_engine:
+        LogTensorStats:
+            enabled:
+                True
+            stats: [min]
+            tensors: [weight, activation, gradient]
+            freq: 1
+        LogFp8TensorStats:
+            enabled:
+                True
+            tensors_struct:
+                - tensor: activation
+                  stats: [scale_inv_min, scale_inv_max, underflows%]
+                - tensor: weight
+                  stats: [scale_inv_min, scale_inv_max]
+            freq: 1
+"""
+
+
+def test_sanity_log_fp8_model_parameters(feature_dirs):
+    """
+    Tests logging stats when model parameters are in fp8.
+    It tests 3 things:
+        - LogTensorStats for weight tensor should work without change,
+        - LogTensorStats and LogFp8TensorStats for non-weight tensors should work without change,
+        - LogFp8TensorStats should support scale_inv_min, scale_inv_max for weight tensor.
+
+    """
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    with debug_session(LOG_FP8_MODEL_PARAMETERS_CONFIG_BASE, feature_dirs) as log_dir:
+        with te.fp8_model_init(recipe=recipe.DelayedScaling()):
+            model = te.Linear(128, 128, params_dtype=torch.bfloat16)
+        inp = torch.zeros(128, 128, dtype=torch.bfloat16).cuda()
+        for _ in range(10):
+            with te.fp8_autocast(fp8_recipe=recipe.DelayedScaling()):
+                output = model(inp)
+            loss = output.sum()
+            loss.backward()
+            debug_api.step()
+        output = read_log(log_dir)
+    assert output, "Output is empty"
+    TEDebugState._reset()
+
+
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),
