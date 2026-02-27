@@ -394,17 +394,30 @@ def common_lib_has_symbol(symbol: str) -> bool:
     if custom_build_dir:
         candidates.append(Path(custom_build_dir) / "libtransformer_engine.so")
 
-    for lib_path in candidates:
-        if not lib_path.is_file():
-            continue
-        try:
-            result = subprocess.run(
-                ["nm", "-D", "--defined-only", str(lib_path)],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return symbol in result.stdout
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-    return False
+    lib_path = None
+    for candidate in candidates:
+        if candidate.is_file():
+            lib_path = candidate
+            break
+
+    if lib_path is None:
+        raise FileNotFoundError(
+            "Could not find libtransformer_engine.so in any of the expected locations: "
+            + ", ".join(str(c) for c in candidates)
+        )
+
+    try:
+        result = subprocess.run(
+            ["nm", "-D", "--defined-only", str(lib_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("'nm' is not available on this system.") from e
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"'nm' failed on {lib_path} (exit code {e.returncode}):\n{e.stderr}"
+        ) from e
+
+    return symbol in result.stdout
