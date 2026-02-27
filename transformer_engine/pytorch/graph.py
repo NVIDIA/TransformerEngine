@@ -455,11 +455,12 @@ def _make_graphed_callables(
                 if is_training:
                     inputs = tuple(i for i in static_input_surface if i.requires_grad)
                     with _none_grad_context_wrapper(inputs):
+                        outputs_requiring_grad = tuple(
+                            o for o in outputs if o is not None and o.requires_grad
+                        )
                         torch.autograd.backward(
-                            tuple(o for o in outputs if o.requires_grad),
-                            grad_tensors=tuple(
-                                torch.empty_like(o) for o in outputs if o.requires_grad
-                            ),
+                            outputs_requiring_grad,
+                            grad_tensors=tuple(torch.empty_like(o) for o in outputs_requiring_grad),
                         )
                         grad_inputs = tuple(input.grad for input in inputs)
 
@@ -621,19 +622,22 @@ def _make_graphed_callables(
                         # Note for _reuse_graph_input_output_buffers: grad output is only used
                         # within backward, so we can reuse the same static buffers every time.
                         static_grad_outputs_keys = tuple(
-                            (o.shape, o.dtype, o.layout) for o in static_outputs if o.requires_grad
+                            (o.shape, o.dtype, o.layout)
+                            for o in static_outputs
+                            if o is not None and o.requires_grad
                         )
                         if static_grad_outputs_keys in static_grad_outputs_dict:
                             static_grad_outputs = static_grad_outputs_dict[static_grad_outputs_keys]
                         else:
                             static_grad_outputs = tuple(
-                                torch.empty_like(o) if o.requires_grad else None
+                                torch.empty_like(o) if o is not None and o.requires_grad else None
                                 for o in static_outputs
                             )
                             static_grad_outputs_dict[static_grad_outputs_keys] = static_grad_outputs
                     else:
                         static_grad_outputs = tuple(
-                            torch.empty_like(o) if o.requires_grad else None for o in static_outputs
+                            torch.empty_like(o) if o is not None and o.requires_grad else None
+                            for o in static_outputs
                         )
                     if is_training:
                         inputs = tuple(i for i in static_input_surface if i.requires_grad)
@@ -641,7 +645,9 @@ def _make_graphed_callables(
                             bwd_graph, pool=mempool
                         ):
                             torch.autograd.backward(
-                                tuple(o for o in static_outputs if o.requires_grad),
+                                tuple(
+                                    o for o in static_outputs if o is not None and o.requires_grad
+                                ),
                                 grad_tensors=tuple(o for o in static_grad_outputs if o is not None),
                                 retain_graph=retain_graph_in_backward,
                             )
@@ -724,7 +730,8 @@ def _make_graphed_callables(
         ):
             # For now, assumes all static_outputs require grad
             static_grad_outputs = tuple(
-                torch.empty_like(o) if o.requires_grad else None for o in static_outputs
+                torch.empty_like(o) if o is not None and o.requires_grad else None
+                for o in static_outputs
             )
             if is_training:
                 inputs = tuple(i for i in static_input_surface if i.requires_grad)
@@ -732,7 +739,7 @@ def _make_graphed_callables(
                     bwd_graph, pool=mempool
                 ):
                     torch.autograd.backward(
-                        tuple(o for o in static_outputs if o.requires_grad),
+                        tuple(o for o in static_outputs if o is not None and o.requires_grad),
                         grad_tensors=tuple(o for o in static_grad_outputs if o is not None),
                         retain_graph=retain_graph_in_backward,
                     )
@@ -803,7 +810,7 @@ def _make_graphed_callables(
                     fwd_graph.replay()
                 torch.cuda.current_stream().wait_event(cuda_graph_event)
                 assert isinstance(static_outputs, tuple)
-                return tuple(o.detach() for o in static_outputs)
+                return tuple(o.detach() if o is not None else o for o in static_outputs)
 
             @staticmethod
             @torch.autograd.function.once_differentiable
@@ -876,7 +883,9 @@ def _make_graphed_callables(
 
         return functionalized
 
-    def make_graphed_attribute_functions(graph_idx, te_modules):
+    def make_graphed_attribute_functions(graph_idx):
+        # Get te modules for current graph
+        te_modules = visited_te_modules.get(graph_idx, set())
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
@@ -885,6 +894,14 @@ def _make_graphed_callables(
                 for module in te_modules:
                     if hasattr(module, "trigger_backward_dw"):
                         module.trigger_backward_dw()
+
+                # Trigger the grad accumulation hook for wgrad graphs.
+                for module in te_modules:
+                    if (
+                        isinstance(module, TransformerEngineBaseModule)
+                        and module.need_backward_dw()
+                    ):
+                        module._trigger_wgrad_accumulation_and_reduce_hooks()
 
         # Attach reset as an attribute to the graphed callable.
         def reset():
@@ -969,7 +986,7 @@ def _make_graphed_callables(
         else:
             ret.append(graphed)
 
-        backward_dw_func, reset_func = make_graphed_attribute_functions(i, te_modules)
+        backward_dw_func, reset_func = make_graphed_attribute_functions(i)
         setattr(ret[-1], "backward_dw", backward_dw_func)
         setattr(ret[-1], "reset", reset_func)
 

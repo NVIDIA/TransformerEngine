@@ -162,7 +162,16 @@ def test_dot_product_attention(
         )
 
     # Get backends
+    # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
+    # For all other shapes test fwd+bwd
     is_training = True
+    # TODO(KshitijLakhani): Set is_training to True for all cases once cuDNN supports dbias for 111s.
+    if config.bias_shape == "111s":
+        is_training = False
+        logging.info(
+            "Setting is_training to False as cuDNN does not support dbias for"
+            f" {config.bias_shape=} "
+        )
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -636,7 +645,8 @@ model_configs_bias_shapes = {
     "bias_1_1": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="1hss"),
     "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="b1ss"),
     "bias_1_3": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"),
-    "bias_1_4": ModelConfig(
+    "bias_1_4": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="111s"),
+    "bias_1_5": ModelConfig(
         4,
         2048,
         24,
@@ -646,7 +656,7 @@ model_configs_bias_shapes = {
         bias_shape="1hss",
         alibi_type="custom",
     ),
-    "bias_1_5": ModelConfig(
+    "bias_1_6": ModelConfig(
         2,
         2048,
         24,
@@ -1143,10 +1153,16 @@ def _run_dot_product_attention(
         bias = None
     if config.attn_bias_type == "post_scale_bias":
         shape = "_".join(config.bias_shape)
+        # For 1hss, 11ss, b1ss, bhss
+        shape_cache = shape
         shape = shape.replace("_s_s", "_sq_skv")
+        # For 111s
+        if shape == shape_cache:
+            shape = shape.replace("_1_s", "_1_skv")
         tensor_shape = [dim_to_num[j] for j in shape.split("_")]
         bias = torch.randn(tensor_shape, dtype=dtype, device="cuda")
-        if config.bias_shape != "1hss":
+        # For 111s, dbias calculation is not supported as of cuDNN 9.18
+        if config.bias_shape == "111s":
             bias.requires_grad = False
 
     # Create RNG
@@ -1818,10 +1834,16 @@ qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 @pytest.mark.parametrize("is_training", [True, False])
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
 def test_mha_fp8_vs_f16(
-    dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, RoPE, is_training, scaling_mode
+    dtype,
+    model,
+    qkv_format,
+    input_layernorm,
+    fp8_dpa_bwd,
+    RoPE,
+    is_training,
+    scaling_mode,
 ):
     """Test MultiHeadAttention module in FP8"""
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
@@ -2078,7 +2100,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     #        config.dropout_p = 0.1
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "1"
 
     # Test backend availability

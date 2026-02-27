@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-from typing import Optional
+from typing import Optional, List
 
 import torch
 import pytest
@@ -113,6 +113,7 @@ batch_sizes_with_zero = [0, 1, 2]
 all_activations = [
     "gelu",
     "geglu",
+    "glu",
     "qgelu",
     "qgeglu",
     "relu",
@@ -135,6 +136,117 @@ def _disable_wgrads(block):
 def reset_global_fp8_state():
     yield
     FP8GlobalStateManager.reset()
+
+
+def check_grouped_tensor_pointers_helper(tensors, num_elems_in_byte=1, tensor_name="tensor"):
+    """
+    Verify that tensors are stored in contiguous memory.
+
+    Args:
+        tensors: List or iterable of tensors to check
+        num_elems_in_byte: Number of elements packed per byte (1 for normal, 2 for NVFP4)
+        tensor_name: Name to use in error messages
+    """
+    tensor_list = list(tensors)
+    if len(tensor_list) < 2:
+        return  # Nothing to check
+
+    for i in range(1, len(tensor_list)):
+        prev_tensor = tensor_list[i - 1]
+        curr_tensor = tensor_list[i]
+
+        # Calculate expected offset based on previous tensor size
+        prev_numel = prev_tensor.numel()
+        expected_offset = (prev_numel // num_elems_in_byte) * prev_tensor.element_size()
+
+        # Verify current tensor's data pointer is correctly offset
+        expected_ptr = prev_tensor.data_ptr() + expected_offset
+        actual_ptr = curr_tensor.data_ptr()
+
+        assert (
+            actual_ptr == expected_ptr
+        ), f"{tensor_name} {i} data pointer mismatch: expected {expected_ptr}, got {actual_ptr}"
+
+
+def check_grouped_tensor_pointers(
+    weights: List[torch.Tensor], fp8_recipe: Optional[recipe.Recipe] = None
+):
+    """
+    Verify that the pointers of the weights are in contiguous memory for GroupedTensor.
+    TODO(ksivaman): This check can be made way more efficient but for now leaving the brute force approach.
+    """
+
+    num_elems_in_a_data_byte = 1 if fp8_recipe is None else 2 if fp8_recipe.nvfp4() else 1
+
+    # Check data.
+    if hasattr(weights[0], "_data") and weights[0]._data is not None:
+        data_tensors = [w._data for w in weights]
+        check_grouped_tensor_pointers_helper(data_tensors, num_elems_in_byte=1, tensor_name="data")
+
+    # Check transpose.
+    if hasattr(weights[0], "_transpose") and weights[0]._transpose is not None:
+        transpose_tensors = [w._transpose for w in weights]
+        check_grouped_tensor_pointers_helper(
+            transpose_tensors, num_elems_in_byte=1, tensor_name="transpose"
+        )
+
+    # Check scale_inv.
+    if hasattr(weights[0], "_scale_inv") and weights[0]._scale_inv is not None:
+        scale_inv_tensors = [w._scale_inv for w in weights]
+        check_grouped_tensor_pointers_helper(
+            scale_inv_tensors, num_elems_in_byte=1, tensor_name="scale_inv"
+        )
+
+    # Check rowwise scale_inv.
+    if hasattr(weights[0], "_rowwise_scale_inv") and weights[0]._rowwise_scale_inv is not None:
+        scale_inv_tensors = [w._rowwise_scale_inv for w in weights]
+        check_grouped_tensor_pointers_helper(
+            scale_inv_tensors, num_elems_in_byte=1, tensor_name="rowwise_scale_inv"
+        )
+
+    # Check columnwise scale_inv.
+    if (
+        hasattr(weights[0], "_columnwise_scale_inv")
+        and weights[0]._columnwise_scale_inv is not None
+    ):
+        columnwise_scale_inv_tensors = [w._columnwise_scale_inv for w in weights]
+        check_grouped_tensor_pointers_helper(
+            columnwise_scale_inv_tensors,
+            num_elems_in_byte=1,
+            tensor_name="columnwise scale_inv",
+        )
+
+    # Check rowwise amax.
+    if hasattr(weights[0], "_rowwise_amax") and weights[0]._rowwise_amax is not None:
+        rowwise_amax_tensors = [w._rowwise_amax for w in weights]
+        check_grouped_tensor_pointers_helper(
+            rowwise_amax_tensors, num_elems_in_byte=1, tensor_name="rowwise amax"
+        )
+
+    # Check columnwise amax.
+    if hasattr(weights[0], "_columnwise_amax") and weights[0]._columnwise_amax is not None:
+        columnwise_amax_tensors = [w._columnwise_amax for w in weights]
+        check_grouped_tensor_pointers_helper(
+            columnwise_amax_tensors, num_elems_in_byte=1, tensor_name="columnwise amax"
+        )
+
+    # Check rowwise data.
+    if hasattr(weights[0], "_rowwise_data") and weights[0]._rowwise_data is not None:
+        rowwise_data_tensors = [w._rowwise_data for w in weights]
+        check_grouped_tensor_pointers_helper(
+            rowwise_data_tensors,
+            num_elems_in_byte=num_elems_in_a_data_byte,
+            tensor_name="rowwise data",
+        )
+
+    # Check columnwise data.
+    if hasattr(weights[0], "_columnwise_data") and weights[0]._columnwise_data is not None:
+        columnwise_data_tensors = [w._columnwise_data for w in weights]
+        check_grouped_tensor_pointers_helper(
+            columnwise_data_tensors,
+            num_elems_in_byte=num_elems_in_a_data_byte,
+            tensor_name="columnwise data",
+        )
 
 
 def _test_sanity_e2e_amp(block, dtype, config, fp8_recipe, skip_wgrad):
@@ -439,8 +551,6 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
 def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias):
-    if NVTE_TEST_NVINSPECT_ENABLED and fp8_model_params:
-        pytest.skip("Quantized model parameters are not supported in debug mode.")
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.max_seqlen_q
@@ -473,18 +583,28 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
+@pytest.mark.parametrize("single_param", all_boolean)
 @pytest.mark.parametrize("empty_split", ["first", "last", "middle"])
 @pytest.mark.parametrize("num_gemms", [4])
 def test_sanity_grouped_linear(
-    dtype, bs, model, fp8_recipe, fp8_model_params, use_bias, num_gemms, empty_split
+    dtype,
+    bs,
+    model,
+    fp8_recipe,
+    fp8_model_params,
+    use_bias,
+    single_param,
+    num_gemms,
+    empty_split,
 ):
-    if NVTE_TEST_NVINSPECT_ENABLED and fp8_model_params:
-        pytest.skip("FP8 model parameters are not supported in debug mode.")
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
+
+    if single_param:
+        os.environ["NVTE_ALLOC_CONTIGUOUS_GROUPED_LINEAR_WEIGHTS"] = "1"
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -495,8 +615,18 @@ def test_sanity_grouped_linear(
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
         te_grouped_linear = GroupedLinear(
-            num_gemms, config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
+            num_gemms,
+            config.hidden_size,
+            ffn_hidden_size,
+            bias=use_bias,
+            params_dtype=dtype,
         ).cuda()
+
+    # Verify that weights are stored in contiguous GroupedTensor storage.
+    weights = [getattr(te_grouped_linear, f"weight{i}") for i in range(num_gemms)]
+    if fp8_recipe is None or not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
+        if single_param:
+            check_grouped_tensor_pointers(weights, fp8_recipe)
 
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
@@ -514,6 +644,9 @@ def test_sanity_grouped_linear(
     loss = out.sum()
     loss.backward()
     assert out.shape == (num_tokens, ffn_hidden_size)
+
+    if single_param:
+        del os.environ["NVTE_ALLOC_CONTIGUOUS_GROUPED_LINEAR_WEIGHTS"]
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -956,7 +1089,13 @@ def test_replace_raw_data_for_float8tensor():
     random_bf16_data = torch.randn(fp8_tensor.shape, dtype=torch.bfloat16, device="cuda")
     fp8_quantizer.update_quantized(random_bf16_data, fp8_tensor)
 
-    attrs_to_check = ["_quantizer", "_fp8_dtype", "_scale_inv", "_transpose", "_transpose_invalid"]
+    attrs_to_check = [
+        "_quantizer",
+        "_fp8_dtype",
+        "_scale_inv",
+        "_transpose",
+        "_transpose_invalid",
+    ]
     attrs = {}
     for attr in attrs_to_check:
         attrs[attr] = getattr(fp8_tensor, attr)
@@ -1079,8 +1218,6 @@ def test_inference_mode(
     quantization: Optional[str],
 ) -> None:
     """Test heuristics for initializing quantized weights"""
-    if NVTE_TEST_NVINSPECT_ENABLED and quantization is not None:
-        pytest.skip("Quantized model parameters are not supported in debug mode.")
 
     # Tensor dimensions
     sequence_length = 32

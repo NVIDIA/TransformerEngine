@@ -35,6 +35,7 @@ PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
 PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
+PyTypeObject *GroupedTensorStoragePythonClass = nullptr;
 
 void init_float8_extension() {
   if (Float8TensorPythonClass) return;
@@ -104,11 +105,22 @@ void init_nvfp4_extensions() {
              "Internal error: could not initialize pyTorch NVFP4 extension.");
 }
 
+void init_grouped_tensor_extension() {
+  if (GroupedTensorStoragePythonClass) return;
+  auto grouped_tensor_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.grouped_tensor");
+  GroupedTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(grouped_tensor_module.ptr(), "GroupedTensor"));
+  NVTE_CHECK(GroupedTensorStoragePythonClass != nullptr,
+             "Internal error: could not initialize pyTorch grouped tensor extension.");
+}
+
 void init_extension() {
   init_float8_extension();
   init_mxfp8_extension();
   init_float8blockwise_extension();
   init_nvfp4_extensions();
+  init_grouped_tensor_extension();
 }
 
 }  // namespace transformer_engine::pytorch
@@ -121,7 +133,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
-
+  m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -132,6 +145,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+  /* GLU (sigmoid gate) */
+  m.def("glu", transformer_engine::pytorch::glu, "GLU activation", py::arg("input"),
+        py::arg("quantizer"));
   /* GELU and variants*/
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
         py::arg("quantizer"));
@@ -158,6 +174,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
         "SwiGLU activation used in GPT OSS", py::arg("input"), py::arg("quantizer"),
         py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
+  /* Backward of GLU */
+  m.def("dglu", transformer_engine::pytorch::dglu, "Backward of GLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
   /* Backward of GELU and variants */
   m.def("dgelu", transformer_engine::pytorch::dgelu, "Backward of GeLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
@@ -325,19 +344,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::fused_topk_with_score_function_fwd, py::arg("logits"),
         py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"), py::arg("group_topk"),
         py::arg("scaling_factor"), py::arg("score_function"), py::arg("expert_bias"),
-        "Fused topk softmax fwd");
+        "Fused topk with score function fwd");
   m.def("fused_topk_with_score_function_bwd",
         &transformer_engine::pytorch::fused_topk_with_score_function_bwd, py::arg("num_tokens"),
         py::arg("num_experts"), py::arg("routing_map"), py::arg("intermediate_output"),
-        py::arg("grad_probs"), py::arg("topk"), py::arg("use_pre_softmax"),
-        py::arg("scaling_factor"), py::arg("score_function"), "Fused topk softmax bwd");
+        py::arg("grad_probs"), py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
+        py::arg("scaling_factor"), py::arg("score_function"), "Fused topk with score function bwd");
   m.def("fused_score_for_moe_aux_loss_fwd",
         &transformer_engine::pytorch::fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
-        py::arg("topk"), py::arg("score_function"), "Fused topk softmax fwd");
+        py::arg("topk"), py::arg("score_function"), "Fused aux loss with score function fwd");
   m.def("fused_score_for_moe_aux_loss_bwd",
         &transformer_engine::pytorch::fused_score_for_moe_aux_loss_bwd, py::arg("num_tokens"),
         py::arg("num_experts"), py::arg("intermediate_output"), py::arg("grad_scores"),
-        py::arg("topk"), py::arg("score_function"), "Fused topk softmax bwd");
+        py::arg("grad_logits"), py::arg("topk"), py::arg("score_function"),
+        "Fused aux loss with score function bwd");
   m.def("fused_moe_aux_loss_fwd", &transformer_engine::pytorch::fused_moe_aux_loss_fwd,
         py::arg("probs"), py::arg("tokens_per_expert"), py::arg("total_num_tokens"),
         py::arg("num_experts"), py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"),
@@ -492,8 +512,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("comm_cga_size") = 2, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
            py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
            py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
-      .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
-           py::arg("local_chunk") = false)
+      .def("copy_into_buffer",
+           static_cast<void (CommOverlap::*)(const at::Tensor &, bool)>(
+               &CommOverlap::copy_into_buffer),
+           py::arg("input"), py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlap::get_communication_stream);
@@ -510,8 +532,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
-      .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
-           py::arg("local_chunk") = false)
+      .def("copy_into_buffer",
+           static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(
+               &CommOverlapP2P::copy_into_buffer),
+           py::arg("input"), py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
