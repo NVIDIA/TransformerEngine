@@ -624,54 +624,14 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         )
         return output, softmax_aux, rng_state
 
-    # Flattened arg indices: 0=q, 1=k, 2=v, 3=bias, 4=softmax_offset, 5=seed,
-    # 6,7=seqlens, 8,9=seq_offsets, 10,11=segment_ids, 12,13=segment_pos.
-    _SEGMENT_IDS_BATCH_DIMS_IDX = (10, 11)
-    _SEGMENT_POS_BATCH_DIMS_IDX = (12, 13)
-
     @staticmethod
     def batcher(batched_args, batch_dims, *, config):
-        # batch_dims: tuple of length len(batched_args); each element is the axis index
-        # that is the batch axis (0, 1, ...) or None if that arg has no batch dim.
-        # check_valid_batch_dims: only 0 or None allowed (single leading batch or no batch).
+        # batch_dims: each element is the batch axis (0, ...) or None. Only 0 or None allowed.
         check_valid_batch_dims(batch_dims)
         assert FusedAttnFwdPrimitive.outer_primitive is not None
         q_bdim, _, _, _, _, seed_bdim, *_ = batch_dims
-
-        # When segment_ids are batched (vmap) and segment_pos are not, do not expand segment_pos to match. 
-        # The impl() layer treats segment_pos as replicated and computes seqlens/offsets per batch index
-        # without materializing the full expanded segment_pos array.
-        # Assert on invalid case (segment_ids.ndim < segment_pos.ndim)
-        batched_args_list = list(batched_args)
-        updated_batch_dims = list(batch_dims)
-        for seg_id_idx, seg_pos_idx in zip(
-            FusedAttnFwdPrimitive._SEGMENT_IDS_BATCH_DIMS_IDX,
-            FusedAttnFwdPrimitive._SEGMENT_POS_BATCH_DIMS_IDX,
-        ):
-            seg_id_bdim = batch_dims[seg_id_idx]
-            seg_pos_bdim = batch_dims[seg_pos_idx]
-            if not (
-                seg_id_bdim is not None
-                and seg_pos_bdim is None
-                and batched_args_list[seg_id_idx].size > 0
-                and batched_args_list[seg_pos_idx].size > 0
-            ):
-                continue
-            segment_ids = batched_args_list[seg_id_idx]
-            segment_pos = batched_args_list[seg_pos_idx]
-            if segment_ids.ndim < segment_pos.ndim:
-                raise AssertionError(
-                    "segment_ids must not have fewer dims than segment_pos; "
-                    f"got segment_ids.ndim={segment_ids.ndim}, segment_pos.ndim={segment_pos.ndim}"
-                )
-            # Do not expand segment_pos: leave it unexpanded so the impl() layer
-            # treats it as replicated and computes seqlens/offsets per batch index
-            # without materializing the full expanded segment_pos array.
-            if segment_ids.ndim >= segment_pos.ndim:
-                continue
-        batch_dims = tuple(updated_batch_dims)
-        batched_args = tuple(batched_args_list)
-
+        # Pass through; segment_ids/segment_pos may have different batch dims (e.g. vmapped ids,
+        # replicated pos). get_seqlens_and_offsets() in attention.py handles conversion without expanding.
         out_bdims = q_bdim, q_bdim, seed_bdim
         return (
             FusedAttnFwdPrimitive.outer_primitive.bind(*batched_args, config=config),
@@ -1121,46 +1081,12 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         )
         return dq, dk, dv, dbias, dsoftmax_offset
 
-    # Flattened arg indices: 0=q, 1=k, 2=v, 3=bias, 4=softmax_offset, 5=softmax_aux,
-    # 6=rng_state, 7=output, 8=doutput, 9,10=seqlens, 11,12=seq_offsets,
-    # 13,14=segment_ids, 15,16=segment_pos.
-    _SEGMENT_IDS_BATCH_DIMS_IDX = (13, 14)
-    _SEGMENT_POS_BATCH_DIMS_IDX = (15, 16)
-
     @staticmethod
     def batcher(batched_args, batch_dims, *, config):
         check_valid_batch_dims(batch_dims)
         assert FusedAttnBwdPrimitive.outer_primitive is not None
         q_bdim, k_bdim, v_bdim, bias_bdim, softmax_offset_bdim, *_ = batch_dims
-
-        # Option 3 (memory-efficient): do not expand segment_pos; conversion layer treats as replicated.
-        batched_args_list = list(batched_args)
-        updated_batch_dims = list(batch_dims)
-        for seg_id_idx, seg_pos_idx in zip(
-            FusedAttnBwdPrimitive._SEGMENT_IDS_BATCH_DIMS_IDX,
-            FusedAttnBwdPrimitive._SEGMENT_POS_BATCH_DIMS_IDX,
-        ):
-            seg_id_bdim = batch_dims[seg_id_idx]
-            seg_pos_bdim = batch_dims[seg_pos_idx]
-            if not (
-                seg_id_bdim is not None
-                and seg_pos_bdim is None
-                and batched_args_list[seg_id_idx].size > 0
-                and batched_args_list[seg_pos_idx].size > 0
-            ):
-                continue
-            segment_ids = batched_args_list[seg_id_idx]
-            segment_pos = batched_args_list[seg_pos_idx]
-            if segment_ids.ndim < segment_pos.ndim:
-                raise AssertionError(
-                    "segment_ids must not have fewer dims than segment_pos; "
-                    f"got segment_ids.ndim={segment_ids.ndim}, segment_pos.ndim={segment_pos.ndim}"
-                )
-            if segment_ids.ndim >= segment_pos.ndim:
-                continue
-        batch_dims = tuple(updated_batch_dims)
-        batched_args = tuple(batched_args_list)
-
+        # Pass through; segment_ids/segment_pos may have different batch dims. Conversion is in attention.py.
         out_bdims = q_bdim, k_bdim, v_bdim, bias_bdim, softmax_offset_bdim
         return (
             FusedAttnBwdPrimitive.outer_primitive.bind(*batched_args, config=config),
