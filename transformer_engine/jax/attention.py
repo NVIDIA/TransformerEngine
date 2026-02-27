@@ -693,26 +693,89 @@ class SequenceDescriptor:
         self, attn_mask_type, qkv_layout, window_size, max_segments_per_seq
     ):
         """
-        Acquire the seqlens/offsets for cuDNN backend
+        Acquire the seqlens/offsets for cuDNN backend.
         """
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos
-        assert q_segment_ids.shape == q_segment_pos.shape
-        assert kv_segment_ids.shape == kv_segment_pos.shape
         # No segment_ids/segment_pos
         if q_segment_ids.size + kv_segment_ids.size == 0:
             return self.seqlens, self.seq_offsets
 
-        if qkv_layout.is_thd():
-            q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlens_offsets(
-                q_segment_ids,
-                kv_segment_ids,
-                q_segment_pos,
-                kv_segment_pos,
-                attn_mask_type,
-                window_size,
-                max_segments_per_seq,
+        # Allow segment_pos to have fewer leading dims than segment_ids if vmapped segment_ids and non-vmapped segment_pos
+        # e.g. when using from_segment_ids_and_pos() for segment_pos generation from segment_ids it is acceptable to have
+        # something like : segment_ids (B, batch, seq), segment_pos (batch, seq)).
+        if q_segment_ids.ndim < q_segment_pos.ndim or kv_segment_ids.ndim < kv_segment_pos.ndim:
+            raise AssertionError(
+                "segment_ids must not have fewer dims than segment_pos; "
+                f"got q_segment_ids.ndim={q_segment_ids.ndim}, q_segment_pos.ndim={q_segment_pos.ndim}, "
+                f"kv_segment_ids.ndim={kv_segment_ids.ndim}, kv_segment_pos.ndim={kv_segment_pos.ndim}"
             )
+        if not (
+            q_segment_ids.shape[-q_segment_pos.ndim :] == q_segment_pos.shape
+            and kv_segment_ids.shape[-kv_segment_pos.ndim :] == kv_segment_pos.shape
+        ):
+            raise AssertionError(
+                "segment_pos trailing shape must match segment_ids; "
+                f"got q_segment_ids.shape={q_segment_ids.shape}, q_segment_pos.shape={q_segment_pos.shape}, "
+                f"kv_segment_ids.shape={kv_segment_ids.shape}, kv_segment_pos.shape={kv_segment_pos.shape}"
+            )
+
+        if qkv_layout.is_thd():
+            # THD: compute seqlens/offsets. Replicated segment_pos (more leading dims on segment_ids, e.g. if vmap)
+            # i) Flatten leading batch dims so that segment_ids and segment_pos have the same number of leading dims,
+            # ii) vmap seqlens/offsets computation with segment_pos broadcast, 
+            # iii) reshape back to the original leading batch dims.
+            if (
+                q_segment_ids.ndim > q_segment_pos.ndim
+                or kv_segment_ids.ndim > kv_segment_pos.ndim
+            ):
+                n_batch_dims_q = q_segment_ids.ndim - q_segment_pos.ndim
+                n_batch_dims_kv = kv_segment_ids.ndim - kv_segment_pos.ndim
+                batch_shape_q = q_segment_ids.shape[:n_batch_dims_q]
+                batch_shape_kv = kv_segment_ids.shape[:n_batch_dims_kv]
+                flat_batch_q = jnp.prod(batch_shape_q)
+                flat_batch_kv = jnp.prod(batch_shape_kv)
+                # assert flat_batch_q == flat_batch_kv, (
+                #     f"segment_ids batch size mismatch: {batch_shape_q} vs {batch_shape_kv}"
+                # )
+                q_flat = q_segment_ids.reshape(
+                    flat_batch_q, *q_segment_ids.shape[n_batch_dims_q:]
+                )
+                kv_flat = kv_segment_ids.reshape(
+                    flat_batch_kv, *kv_segment_ids.shape[n_batch_dims_kv:]
+                )
+
+                def single_batch(seg_id_q, seg_id_kv, seg_pos_q, seg_pos_kv):
+                    return _segment_ids_pos_to_seqlens_offsets(
+                        seg_id_q,
+                        seg_id_kv,
+                        seg_pos_q,
+                        seg_pos_kv,
+                        attn_mask_type,
+                        window_size,
+                        max_segments_per_seq,
+                    )
+
+                q_sl, kv_sl, q_off, kv_off = jax.vmap(
+                    single_batch, in_axes=(0, 0, None, None)
+                )(q_flat, kv_flat, q_segment_pos, kv_segment_pos)
+
+                q_seqlens = q_sl.reshape(*batch_shape_q, *q_sl.shape[1:])
+                kv_seqlens = kv_sl.reshape(*batch_shape_kv, *kv_sl.shape[1:])
+                q_offsets = q_off.reshape(*batch_shape_q, *q_off.shape[1:])
+                kv_offsets = kv_off.reshape(*batch_shape_kv, *kv_off.shape[1:])
+            else:
+                q_seqlens, kv_seqlens, q_offsets, kv_offsets = (
+                    _segment_ids_pos_to_seqlens_offsets(
+                        q_segment_ids,
+                        kv_segment_ids,
+                        q_segment_pos,
+                        kv_segment_pos,
+                        attn_mask_type,
+                        window_size,
+                        max_segments_per_seq,
+                    )
+                )
         else:
             q_seqlens, kv_seqlens = _segment_ids_to_seqlens(
                 q_segment_ids,
