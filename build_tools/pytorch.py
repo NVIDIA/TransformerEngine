@@ -8,7 +8,13 @@ from pathlib import Path
 
 import setuptools
 
-from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
+from .utils import (
+    all_files_in_dir,
+    common_lib_has_symbol,
+    cuda_version,
+    get_cuda_include_dirs,
+    debug_build_enabled,
+)
 from typing import List
 
 
@@ -87,11 +93,11 @@ def setup_pytorch_extension(
         libraries.append("nvshmem_host")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
-    if bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0"))):
-        cusolvermp_home = Path(os.getenv("CUSOLVERMP_HOME", "/usr"))
-        include_dirs.append(cusolvermp_home / "include")
-        library_dirs.append(cusolvermp_home / "lib")
-        libraries.append("cusolverMp")
+    # Auto-detect cuSolverMp support from the already-built common library.
+    # The PyTorch extension only calls nvte_* C API functions (not cusolverMp
+    # directly), so it only needs the compile definition, not cusolverMp
+    # headers or libraries.
+    if common_lib_has_symbol("nvte_cusolvermp_ctx_create"):
         cxx_flags.append("-DNVTE_WITH_CUSOLVERMP")
 
     # Construct PyTorch CUDA extension
