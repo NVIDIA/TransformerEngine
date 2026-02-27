@@ -59,7 +59,6 @@ from transformer_engine.pytorch.cpu_offload import (
     is_cpu_offload_enabled,
     start_offload,
     mark_activation_offload,
-    mark_not_offload,
     NVTE_CPU_OFFLOAD_V1,
 )
 from transformer_engine.pytorch.cpu_offload_v1 import is_current_layer_offloaded
@@ -1308,8 +1307,6 @@ class FusedAttnFunc(torch.autograd.Function):
             # return appropriate tensors
             out_ret = out_fp8 if is_output_fp8 else out
 
-            mark_not_offload(out_fp8)
-            mark_not_offload(out)
 
             # save appropriate tensors
             fp8_tensors = (None, None, None, None)
@@ -1361,7 +1358,6 @@ class FusedAttnFunc(torch.autograd.Function):
             out = out_
             out_ret = out_
             fp8_tensors = (None, None, None, None)
-            mark_not_offload(out)
             qkvo_tensors = (q, k, v, out)
 
         nvtx_range_pop(f"{nvtx_label}")
