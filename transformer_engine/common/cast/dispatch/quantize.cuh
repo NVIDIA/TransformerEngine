@@ -308,10 +308,12 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
   }
 }
 
+// Host-aware and not graph-safe: group quantization with split section info from the host.
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
-void group_quantize_fwd_helper(const NVTETensor input, NVTETensor *outputs,
-                               const size_t *split_sections, const size_t num_tensors,
-                               const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *outputs,
+                                          const size_t *split_sections, const size_t num_tensors,
+                                          const NVTEQuantizationConfig quant_config,
+                                          cudaStream_t stream) {
   using namespace detail;
 
   const Tensor *input_tensor = convertNVTETensorCheck(input);

@@ -90,6 +90,8 @@ pybind11::dict Registrations() {
       EncapsulateFFI(FusedMoEAuxLossForwardHandler);
   dict["te_fused_moe_aux_loss_backward_ffi"] =
       EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
+  dict["te_inspect_ffi"] =
+      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
 
   return dict;
 }

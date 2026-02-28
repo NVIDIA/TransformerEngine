@@ -251,6 +251,11 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
 
   // calculate the global offset to get tensor id
   size_t global_offset = blockIdx.y * CHUNK_DIM_Y * last_logical_dim;
+  // paged stashing: will have input buffer [M, N], where M is larger than sum(first_dims)
+  // also need to early return if this CTA is processing a region larger than the last offsets[num_tensors]
+  if (global_offset >= offsets_ptr[num_tensors]) {
+    return;
+  }
   int tensor_id = get_current_tensor_id(shape_rep, num_tensors, global_offset, first_logical_dim,
                                         last_logical_dim, offsets_ptr);
   output_pre_rht_amax_ptr = static_cast<float*>(amax_rowwise_ptr) + tensor_id;
@@ -335,8 +340,6 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
                           is_master_thread);
       }
 
-      ptx::fence_proxy_async_shared_cta();
-
       // Wait for the data to have arrived
       ptx::mbarrier_wait_parity(&mbar[stage], 0);
 
@@ -368,6 +371,9 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
         // memory.
         __syncthreads();
       }
+
+      // Ensure generic shared-memory accesses are visible before the next TMA write.
+      ptx::fence_proxy_async_shared_cta();
     }
   }
 
@@ -440,9 +446,8 @@ void group_hadamard_transform_amax_graph_safe(const GroupedTensor* input, Groupe
   float* const amax_rowwise_ptr = reinterpret_cast<float*>(output->amax.dptr);
   float* const amax_colwise_ptr = reinterpret_cast<float*>(output->columnwise_amax.dptr);
 
-  const int64_t* const offsets_ptr = reinterpret_cast<const int64_t*>(input->tensor_offsets.dptr);
-  const int64_t* const first_dims_ptr = reinterpret_cast<const int64_t*>(input->first_dims.dptr);
-  // const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
+  const int64_t* const offsets_ptr = reinterpret_cast<const int64_t*>(output->tensor_offsets.dptr);
+  const int64_t* const first_dims_ptr = reinterpret_cast<const int64_t*>(output->first_dims.dptr);
 
   // some sanity checks
   if (all_return_pre_rht_amax) {

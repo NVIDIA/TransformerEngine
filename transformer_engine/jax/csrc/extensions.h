@@ -143,6 +143,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationHandler);
 
+// Inspect
+XLA_FFI_DECLARE_HANDLER_SYMBOL(InspectHandler);
+
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 
