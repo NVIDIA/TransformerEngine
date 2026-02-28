@@ -33,6 +33,8 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
       return CUDA_R_16F;
     case DType::kFloat32:
       return CUDA_R_32F;
+    case DType::kFloat64:
+      return CUDA_R_64F;
     case DType::kBFloat16:
       return CUDA_R_16BF;
     case DType::kFloat8E4M3:
