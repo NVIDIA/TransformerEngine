@@ -1130,6 +1130,19 @@ class LayerNormLinear(TransformerEngineBaseModule):
                    is used.
     """
 
+    def __new__(
+        cls,
+        *args,
+        **kwargs,
+    ) -> None:
+        if "fp8_model_init" in kwargs:
+            with fp8_model_init(enabled=kwargs.get("fp8_model_init", False))
+                module = cls(*args, **kwargs)
+        else:
+            module = cls(*args, **kwargs)
+        return module
+
+
     def __init__(
         self,
         in_features: int,
