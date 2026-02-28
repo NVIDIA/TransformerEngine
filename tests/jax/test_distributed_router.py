@@ -106,17 +106,21 @@ class TestDistributedFusedTopk:
             @jax.jit
             def target_fwd(x):
                 return fused_topk_with_score_function(
-                    x, topk=topk, score_function=score_function,
+                    x,
+                    topk=topk,
+                    score_function=score_function,
                 )
 
             target_probs, target_routing_map = target_fwd(logits_sharded)
 
-            logits_shards = jnp.reshape(
-                logits, (num_dp_devices, local_num_tokens, num_experts)
+            logits_shards = jnp.reshape(logits, (num_dp_devices, local_num_tokens, num_experts))
+            ref_fwd_fn = jax.jit(
+                lambda x: reference_topk_softmax_sigmoid(
+                    x,
+                    topk=topk,
+                    score_function=score_function,
+                )
             )
-            ref_fwd_fn = jax.jit(lambda x: reference_topk_softmax_sigmoid(
-                x, topk=topk, score_function=score_function,
-            ))
             ref_probs_list = []
             ref_routing_list = []
             for i in range(num_dp_devices):
@@ -128,22 +132,29 @@ class TestDistributedFusedTopk:
             ref_routing = jnp.concatenate(ref_routing_list, axis=0)
 
             assert_allclose(
-                jax.device_get(target_probs), ref_probs, dtype=jnp.float32,
+                jax.device_get(target_probs),
+                ref_probs,
+                dtype=jnp.float32,
             )
             assert jnp.array_equal(
-                jax.device_get(target_routing_map), ref_routing,
+                jax.device_get(target_routing_map),
+                ref_routing,
             ), "Routing map mismatch in distributed fused_topk"
 
             # === Backward ===
             def target_loss(x):
                 p, _ = fused_topk_with_score_function(
-                    x, topk=topk, score_function=score_function,
+                    x,
+                    topk=topk,
+                    score_function=score_function,
                 )
                 return jnp.sum(p)
 
             def ref_chunk_loss(x_chunk):
                 p, _ = reference_topk_softmax_sigmoid(
-                    x_chunk, topk=topk, score_function=score_function,
+                    x_chunk,
+                    topk=topk,
+                    score_function=score_function,
                 )
                 return jnp.sum(p)
 
@@ -156,12 +167,15 @@ class TestDistributedFusedTopk:
             ref_grad = jnp.concatenate(ref_grads, axis=0)
 
             assert_allclose(
-                jax.device_get(target_grad), ref_grad, dtype=jnp.float32,
+                jax.device_get(target_grad),
+                ref_grad,
+                dtype=jnp.float32,
             )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
-        "num_tokens,num_experts,topk", TOPK_CASES,
+        "num_tokens,num_experts,topk",
+        TOPK_CASES,
     )
     @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
     def test_distributed_topk(
@@ -185,7 +199,6 @@ class TestDistributedFusedTopk:
             topk,
             score_function,
         )
-
 
 
 class TestDistributedScoreForAuxLoss:
@@ -226,17 +239,21 @@ class TestDistributedScoreForAuxLoss:
             @jax.jit
             def target_fwd(x):
                 return fused_compute_score_for_moe_aux_loss(
-                    x, topk=topk, score_function=score_function,
+                    x,
+                    topk=topk,
+                    score_function=score_function,
                 )
 
             target_routing_map, target_scores = target_fwd(logits_sharded)
 
-            logits_shards = jnp.reshape(
-                logits, (num_dp_devices, local_num_tokens, num_experts)
+            logits_shards = jnp.reshape(logits, (num_dp_devices, local_num_tokens, num_experts))
+            ref_fwd_fn = jax.jit(
+                lambda x: reference_compute_scores_for_aux_loss(
+                    x,
+                    topk=topk,
+                    score_function=score_function,
+                )
             )
-            ref_fwd_fn = jax.jit(lambda x: reference_compute_scores_for_aux_loss(
-                x, topk=topk, score_function=score_function,
-            ))
             ref_routing_list = []
             ref_scores_list = []
             for i in range(num_dp_devices):
@@ -248,22 +265,29 @@ class TestDistributedScoreForAuxLoss:
             ref_scores = jnp.concatenate(ref_scores_list, axis=0)
 
             assert_allclose(
-                jax.device_get(target_scores), ref_scores, dtype=jnp.float32,
+                jax.device_get(target_scores),
+                ref_scores,
+                dtype=jnp.float32,
             )
             assert jnp.array_equal(
-                jax.device_get(target_routing_map), ref_routing,
+                jax.device_get(target_routing_map),
+                ref_routing,
             ), "Routing map mismatch in distributed score_for_aux_loss"
 
             # === Backward ===
             def target_loss(x):
                 _, s = fused_compute_score_for_moe_aux_loss(
-                    x, topk=topk, score_function=score_function,
+                    x,
+                    topk=topk,
+                    score_function=score_function,
                 )
                 return jnp.sum(s)
 
             def ref_chunk_loss(x_chunk):
                 _, s = reference_compute_scores_for_aux_loss(
-                    x_chunk, topk=topk, score_function=score_function,
+                    x_chunk,
+                    topk=topk,
+                    score_function=score_function,
                 )
                 return jnp.sum(s)
 
@@ -276,12 +300,15 @@ class TestDistributedScoreForAuxLoss:
             ref_grad = jnp.concatenate(ref_grads, axis=0)
 
             assert_allclose(
-                jax.device_get(target_grad), ref_grad, dtype=jnp.float32,
+                jax.device_get(target_grad),
+                ref_grad,
+                dtype=jnp.float32,
             )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
-        "num_tokens,num_experts,topk", TOPK_CASES,
+        "num_tokens,num_experts,topk",
+        TOPK_CASES,
     )
     @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
     def test_distributed_score_for_aux_loss(
@@ -305,7 +332,6 @@ class TestDistributedScoreForAuxLoss:
             topk,
             score_function,
         )
-
 
 
 class TestDistributedMoEAuxLoss:
@@ -336,9 +362,7 @@ class TestDistributedMoEAuxLoss:
         probs = jnp.arange(-num_experts // 2, num_experts // 2, dtype=jnp.float32) * 1e-2
         probs = probs[None, :].repeat(num_tokens, axis=0) + offset[:, None]
 
-        tokens_per_expert = jax.random.randint(
-            subkey1, (num_experts,), 1, 1000
-        ).astype(jnp.int32)
+        tokens_per_expert = jax.random.randint(subkey1, (num_experts,), 1, 1000).astype(jnp.int32)
         coeff = 0.01
 
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
@@ -358,7 +382,8 @@ class TestDistributedMoEAuxLoss:
             @jax.jit
             def target_fwd(p, tpe):
                 return fused_moe_aux_loss(
-                    p, tpe,
+                    p,
+                    tpe,
                     total_num_tokens=num_tokens,
                     num_experts=num_experts,
                     topk=topk,
@@ -367,19 +392,29 @@ class TestDistributedMoEAuxLoss:
 
             target_loss = target_fwd(probs_dev, tpe_dev)
 
-            ref_fwd_fn = jax.jit(lambda p: reference_aux_loss(
-                p, tokens_per_expert, num_tokens, topk, num_experts, coeff,
-            ))
+            ref_fwd_fn = jax.jit(
+                lambda p: reference_aux_loss(
+                    p,
+                    tokens_per_expert,
+                    num_tokens,
+                    topk,
+                    num_experts,
+                    coeff,
+                )
+            )
             ref_loss = ref_fwd_fn(probs)
 
             assert_allclose(
-                jax.device_get(target_loss), ref_loss, dtype=jnp.float32,
+                jax.device_get(target_loss),
+                ref_loss,
+                dtype=jnp.float32,
             )
 
             # === Backward ===
             def target_loss_fn(p):
                 return fused_moe_aux_loss(
-                    p, tokens_per_expert,
+                    p,
+                    tokens_per_expert,
                     total_num_tokens=num_tokens,
                     num_experts=num_experts,
                     topk=topk,
@@ -388,19 +423,27 @@ class TestDistributedMoEAuxLoss:
 
             def ref_loss_fn(p):
                 return reference_aux_loss(
-                    p, tokens_per_expert, num_tokens, topk, num_experts, coeff,
+                    p,
+                    tokens_per_expert,
+                    num_tokens,
+                    topk,
+                    num_experts,
+                    coeff,
                 )
 
             target_grad = jax.jit(jax.grad(target_loss_fn))(probs_dev)
             ref_grad = jax.jit(jax.grad(ref_loss_fn))(probs)
 
             assert_allclose(
-                jax.device_get(target_grad), ref_grad, dtype=jnp.float32,
+                jax.device_get(target_grad),
+                ref_grad,
+                dtype=jnp.float32,
             )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper(
-        "num_tokens,num_experts,topk", AUX_LOSS_CASES,
+        "num_tokens,num_experts,topk",
+        AUX_LOSS_CASES,
     )
     def test_distributed_aux_loss(
         self,
