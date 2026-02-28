@@ -96,11 +96,11 @@ def _initialize_distributed(args):
     if _distributed_initialized:
         return
 
-    if args.coordinator_address is None or args.num_processes is None or args.process_id is None:
+    if args.num_processes is None or args.process_id is None:
         raise ValueError(
-            "All distributed initialization arguments are required: "
-            "--coordinator-address, --num-processes, --process-id"
+            "All distributed initialization arguments are required: --num-processes, --process-id"
         )
+
     if args.local_device_ids is None:
         assert (
             args.num_devices_per_process is not None
@@ -115,6 +115,9 @@ def _initialize_distributed(args):
         # Use explicitly provided global device IDs
         global_device_ids_for_this_process = args.local_device_ids
         args.num_devices_per_process = len(args.local_device_ids.split(","))
+
+    if args.tensor_parallel_size is None:
+        args.tensor_parallel_size = _get_dp_and_tp_sizes(args)[1]
 
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
 
@@ -231,9 +234,6 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
         default="all_gather",
         choices=["all_gather", "reduce_scatter"],
         help="Type of collective operation",
-    )
-    parser.add_argument(
-        "--fp8-recipe", type=str, default="DelayedScaling", help="FP8 recipe to use"
     )
     parser.add_argument(
         "--enable-data-parallel", action="store_true", help="Enable data parallelism"

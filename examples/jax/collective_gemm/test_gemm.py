@@ -54,23 +54,6 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
     return x_sharding, weight_sharding, bias_sharding, output_sharding
 
 
-def _get_dp_and_tp_sizes(args):
-    num_gpu = args.num_processes * args.num_devices_per_process
-    if args.tensor_parallel_size is None:
-        num_gpu_dp = 2 if args.enable_data_parallel else 1
-        assert (
-            num_gpu > 1 and num_gpu % num_gpu_dp == 0
-        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-        num_gpu_tp = num_gpu // num_gpu_dp
-    else:
-        num_gpu_tp = args.tensor_parallel_size
-        assert (
-            num_gpu > 1 and num_gpu % num_gpu_tp == 0
-        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-        num_gpu_dp = num_gpu // num_gpu_tp
-    return num_gpu_dp, num_gpu_tp
-
-
 @partial(jax.jit, static_argnames=("contracting_dims", "collective_op", "output_sharding"))
 def _jitted_cgemm(x, weight, bias, contracting_dims, collective_op, output_sharding):
     output = tex.gemm(
@@ -193,11 +176,11 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) < 5:  # Need at least the 3 required distributed args
+    if len(sys.argv) < 3:  # Need at least the 3 required distributed args
         print("Error: This script requires distributed initialization arguments.")
         print(
-            "Usage: python test_gemm.py --coordinator-address <address> --num-processes <num>"
-            " --process-id <id> [--local-device-ids <ids>] [other args]"
+            "Usage: python test_gemm.py --num-processes <num> --process-id <id> [--local-device-ids"
+            " <ids>] [other args]"
         )
         sys.exit(1)
 
