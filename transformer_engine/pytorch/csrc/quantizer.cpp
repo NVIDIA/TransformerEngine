@@ -9,6 +9,7 @@
 #include "common.h"
 #include "pybind.h"
 #include "torch/torch.h"
+#include "transformer_engine/recipe.h"
 
 namespace transformer_engine::pytorch {
 
@@ -1461,6 +1462,16 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->dtype = quantizer.attr("dtype").cast<DType>();
   this->with_rht = quantizer.attr("with_rht").cast<bool>();
   this->with_post_rht_amax = quantizer.attr("with_post_rht_amax").cast<bool>();
+  // Optional amax estimation scale (None -> disabled)
+  this->with_amax_estimation = false;
+  this->amax_estimation_scale = 1.0f;
+  if (py::hasattr(quantizer, "amax_estimation_scale")) {
+    auto aes = quantizer.attr("amax_estimation_scale");
+    if (!aes.is_none()) {
+      this->with_amax_estimation = true;
+      this->amax_estimation_scale = aes.cast<float>();
+    }
+  }
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
 
@@ -1923,16 +1934,45 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     if (input.dtype() != DType::kBFloat16) {
       NVTE_CHECK(false, "RHT is only supported for bfloat16 input");
     }
+    NVTE_CHECK(!(this->with_post_rht_amax && this->with_amax_estimation),
+               "Invalid NVFP4 config: cannot use post-RHT amax kernel and amax estimation");
+
     if (this->with_post_rht_amax) {
-      // We need:
+      // True post-RHT amax path:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
       NVTE_SCOPED_GIL_RELEASE({
         nvte_hadamard_transform_amax(input.data(), out.data(), 0,
                                      this->rht_matrix_random_sign_mask_t, stream);
       });
+    } else if (this->with_amax_estimation) {
+      // Consume/compute pre-RHT amax, and later estimate post-RHT amax from it
+      if (compute_amax) {
+        // Compute amax of input tensor (pre-RHT) into an available amax pointer
+        auto rowwise_amax_ptr = out.get_amax().data_ptr;
+        auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
+        void* amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+        NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
+
+        // Compute amax of input tensor
+        out.set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+        NVTE_SCOPED_GIL_RELEASE(
+            { nvte_compute_amax_with_config(input.data(), out.data(), quant_config, stream); });
+        out.set_amax(rowwise_amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+
+        // Mirror pre-RHT amax to both row-wise and column-wise amax buffers
+        if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
+          NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),
+                                          cudaMemcpyDeviceToDevice, stream));
+        }
+        if (columnwise_amax_ptr != amax_ptr && columnwise_amax_ptr != nullptr) {
+          NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, amax_ptr, sizeof(float),
+                                          cudaMemcpyDeviceToDevice, stream));
+        }
+      }
+      // else: pre-RHT amax is assumed to already be populated (e.g., via fused op + quantize_with_amax)
     } else {
-      // raise error since it's not supported yet
+      // with_rht but not with_post_rht_amax and not using estimation
       NVTE_CHECK(false, "Pre-RHT amax is not supported yet");
     }
   } else {  // Without RHT
@@ -1981,6 +2021,14 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     opts.reduceOp = c10d::ReduceOp::MAX;
     NVTE_SCOPED_GIL_RELEASE(
         { this->amax_reduction_group->allreduce_coalesced(amax_tensors, opts)->wait(); });
+  }
+
+  // If enabled, estimate post-RHT amax for columnwise path by scaling the (pre-RHT) amax.
+  // This is intentionally done as a small standalone kernel to avoid touching compute kernels.
+  if (this->with_rht && !this->with_post_rht_amax && this->with_amax_estimation &&
+      this->columnwise_usage) {
+    NVTE_SCOPED_GIL_RELEASE(
+        { nvte_scale_amax(out.data(), /*columnwise=*/true, this->amax_estimation_scale, stream); });
   }
 
   if (this->with_rht) {
