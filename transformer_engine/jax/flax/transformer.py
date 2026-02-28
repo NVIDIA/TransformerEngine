@@ -182,7 +182,9 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         is_gqa = h_q != h_kv
 
         if is_gqa:
-            assert (h_q % h_kv == 0) and (h_q >= h_kv)
+            assert (h_q % h_kv == 0) and (
+                h_q >= h_kv
+            ), f"num_query_heads ({h_q}) must be divisible by and >= num_kv_heads ({h_kv})"
             group_size = h_q // h_kv
             grouped_query = query.reshape((*query.shape[:2], h_kv, group_size, query.shape[-1]))
 
@@ -428,7 +430,9 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         if self.transpose_batch_sequence:
             x = x.transpose([1, 0, 2, 3])
 
-        assert x.dtype == query.dtype
+        assert (
+            x.dtype == query.dtype
+        ), f"output dtype {x.dtype} does not match query dtype {query.dtype}"
         return x
 
 
@@ -713,9 +717,13 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         del self.attn_bias_type, self.attn_mask_type, self.qkv_layout
 
         if attn_bias_type == AttnBiasType.NO_BIAS:
-            assert bias is None
+            assert (
+                bias is None
+            ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias={bias}"
         else:
-            assert bias is not None
+            assert (
+                bias is not None
+            ), f"bias must not be None when attn_bias_type is {attn_bias_type}"
             bias = bias.astype(input_dtype)
 
         self._assert_dtypes(query, key, value, qkv_layout)
@@ -823,11 +831,13 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 key, value = jnp.split(key, [1], axis=-3)
                 key, value = map(functools.partial(jnp.squeeze, axis=-3), [key, value])
             else:
-                assert qkv_layout.is_separate()
+                assert (
+                    qkv_layout.is_separate()
+                ), f"Expected separate qkv_layout, but got {qkv_layout}"
 
             assert sequence_descriptor is None or isinstance(
                 sequence_descriptor, (jnp.ndarray, np.ndarray)
-            )
+            ), f"sequence_descriptor must be None or ndarray, but got {type(sequence_descriptor)}"
 
             x = _UnfusedDotProductAttention(
                 attention_dropout=self.attention_dropout,
@@ -994,7 +1004,7 @@ def _canonicalize_lora_scope(scope):
         SCOPE_EX_QKV_PROJ,
         SCOPE_EX_OUTPUT_PROJ,
         SCOPE_EX_MLP,
-    ]
+    ], f"Unsupported LoRA scope: {scope}"
 
     lora_scope = LoRAScope()
 
@@ -1307,8 +1317,10 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             return self.kernel_init(*args) / (depth_scaling if self.scaled_query_init else 1.0)
 
         def qkv_init(key, shape, dtype):
-            assert len(shape) == 3
-            assert shape[-2] == 3
+            assert (
+                len(shape) == 3
+            ), f"qkv_init expects 3D shape, but got {len(shape)}D shape {shape}"
+            assert shape[-2] == 3, f"qkv_init expects shape[-2] == 3, but got shape={shape}"
 
             q_key, k_key, v_key = jax_random.split(key, num=3)
 
@@ -1323,8 +1335,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             return jnp.stack([q_kernel, k_kernel, v_kernel], axis=-2, dtype=dtype)
 
         def kv_init(key, shape, dtype):
-            assert len(shape) == 3
-            assert shape[-2] == 2
+            assert len(shape) == 3, f"kv_init expects 3D shape, but got {len(shape)}D shape {shape}"
+            assert shape[-2] == 2, f"kv_init expects shape[-2] == 2, but got shape={shape}"
 
             k_key, v_key = jax_random.split(key)
 
@@ -1415,7 +1427,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 )(inputs_q)
 
                 if is_self_attn:
-                    assert ln_out is not None
+                    assert ln_out is not None, "ln_out must not be None for self-attention"
                     inputs_kv = ln_out
 
                 kv_proj = DenseGeneral(
@@ -1475,7 +1487,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             )(inputs_q)
 
             if is_self_attn:
-                assert ln_out is not None
+                assert ln_out is not None, "ln_out must not be None for self-attention"
                 inputs_kv = ln_out
 
             query = query.astype(input_dtype)
@@ -1494,7 +1506,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             elif qkv_layout == QKVLayout.BSHD_BS2HD:
                 key, value = jnp.split(kv_proj, [1], axis=-2)
             else:
-                assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+                assert (
+                    qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+                ), f"Expected QKVLayout.BSHD_BSHD_BSHD, but got {qkv_layout}"
 
             # No changes to memory layout, should trigger bitcast only (Ideally no Perf impact)
             query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
@@ -1520,7 +1534,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
 
         if decode:
-            assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+            assert (
+                qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+            ), f"decode mode requires QKVLayout.BSHD_BSHD_BSHD, but got {qkv_layout}"
             is_initialized = self.has_variable("cache", "cached_key")
 
             cached_key = self.variable("cache", "cached_key", jnp.zeros, key.shape, key.dtype)
@@ -1588,7 +1604,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             kv_proj = with_sharding_constraint_by_logical_axes(kv_proj, kv_sharding_constraint)
             dpa_args = [query, kv_proj, None]
         else:
-            assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+            assert (
+                qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+            ), f"Expected QKVLayout.BSHD_BSHD_BSHD, but got {qkv_layout}"
             query = query.reshape((*query.shape[:2], self.num_attention_heads, self.head_dim))
             key = key.reshape((*key.shape[:2], self.num_gqa_groups, self.head_dim))
             value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
@@ -2101,7 +2119,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                     l = inputs.shape[sequence_dim]
                 attn_bias = rel_emb(l, l, False)
 
-        assert inputs.ndim == 3
+        assert (
+            inputs.ndim == 3
+        ), f"inputs must be 3D (batch, sequence, hidden), but got {inputs.ndim}D"
 
         # Make name be the exactly same as T5X, since names would affect
         # RNGKey during init and apply. Myabe no need in the feature.
@@ -2151,10 +2171,15 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         )(inputs, inputs, attention_mask, attn_bias, deterministic=deterministic, decode=decode)
 
         def hidden_dropout(x, deterministic):
-            assert isinstance(self.hidden_dropout_dims, Sequence)
+            assert isinstance(
+                self.hidden_dropout_dims, Sequence
+            ), f"hidden_dropout_dims must be a Sequence, but got {type(self.hidden_dropout_dims)}"
             x_shape_len = len(x.shape)
             for dims in self.hidden_dropout_dims:
-                assert -x_shape_len <= dims < x_shape_len
+                assert -x_shape_len <= dims < x_shape_len, (
+                    f"hidden_dropout_dims value {dims} is out of range "
+                    f"[{-x_shape_len}, {x_shape_len}) for input with {x_shape_len} dimensions"
+                )
 
             return nn.Dropout(
                 rate=self.hidden_dropout,
@@ -2179,7 +2204,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             )(x, deterministic=deterministic)
 
         if self.apply_residual_connection_post_layernorm:
-            assert ln_out is not None
+            assert (
+                ln_out is not None
+            ), "ln_out must not be None when apply_residual_connection_post_layernorm is True"
             residual = ln_out
 
         x = x + residual
@@ -2239,7 +2266,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             y = hidden_dropout(y, deterministic)
 
             if self.apply_residual_connection_post_layernorm:
-                assert ln_out is not None
+                assert (
+                    ln_out is not None
+                ), "ln_out must not be None when apply_residual_connection_post_layernorm is True"
                 residual = ln_out
 
             mlp_input = y + residual
@@ -2284,7 +2313,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         )(mlp_input, deterministic=deterministic)
 
         if self.apply_residual_connection_post_layernorm:
-            assert ln_out is not None
+            assert (
+                ln_out is not None
+            ), "ln_out must not be None when apply_residual_connection_post_layernorm is True"
             residual = ln_out
 
         z = with_sharding_constraint_by_logical_axes(

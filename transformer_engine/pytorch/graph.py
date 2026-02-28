@@ -146,8 +146,14 @@ def _make_graphed_callables(
     _order_without_wgrad = None
     delay_wgrad_compute = False
     if _order is None:
-        assert len(sample_args) == len(callables)
-        assert len(sample_kwargs) == len(callables)
+        assert len(sample_args) == len(callables), (
+            "Expected sample_args to have the same length as callables, "
+            f"but got {len(sample_args)} sample_args for {len(callables)} callables"
+        )
+        assert len(sample_kwargs) == len(callables), (
+            "Expected sample_kwargs to have the same length as callables, "
+            f"but got {len(sample_kwargs)} sample_kwargs for {len(callables)} callables"
+        )
     else:
         # Custom logic for interleaved pipeline parallelism
         # Note: This is tightly coupled with the Megatron-core
@@ -171,7 +177,12 @@ def _make_graphed_callables(
             _order_without_wgrad.append(c_id)
         num_model_chunks = max(_order_without_wgrad)
         num_microbatches = len(_order_without_wgrad) // num_model_chunks // 2
-        assert num_model_chunks * num_microbatches * 2 == len(_order_without_wgrad)
+        assert num_model_chunks * num_microbatches * 2 == len(_order_without_wgrad), (
+            "Pipeline-parallel order dimension mismatch: "
+            f"num_model_chunks ({num_model_chunks}) * num_microbatches ({num_microbatches}) * 2 "
+            f"= {num_model_chunks * num_microbatches * 2}, "
+            f"but len(_order_without_wgrad) = {len(_order_without_wgrad)}"
+        )
 
         # When delay_wgrad_compute is enabled, each layer is treated as a model chunk, which
         # allows for fine-grained graph capture order.
@@ -220,7 +231,11 @@ def _make_graphed_callables(
             num_layers = _num_layers_per_chunk[m_chunk]
             _prefix_num_layers.append(_prefix_num_layers[-1] + num_layers)
 
-        assert len(sample_kwargs) == len(sample_args)
+        assert len(sample_kwargs) == len(sample_args), (
+            "Pipeline-parallel schedule requires sample_kwargs and sample_args to have "
+            f"the same length, but got {len(sample_kwargs)} sample_kwargs "
+            f"for {len(sample_args)} sample_args"
+        )
 
     # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
     # Note: When capturing a graph, we hold onto the args and kwargs so we have static buffers
@@ -352,7 +367,11 @@ def _make_graphed_callables(
                         )
                         else ()
                     )
-        assert len(per_callable_module_params) == len(flatten_sample_args)
+        assert len(per_callable_module_params) == len(flatten_sample_args), (
+            "Pipeline-parallel dimension mismatch: "
+            f"per_callable_module_params has {len(per_callable_module_params)} entries, "
+            f"but flatten_sample_args has {len(flatten_sample_args)} entries"
+        )
         per_callable_static_input_surfaces = [
             flatten_sample_args[i] + per_callable_module_params[i]
             for i in range(len(flatten_sample_args))
@@ -800,7 +819,9 @@ def _make_graphed_callables(
 
                 # Replay forward graph
                 fwd_graph.replay()
-                assert isinstance(static_outputs, tuple)
+                assert isinstance(
+                    static_outputs, tuple
+                ), f"Expected static_outputs to be a tuple, but got {type(static_outputs)}"
                 return tuple(o.detach() if o is not None else o for o in static_outputs)
 
             @staticmethod
@@ -809,7 +830,11 @@ def _make_graphed_callables(
                 # pylint: disable=missing-function-docstring
 
                 # Replay backward graph
-                assert len(grads) == len(static_grad_outputs)
+                assert len(grads) == len(static_grad_outputs), (
+                    "Backward graph grad dimension mismatch: "
+                    f"received {len(grads)} grads, "
+                    f"but expected {len(static_grad_outputs)} static_grad_outputs"
+                )
                 for g, grad in zip(static_grad_outputs, grads):
                     if g is not None:
                         # don't copy if autograd gods have been kind and the
@@ -823,7 +848,9 @@ def _make_graphed_callables(
                     FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
                 # Input args that didn't require grad expect a None gradient.
-                assert isinstance(static_grad_inputs, tuple)
+                assert isinstance(
+                    static_grad_inputs, tuple
+                ), f"Expected static_grad_inputs to be a tuple, but got {type(static_grad_inputs)}"
                 return (None,) + tuple(
                     b.detach() if b is not None else b for b in static_grad_inputs
                 )

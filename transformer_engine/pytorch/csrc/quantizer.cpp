@@ -1921,7 +1921,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // Compute amax.
   if (this->with_rht) {
     if (input.dtype() != DType::kBFloat16) {
-      NVTE_CHECK(false, "RHT is only supported for bfloat16 input");
+      NVTE_ERROR("RHT is only supported for bfloat16 input, got dtype enum value ",
+                 static_cast<int>(input.dtype()));
     }
     if (this->with_post_rht_amax) {
       // We need:
@@ -1933,7 +1934,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       });
     } else {
       // raise error since it's not supported yet
-      NVTE_CHECK(false, "Pre-RHT amax is not supported yet");
+      NVTE_ERROR(
+          "Pre-RHT amax is not supported yet. "
+          "Use with_post_rht_amax=true instead.");
     }
   } else {  // Without RHT
     if (compute_amax) {

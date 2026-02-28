@@ -373,23 +373,35 @@ class TransformerLayer(torch.nn.Module):
         self.apply_residual_connection_post_layernorm = apply_residual_connection_post_layernorm
 
         if parallel_attention_mlp:
-            assert self.layer_type == "encoder", "parallel_attention requires layer_type='encoder'"
-            assert not self.apply_residual_connection_post_layernorm, (
-                "parallel_attention and apply_residual_connection_post_layernorm "
-                "not supported simultaneously."
-            )
-            assert (
-                not self.output_layernorm
-            ), "parallel_attention and output_layernorm not supported simultaneously"
+            if self.layer_type != "encoder":
+                raise ValueError(
+                    "parallel_attention requires layer_type='encoder', "
+                    f"but got layer_type={self.layer_type!r}"
+                )
+            if self.apply_residual_connection_post_layernorm:
+                raise ValueError(
+                    "parallel_attention and apply_residual_connection_post_layernorm "
+                    "are not supported simultaneously."
+                )
+            if self.output_layernorm:
+                raise ValueError(
+                    "parallel_attention and output_layernorm are not supported simultaneously."
+                )
 
         self.parallel_attention_mlp = parallel_attention_mlp
 
-        assert layer_type in LayerTypes, f"layer_type {layer_type} not supported"
+        if layer_type not in LayerTypes:
+            raise ValueError(
+                f"layer_type {layer_type!r} is not supported. "
+                f"Supported types are: {', '.join(repr(t) for t in LayerTypes)}"
+            )
 
         if not fuse_qkv_params:
-            assert (
-                not fuse_wgrad_accumulation
-            ), "Gradient accumulation fusion requires single QKV parameter."
+            if fuse_wgrad_accumulation:
+                raise ValueError(
+                    "Gradient accumulation fusion (fuse_wgrad_accumulation=True) "
+                    "requires fuse_qkv_params=True, but fuse_qkv_params is False."
+                )
 
         if not fuse_qkv_params:
             qkv_weight_interleaved = False
@@ -792,32 +804,57 @@ class TransformerLayer(torch.nn.Module):
         }:
             enc_dec_bottom_right_diagonal = True
 
-        assert (
-            self_attn_mask_type in AttnMaskTypes
-        ), f"self_attn_mask_type {self_attn_mask_type} not supported"
-        assert (
-            enc_dec_attn_mask_type in AttnMaskTypes
-        ), f"enc_dec_attn_mask_type {enc_dec_attn_mask_type} not supported"
+        if self_attn_mask_type not in AttnMaskTypes:
+            raise ValueError(
+                f"self_attn_mask_type {self_attn_mask_type!r} is not supported. "
+                f"Supported types are: {', '.join(repr(t) for t in AttnMaskTypes)}"
+            )
+        if enc_dec_attn_mask_type not in AttnMaskTypes:
+            raise ValueError(
+                f"enc_dec_attn_mask_type {enc_dec_attn_mask_type!r} is not supported. "
+                f"Supported types are: {', '.join(repr(t) for t in AttnMaskTypes)}"
+            )
 
         hidden_states = hidden_states.contiguous()
 
         if self.sequence_parallel and self.seq_length is not None:
-            assert (
-                hidden_states.shape[0] == self.seq_length // self.tp_size
-            ), "Sequence dimension must be split across TP group when using sequence parallel."
+            if hidden_states.shape[0] != self.seq_length // self.tp_size:
+                raise ValueError(
+                    "Sequence dimension must be split across TP group when using "
+                    "sequence parallel. Expected hidden_states.shape[0] to be "
+                    f"{self.seq_length // self.tp_size} "
+                    f"(seq_length={self.seq_length} // tp_size={self.tp_size}), "
+                    f"but got {hidden_states.shape[0]}."
+                )
 
         if (
             "padding" in self_attn_mask_type or self_attn_mask_type == "arbitrary"
         ) and attention_mask is not None:
-            assert all(
-                attention_mask[i].dtype == torch.bool for i in range(len(attention_mask))
-            ), "Attention mask must be a boolean tensor or a list/tuple of two boolean tensors"
+            if not all(attention_mask[i].dtype == torch.bool for i in range(len(attention_mask))):
+                non_bool_dtypes = [
+                    (i, attention_mask[i].dtype)
+                    for i in range(len(attention_mask))
+                    if attention_mask[i].dtype != torch.bool
+                ]
+                raise TypeError(
+                    "Attention mask must be a boolean tensor or a list/tuple of boolean "
+                    f"tensors, but found non-bool dtypes at indices: {non_bool_dtypes}"
+                )
         if (
             "padding" in enc_dec_attn_mask_type or enc_dec_attn_mask_type == "arbitrary"
         ) and enc_dec_attn_mask is not None:
-            assert all(
+            if not all(
                 enc_dec_attn_mask[i].dtype == torch.bool for i in range(len(enc_dec_attn_mask))
-            ), "Encoder-decoder attention mask must be boolean tensor(s)"
+            ):
+                non_bool_dtypes = [
+                    (i, enc_dec_attn_mask[i].dtype)
+                    for i in range(len(enc_dec_attn_mask))
+                    if enc_dec_attn_mask[i].dtype != torch.bool
+                ]
+                raise TypeError(
+                    "Encoder-decoder attention mask must be boolean tensor(s), "
+                    f"but found non-bool dtypes at indices: {non_bool_dtypes}"
+                )
 
         # For AMP
         if torch.is_autocast_enabled():
