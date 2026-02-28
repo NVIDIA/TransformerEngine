@@ -21,8 +21,7 @@ For fused_moe_aux_loss:
 - All inputs and outputs are replicated (partition function forces this)
 - We verify the op works correctly under a mesh context
 
-These tests exercise: partition, infer_sharding_from_operands, batcher,
-and shardy_sharding_rule from the router primitives.
+These tests exercise: batcher and shardy_sharding_rule from the router primitives.
 """
 
 import pytest
@@ -86,9 +85,8 @@ class TestDistributedFusedTopk:
         num_experts,
         topk,
         score_function,
-        use_shardy,
     ):
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
+        jax.config.update("jax_use_shardy_partitioner", True)
 
         logits = make_logits(num_tokens, num_experts, score_function)
 
@@ -166,7 +164,6 @@ class TestDistributedFusedTopk:
         "num_tokens,num_experts,topk", TOPK_CASES,
     )
     @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
-    @pytest.mark.parametrize("use_shardy", [True])
     def test_distributed_topk(
         self,
         device_count,
@@ -177,7 +174,6 @@ class TestDistributedFusedTopk:
         num_experts,
         topk,
         score_function,
-        use_shardy,
     ):
         self._impl_test(
             device_count,
@@ -188,70 +184,8 @@ class TestDistributedFusedTopk:
             num_experts,
             topk,
             score_function,
-            use_shardy,
         )
 
-    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
-    def test_distributed_topk_gspmd(
-        self,
-        device_count,
-        mesh_shape,
-        mesh_axes,
-        mesh_resource,
-        score_function,
-    ):
-        """GSPMD test using value_and_grad with explicit shardings.
-
-        GSPMD (non-shardy) requires explicit in/out shardings on jax.jit
-        to correctly partition custom ops, matching the compare_ops pattern
-        used by other TE distributed tests (softmax, permutation).
-        """
-        num_tokens, num_experts, topk = 128, 32, 4
-        jax.config.update("jax_use_shardy_partitioner", False)
-
-        logits = make_logits(num_tokens, num_experts, score_function)
-
-        devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
-        mesh = Mesh(devices, mesh_axes)
-        dp_axis = mesh_resource.dp_resource
-        sharded_pspec = PartitionSpec(dp_axis, None)
-
-        with mesh:
-            logits_sharding = NamedSharding(mesh, sharded_pspec)
-            logits_sharded = jax.device_put(logits, logits_sharding)
-
-            def target_loss(x):
-                p, _ = fused_topk_with_score_function(
-                    x, topk=topk, score_function=score_function,
-                )
-                return jnp.sum(p)
-
-            def ref_loss(x):
-                p, _ = reference_topk_softmax_sigmoid(
-                    x, topk=topk, score_function=score_function,
-                )
-                return jnp.sum(p)
-
-            target_vg = jax.jit(
-                jax.value_and_grad(target_loss),
-                in_shardings=(logits_sharding,),
-                out_shardings=(None, logits_sharding),
-            )
-            ref_vg = jax.jit(
-                jax.value_and_grad(ref_loss),
-                in_shardings=(logits_sharding,),
-                out_shardings=(None, logits_sharding),
-            )
-            target_fwd, target_grad = target_vg(logits_sharded)
-            ref_fwd, ref_grad = ref_vg(logits_sharded)
-
-            assert_allclose(target_fwd, ref_fwd, dtype=jnp.float32)
-            assert_allclose(
-                jax.device_get(target_grad),
-                jax.device_get(ref_grad),
-                dtype=jnp.float32,
-            )
 
 
 class TestDistributedScoreForAuxLoss:
@@ -271,9 +205,8 @@ class TestDistributedScoreForAuxLoss:
         num_experts,
         topk,
         score_function,
-        use_shardy,
     ):
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
+        jax.config.update("jax_use_shardy_partitioner", True)
 
         logits = make_logits(num_tokens, num_experts, score_function)
 
@@ -351,7 +284,6 @@ class TestDistributedScoreForAuxLoss:
         "num_tokens,num_experts,topk", TOPK_CASES,
     )
     @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
-    @pytest.mark.parametrize("use_shardy", [True])
     def test_distributed_score_for_aux_loss(
         self,
         device_count,
@@ -362,7 +294,6 @@ class TestDistributedScoreForAuxLoss:
         num_experts,
         topk,
         score_function,
-        use_shardy,
     ):
         self._impl_test(
             device_count,
@@ -373,65 +304,8 @@ class TestDistributedScoreForAuxLoss:
             num_experts,
             topk,
             score_function,
-            use_shardy,
         )
 
-    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
-    def test_distributed_score_for_aux_loss_gspmd(
-        self,
-        device_count,
-        mesh_shape,
-        mesh_axes,
-        mesh_resource,
-        score_function,
-    ):
-        """GSPMD test using value_and_grad with explicit shardings."""
-        num_tokens, num_experts, topk = 128, 32, 4
-        jax.config.update("jax_use_shardy_partitioner", False)
-
-        logits = make_logits(num_tokens, num_experts, score_function)
-
-        devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
-        mesh = Mesh(devices, mesh_axes)
-        dp_axis = mesh_resource.dp_resource
-        sharded_pspec = PartitionSpec(dp_axis, None)
-
-        with mesh:
-            logits_sharding = NamedSharding(mesh, sharded_pspec)
-            logits_sharded = jax.device_put(logits, logits_sharding)
-
-            def target_loss(x):
-                _, s = fused_compute_score_for_moe_aux_loss(
-                    x, topk=topk, score_function=score_function,
-                )
-                return jnp.sum(s)
-
-            def ref_loss(x):
-                _, s = reference_compute_scores_for_aux_loss(
-                    x, topk=topk, score_function=score_function,
-                )
-                return jnp.sum(s)
-
-            target_vg = jax.jit(
-                jax.value_and_grad(target_loss),
-                in_shardings=(logits_sharding,),
-                out_shardings=(None, logits_sharding),
-            )
-            ref_vg = jax.jit(
-                jax.value_and_grad(ref_loss),
-                in_shardings=(logits_sharding,),
-                out_shardings=(None, logits_sharding),
-            )
-            target_fwd, target_grad = target_vg(logits_sharded)
-            ref_fwd, ref_grad = ref_vg(logits_sharded)
-
-            assert_allclose(target_fwd, ref_fwd, dtype=jnp.float32)
-            assert_allclose(
-                jax.device_get(target_grad),
-                jax.device_get(ref_grad),
-                dtype=jnp.float32,
-            )
 
 
 class TestDistributedMoEAuxLoss:
@@ -452,12 +326,11 @@ class TestDistributedMoEAuxLoss:
         num_tokens,
         num_experts,
         topk,
-        use_shardy,
     ):
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
+        jax.config.update("jax_use_shardy_partitioner", True)
 
         key = jax.random.PRNGKey(42)
-        key, subkey1, subkey2 = jax.random.split(key, 3)
+        _, subkey1, _ = jax.random.split(key, 3)
 
         offset = jnp.arange(-num_tokens // 2, num_tokens // 2, dtype=jnp.float32) * 1e-4
         probs = jnp.arange(-num_experts // 2, num_experts // 2, dtype=jnp.float32) * 1e-2
@@ -529,7 +402,6 @@ class TestDistributedMoEAuxLoss:
     @pytest_parametrize_wrapper(
         "num_tokens,num_experts,topk", AUX_LOSS_CASES,
     )
-    @pytest.mark.parametrize("use_shardy", [True, False])
     def test_distributed_aux_loss(
         self,
         device_count,
@@ -539,7 +411,6 @@ class TestDistributedMoEAuxLoss:
         num_tokens,
         num_experts,
         topk,
-        use_shardy,
     ):
         self._impl_test(
             device_count,
@@ -549,5 +420,4 @@ class TestDistributedMoEAuxLoss:
             num_tokens,
             num_experts,
             topk,
-            use_shardy,
         )

@@ -21,25 +21,38 @@ Functions:
 """
 
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 
 from transformer_engine.jax.cpp_extensions.router import (
+    ScoreFunction,
     fused_topk_with_score_function_fwd,
     fused_topk_with_score_function_bwd,
-    fused_score_for_moe_aux_loss_fwd,
-    fused_score_for_moe_aux_loss_bwd,
     fused_moe_aux_loss_fwd,
     fused_moe_aux_loss_bwd,
 )
 
 __all__ = [
+    "ScoreFunction",
     "fused_topk_with_score_function",
     "fused_compute_score_for_moe_aux_loss",
     "fused_moe_aux_loss",
 ]
+
+
+def _validate_score_function(score_function: Union[str, ScoreFunction]) -> ScoreFunction:
+    """Validate and convert score_function to a ScoreFunction enum."""
+    if isinstance(score_function, ScoreFunction):
+        return score_function
+    try:
+        return ScoreFunction[score_function.upper()]
+    except (KeyError, AttributeError):
+        raise ValueError(
+            f"score_function must be 'softmax', 'sigmoid', or a ScoreFunction enum, "
+            f"got {score_function!r}"
+        ) from None
 
 
 # =============================================================================
@@ -51,10 +64,10 @@ def fused_topk_with_score_function(
     logits: jnp.ndarray,
     topk: int,
     use_pre_softmax: bool = False,
-    num_groups: int = -1,
-    group_topk: int = -1,
+    num_groups: int = 1,
+    group_topk: int = 1,
     scaling_factor: float = 1.0,
-    score_function: str = "softmax",
+    score_function: Union[str, ScoreFunction] = ScoreFunction.SOFTMAX,
     expert_bias: Optional[jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
@@ -69,13 +82,13 @@ def fused_topk_with_score_function(
     use_pre_softmax : bool
         If True, apply softmax before top-k (only for softmax score function). Else, apply post top-k
     num_groups : int
-        Number of groups for grouped top-k. -1 to disable.
+        Number of groups for grouped top-k. 1 means no grouping.
     group_topk : int
-        Top-k at group level. -1 to disable.
+        Top-k at group level. 1 means no group-level selection.
     scaling_factor : float
         Scaling factor applied to output probs.
-    score_function : str
-        Score function: "softmax" or "sigmoid".
+    score_function : Union[str, ScoreFunction]
+        Score function: "softmax" / "sigmoid" or ScoreFunction.SOFTMAX / ScoreFunction.SIGMOID.
     expert_bias : Optional[jnp.ndarray]
         Expert bias, shape [num_experts]. Only used with sigmoid.
 
@@ -88,21 +101,13 @@ def fused_topk_with_score_function(
         Boolean mask, shape [num_tokens, num_experts].
         True at selected expert positions.
     """
-    if score_function not in ("softmax", "sigmoid"):
-        raise ValueError(
-            f"score_function must be 'softmax' or 'sigmoid', got '{score_function}'"
-        )
+    score_function = _validate_score_function(score_function)
 
-    if expert_bias is not None and score_function != "sigmoid":
+    if expert_bias is not None and score_function != ScoreFunction.SIGMOID:
         raise ValueError(
             "expert_bias is only supported with score_function='sigmoid'. "
-            f"Got score_function='{score_function}'."
+            f"Got score_function='{score_function.name}'."
         )
-
-    # Flatten to 2D if shape is [B, S, H]
-    original_shape = logits.shape
-    if logits.ndim > 2:
-        logits = logits.reshape(-1, original_shape[-1])
 
     if expert_bias is None:
         expert_bias = jnp.empty((0,), dtype=logits.dtype)
@@ -116,17 +121,13 @@ def fused_topk_with_score_function(
         group_topk,
         scaling_factor,
         score_function,
+        False,  # compute_aux_scores
     )
-
-    # Restore shape if needed
-    if len(original_shape) > 2:
-        probs = probs.reshape(original_shape)
-        routing_map = routing_map.reshape(original_shape)
 
     return probs, routing_map
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5, 6, 7))
+@partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5, 6, 7, 8))
 def _fused_topk_with_score_function(
     logits: jnp.ndarray,
     expert_bias: jnp.ndarray,
@@ -135,22 +136,23 @@ def _fused_topk_with_score_function(
     num_groups: int,
     group_topk: int,
     scaling_factor: float,
-    score_function: str,
+    score_function: ScoreFunction,
+    compute_aux_scores: bool,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     (probs, routing_map), _ = _fused_topk_with_score_function_fwd(
         logits, expert_bias, topk, use_pre_softmax, num_groups, group_topk,
-        scaling_factor, score_function,
+        scaling_factor, score_function, compute_aux_scores,
     )
     return probs, routing_map
 
 
 def _fused_topk_with_score_function_fwd(
     logits, expert_bias, topk, use_pre_softmax, num_groups, group_topk,
-    scaling_factor, score_function,
+    scaling_factor, score_function, compute_aux_scores,
 ):
     probs, routing_map, intermediate_output = fused_topk_with_score_function_fwd(
         logits, topk, use_pre_softmax, num_groups, group_topk,
-        scaling_factor, score_function, expert_bias,
+        scaling_factor, score_function, expert_bias, compute_aux_scores,
     )
     residuals = (routing_map, intermediate_output)
     return (probs, routing_map), residuals
@@ -158,7 +160,7 @@ def _fused_topk_with_score_function_fwd(
 
 def _fused_topk_with_score_function_bwd(
     topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,  # pylint: disable=unused-argument
-    residuals, g,
+    compute_aux_scores, residuals, g,
 ):
     routing_map, intermediate_output = residuals
     grad_probs, _ = g  # routing_map gradient is None (boolean)
@@ -166,8 +168,9 @@ def _fused_topk_with_score_function_bwd(
     grad_logits = fused_topk_with_score_function_bwd(
         routing_map, intermediate_output, grad_probs,
         topk, use_pre_softmax, scaling_factor, score_function,
+        compute_aux_scores,
     )
-    # Return gradients for (logits, expert_bias)
+    # expert_bias gradient is None: bias is not differentiated through this kernel
     return grad_logits, None
 
 
@@ -185,7 +188,7 @@ _fused_topk_with_score_function.defvjp(
 def fused_compute_score_for_moe_aux_loss(
     logits: jnp.ndarray,
     topk: int,
-    score_function: str = "softmax",
+    score_function: Union[str, ScoreFunction] = ScoreFunction.SOFTMAX,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Compute scores and routing map for MoE auxiliary loss.
@@ -194,14 +197,17 @@ def fused_compute_score_for_moe_aux_loss(
     no expert bias, no scaling) to produce the scores and routing map
     used for the load-balancing auxiliary loss.
 
+    Internally delegates to the same primitive as fused_topk_with_score_function
+    with compute_aux_scores=True, selecting the score-for-aux-loss CUDA kernel.
+
     Parameters
     ----------
     logits : jnp.ndarray
         Logits from the gating GEMM, shape [num_tokens, num_experts].
     topk : int
         Number of top experts to select.
-    score_function : str
-        Score function: "softmax" or "sigmoid".
+    score_function : Union[str, ScoreFunction]
+        Score function: "softmax" / "sigmoid" or ScoreFunction.SOFTMAX / ScoreFunction.SIGMOID.
 
     Returns
     -------
@@ -210,58 +216,20 @@ def fused_compute_score_for_moe_aux_loss(
     scores : jnp.ndarray
         Dense score tensor, shape [num_tokens, num_experts].
     """
-    if score_function not in ("softmax", "sigmoid"):
-        raise ValueError(
-            f"score_function must be 'softmax' or 'sigmoid', got '{score_function}'"
-        )
+    score_function = _validate_score_function(score_function)
 
-    original_shape = logits.shape
-    if logits.ndim > 2:
-        logits = logits.reshape(-1, original_shape[-1])
-
-    routing_map, scores = _fused_compute_score_for_moe_aux_loss(logits, topk, score_function)
-
-    if len(original_shape) > 2:
-        routing_map = routing_map.reshape(original_shape)
-        scores = scores.reshape(original_shape)
-
-    return routing_map, scores
-
-
-@partial(jax.custom_vjp, nondiff_argnums=(1, 2))
-def _fused_compute_score_for_moe_aux_loss(
-    logits: jnp.ndarray,
-    topk: int,
-    score_function: str,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    (routing_map, scores), _ = _fused_compute_score_for_moe_aux_loss_fwd(
-        logits, topk, score_function,
+    scores, routing_map = _fused_topk_with_score_function(
+        logits,
+        jnp.empty((0,), dtype=logits.dtype),
+        topk,
+        False,  # use_pre_softmax (unused for aux scores)
+        1,      # num_groups (unused for aux scores)
+        1,      # group_topk (unused for aux scores)
+        1.0,    # scaling_factor (unused for aux scores)
+        score_function,
+        True,   # compute_aux_scores
     )
     return routing_map, scores
-
-
-def _fused_compute_score_for_moe_aux_loss_fwd(logits, topk, score_function):
-    scores, routing_map, intermediate_output = fused_score_for_moe_aux_loss_fwd(
-        logits, topk, score_function,
-    )
-    residuals = (intermediate_output,)
-    return (routing_map, scores), residuals
-
-
-def _fused_compute_score_for_moe_aux_loss_bwd(topk, score_function, residuals, g):
-    (intermediate_output,) = residuals
-    _, grad_scores = g  # routing_map gradient is None (boolean)
-
-    grad_logits = fused_score_for_moe_aux_loss_bwd(
-        intermediate_output, grad_scores, topk, score_function,
-    )
-    return (grad_logits,)
-
-
-_fused_compute_score_for_moe_aux_loss.defvjp(
-    _fused_compute_score_for_moe_aux_loss_fwd,
-    _fused_compute_score_for_moe_aux_loss_bwd,
-)
 
 
 # =============================================================================
@@ -325,12 +293,10 @@ def _fused_moe_aux_loss(
 def _fused_moe_aux_loss_fwd(
     probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff,
 ):
-    num_rows = probs.shape[0]
-    num_cols = probs.shape[1]
     aux_loss, const_buf = fused_moe_aux_loss_fwd(
         probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff,
     )
-    residuals = (const_buf, tokens_per_expert, num_rows, num_cols)
+    residuals = (const_buf, tokens_per_expert, probs.shape[0], probs.shape[1])
     return aux_loss.squeeze(), residuals
 
 

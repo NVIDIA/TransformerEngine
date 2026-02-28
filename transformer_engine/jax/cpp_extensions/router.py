@@ -2,26 +2,26 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for fused MoE router"""
-import warnings
+from enum import IntEnum
 from functools import partial
 
 import jax.numpy as jnp
 from jax import dtypes, ffi
-from jax.sharding import PartitionSpec, NamedSharding
 
 from .base import BasePrimitive, register_primitive
-from .misc import get_padded_spec
 
 __all__ = [
+    "ScoreFunction",
     "fused_topk_with_score_function_fwd",
     "fused_topk_with_score_function_bwd",
-    "fused_score_for_moe_aux_loss_fwd",
-    "fused_score_for_moe_aux_loss_bwd",
     "fused_moe_aux_loss_fwd",
     "fused_moe_aux_loss_bwd",
 ]
 
-SCORE_FUNCTION_MAP = {"sigmoid": 0, "softmax": 1}
+
+class ScoreFunction(IntEnum):
+    SIGMOID = 0
+    SOFTMAX = 1
 
 
 # =========================================== ==================================
@@ -32,11 +32,12 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
     """
     Fused Top-K with Score Function Forward Primitive.
     Computes score_function(logits) -> top-k -> probs, routing_map.
+    When compute_aux_scores=1, instead computes clean scores for aux loss.
     """
 
     name = "te_fused_topk_with_score_function_forward_ffi"
     multiple_results = True
-    impl_static_args = (2, 3, 4, 5, 6, 7)  # topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function
+    impl_static_args = (2, 3, 4, 5, 6, 7, 8)  # topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, compute_aux_scores
     inner_primitive = None
     outer_primitive = None
 
@@ -50,12 +51,13 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         group_topk,
         scaling_factor,
         score_function,
+        compute_aux_scores,
     ):
         """Abstract evaluation: describe output shapes and dtypes."""
-        del expert_bias_aval, topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function
+        del expert_bias_aval, topk, use_pre_softmax, num_groups, group_topk
+        del scaling_factor, score_function, compute_aux_scores
         i_dtype = dtypes.canonicalize_dtype(logits_aval.dtype)
         i_shape = logits_aval.shape
-        assert len(i_shape) == 2, f"logits must be 2D [num_tokens, num_experts], got {i_shape}"
         probs_aval = logits_aval.update(shape=i_shape, dtype=i_dtype)
         routing_map_aval = logits_aval.update(shape=i_shape, dtype=jnp.bool_)
         intermediate_aval = logits_aval.update(shape=i_shape, dtype=i_dtype)
@@ -73,6 +75,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         group_topk,
         scaling_factor,
         score_function,
+        compute_aux_scores,
     ):
         return ffi.ffi_lowering(FusedTopkWithScoreFunctionFwdPrimitive.name)(
             ctx,
@@ -84,6 +87,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
             group_topk=group_topk,
             scaling_factor=scaling_factor,
             score_function=score_function,
+            compute_aux_scores=compute_aux_scores,
         )
 
     @staticmethod
@@ -96,6 +100,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         group_topk,
         scaling_factor,
         score_function,
+        compute_aux_scores,
     ):
         assert FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive is not None
         return FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive.bind(
@@ -107,6 +112,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
             group_topk=group_topk,
             scaling_factor=scaling_factor,
             score_function=score_function,
+            compute_aux_scores=compute_aux_scores,
         )
 
     @staticmethod
@@ -120,6 +126,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         group_topk,
         scaling_factor,
         score_function,
+        compute_aux_scores,
     ):
         assert FusedTopkWithScoreFunctionFwdPrimitive.outer_primitive is not None
         logits, expert_bias = batched_args
@@ -134,77 +141,10 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
                 group_topk=group_topk,
                 scaling_factor=scaling_factor,
                 score_function=score_function,
+                compute_aux_scores=compute_aux_scores,
             ),
             (logits_bdim, logits_bdim, logits_bdim),
         )
-
-    @staticmethod
-    def infer_sharding_from_operands(
-        topk,
-        use_pre_softmax,
-        num_groups,
-        group_topk,
-        scaling_factor,
-        score_function,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        del (
-            topk,
-            use_pre_softmax,
-            num_groups,
-            group_topk,
-            scaling_factor,
-            score_function,
-            result_infos,
-        )
-        logits_spec = get_padded_spec(arg_infos[0])
-        if logits_spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the expert dimension is not supported in "
-                f"{FusedTopkWithScoreFunctionFwdPrimitive.name}! "
-                "Forcing XLA to not shard the expert dim, which might introduce extra "
-                "collective ops and hurt performance."
-            )
-        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec[:-1], None))
-        return [out_sharding, out_sharding, out_sharding]
-
-    @staticmethod
-    def partition(
-        topk,
-        use_pre_softmax,
-        num_groups,
-        group_topk,
-        scaling_factor,
-        score_function,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        del result_infos
-        logits_spec = get_padded_spec(arg_infos[0])
-        if logits_spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the expert dimension is not supported in "
-                f"{FusedTopkWithScoreFunctionFwdPrimitive.name}! "
-                "Forcing XLA to not shard the expert dim, which might introduce extra "
-                "collective ops and hurt performance."
-            )
-        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec[:-1], None))
-        logits_sharding = out_sharding
-        bias_sharding = NamedSharding(mesh, PartitionSpec(None))
-        arg_shardings = (logits_sharding, bias_sharding)
-        impl = partial(
-            FusedTopkWithScoreFunctionFwdPrimitive.impl,
-            topk=topk,
-            use_pre_softmax=use_pre_softmax,
-            num_groups=num_groups,
-            group_topk=group_topk,
-            scaling_factor=scaling_factor,
-            score_function=score_function,
-        )
-        return mesh, impl, [out_sharding, out_sharding, out_sharding], arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -223,11 +163,12 @@ register_primitive(FusedTopkWithScoreFunctionFwdPrimitive)
 class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
     """
     Fused Top-K with Score Function Backward Primitive.
+    When compute_aux_scores=1, runs the score-for-aux-loss backward instead.
     """
 
     name = "te_fused_topk_with_score_function_backward_ffi"
     multiple_results = False
-    impl_static_args = (3, 4, 5, 6)  # topk, use_pre_softmax, scaling_factor, score_function
+    impl_static_args = (3, 4, 5, 6, 7)  # topk, use_pre_softmax, scaling_factor, score_function, compute_aux_scores
     inner_primitive = None
     outer_primitive = None
 
@@ -240,8 +181,10 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         use_pre_softmax,
         scaling_factor,
         score_function,
+        compute_aux_scores,
     ):
-        del topk, use_pre_softmax, scaling_factor, score_function, routing_map_aval
+        del topk, use_pre_softmax, scaling_factor, score_function
+        del compute_aux_scores, routing_map_aval
         return intermediate_aval.update(
             shape=intermediate_aval.shape,
             dtype=dtypes.canonicalize_dtype(grad_probs_aval.dtype),
@@ -258,6 +201,7 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         use_pre_softmax,
         scaling_factor,
         score_function,
+        compute_aux_scores,
     ):
         return ffi.ffi_lowering(FusedTopkWithScoreFunctionBwdPrimitive.name)(
             ctx,
@@ -268,6 +212,7 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
             use_pre_softmax=use_pre_softmax,
             scaling_factor=scaling_factor,
             score_function=score_function,
+            compute_aux_scores=compute_aux_scores,
         )
 
     @staticmethod
@@ -279,6 +224,7 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         use_pre_softmax,
         scaling_factor,
         score_function,
+        compute_aux_scores,
     ):
         assert FusedTopkWithScoreFunctionBwdPrimitive.inner_primitive is not None
         return FusedTopkWithScoreFunctionBwdPrimitive.inner_primitive.bind(
@@ -289,6 +235,7 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
             use_pre_softmax=use_pre_softmax,
             scaling_factor=scaling_factor,
             score_function=score_function,
+            compute_aux_scores=compute_aux_scores,
         )
 
     @staticmethod
@@ -300,6 +247,7 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         use_pre_softmax,
         scaling_factor,
         score_function,
+        compute_aux_scores,
     ):
         assert FusedTopkWithScoreFunctionBwdPrimitive.outer_primitive is not None
         routing_map, intermediate, grad_probs = batched_args
@@ -313,49 +261,10 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
                 use_pre_softmax=use_pre_softmax,
                 scaling_factor=scaling_factor,
                 score_function=score_function,
+                compute_aux_scores=compute_aux_scores,
             ),
             grad_probs_bdim,
         )
-
-    @staticmethod
-    def infer_sharding_from_operands(
-        topk, use_pre_softmax, scaling_factor, score_function, mesh, arg_infos, result_infos
-    ):
-        del topk, use_pre_softmax, scaling_factor, score_function, result_infos
-        grad_spec = get_padded_spec(arg_infos[2])
-        if grad_spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the expert dimension is not supported in "
-                f"{FusedTopkWithScoreFunctionBwdPrimitive.name}! "
-                "Forcing XLA to not shard the expert dim."
-            )
-        return NamedSharding(mesh, PartitionSpec(*grad_spec[:-1], None))
-
-    @staticmethod
-    def partition(
-        topk, use_pre_softmax, scaling_factor, score_function, mesh, arg_infos, result_infos
-    ):
-        del result_infos
-        grad_spec = get_padded_spec(arg_infos[2])
-        if grad_spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the expert dimension is not supported in "
-                f"{FusedTopkWithScoreFunctionBwdPrimitive.name}! "
-                "Forcing XLA to not shard the expert dim."
-            )
-        out_sharding = NamedSharding(mesh, PartitionSpec(*grad_spec[:-1], None))
-        arg_shardings = tuple(
-            NamedSharding(mesh, PartitionSpec(*get_padded_spec(a)[:-1], None))
-            for a in arg_infos
-        )
-        impl = partial(
-            FusedTopkWithScoreFunctionBwdPrimitive.impl,
-            topk=topk,
-            use_pre_softmax=use_pre_softmax,
-            scaling_factor=scaling_factor,
-            score_function=score_function,
-        )
-        return mesh, impl, out_sharding, arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -364,186 +273,6 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
 
 
 register_primitive(FusedTopkWithScoreFunctionBwdPrimitive)
-
-
-# =============================================================================
-# Fused Score for MoE Aux Loss - Forward
-# =============================================================================
-
-
-class FusedScoreForMoEAuxLossFwdPrimitive(BasePrimitive):
-    """
-    Fused Score for MoE Aux Loss Forward Primitive.
-    """
-
-    name = "te_fused_score_for_moe_aux_loss_forward_ffi"
-    multiple_results = True
-    impl_static_args = (1, 2)  # topk, score_function
-    inner_primitive = None
-    outer_primitive = None
-
-    @staticmethod
-    def abstract(logits_aval, topk, score_function):
-        del topk, score_function
-        i_dtype = dtypes.canonicalize_dtype(logits_aval.dtype)
-        i_shape = logits_aval.shape
-        scores_aval = logits_aval.update(shape=i_shape, dtype=i_dtype)
-        routing_map_aval = logits_aval.update(shape=i_shape, dtype=jnp.bool_)
-        intermediate_aval = logits_aval.update(shape=i_shape, dtype=i_dtype)
-        return scores_aval, routing_map_aval, intermediate_aval
-
-    @staticmethod
-    def lowering(ctx, logits, *, topk, score_function):
-        return ffi.ffi_lowering(FusedScoreForMoEAuxLossFwdPrimitive.name)(
-            ctx, logits, topk=topk, score_function=score_function
-        )
-
-    @staticmethod
-    def impl(logits, topk, score_function):
-        assert FusedScoreForMoEAuxLossFwdPrimitive.inner_primitive is not None
-        return FusedScoreForMoEAuxLossFwdPrimitive.inner_primitive.bind(
-            logits, topk=topk, score_function=score_function
-        )
-
-    @staticmethod
-    def batcher(batched_args, batch_dims, *, topk, score_function):
-        assert FusedScoreForMoEAuxLossFwdPrimitive.outer_primitive is not None
-        (logits,) = batched_args
-        (logits_bdim,) = batch_dims
-        return (
-            FusedScoreForMoEAuxLossFwdPrimitive.outer_primitive.bind(
-                logits, topk=topk, score_function=score_function
-            ),
-            (logits_bdim, logits_bdim, logits_bdim),
-        )
-
-    @staticmethod
-    def infer_sharding_from_operands(topk, score_function, mesh, arg_infos, result_infos):
-        del topk, score_function, result_infos
-        logits_spec = get_padded_spec(arg_infos[0])
-        if logits_spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the expert dimension is not supported in "
-                f"{FusedScoreForMoEAuxLossFwdPrimitive.name}! "
-                "Forcing XLA to not shard the expert dim."
-            )
-        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec[:-1], None))
-        return [out_sharding, out_sharding, out_sharding]
-
-    @staticmethod
-    def partition(topk, score_function, mesh, arg_infos, result_infos):
-        del result_infos
-        logits_spec = get_padded_spec(arg_infos[0])
-        if logits_spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the expert dimension is not supported in "
-                f"{FusedScoreForMoEAuxLossFwdPrimitive.name}! "
-                "Forcing XLA to not shard the expert dim."
-            )
-        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec[:-1], None))
-        arg_shardings = (out_sharding,)
-        impl = partial(
-            FusedScoreForMoEAuxLossFwdPrimitive.impl, topk=topk, score_function=score_function
-        )
-        return mesh, impl, [out_sharding, out_sharding, out_sharding], arg_shardings
-
-    @staticmethod
-    def shardy_sharding_rule(*args):
-        del args
-        return "num_tokens num_experts -> num_tokens num_experts, num_tokens num_experts, num_tokens num_experts"
-
-
-register_primitive(FusedScoreForMoEAuxLossFwdPrimitive)
-
-
-# =============================================================================
-# Fused Score for MoE Aux Loss - Backward
-# =============================================================================
-
-
-class FusedScoreForMoEAuxLossBwdPrimitive(BasePrimitive):
-    """
-    Fused Score for MoE Aux Loss Backward Primitive.
-    """
-
-    name = "te_fused_score_for_moe_aux_loss_backward_ffi"
-    multiple_results = False
-    impl_static_args = (2, 3)  # topk, score_function
-    inner_primitive = None
-    outer_primitive = None
-
-    @staticmethod
-    def abstract(intermediate_aval, grad_scores_aval, topk, score_function):
-        del topk, score_function, intermediate_aval
-        return grad_scores_aval.update(
-            shape=grad_scores_aval.shape,
-            dtype=dtypes.canonicalize_dtype(grad_scores_aval.dtype),
-        )
-
-    @staticmethod
-    def lowering(ctx, intermediate, grad_scores, *, topk, score_function):
-        return ffi.ffi_lowering(FusedScoreForMoEAuxLossBwdPrimitive.name)(
-            ctx, intermediate, grad_scores, topk=topk, score_function=score_function
-        )
-
-    @staticmethod
-    def impl(intermediate, grad_scores, topk, score_function):
-        assert FusedScoreForMoEAuxLossBwdPrimitive.inner_primitive is not None
-        return FusedScoreForMoEAuxLossBwdPrimitive.inner_primitive.bind(
-            intermediate, grad_scores, topk=topk, score_function=score_function
-        )
-
-    @staticmethod
-    def batcher(batched_args, batch_dims, *, topk, score_function):
-        assert FusedScoreForMoEAuxLossBwdPrimitive.outer_primitive is not None
-        intermediate, grad_scores = batched_args
-        _, grad_scores_bdim = batch_dims
-        return (
-            FusedScoreForMoEAuxLossBwdPrimitive.outer_primitive.bind(
-                intermediate, grad_scores, topk=topk, score_function=score_function
-            ),
-            grad_scores_bdim,
-        )
-
-    @staticmethod
-    def infer_sharding_from_operands(topk, score_function, mesh, arg_infos, result_infos):
-        del topk, score_function, result_infos
-        spec = get_padded_spec(arg_infos[1])
-        if spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the expert dimension is not supported in "
-                f"{FusedScoreForMoEAuxLossBwdPrimitive.name}! "
-                "Forcing XLA to not shard the expert dim."
-            )
-        return NamedSharding(mesh, PartitionSpec(*spec[:-1], None))
-
-    @staticmethod
-    def partition(topk, score_function, mesh, arg_infos, result_infos):
-        del result_infos
-        spec = get_padded_spec(arg_infos[1])
-        if spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the expert dimension is not supported in "
-                f"{FusedScoreForMoEAuxLossBwdPrimitive.name}! "
-                "Forcing XLA to not shard the expert dim."
-            )
-        out_sharding = NamedSharding(mesh, PartitionSpec(*spec[:-1], None))
-        arg_shardings = tuple(
-            NamedSharding(mesh, PartitionSpec(*get_padded_spec(a)[:-1], None))
-            for a in arg_infos
-        )
-        impl = partial(
-            FusedScoreForMoEAuxLossBwdPrimitive.impl, topk=topk, score_function=score_function
-        )
-        return mesh, impl, out_sharding, arg_shardings
-
-    @staticmethod
-    def shardy_sharding_rule(*args):
-        del args
-        return "num_tokens num_experts, num_tokens num_experts -> num_tokens num_experts"
-
-
-register_primitive(FusedScoreForMoEAuxLossBwdPrimitive)
 
 
 # =============================================================================
@@ -614,30 +343,6 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(
-        total_num_tokens, num_experts, topk, coeff, mesh, arg_infos, result_infos
-    ):
-        del total_num_tokens, num_experts, topk, coeff, arg_infos, result_infos
-        replicated = NamedSharding(mesh, PartitionSpec())
-        return [replicated, replicated]
-
-    @staticmethod
-    def partition(
-        total_num_tokens, num_experts, topk, coeff, mesh, arg_infos, result_infos
-    ):
-        del result_infos, arg_infos
-        replicated = NamedSharding(mesh, PartitionSpec())
-        arg_shardings = (replicated, replicated)
-        impl = partial(
-            FusedMoEAuxLossFwdPrimitive.impl,
-            total_num_tokens=total_num_tokens,
-            num_experts=num_experts,
-            topk=topk,
-            coeff=coeff,
-        )
-        return mesh, impl, [replicated, replicated], arg_shardings
-
-    @staticmethod
     def shardy_sharding_rule(*args):
         del args
         return "num_tokens num_experts, num_experts -> aux_loss_one, const_buf_one"
@@ -702,25 +407,6 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(num_rows, num_cols, mesh, arg_infos, result_infos):
-        del num_rows, num_cols, result_infos, arg_infos
-        # Output is [num_rows, num_cols]; cannot infer token sharding from
-        # scalar/1D inputs, so replicate by default.
-        return NamedSharding(mesh, PartitionSpec(None, None))
-
-    @staticmethod
-    def partition(num_rows, num_cols, mesh, arg_infos, result_infos):
-        del result_infos, arg_infos
-        # All inputs are scalars or 1D vectors — replicate them.
-        # Output is [num_rows, num_cols] — replicate (no token sharding info
-        # available from scalar inputs).
-        replicated = NamedSharding(mesh, PartitionSpec())
-        out_sharding = NamedSharding(mesh, PartitionSpec(None, None))
-        arg_shardings = (replicated, replicated, replicated)
-        impl = partial(FusedMoEAuxLossBwdPrimitive.impl, num_rows=num_rows, num_cols=num_cols)
-        return mesh, impl, out_sharding, arg_shardings
-
-    @staticmethod
     def shardy_sharding_rule(*args):
         del args
         return "const_buf_one, num_experts, grad_one -> num_tokens num_experts"
@@ -741,11 +427,16 @@ def fused_topk_with_score_function_fwd(
     num_groups: int,
     group_topk: int,
     scaling_factor: float,
-    score_function: str,
+    score_function,
     expert_bias: jnp.ndarray,
+    compute_aux_scores: bool = False,
 ):
     """
     Fused top-k with score function forward pass.
+
+    When compute_aux_scores=True, runs the clean score-for-aux-loss kernel
+    instead of the full top-k kernel (expert_bias, use_pre_softmax, num_groups,
+    group_topk, and scaling_factor are ignored).
 
     Parameters
     ----------
@@ -756,21 +447,22 @@ def fused_topk_with_score_function_fwd(
     use_pre_softmax : bool
         If True, apply softmax before top-k.
     num_groups : int
-        Number of groups for grouped top-k (-1 to disable).
+        Number of groups for grouped top-k (1 to disable).
     group_topk : int
-        Top-k at group level (-1 to disable).
+        Top-k at group level (1 to disable).
     scaling_factor : float
         Scaling factor for output probs.
-    score_function : str
-        "softmax" or "sigmoid".
+    score_function : ScoreFunction
+        ScoreFunction.SOFTMAX or ScoreFunction.SIGMOID.
     expert_bias : jnp.ndarray
         Expert bias (only used with sigmoid). Pass empty array if unused.
+    compute_aux_scores : bool
+        If True, compute clean scores for aux loss instead of full top-k.
 
     Returns
     -------
-    probs, routing_map, intermediate_output
+    probs_or_scores, routing_map, intermediate_output
     """
-    score_fn_int = SCORE_FUNCTION_MAP[score_function]
     return FusedTopkWithScoreFunctionFwdPrimitive.outer_primitive.bind(
         logits,
         expert_bias,
@@ -779,7 +471,8 @@ def fused_topk_with_score_function_fwd(
         num_groups=int(num_groups),
         group_topk=int(group_topk),
         scaling_factor=float(scaling_factor),
-        score_function=int(score_fn_int),
+        score_function=int(score_function),
+        compute_aux_scores=int(compute_aux_scores),
     )
 
 
@@ -790,12 +483,15 @@ def fused_topk_with_score_function_bwd(
     topk: int,
     use_pre_softmax: bool,
     scaling_factor: float,
-    score_function: str,
+    score_function,
+    compute_aux_scores: bool = False,
 ):
     """
     Fused top-k with score function backward pass.
+
+    When compute_aux_scores=True, routing_map is ignored and the
+    score-for-aux-loss backward kernel is used instead.
     """
-    score_fn_int = SCORE_FUNCTION_MAP[score_function]
     return FusedTopkWithScoreFunctionBwdPrimitive.outer_primitive.bind(
         routing_map,
         intermediate_output,
@@ -803,45 +499,8 @@ def fused_topk_with_score_function_bwd(
         topk=int(topk),
         use_pre_softmax=int(use_pre_softmax),
         scaling_factor=float(scaling_factor),
-        score_function=int(score_fn_int),
-    )
-
-
-def fused_score_for_moe_aux_loss_fwd(
-    logits: jnp.ndarray,
-    topk: int,
-    score_function: str,
-):
-    """
-    Fused compute scores for MoE aux loss forward pass.
-
-    Returns
-    -------
-    scores, routing_map, intermediate_output
-    """
-    score_fn_int = SCORE_FUNCTION_MAP[score_function]
-    return FusedScoreForMoEAuxLossFwdPrimitive.outer_primitive.bind(
-        logits,
-        topk=int(topk),
-        score_function=int(score_fn_int),
-    )
-
-
-def fused_score_for_moe_aux_loss_bwd(
-    intermediate_output: jnp.ndarray,
-    grad_scores: jnp.ndarray,
-    topk: int,
-    score_function: str,
-):
-    """
-    Fused compute scores for MoE aux loss backward pass.
-    """
-    score_fn_int = SCORE_FUNCTION_MAP[score_function]
-    return FusedScoreForMoEAuxLossBwdPrimitive.outer_primitive.bind(
-        intermediate_output,
-        grad_scores,
-        topk=int(topk),
-        score_function=int(score_fn_int),
+        score_function=int(score_function),
+        compute_aux_scores=int(compute_aux_scores),
     )
 
 
