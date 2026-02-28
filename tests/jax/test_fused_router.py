@@ -440,12 +440,14 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     routing_map_ref, scores_ref = ref_fwd_fn(logits)
 
     # Forward: fused (jitted)
-    fused_fwd_fn = jax.jit(partial(
-        fused_topk_with_score_function,
-        topk=topk,
-        score_function=score_function,
-        compute_aux_scores=True,
-    ))
+    fused_fwd_fn = jax.jit(
+        partial(
+            fused_topk_with_score_function,
+            topk=topk,
+            score_function=score_function,
+            compute_aux_scores=True,
+        )
+    )
     scores_fused, routing_map_fused = fused_fwd_fn(logits)
 
     assert jnp.allclose(
@@ -460,7 +462,10 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
 
     def loss_fused(logits_):
         s, _ = fused_topk_with_score_function(
-            logits_, topk, score_function=score_function, compute_aux_scores=True,
+            logits_,
+            topk,
+            score_function=score_function,
+            compute_aux_scores=True,
         )
         return s.sum()
 

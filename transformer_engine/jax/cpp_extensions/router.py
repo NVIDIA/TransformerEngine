@@ -159,9 +159,16 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def infer_sharding_from_operands(
-        topk, use_pre_softmax, num_groups, group_topk, scaling_factor,
-        score_function, compute_aux_scores,
-        mesh, arg_infos, result_infos,
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        compute_aux_scores,
+        mesh,
+        arg_infos,
+        result_infos,
     ):
         del topk, use_pre_softmax, num_groups, group_topk, scaling_factor
         del score_function, compute_aux_scores, result_infos
@@ -173,9 +180,16 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def partition(
-        topk, use_pre_softmax, num_groups, group_topk, scaling_factor,
-        score_function, compute_aux_scores,
-        mesh, arg_infos, result_infos,
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        compute_aux_scores,
+        mesh,
+        arg_infos,
+        result_infos,
     ):
         del result_infos
         logits_spec = get_padded_spec(arg_infos[0])
@@ -187,9 +201,15 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
 
         def sharded_impl(logits, expert_bias):
             return FusedTopkWithScoreFunctionFwdPrimitive.impl(
-                logits, expert_bias,
-                topk, use_pre_softmax, num_groups, group_topk,
-                scaling_factor, score_function, compute_aux_scores,
+                logits,
+                expert_bias,
+                topk,
+                use_pre_softmax,
+                num_groups,
+                group_topk,
+                scaling_factor,
+                score_function,
+                compute_aux_scores,
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -325,8 +345,14 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def infer_sharding_from_operands(
-        topk, use_pre_softmax, scaling_factor, score_function, compute_aux_scores,
-        mesh, arg_infos, result_infos,
+        topk,
+        use_pre_softmax,
+        scaling_factor,
+        score_function,
+        compute_aux_scores,
+        mesh,
+        arg_infos,
+        result_infos,
     ):
         del topk, use_pre_softmax, scaling_factor, score_function
         del compute_aux_scores, result_infos
@@ -335,8 +361,14 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def partition(
-        topk, use_pre_softmax, scaling_factor, score_function, compute_aux_scores,
-        mesh, arg_infos, result_infos,
+        topk,
+        use_pre_softmax,
+        scaling_factor,
+        score_function,
+        compute_aux_scores,
+        mesh,
+        arg_infos,
+        result_infos,
     ):
         del result_infos
         grad_spec = get_padded_spec(arg_infos[2])
@@ -345,9 +377,14 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
 
         def sharded_impl(routing_map, intermediate, grad_probs):
             return FusedTopkWithScoreFunctionBwdPrimitive.impl(
-                routing_map, intermediate, grad_probs,
-                topk, use_pre_softmax, scaling_factor,
-                score_function, compute_aux_scores,
+                routing_map,
+                intermediate,
+                grad_probs,
+                topk,
+                use_pre_softmax,
+                scaling_factor,
+                score_function,
+                compute_aux_scores,
             )
 
         return mesh, sharded_impl, out_sharding, arg_shardings
@@ -431,8 +468,13 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def infer_sharding_from_operands(
-        total_num_tokens, num_experts, topk, coeff,
-        mesh, arg_infos, result_infos,
+        total_num_tokens,
+        num_experts,
+        topk,
+        coeff,
+        mesh,
+        arg_infos,
+        result_infos,
     ):
         del total_num_tokens, num_experts, topk, coeff, arg_infos, result_infos
         scalar_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -440,8 +482,13 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def partition(
-        total_num_tokens, num_experts, topk, coeff,
-        mesh, arg_infos, result_infos,
+        total_num_tokens,
+        num_experts,
+        topk,
+        coeff,
+        mesh,
+        arg_infos,
+        result_infos,
     ):
         del result_infos
         scalar_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -450,8 +497,12 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
 
         def sharded_impl(probs, tokens_per_expert):
             return FusedMoEAuxLossFwdPrimitive.impl(
-                probs, tokens_per_expert,
-                total_num_tokens, num_experts, topk, coeff,
+                probs,
+                tokens_per_expert,
+                total_num_tokens,
+                num_experts,
+                topk,
+                coeff,
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -522,27 +573,38 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def infer_sharding_from_operands(
-        num_rows, num_cols,
-        mesh, arg_infos, result_infos,
+        num_rows,
+        num_cols,
+        mesh,
+        arg_infos,
+        result_infos,
     ):
         del num_rows, num_cols, arg_infos, result_infos
         return NamedSharding(mesh, PartitionSpec(None, None))
 
     @staticmethod
     def partition(
-        num_rows, num_cols,
-        mesh, arg_infos, result_infos,
+        num_rows,
+        num_cols,
+        mesh,
+        arg_infos,
+        result_infos,
     ):
         del result_infos
         out_sharding = NamedSharding(mesh, PartitionSpec(None, None))
         arg_shardings = (
-            arg_infos[0].sharding, arg_infos[1].sharding, arg_infos[2].sharding,
+            arg_infos[0].sharding,
+            arg_infos[1].sharding,
+            arg_infos[2].sharding,
         )
 
         def sharded_impl(const_buf, tokens_per_expert, grad_aux_loss):
             return FusedMoEAuxLossBwdPrimitive.impl(
-                const_buf, tokens_per_expert, grad_aux_loss,
-                num_rows, num_cols,
+                const_buf,
+                tokens_per_expert,
+                grad_aux_loss,
+                num_rows,
+                num_cols,
             )
 
         return mesh, sharded_impl, out_sharding, arg_shardings
