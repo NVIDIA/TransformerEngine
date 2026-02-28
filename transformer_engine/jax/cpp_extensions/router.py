@@ -3,14 +3,13 @@
 # See LICENSE for license information.
 """JAX/TE custom ops for fused MoE router"""
 from enum import IntEnum
-from functools import partial
 
 import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.sharding import NamedSharding, PartitionSpec
 
 from .base import BasePrimitive, register_primitive
-from ..sharding import get_padded_spec
+from .misc import get_padded_spec
 
 __all__ = [
     "ScoreFunction",
@@ -22,6 +21,8 @@ __all__ = [
 
 
 class ScoreFunction(IntEnum):
+    """Score function enum for fused MoE router kernels."""
+
     SIGMOID = 0
     SOFTMAX = 1
 
