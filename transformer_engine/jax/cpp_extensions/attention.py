@@ -699,6 +699,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         arg_shardings[-2] = arg_shardings[-4]
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+
+        if config.qkv_layout.is_separate():
+            q_spec = get_padded_spec(arg_infos[0])
+            k_spec = get_padded_spec(arg_infos[1])
+            v_spec = get_padded_spec(arg_infos[2])
+            assert q_spec == k_spec == v_spec, (
+                f"Q, K, and V sharding specs must be identical but received {q_spec=}, {k_spec=},"
+                f" {v_spec=}"
+            )
+
         impl = partial(FusedAttnFwdPrimitive.impl, config=config)
         return mesh, impl, out_shardings, arg_shardings
 
