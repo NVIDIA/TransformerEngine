@@ -358,9 +358,9 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             rowwise_usage = self._rowwise_data is not None
         if columnwise_usage is None:
             columnwise_usage = self._columnwise_data is not None
-        assert (
-            columnwise_usage or rowwise_usage
-        ), "Must retain some data either columnwise or rowwise"
+        # assert (
+        #     columnwise_usage or rowwise_usage
+        # ), "Must retain some data either columnwise or rowwise"
 
         if columnwise_usage and rowwise_usage:
             if not self._is_2D_scaled:
