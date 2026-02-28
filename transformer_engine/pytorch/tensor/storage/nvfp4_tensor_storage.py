@@ -316,6 +316,17 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         if columnwise_usage is None:
             columnwise_usage = self._columnwise_data is not None
 
+        # If both rowwise and columnwise are requested, create columnwise from rowwise if needed
+        if rowwise_usage and columnwise_usage:
+            assert (
+                self._rowwise_data is not None
+                and self._rowwise_scale_inv is not None
+                and self._amax_rowwise is not None
+            ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
+            if self._columnwise_data is None or self._columnwise_scale_inv is None:
+                self._create_columnwise()
+                return
+
         # Update row-scaled data
         if rowwise_usage:
             if self._rowwise_data is None:
@@ -356,3 +367,51 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             self._columnwise_data = None
             self._columnwise_scale_inv = None
             self._amax_columnwise = None
+
+    def _create_columnwise(self):
+        """
+        Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
+        """
+        assert (
+            self._quantizer is not None and self._quantizer.with_2d_quantization
+        ), "Cannot create columnwise data without 2D quantization enabled."
+        rowwise_data = self._rowwise_data
+        if not rowwise_data.is_contiguous():
+            rowwise_data = rowwise_data.contiguous()
+        # NVFP4 requires a specialized transpose that handles nibble repacking
+        self._columnwise_data = tex.nvfp4_data_transpose(rowwise_data, out=self._columnwise_data)
+        if self._columnwise_scale_inv is None:
+            assert self._quantizer is not None
+            # Use logical shape (self.size()), not packed byte shape (rowwise_data.shape)
+            # NVFP4 packs 2 elements per byte, so rowwise_data.shape[-1] is K/2
+            logical_shape = self.size()
+            columnwise_scale_inv_shape = self._quantizer.get_scale_shape(logical_shape, True)
+            self._columnwise_scale_inv = torch.empty(
+                columnwise_scale_inv_shape,
+                dtype=self._rowwise_scale_inv.dtype,
+                device=self._rowwise_scale_inv.device,
+            )
+        assert len(self._rowwise_scale_inv.shape) == 2
+        assert len(self._columnwise_scale_inv.shape) == 2
+
+        # rowwise_scale_inv has shape [M_padded, K_tiles] where each tile's scale
+        # is repeated 16 times (once per row in the 16x16 tile).
+        # columnwise_scale_inv has shape [K_padded, M_tiles] where scales are
+        # repeated 16 times per tile row.
+        TILE_SIZE = 16
+        logical_shape = self.size()
+        M, K = logical_shape[0], logical_shape[-1]
+        M_tiles = (M + TILE_SIZE - 1) // TILE_SIZE
+        K_tiles = (K + TILE_SIZE - 1) // TILE_SIZE
+
+        tex.nvfp4_2d_scale_transpose(
+            self._rowwise_scale_inv,
+            self._columnwise_scale_inv,
+            M_tiles,
+            K_tiles,
+        )
+
+        # Also set columnwise amax (same as rowwise since it's just transposed data)
+        if self._amax_columnwise is None:
+            self._amax_columnwise = torch.empty_like(self._amax_rowwise)
+        self._amax_columnwise.copy_(self._amax_rowwise)

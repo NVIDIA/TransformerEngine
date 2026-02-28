@@ -163,7 +163,6 @@ list(APPEND transformer_engine_cuda_sources
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
-     recipe/nvfp4.cu
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
@@ -182,6 +181,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
+     recipe/nvfp4.cu
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 

@@ -273,6 +273,44 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_data_transpose", &transformer_engine::pytorch::nvfp4_data_transpose,
+        "Transpose NVFP4 packed data with nibble repacking", py::arg("input"), py::kw_only(),
+        py::arg("out"), py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "nvfp4_2d_scale_transpose", &transformer_engine::pytorch::nvfp4_2d_scale_transpose,
+      "Transpose NVFP4 tile-level scales (E4M3 stored as uint8) from rowwise to columnwise format",
+      py::arg("input"), py::arg("output"), py::arg("M_tiles"), py::arg("K_tiles"),
+      py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_expand_scale_to_fp8", &transformer_engine::pytorch::nvfp4_expand_scale_to_fp8,
+        "Expand tile-level scales to row-level scales and convert to FP8 E4M3", py::arg("input"),
+        py::arg("output"), py::arg("tile_rows"), py::arg("tile_cols"), py::arg("rows_padded"),
+        py::arg("block_len"), py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_compute_per_block_scale",
+        &transformer_engine::pytorch::nvfp4_compute_per_block_scale,
+        "Compute per-block decode scale from block amax and global amax", py::arg("block_amax"),
+        py::arg("scale"), py::arg("global_amax"), py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_compute_global_scale", &transformer_engine::pytorch::nvfp4_compute_global_scale,
+        "Compute global encode scale from global amax", py::arg("global_amax"),
+        py::arg("global_scale"), py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_fused_scale", &transformer_engine::pytorch::nvfp4_fused_scale,
+        "Fused kernel: compute per-block decode scale, copy global amax, expand to row-level FP8",
+        py::arg("block_amax"), py::arg("global_amax"), py::arg("per_block_scale"),
+        py::arg("target_scale"), py::arg("target_amax"), py::arg("tile_rows"), py::arg("tile_cols"),
+        py::arg("rows_padded"), py::arg("block_len"), py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_multi_tensor_fused_scale",
+        &transformer_engine::pytorch::nvfp4_multi_tensor_fused_scale,
+        "Batched fused scale: compute per-block decode scale, copy global amax, expand to FP8 for "
+        "multiple tensors",
+        py::arg("block_amax_list"), py::arg("global_amax_list"), py::arg("per_block_scale_list"),
+        py::arg("target_scale_list"), py::arg("target_amax_list"), py::arg("tile_rows_list"),
+        py::arg("tile_cols_list"), py::arg("rows_padded_list"), py::arg("block_len"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_2d_multi_tensor_transpose",
+        &transformer_engine::pytorch::nvfp4_2d_multi_tensor_transpose,
+        "Batched NVFP4 columnwise creation: transpose data and scales for multiple tensors",
+        py::arg("rowwise_data_list"), py::arg("columnwise_data_list"),
+        py::arg("rowwise_scale_inv_list"), py::arg("columnwise_scale_inv_list"), py::arg("M_list"),
+        py::arg("K_list"), py::call_guard<py::gil_scoped_release>());
   m.def("swap_first_dims", &transformer_engine::pytorch::swap_first_dims,
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
@@ -295,6 +333,29 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
         py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
+  // NVFP4 2D
+  m.def("nvfp4_2d_compute_partial_amax",
+        &transformer_engine::pytorch::nvfp4_2d_compute_partial_amax,
+        "Compute partial amax from master weights for NVFP4 2D", py::arg("tensor"), py::arg("amax"),
+        py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len") = 16,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_multi_tensor_compute_partial_amax",
+        &transformer_engine::pytorch::nvfp4_multi_tensor_compute_partial_amax,
+        "Batched compute partial and global amax from master weights for NVFP4 2D",
+        py::arg("master_weight_list"), py::arg("partial_amax_list"), py::arg("global_amax_list"),
+        py::arg("h_list"), py::arg("w_list"), py::arg("start_offset_list"),
+        py::arg("block_len") = 16, py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_2d_partial_cast", &transformer_engine::pytorch::nvfp4_2d_partial_cast,
+        "Partial cast from master weights for NVFP4 2D", py::arg("inp"), py::arg("out"),
+        py::arg("scale"), py::arg("global_scale"), py::arg("h"), py::arg("w"),
+        py::arg("start_offset"), py::arg("block_len") = 16,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvfp4_multi_tensor_2d_partial_cast",
+        &transformer_engine::pytorch::nvfp4_multi_tensor_2d_partial_cast,
+        "Batched partial cast from master weights for NVFP4 2D", py::arg("inp_list"),
+        py::arg("out_list"), py::arg("scale_list"), py::arg("global_scale_list"), py::arg("h_list"),
+        py::arg("w_list"), py::arg("start_offset_list"), py::arg("block_len") = 16,
+        py::call_guard<py::gil_scoped_release>());
   m.def("mxfp8_scaling_compute_partial_amax",
         &transformer_engine::pytorch::mxfp8_scaling_compute_partial_amax,
         "Compute partial amax from master weights for fp8 mxfp8 scaling", py::arg("input"),
