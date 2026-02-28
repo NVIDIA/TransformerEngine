@@ -424,6 +424,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_scale", &transformer_engine::pytorch::multi_tensor_scale_cuda,
         "Fused overflow check + scale for a list of contiguous tensors",
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_scale_tensor", &transformer_engine::pytorch::multi_tensor_scale_tensor_cuda,
+        "Fused overflow check + scale for a list of contiguous tensors with scale passed as tensor",
+        py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_l2norm", &transformer_engine::pytorch::multi_tensor_l2norm_cuda,
         "Computes L2 norm for a list of contiguous tensors",
         py::call_guard<py::gil_scoped_release>());
