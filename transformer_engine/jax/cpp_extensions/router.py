@@ -7,8 +7,10 @@ from functools import partial
 
 import jax.numpy as jnp
 from jax import dtypes, ffi
+from jax.sharding import NamedSharding, PartitionSpec
 
 from .base import BasePrimitive, register_primitive
+from ..sharding import get_padded_spec
 
 __all__ = [
     "ScoreFunction",
@@ -156,12 +158,41 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(*args, **kwargs):
-        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+    def infer_sharding_from_operands(
+        topk, use_pre_softmax, num_groups, group_topk, scaling_factor,
+        score_function, compute_aux_scores,
+        mesh, arg_infos, result_infos,
+    ):
+        del topk, use_pre_softmax, num_groups, group_topk, scaling_factor
+        del score_function, compute_aux_scores, result_infos
+        logits_spec = get_padded_spec(arg_infos[0])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
+        routing_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
+        intermediate_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
+        return [out_sharding, routing_sharding, intermediate_sharding]
 
     @staticmethod
-    def partition(*args, **kwargs):
-        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+    def partition(
+        topk, use_pre_softmax, num_groups, group_topk, scaling_factor,
+        score_function, compute_aux_scores,
+        mesh, arg_infos, result_infos,
+    ):
+        del result_infos
+        logits_spec = get_padded_spec(arg_infos[0])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
+        routing_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
+        intermediate_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
+        out_shardings = [out_sharding, routing_sharding, intermediate_sharding]
+        arg_shardings = (arg_infos[0].sharding, arg_infos[1].sharding)
+
+        def sharded_impl(logits, expert_bias):
+            return FusedTopkWithScoreFunctionFwdPrimitive.impl(
+                logits, expert_bias,
+                topk, use_pre_softmax, num_groups, group_topk,
+                scaling_factor, score_function, compute_aux_scores,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -293,12 +324,33 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(*args, **kwargs):
-        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+    def infer_sharding_from_operands(
+        topk, use_pre_softmax, scaling_factor, score_function, compute_aux_scores,
+        mesh, arg_infos, result_infos,
+    ):
+        del topk, use_pre_softmax, scaling_factor, score_function
+        del compute_aux_scores, result_infos
+        grad_spec = get_padded_spec(arg_infos[2])
+        return NamedSharding(mesh, PartitionSpec(*grad_spec))
 
     @staticmethod
-    def partition(*args, **kwargs):
-        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+    def partition(
+        topk, use_pre_softmax, scaling_factor, score_function, compute_aux_scores,
+        mesh, arg_infos, result_infos,
+    ):
+        del result_infos
+        grad_spec = get_padded_spec(arg_infos[2])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*grad_spec))
+        arg_shardings = (arg_infos[0].sharding, arg_infos[1].sharding, arg_infos[2].sharding)
+
+        def sharded_impl(routing_map, intermediate, grad_probs):
+            return FusedTopkWithScoreFunctionBwdPrimitive.impl(
+                routing_map, intermediate, grad_probs,
+                topk, use_pre_softmax, scaling_factor,
+                score_function, compute_aux_scores,
+            )
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -378,12 +430,31 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(*args, **kwargs):
-        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+    def infer_sharding_from_operands(
+        total_num_tokens, num_experts, topk, coeff,
+        mesh, arg_infos, result_infos,
+    ):
+        del total_num_tokens, num_experts, topk, coeff, arg_infos, result_infos
+        scalar_sharding = NamedSharding(mesh, PartitionSpec(None))
+        return [scalar_sharding, scalar_sharding]
 
     @staticmethod
-    def partition(*args, **kwargs):
-        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+    def partition(
+        total_num_tokens, num_experts, topk, coeff,
+        mesh, arg_infos, result_infos,
+    ):
+        del result_infos
+        scalar_sharding = NamedSharding(mesh, PartitionSpec(None))
+        out_shardings = [scalar_sharding, scalar_sharding]
+        arg_shardings = (arg_infos[0].sharding, arg_infos[1].sharding)
+
+        def sharded_impl(probs, tokens_per_expert):
+            return FusedMoEAuxLossFwdPrimitive.impl(
+                probs, tokens_per_expert,
+                total_num_tokens, num_experts, topk, coeff,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
@@ -450,12 +521,31 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(*args, **kwargs):
-        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+    def infer_sharding_from_operands(
+        num_rows, num_cols,
+        mesh, arg_infos, result_infos,
+    ):
+        del num_rows, num_cols, arg_infos, result_infos
+        return NamedSharding(mesh, PartitionSpec(None, None))
 
     @staticmethod
-    def partition(*args, **kwargs):
-        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+    def partition(
+        num_rows, num_cols,
+        mesh, arg_infos, result_infos,
+    ):
+        del result_infos
+        out_sharding = NamedSharding(mesh, PartitionSpec(None, None))
+        arg_shardings = (
+            arg_infos[0].sharding, arg_infos[1].sharding, arg_infos[2].sharding,
+        )
+
+        def sharded_impl(const_buf, tokens_per_expert, grad_aux_loss):
+            return FusedMoEAuxLossBwdPrimitive.impl(
+                const_buf, tokens_per_expert, grad_aux_loss,
+                num_rows, num_cols,
+            )
+
+        return mesh, sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
