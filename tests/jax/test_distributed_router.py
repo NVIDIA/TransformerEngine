@@ -238,7 +238,9 @@ class TestDistributedScoreForAuxLoss:
             @jax.jit
             def target_fwd(x):
                 return fused_topk_with_score_function(
-                    x, topk=topk, score_function=score_function,
+                    x,
+                    topk=topk,
+                    score_function=score_function,
                     compute_aux_scores=True,
                 )
 
@@ -275,7 +277,9 @@ class TestDistributedScoreForAuxLoss:
             # === Backward ===
             def target_loss(x):
                 s, _ = fused_topk_with_score_function(
-                    x, topk=topk, score_function=score_function,
+                    x,
+                    topk=topk,
+                    score_function=score_function,
                     compute_aux_scores=True,
                 )
                 return jnp.sum(s)
