@@ -810,5 +810,93 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<bool>("is_grouped_dense_wgrad")
                                   .Attr<bool>("use_async_d2h_group_sizes"));
 
+Error_Type GemmInitializeFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv,
+                             Buffer_Type rhs, Buffer_Type rhs_scale_inv, Buffer_Type bias,
+                             Buffer_Type gelu_input, Result_Type output, Result_Type bias_grad,
+                             Result_Type pre_gelu_out, Result_Type workspace,
+                             JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
+                             int64_t rhs_axis_boundary, bool lhs_transposed, bool rhs_transposed,
+                             bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator,
+                             JAXX_Collective_Op collective_op) {
+  return wrapInStreamCapture(std::function(GemmFFI), stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv,
+                             bias, gelu_input, output, bias_grad, pre_gelu_out, workspace,
+                             scaling_mode, lhs_axis_boundary, rhs_axis_boundary, lhs_transposed,
+                             rhs_transposed, fuse_bias, fuse_gelu, grad, use_split_accumulator,
+                             collective_op);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmInitializeHandler, GemmInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // lhs
+                                  .Arg<Buffer_Type>()      // lhs_scale_inv
+                                  .Arg<Buffer_Type>()      // rhs
+                                  .Arg<Buffer_Type>()      // rhs_scale_inv
+                                  .Arg<Buffer_Type>()      // bias
+                                  .Arg<Buffer_Type>()      // gelu_input
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // bias_grad
+                                  .Ret<Buffer_Type>()      // pre_gelu_out
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<int64_t>("lhs_axis_boundary")
+                                  .Attr<int64_t>("rhs_axis_boundary")
+                                  .Attr<bool>("lhs_transposed")
+                                  .Attr<bool>("rhs_transposed")
+                                  .Attr<bool>("fuse_bias")
+                                  .Attr<bool>("fuse_gelu")
+                                  .Attr<bool>("grad")
+                                  .Attr<bool>("use_split_accumulator")
+                                  .Attr<JAXX_Collective_Op>("collective_op"));
+
+Error_Type GroupedGemmD2HGroupSizesInitializeFFI(cudaStream_t stream, Buffer_Type group_sizes,
+                                                 Result_Type dummy_output, size_t num_gemms) {
+  return wrapInStreamCapture(std::function(GroupedGemmD2HGroupSizesFFI), stream, group_sizes,
+                             dummy_output, num_gemms);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesInitializeHandler,
+                              GroupedGemmD2HGroupSizesInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // group_sizes
+                                  .Ret<Buffer_Type>()      // dummy_output
+                                  .Attr<int64_t>("num_gemms"));
+
+Error_Type GroupedGemmInitializeFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
+                                    Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
+                                    Buffer_Type group_sizes, Buffer_Type group_offset,
+                                    Result_Type output, Result_Type workspace, size_t m, size_t n,
+                                    size_t k, bool lhs_is_trans, bool rhs_is_trans,
+                                    JAXX_Scaling_Mode scaling_mode, bool has_bias,
+                                    bool is_grouped_dense_wgrad, bool use_async_d2h_group_sizes) {
+  return wrapInStreamCapture(std::function(GroupedGemmFFI), stream, lhs_data, lhs_sinv, rhs_data,
+                             rhs_sinv, bias, group_sizes, group_offset, output, workspace, m, n, k,
+                             lhs_is_trans, rhs_is_trans, scaling_mode, has_bias,
+                             is_grouped_dense_wgrad, use_async_d2h_group_sizes);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmInitializeHandler, GroupedGemmInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // lhs_data
+                                  .Arg<Buffer_Type>()      // lhs_sinv
+                                  .Arg<Buffer_Type>()      // rhs_data
+                                  .Arg<Buffer_Type>()      // rhs_sinv
+                                  .Arg<Buffer_Type>()      // bias
+                                  .Arg<Buffer_Type>()      // group_sizes
+                                  .Arg<Buffer_Type>()      // group_offset
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attr<int64_t>("M")
+                                  .Attr<int64_t>("N")
+                                  .Attr<int64_t>("K")
+                                  .Attr<bool>("lhs_is_trans")
+                                  .Attr<bool>("rhs_is_trans")
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<bool>("has_bias")
+                                  .Attr<bool>("is_grouped_dense_wgrad")
+                                  .Attr<bool>("use_async_d2h_group_sizes"));
+
 }  // namespace jax
 }  // namespace transformer_engine

@@ -79,10 +79,13 @@ pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_s
                                               bool zero_centered_gamma, int sm_margin);
 
 // Quantization
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasQuantizeInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasQuantizeHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
@@ -91,21 +94,29 @@ pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_
                                                JAXX_Quantize_Layout quantize_layout);
 
 // Softmax
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
 
 // Attention
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(
@@ -132,11 +143,14 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal);
 
 // GEMM
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 
 // Grouped GEMM
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 
 // Amax

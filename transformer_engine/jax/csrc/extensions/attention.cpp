@@ -666,5 +666,74 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnBackwardHandler, FusedAttnBackwardFFI,
                                   .Attrs(),
                               FFI_CudaGraph_Traits);
 
+Error_Type FusedAttnForwardInitializeFFI(
+    cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf, Buffer_Type v_buf,
+    Buffer_Type bias_buf, Buffer_Type seed_buf, Buffer_Type q_cu_seqlens_buf,
+    Buffer_Type kv_cu_seqlens_buf, Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
+    Variadic_Buffer_Type _unused_args, Result_Type output_buf, Result_Type softmax_aux_buf,
+    Result_Type rng_state_buf, Result_Type workspace_buf, Dictionary attrs) {
+  return wrapInStreamCapture(std::function(FusedAttnForwardFFI), stream, q_buf, k_buf, v_buf,
+                             bias_buf, seed_buf, q_cu_seqlens_buf, kv_cu_seqlens_buf,
+                             q_seq_offsets_buf, k_seq_offsets_buf, _unused_args, output_buf,
+                             softmax_aux_buf, rng_state_buf, workspace_buf, attrs);
+}
+
+Error_Type FusedAttnBackwardInitializeFFI(
+    cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf, Buffer_Type v_buf,
+    Buffer_Type bias_buf, Buffer_Type softmax_aux_buf, Buffer_Type rng_state_buf,
+    Buffer_Type output_buf, Buffer_Type doutput_buf, Buffer_Type q_cu_seqlens_buf,
+    Buffer_Type kv_cu_seqlens_buf, Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
+    Variadic_Buffer_Type _unused_args, Result_Type dq_buf, Result_Type dk_buf, Result_Type dv_buf,
+    Result_Type dbias_buf, Result_Type workspace_buf, Dictionary attrs) {
+  return wrapInStreamCapture(std::function(FusedAttnBackwardFFI), stream, q_buf, k_buf, v_buf,
+                             bias_buf, softmax_aux_buf, rng_state_buf, output_buf, doutput_buf,
+                             q_cu_seqlens_buf, kv_cu_seqlens_buf, q_seq_offsets_buf,
+                             k_seq_offsets_buf, _unused_args, dq_buf, dk_buf, dv_buf, dbias_buf,
+                             workspace_buf, attrs);
+}
+
+// FFI Handler Symbols for Initialization
+XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardInitializeHandler, FusedAttnForwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // q
+                                  .Arg<Buffer_Type>()      // k
+                                  .Arg<Buffer_Type>()      // v
+                                  .Arg<Buffer_Type>()      // bias
+                                  .Arg<Buffer_Type>()      // seed_buf
+                                  .Arg<Buffer_Type>()      // q_cu_seqlens
+                                  .Arg<Buffer_Type>()      // kv_cu_seqlens
+                                  .Arg<Buffer_Type>()      // q_seq_offsets
+                                  .Arg<Buffer_Type>()      // k_seq_offsets
+                                  .RemainingArgs()         // _cp_aux_args unused
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // softmax_aux
+                                  .Ret<Buffer_Type>()      // rng_state
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attrs());
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnBackwardInitializeHandler, FusedAttnBackwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // q
+                                  .Arg<Buffer_Type>()      // k
+                                  .Arg<Buffer_Type>()      // v
+                                  .Arg<Buffer_Type>()      // bias
+                                  .Arg<Buffer_Type>()      // softmax_aux
+                                  .Arg<Buffer_Type>()      // rng_state
+                                  .Arg<Buffer_Type>()      // output
+                                  .Arg<Buffer_Type>()      // doutput
+                                  .Arg<Buffer_Type>()      // q_cu_seqlens
+                                  .Arg<Buffer_Type>()      // kv_cu_seqlens
+                                  .Arg<Buffer_Type>()      // q_seq_offsets
+                                  .Arg<Buffer_Type>()      // k_seq_offsets
+                                  .RemainingArgs()         // _cp_aux_args unused
+                                  .Ret<Buffer_Type>()      // dq
+                                  .Ret<Buffer_Type>()      // dk
+                                  .Ret<Buffer_Type>()      // dv
+                                  .Ret<Buffer_Type>()      // dbias
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attrs());
+
 }  // namespace jax
 }  // namespace transformer_engine
