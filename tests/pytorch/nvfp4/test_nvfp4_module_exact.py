@@ -6,7 +6,7 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from transformer_engine.pytorch.custom_recipes import quantization_nvfp4
+from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
 from transformer_engine.pytorch.custom_recipes import utils
 
 
@@ -76,39 +76,36 @@ def get_nvfp4_quantizer_factory(with_rht: bool = False, with_2d_quantization: bo
         with_2d_quantization: Whether to use 2D quantization (16x16 tiles for weights)
 
     Returns:
-        A factory function that takes a role string and returns a quantizer instance
+        A factory function that takes a QuantizerRole and returns a quantizer instance
     """
 
     def factory(role):
-        if role == "linear_input":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+        if role.tensor_type == "input":
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
                 with_rht=with_rht,
             )
-        elif role == "linear_weight":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+        elif role.tensor_type == "weight":
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(16, 16) if with_2d_quantization else (1, 16),
                 pow_2_scales=False,
                 with_rht=False,
             )
-        elif role == "linear_output":
-            # Output quantization not used
+        elif role.tensor_type == "output":
             return None
-        elif role == "linear_grad_output":
-            return quantization_nvfp4.NVFP4QuantizerRef(
+        elif role.tensor_type == "grad_output":
+            return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(1, 16),
                 pow_2_scales=False,
                 with_rht=with_rht,
             )
-        elif role == "linear_grad_input":
-            # Grad input quantization not used
+        elif role.tensor_type == "grad_input":
             return None
         else:
-            # For any other roles, return None
             return None
 
     return factory

@@ -19,7 +19,7 @@ from ...distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...quantization import FP8GlobalStateManager, Recipe
+from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -269,6 +269,21 @@ class BasicLinear(BasicOperation):
         if mode == "backward":
             return 1
         return 0
+
+    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
+        name = getattr(self, "name", "") or ""
+        if mode == "forward":
+            # BasicLinear owns input and weight quantizers.
+            # Output quantizer is provided by the next op (as its input quantizer).
+            return [
+                QuantizerRole(module_type="linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=name),
+            ]
+        if mode == "backward":
+            # BasicLinear owns grad_output quantizer.
+            # Grad_input quantizer is provided by the previous op (as its grad_output quantizer).
+            return [QuantizerRole(module_type="linear", tensor_type="grad_output", name=name)]
+        return None
 
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""

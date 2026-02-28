@@ -23,7 +23,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import WeightGradStore
-from ..quantization import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     divide,
     cast_if_needed,
@@ -743,6 +743,33 @@ class GroupedLinear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``GroupedLinear``.
+
+        For grouped GEMMs we repeat the same pattern for each GEMM in
+        order.  The output (fwd) and grad-input (bwd) slots default to
+        ``None`` (unknown consumer).  Set :attr:`output_quantizer_role` /
+        :attr:`grad_input_quantizer_role` to provide consumer identity.
+        """
+        name = self.name or ""
+        if fwd:
+            base = [
+                QuantizerRole(module_type="grouped_linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="grouped_linear", tensor_type="weight", name=name),
+                self._output_quantizer_role,
+            ]
+        else:
+            base = [
+                QuantizerRole(module_type="grouped_linear", tensor_type="grad_output", name=name),
+                self._grad_input_quantizer_role,
+            ]
+        return [base[i % len(base)] for i in range(num_quantizers)]
 
     def make_grouped_weights(self, defer_init=False) -> None:
         """

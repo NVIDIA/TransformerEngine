@@ -16,6 +16,7 @@ import torch
 from transformer_engine.common.recipe import Recipe
 from ..quantization import (
     FP8GlobalStateManager,
+    QuantizerRole,
     RecipeState,
     autocast,
 )
@@ -209,6 +210,15 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """
         return 0
 
+    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
+        """Return an ordered list of :class:`QuantizerRole` for quantizers.
+
+        The returned list must be aligned with the internal quantizer ordering and
+        must have length ``num_quantizers(mode)`` for supported modes.
+        Returning ``None`` means "no explicit roles".
+        """
+        return None
+
     def get_input_quantizer(self) -> Optional[Quantizer]:
         if self.num_quantizers("forward") > 0:
             return self.get_quantizer("forward", 0)
@@ -268,10 +278,17 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     )
 
                 # Construct quantization recipe state
+                roles = self.get_quantizer_roles(mode)
+                if roles is not None:
+                    assert len(roles) == num_quantizers, (
+                        "Recipe roles must match number of quantizers "
+                        f"({len(roles)=} vs {num_quantizers=})"
+                    )
                 recipe_state = RecipeState.create(
                     recipe,
                     mode=mode,
                     num_quantizers=num_quantizers,
+                    roles=roles,
                 )
                 fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
                     forward=(mode == "forward"),

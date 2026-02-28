@@ -499,19 +499,24 @@ class CustomRecipe(Recipe):
     Parameters
     ----------
     qfactory : Callable
-        Factory callable that returns a quantizer instance for a
-        given semantic tensor role.
-        The callable is typically invoked as::
+        Factory callable that returns a quantizer instance for a given `QuantizerRole`.
+        The callable is invoked as::
 
             qfactory(
-                role: str,
-            )
+                role: QuantizerRole,
+            ) -> Optional[Quantizer]
 
-        Where `role` is one of the following strings for e.g. te.Linear
-        (stable public contract):
+        `QuantizerRole` is a frozen dataclass with the following fields:
 
-        - forward:  "linear_input", "linear_weight", "linear_output"
-        - backward: "linear_grad_output", "linear_grad_input"
+        - `module_type` (str): module type (empty string when not set), e.g.
+          `"linear"`, `"grouped_linear"`, `"dpa"`.
+        - `tensor_type` (str): what tensor is being quantized (empty
+        string when not set), e.g. `"input"`, `"weight"`, `"grad_output"`.
+        - `name` (str): caller-provided module instance name (empty
+          string when not set), e.g. `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`.
+
+        See `transformer_engine.pytorch.quantization.QuantizerRole`
+        for full documentation.
     """
 
     qfactory: Callable[..., Any]

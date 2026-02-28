@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import abc
+import dataclasses
 import itertools
 import functools
 import warnings
@@ -41,7 +42,51 @@ __all__ = [
     "is_nvfp4_available",
     "get_default_recipe",
     "get_align_size_for_quantization",
+    "QuantizerRole",
 ]
+
+
+@dataclasses.dataclass(frozen=True)
+class QuantizerRole:
+    """Identity of a tensor slot requesting a quantizer.
+
+    TE modules populate all fields they know about.
+    User factories inspect only the fields they care about.
+
+    .. warning::
+        **EXPERIMENTAL**: QuantizerRole is experimental, still under active development,
+        and the API is subject to change without notice. Use at your own risk.
+
+    Fields
+    ------
+    module_type : str
+        Module type that emits this role, e.g. `"linear"`, `"grouped_linear"`, `"dpa"`.
+        Empty string when not provided.
+    tensor_type : str
+        What tensor is being quantized, in the module's own vocabulary.
+        Linear modules: `"input"`, `"weight"`, `"grad_output"`, etc.
+        DPA: `"qkv"`, `"s"`, etc.
+        Empty string when not provided.
+    name : str
+        Caller-provided module instance name (e.g. set by the training
+        framework), e.g.
+        `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`, `"linear_39"`.
+        Empty string when not provided.
+    """
+
+    module_type: str = ""
+    tensor_type: str = ""
+    name: str = ""
+
+    def __str__(self) -> str:
+        parts = []
+        if self.module_type:
+            parts.append(f"module_type={self.module_type}")
+        if self.tensor_type:
+            parts.append(f"tensor_type={self.tensor_type}")
+        if self.name:
+            parts.append(f"name={self.name}")
+        return "|".join(parts) if parts else "QuantizerRole()"
 
 
 @functools.lru_cache(maxsize=None)
@@ -992,6 +1037,7 @@ class RecipeState(abc.ABC):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[list[QuantizerRole]] = None,
     ) -> RecipeState:
         """Factory method to create the state for a quantization recipe
 
@@ -1005,6 +1051,8 @@ class RecipeState(abc.ABC):
             Number of quantizers to create state for.
         device: torch.device, default = default CUDA device
             Device for quantized tensors.
+        roles: list of QuantizerRole, optional
+            Semantic roles for each quantizer slot.
 
         Returns
         -------
@@ -1028,12 +1076,15 @@ class RecipeState(abc.ABC):
             cls = CustomRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
-        return cls(
+        state = cls(
             recipe,
             mode=mode,
             num_quantizers=num_quantizers,
             device=device,
         )
+        # Optional QuantizerRole objects
+        state.roles = roles
+        return state
 
     @abc.abstractmethod
     def make_quantizers(self) -> list:
@@ -1381,26 +1432,24 @@ class CustomRecipeState(RecipeState):
 
     def make_quantizers(self) -> list:
         qfactory = self.recipe.qfactory
+
+        roles: List[QuantizerRole] = getattr(self, "roles", None)
+        if roles is None:
+            warnings.warn(
+                "CustomRecipeState: no QuantizerRole list provided by the module/op. "
+                "Falling back to bare QuantizerRole() defaults. "
+                "Override get_quantizer_roles() to provide meaningful roles.",
+                stacklevel=2,
+            )
+            roles = [QuantizerRole() for _ in range(self.num_quantizers)]
+        if len(roles) != self.num_quantizers:
+            raise ValueError(
+                "CustomRecipeState requires roles to match num_quantizers "
+                f"({len(roles)=} vs {self.num_quantizers=})"
+            )
+
         out = []
-
-        # TODO(negvet): make_quantizers() should take roles from the operation
-        # Hardcode linear-specific roles for now
-        roles: List[str]
-        if self.mode == "forward":
-            roles = [
-                ("linear_input", "linear_weight", "linear_output")[i % 3]
-                for i in range(self.num_quantizers)
-            ]
-        elif self.mode == "backward":
-            roles = [
-                ("linear_grad_output", "linear_grad_input")[i % 2]
-                for i in range(self.num_quantizers)
-            ]
-        else:
-            roles = ["unknown"] * self.num_quantizers
-
         for i in range(self.num_quantizers):
-            # Get quantizer from the user defined factory
             quantizer = qfactory(roles[i])
             out.append(quantizer)
         return out
