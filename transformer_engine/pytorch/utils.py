@@ -12,7 +12,6 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 
-from .quantized_tensor import Quantizer
 from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
@@ -444,16 +443,6 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
             "FP8 execution requires the product of all dimensions except the last to be divisible"
             " by 8 and the last dimension to be divisible by 16, but got tensor with"
             f" dims={list(tensor.size())}"
-        )
-
-
-def assert_dim_for_all_gather(
-    tensor: torch.Tensor, with_all_gather: bool, quantizer: Quantizer
-) -> None:
-    """Assert that tensor dimensions are supported for all-gather"""
-    if with_all_gather:
-        assert quantizer.is_quantizable(tensor), (
-            "All-gather requires quantizable tensor for quantizer " + quantizer.__class__.__name__
         )
 
 
