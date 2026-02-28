@@ -1194,6 +1194,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
         assert (
             self.parallel_mode in GemmParallelModes
         ), f"parallel_mode {parallel_mode} not supported"
+        if self.parallel_mode == "row":
+            raise NotImplementedError(
+                "Normalization does not support tensor-parallel distribution."
+            )
 
         if self.parallel_mode == "column":
             self.out_features = divide(self.out_features, self.tp_size)
