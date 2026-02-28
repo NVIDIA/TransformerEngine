@@ -6,6 +6,9 @@
 
 #include <pybind.h>
 
+#include <functional>
+#include <numeric>
+
 #include "common.h"
 #include "pybind.h"
 #include "torch/torch.h"
@@ -1706,6 +1709,29 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_unquantized_tensor_w
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+/**
+ * @brief Compress an N-D shape into a 2-D shape by flattening all but the last dimension.
+ *
+ * This utility is intended for comparing N-dimensional tensor shapes in a 2D space:
+ * it multiplies (flattens) every dimension except the final one into a single leading
+ * dimension, and keeps the last dimension unchanged.
+ *
+ * Example: [d0, d1, d2, ..., d{n-2}, d{n-1}] -> [d0*d1*...*d{n-2}, d{n-1}]
+ *
+ * If the input has 2 or fewer dimensions, it is returned unchanged.
+ */
+std::vector<size_t> compressShapeTo2D(const std::vector<size_t>& data) {
+  // If 2 or fewer elements, return as-is
+  if (data.size() <= 2) {
+    return data;
+  }
+  // Multiply all elements except the last
+  size_t product = std::accumulate(data.begin(), data.end() - 1, static_cast<size_t>(1),
+                                   std::multiplies<size_t>());
+  // Return new vector of size 2: {product, last}
+  return std::vector<size_t>{product, data.back()};
+}
+
 std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     py::object tensor) const {
   NVTE_CHECK(detail::IsNVFP4Tensor(tensor.ptr()), "NVFP4Quantizer must output to IsNVFP4Tensor.");
@@ -1735,8 +1761,11 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
     if (rowwise_data) {
       auto expected_shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
-      NVTE_CHECK(shape == expected_shape, "NVFP4 row-wise data (shape=", expected_shape,
-                 ") and column-wise data (shape=", shape, ") do not match");
+      auto expected_shape_2d = compressShapeTo2D(expected_shape);
+      auto shape_2d = compressShapeTo2D(shape);
+      NVTE_CHECK(shape_2d == expected_shape_2d, "NVFP4 row-wise data (2D shape=", expected_shape_2d,
+                 ") and column-wise data (2D shape=", shape_2d, ") do not match");
+      shape = expected_shape;
     }
   } else {  // Already checked columnwise_data_tensor == true
     shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
