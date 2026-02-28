@@ -394,8 +394,14 @@ class FusedAdam(torch.optim.Optimizer):
             store_param_remainders (bool): Store only trailing remainder bits.
         """
         dtype = self.name_to_dtype_map[state_name]
+        # Extract local tensor from DTensor (e.g. from FSDP2) to avoid
+        # QuantizedTensor.__torch_dispatch__ ignoring the dtype kwarg in
+        # torch.empty_like, and to ensure optimizer states are plain tensors.
+        local_param = param._local_tensor if isinstance(param, DTensor) else param
         # Handle QuantizedTensor by dequantizing first
-        param_for_empty = param.dequantize() if isinstance(param, QuantizedTensor) else param
+        param_for_empty = (
+            local_param.dequantize() if isinstance(local_param, QuantizedTensor) else local_param
+        )
         if store_param_remainders:
             data = torch.zeros_like(param_for_empty, dtype=torch.int16)
         else:
@@ -440,7 +446,14 @@ class FusedAdam(torch.optim.Optimizer):
                 store_param_remainders=store_param_remainders,
             )
             if not store_param_remainders:
-                self.set_scaled_state(param, "master_param", param.clone().detach().float())
+                # Extract local tensor from DTensor and dequantize QuantizedTensor
+                # to get a plain float32 copy for the master weight.
+                local_param = param._local_tensor if isinstance(param, DTensor) else param
+                if isinstance(local_param, QuantizedTensor):
+                    master = local_param.dequantize(dtype=torch.float32).clone().detach()
+                else:
+                    master = local_param.clone().detach().float()
+                self.set_scaled_state(param, "master_param", master)
 
     def state_dict(self):
         """Override the state_dict() of pytorch. Before returning the state_dict, cast all
@@ -575,6 +588,10 @@ class FusedAdam(torch.optim.Optimizer):
 
                 if p_grad is None:
                     continue
+                # Extract local tensors from DTensors (e.g. from FSDP2)
+                # so that multi_tensor kernels receive plain CUDA tensors.
+                if isinstance(p_grad, DTensor):
+                    p_grad = p_grad._local_tensor
                 if p_grad.data.is_sparse:
                     raise RuntimeError("FusedAdam does not support sparse gradients.")
 
@@ -594,10 +611,10 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state[name])
                             state_scales[name].append(self._scales[p][name])
-                if isinstance(p, Float8Tensor) or (
-                    isinstance(p, DTensor) and isinstance(p._local_tensor, Float8Tensor)
-                ):
-                    p = p._local_tensor if isinstance(p, DTensor) else p
+                # Extract local tensor from DTensor param for multi_tensor kernels
+                if isinstance(p, DTensor):
+                    p = p._local_tensor
+                if isinstance(p, Float8Tensor):
                     out_dtype = p._fp8_dtype
                     p_fp8_model.append(p._data.data)
                     scale, amax, scale_inv = get_fp8_meta(p)

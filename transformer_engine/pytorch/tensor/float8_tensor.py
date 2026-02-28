@@ -284,6 +284,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
 
+    def __getstate__(self):
+        """Exclude unpicklable process group from serialized state."""
+        state = self.__dict__.copy()
+        state["amax_reduction_group"] = None
+        return state
+
     def copy(self) -> Float8CurrentScalingQuantizer:
         """Create shallow copy"""
 

@@ -9,12 +9,7 @@ import sys
 import argparse
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import (
-    Format,
-    DelayedScaling,
-    Float8CurrentScaling,
-    MXFP8BlockScaling,
-)
+import transformer_engine.common.recipe
 
 import torch
 import torch.distributed as dist
@@ -43,14 +38,23 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument("--seq-length", type=int, default=128, help="Sequence length of input")
     parser.add_argument("--params-dtype", type=str, default="float32", help="Parameter dtype.")
     parser.add_argument(
-        "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
+        "--fp8-init",
+        action="store_true",
+        default=False,
+        help="Initialize primary weights in FP8.",
     )
     parser.add_argument(
         "--recipe",
         type=str,
-        default="mx_fp8_block_scaling",
+        default="MXFP8BlockScaling",
         help="Quantizer type.",
-        choices=["delayed_scaling", "current_scaling", "mx_fp8_block_scaling"],
+        choices=[
+            "DelayedScaling",
+            "Float8CurrentScaling",
+            "Float8BlockScaling",
+            "MXFP8BlockScaling",
+            "NVFP4BlockScaling",
+        ],
     )
     parser.add_argument(
         "--layer-type",
@@ -110,15 +114,8 @@ def get_te_layer_from_string(layer_name):
     return te_layer_map[layer_name.lower()]
 
 
-def get_recipe_from_string(recipe, fp8_format=Format.HYBRID):
-    if recipe == "delayed_scaling":
-        return DelayedScaling(fp8_format=fp8_format, amax_history_len=16, amax_compute_algo="max")
-    elif recipe == "current_scaling":
-        return Float8CurrentScaling(fp8_format=fp8_format)
-    elif recipe == "mx_fp8_block_scaling":
-        return MXFP8BlockScaling(fp8_format=fp8_format)
-    else:
-        raise ValueError(f"Unknown quantizer type: {recipe}")
+def get_recipe_from_string(recipe):
+    return getattr(transformer_engine.common.recipe, recipe)()
 
 
 def init_te_model(config):
@@ -244,7 +241,7 @@ def test_fp8_fsdp2_allgather(model):
             module.unshard()
     # Make sure allgathered parameters match exactly
     for name, param in model.named_parameters():
-        assert torch.allclose(param.dequantize(), fp32_allgathered_params[name])
+        torch.testing.assert_close(param.dequantize(), fp32_allgathered_params[name])
     # Revert model to original sharded state
     for module in model.modules():
         # Not all modules are wrapped/sharded with FSDP2.
@@ -278,8 +275,7 @@ def _train(args):
     device = torch.device(f"cuda:{LOCAL_RANK}")
 
     # FP8 Configuration
-    fp8_format = Format.HYBRID
-    fp8_recipe = get_recipe_from_string(args.recipe, fp8_format)
+    fp8_recipe = get_recipe_from_string(args.recipe)
 
     build_model_context_args = {}
     if not args.fp8_init:
@@ -292,13 +288,13 @@ def _train(args):
         build_model_context_args["enabled"] = True
         build_model_context_args["recipe"] = fp8_recipe
 
-    dist_print(f"Memory before model init: {torch.cuda.memory_allocated(device)/1e6} MB")
+    dist_print(f"Memory before model init: {torch.cuda.memory_allocated(device) / 1e6} MB")
     # Create the model on the meta/cuda device as per args
     with build_model_context(**build_model_context_args):
         model, inp_shape, out_shape = init_te_model(args)
     dist_print(
         f"Memory after model init on device {args.device}:"
-        f" {torch.cuda.memory_allocated(device)/1e6} MB"
+        f" {torch.cuda.memory_allocated(device) / 1e6} MB"
     )
 
     # Creating a DeviceMesh for fully_shard
@@ -319,7 +315,7 @@ def _train(args):
         dist_print(f" Sharded parameters materialized and initialized on cuda device.")
 
     dist_print(
-        f"FSDP2 model in cuda, memory allocated: {torch.cuda.memory_allocated(device)/1e6} MB"
+        f"FSDP2 model in cuda, memory allocated: {torch.cuda.memory_allocated(device) / 1e6} MB"
     )
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -327,11 +323,20 @@ def _train(args):
     for iteration in range(args.iter):
         # Zero the parameter gradients
         optimizer.zero_grad()
-        input_data = torch.randn(inp_shape).to(device)
-        with te.autocast(enabled=True, recipe=fp8_recipe):
-            output = model(input_data)
-        target = torch.randn(out_shape).to(device)
-        loss = F.mse_loss(output, target)
+
+        input_data = torch.randn(inp_shape, device=device)
+        target = torch.randn(out_shape, device=device)
+
+        # NVFP4BlockScaling requires bfloat16 inputs in both the forward and backward passes.
+        with (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if args.recipe == "NVFP4BlockScaling"
+            else nullcontext()
+        ):
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                output = model(input_data)
+                loss = F.mse_loss(output, target)
+
         loss.backward()
         optimizer.step()
         dist_print(f"Iteration {iteration} completed with loss {loss.item()}")
