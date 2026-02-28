@@ -94,6 +94,13 @@ def dense(
     if transpose_batch_sequence:
         warnings.warn("transpose_batch_sequence is not well tested, use with caution!")
 
+    if collective_op_set != tex.noop_collective_op_set and not output_axes:
+        warnings.warn(
+            "Collective GEMM with Shardy propagation may produce an incorrect sharding pattern"
+            " for the output. Set `output_axes` to apply the correct sharding constraint.",
+            UserWarning,
+        )
+
     if quantizer_set == noop_quantizer_set:
         input_dtype = x.dtype
         kernel = kernel.astype(input_dtype)

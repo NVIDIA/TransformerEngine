@@ -88,8 +88,6 @@ def _jitted_cgemm(x, weight, bias, contracting_dims, collective_op, output_shard
 def run_gemm_tests(args, mesh=None):
     """Execute GEMM tests."""
     print(args)
-    # Collective GEMM requires Shardy partitioner to be disabled
-    jax.config.update("jax_use_shardy_partitioner", False)
 
     # Initialize distributed with provided arguments
     _initialize_distributed(args)
@@ -137,8 +135,7 @@ def run_gemm_tests(args, mesh=None):
             bias_sharded,
             contracting_dims=((2,), (0,)),
             collective_op=collective_op,
-            # CollectiveGEMM output should have a correct sharding without applying sharding constraint
-            output_sharding=None,
+            output_sharding=output_sharding,
         )
         assert (
             ref_output.sharding == output.sharding
