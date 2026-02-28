@@ -98,6 +98,12 @@ class _GroupedLinear(torch.autograd.Function):
             save_original_input,
             debug,
         ) = non_tensor_args
+        if fp8:
+            backward_mode = FP8GlobalStateManager.get_fp8_recipe().backward_mode
+        else:
+            backward_mode = "default"
+        if backward_mode == "unquant":
+            save_original_input = True
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
@@ -113,10 +119,15 @@ class _GroupedLinear(torch.autograd.Function):
                 input_quantizer.set_usage(
                     rowwise=True,
                     columnwise=(
-                        is_grad_enabled and weight_requires_grad and not save_original_input
+                        is_grad_enabled
+                        and weight_requires_grad
+                        and not save_original_input
+                        and backward_mode == "default"
                     ),
                 )
             columnwise_usage = is_grad_enabled and inp.requires_grad
+            if backward_mode in ("unquant", "dequant"):
+                columnwise_usage = False
             if not columnwise_usage:
                 columnwise_usage = (
                     is_fp8_activation_recompute_enabled()
@@ -241,7 +252,12 @@ class _GroupedLinear(torch.autograd.Function):
                 else:
                     for inputmat in inputmats:
                         if isinstance(inputmat, QuantizedTensorStorage):
-                            inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+                            if backward_mode in ("unquant", "dequant"):
+                                # In dequant mode we should dequantize directly from
+                                # fprop quantized layouts without retargeting usage.
+                                inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
+                            else:
+                                inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
             else:
                 inputmats = [None] * num_gemms
 
@@ -292,6 +308,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            ctx.backward_mode = backward_mode
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
@@ -309,6 +326,17 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.debug = debug
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
+
+            # Non-quantized backward mode overrides
+            if backward_mode in ("unquant", "dequant"):
+                ctx.fp8 = False
+                ctx.ub_overlap_ag = False
+                ctx.ub_overlap_rs_dgrad = False
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_bulk_wgrad = False
+                ctx.grad_input_quantizer = None
+                ctx.grad_weight_quantizer = None
+                ctx.grad_output_quantizer = None
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -404,13 +432,25 @@ class _GroupedLinear(torch.autograd.Function):
                     dtype=ctx.activation_dtype,
                     device=ctx.device,
                 )
+                weights_for_dgrad = weights
+                if ctx.backward_mode == "dequant":
+                    weights_for_dgrad = [
+                        (
+                            weight.dequantize(dtype=ctx.activation_dtype)
+                            if isinstance(weight, QuantizedTensorStorage)
+                            else cast_if_needed(weight, ctx.activation_dtype)
+                        )
+                        for weight in weights
+                    ]
+                elif ctx.backward_mode == "unquant":
+                    weights_for_dgrad = origin_weights
                 # Make sure weights are available in column-wise format
                 # for dgrad computation.
-                for weight in weights:
+                for weight in weights_for_dgrad:
                     if isinstance(weight, QuantizedTensorStorage):
                         weight.update_usage(columnwise_usage=True)
                 general_grouped_gemm(
-                    weights,
+                    weights_for_dgrad,
                     grad_output,
                     [dgrad],
                     ctx.grad_input_quantizers,
@@ -465,6 +505,30 @@ class _GroupedLinear(torch.autograd.Function):
                         inputmats = torch.split(
                             cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
                         )
+                elif ctx.backward_mode == "dequant":
+                    inputmats_dequant = []
+                    for m_split, inputmat in zip(ctx.m_splits, inputmats):
+                        if isinstance(inputmat, QuantizedTensorStorage):
+                            if m_split == 0:
+                                # Dequant kernels for some quantized storage formats
+                                # (e.g. MXFP8/Float8BlockScaling) do not accept empty
+                                # M-dimension inputs. For empty grouped splits, materialize
+                                # an explicit empty high-precision matrix instead of invoking
+                                # dequantize().
+                                inputmats_dequant.append(
+                                    torch.empty(
+                                        (0, ctx.weights_shape_1),
+                                        dtype=ctx.activation_dtype,
+                                        device=ctx.device,
+                                    )
+                                )
+                            else:
+                                inputmats_dequant.append(
+                                    inputmat.dequantize(dtype=ctx.activation_dtype)
+                                )
+                        else:
+                            inputmats_dequant.append(cast_if_needed(inputmat, ctx.activation_dtype))
+                    inputmats = inputmats_dequant
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm,
                     quantization_params=ctx.grad_weight_quantizers,
@@ -1040,6 +1104,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                 for i in range(self.num_gemms):
                     grad_output_quantizers[i].internal = True
                     grad_output_quantizers[i].optimize_for_gemm = True
+            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if fp8_recipe.backward_mode == "dequant" and (fp8_recipe.mxfp8() or fp8_recipe.nvfp4()):
+                for input_quantizer in input_quantizers:
+                    input_quantizer.optimize_for_gemm = False
+                if torch.is_grad_enabled():
+                    for grad_output_quantizer in grad_output_quantizers:
+                        grad_output_quantizer.optimize_for_gemm = False
         return (
             input_quantizers,
             weight_quantizers,
