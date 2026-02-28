@@ -1143,6 +1143,7 @@ std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size
 
 MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
+  this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
 }
 
 void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
@@ -1421,6 +1422,7 @@ void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
   }
+  quant_config.set_mxfp8_2d_quantization(this->with_2d_quantization);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });

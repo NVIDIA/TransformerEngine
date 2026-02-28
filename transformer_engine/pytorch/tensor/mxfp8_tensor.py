@@ -35,15 +35,20 @@ class MXFP8Quantizer(Quantizer):
 
     dtype: TE_DType
 
+    """2D block scaling, only applicable for weights."""
+    with_2d_quantization: bool
+
     def __init__(
         self,
         fp8_dtype: TE_DType,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
+        with_2d_quantization: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
+        self.with_2d_quantization = with_2d_quantization
 
     def copy(self) -> MXFP8Quantizer:
         """Create shallow copy"""
@@ -52,6 +57,7 @@ class MXFP8Quantizer(Quantizer):
             fp8_dtype=self.dtype,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
+            with_2d_quantization=self.with_2d_quantization,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
