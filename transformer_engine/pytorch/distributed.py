@@ -1934,6 +1934,40 @@ def _get_module_fsdp_state(module):
     return fsdp_state
 
 
+def _convert_param_to_dtensor_param(
+    param: torch.nn.Parameter,
+    device_mesh: torch.distributed.DeviceMesh,
+    placements: Tuple[torch.distributed.tensor.placement_types.Placement],
+    shape: Optional[torch.Size] = None,
+    stride: Optional[Tuple[int]] = None,
+):
+    """Convert the parameter into a DTensor."""
+    from torch.distributed.tensor import DTensor
+
+    # If the parameter is already a DTensor, extract local Tensor.
+    # We overwrite the original DTensor's distributed configuration.
+    param_tensor = param
+    if isinstance(param, DTensor):
+        param_tensor = param.to_local()
+    # Convert the parameter to a DTensor.
+    new_param = torch.nn.Parameter(
+        DTensor.from_local(
+            param_tensor,
+            device_mesh,
+            placements=placements,
+            shape=shape,
+            stride=stride,
+        )
+    )
+    # Inherit attributes of the original Parameter.
+    # For example, "param_init_meta" or "tensor_model_parallel".
+    for key, val in param.__dict__.items():
+        if not hasattr(new_param, key):
+            # Set the original attribute.
+            setattr(new_param, key, val)
+    return new_param
+
+
 def _fsdp_scatter_tensors(
     fsdp_group: dist_group_type,
     *tensors: torch.Tensor,

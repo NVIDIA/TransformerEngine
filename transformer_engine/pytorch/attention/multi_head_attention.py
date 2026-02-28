@@ -7,6 +7,7 @@ import os
 import collections
 from typing import Callable, List, Optional, Tuple, Union
 import torch
+from torch.distributed import DeviceMesh
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
@@ -191,6 +192,19 @@ class MultiheadAttention(torch.nn.Module):
              ``set_tensor_parallel_group(tp_group)`` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
+    tp_mesh : Optional[DeviceMesh], default = None
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+    weight_mesh : Optional[DeviceMesh], default = None
+            A 1-D DeviceMesh containing a weight-sharding mesh dimension. Only required
+            when using the FP8 Current (per-tensor) Scaling recipe on sharded DTensor
+            parameters and if the DTensor DeviceMesh includes dimensions that do not
+            shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
+            For example:
+                - device_mesh["dp"] for FSDP.
+                - device_mesh["dp_cp"] if using CP ranks in FSDP.
+                - device_mesh["tp"] if using TP.
+                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
 
     Optimization parameters
     -----------------------
@@ -286,6 +300,8 @@ class MultiheadAttention(torch.nn.Module):
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
         softmax_type: str = "vanilla",
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
     ) -> None:
         super().__init__()
 
@@ -357,6 +373,13 @@ class MultiheadAttention(torch.nn.Module):
         self.q_norm, self.k_norm = self._create_qk_norm_modules(
             qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size
         )
+        if tp_mesh is not None or weight_mesh is not None:
+            # Apply DeviceMesh and DTensor-related modifications.
+            # Only necessary for trainable weighted norms.
+            if hasattr(self.q_norm, "set_device_mesh"):
+                self.q_norm.set_device_mesh(tp_mesh=tp_mesh, weight_mesh=weight_mesh)
+            if hasattr(self.k_norm, "set_device_mesh"):
+                self.k_norm.set_device_mesh(tp_mesh=tp_mesh, weight_mesh=weight_mesh)
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
@@ -389,6 +412,8 @@ class MultiheadAttention(torch.nn.Module):
                     normalization=normalization,
                     ub_name="qkv",
                     name=name + ".layernorm_linear_qkv" if name is not None else None,
+                    tp_mesh=tp_mesh,
+                    weight_mesh=weight_mesh,
                     **common_gemm_kwargs,
                 )
             else:
@@ -401,6 +426,8 @@ class MultiheadAttention(torch.nn.Module):
                     parallel_mode=qkv_parallel_mode,
                     parameters_split=parameters_split,
                     name=name + ".linear_qkv" if name is not None else None,
+                    tp_mesh=tp_mesh,
+                    weight_mesh=weight_mesh,
                     **common_gemm_kwargs,
                 )
         elif self.attention_type == "cross":
@@ -423,6 +450,8 @@ class MultiheadAttention(torch.nn.Module):
                     normalization=normalization,
                     ub_name="qkv",
                     name=name + ".layernorm_linear_q" if name is not None else None,
+                    tp_mesh=tp_mesh,
+                    weight_mesh=weight_mesh,
                     **common_gemm_kwargs,
                 )
             else:
@@ -433,6 +462,8 @@ class MultiheadAttention(torch.nn.Module):
                     bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
+                    tp_mesh=tp_mesh,
+                    weight_mesh=weight_mesh,
                     **common_gemm_kwargs,
                 )
             self.key_value = Linear(
@@ -444,6 +475,8 @@ class MultiheadAttention(torch.nn.Module):
                 parallel_mode=qkv_parallel_mode,
                 parameters_split=("key", "value") if not fuse_qkv_params else None,
                 name=name + ".linear_kv" if name is not None else None,
+                tp_mesh=tp_mesh,
+                weight_mesh=weight_mesh,
                 **common_gemm_kwargs,
             )
 
@@ -461,6 +494,8 @@ class MultiheadAttention(torch.nn.Module):
             layer_number=self.layer_number,
             attention_type=self.attention_type,
             softmax_type=self.softmax_type,
+            tp_mesh=tp_mesh,
+            weight_mesh=weight_mesh,
         )
 
         # Linear
@@ -475,6 +510,8 @@ class MultiheadAttention(torch.nn.Module):
             ub_overlap_ag=ub_overlap_ag,
             ub_name="proj",
             name=name + ".proj" if name is not None else None,
+            tp_mesh=tp_mesh,
+            weight_mesh=weight_mesh,
             **common_gemm_kwargs,
         )
 
@@ -561,6 +598,62 @@ class MultiheadAttention(torch.nn.Module):
                   tensor parallel process group.
         """
         self.tp_group = tp_group
+
+    def set_device_mesh(
+        self,
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
+    ) -> None:
+        """
+        Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
+        depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
+
+        TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
+        integration with Torch DCP checkpointing. This method should only be invoked when
+        using DTensor parameters, e.g. when using FSDP2 or DCP.
+
+        When FSDP2 fully_shard() encounters any DTensor Shard(s), it will automatically
+        convert them into FSDP-TP strided or non-strided shards depending on the current
+        sharding dimension and factor of the DTensor. When the sharding dimension of FSDP
+        matches that of TP, FSDP uses a _StridedShard placement type instead of Shard.
+        This experimental FSDP-TP logic presides in this FSDP2 initialization function:
+        ``torch.distributed.fsdp._fully_shard._fsdp_param._init_sharded_param``
+
+        Parameters
+        ----------
+        tp_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+        weight_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a weight-sharding mesh dimension. Only required
+            when using the FP8 Current (per-tensor) Scaling recipe on sharded DTensor
+            parameters and if the DTensor DeviceMesh includes dimensions that do not
+            shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
+            For example:
+                - device_mesh["dp"] for FSDP.
+                - device_mesh["dp_cp"] if using CP ranks in FSDP.
+                - device_mesh["tp"] if using TP.
+                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
+        """
+        if tp_mesh is not None:
+            # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
+            assert (
+                tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
+                (
+                    f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                    f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                ),
+            )
+            # Set the tensor parallel group from the mesh.
+            self.set_tensor_parallel_group(tp_mesh.get_group())
+
+        if tp_mesh is not None or weight_mesh is not None:
+            # Iterate through child sub-modules without deep recursion.
+            # Automatically detects TransformerEngine TP modules and
+            # the capability to call this method at any level.
+            for name, child in self.named_children():
+                if hasattr(child, "set_device_mesh"):
+                    child.set_device_mesh(tp_mesh, weight_mesh)
 
     def set_context_parallel_group(
         self,

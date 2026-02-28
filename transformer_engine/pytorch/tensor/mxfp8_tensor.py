@@ -11,6 +11,7 @@ import warnings
 
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+from torch.distributed.tensor import DTensor
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
@@ -727,6 +728,15 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 columnwise_scale_inv = torch.nn.functional.pad(
                     columnwise_scale_inv, (0, 0, 0, pad_dim0)
                 )
+
+        # If out is a DTensor from a previously un-sharded
+        # AG buffer, convert to local Tensor.
+        # FIXME(@cspades): FP8 parameters currently are not
+        # compatible with DCP checkpointing.
+        if isinstance(out, DTensor):
+            # out.to_local() is not supported with Torch Dispatch,
+            # for quantized tensors with _transpose usage.
+            out = out._local_tensor
 
         if out is not None:
             out._rowwise_data = rowwise_data

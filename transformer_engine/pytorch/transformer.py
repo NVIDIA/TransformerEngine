@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from typing import Callable, List, Optional, Tuple, Union
 
 import torch
+from torch.distributed import DeviceMesh
 
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
@@ -248,6 +249,19 @@ class TransformerLayer(torch.nn.Module):
              :meth:`set_tensor_parallel_group` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
+    tp_mesh : Optional[DeviceMesh], default = None
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+    weight_mesh : Optional[DeviceMesh], default = None
+            A 1-D DeviceMesh containing a weight-sharding mesh dimension. Only required
+            when using the FP8 Current (per-tensor) Scaling recipe on sharded DTensor
+            parameters and if the DTensor DeviceMesh includes dimensions that do not
+            shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
+            For example:
+                - device_mesh["dp"] for FSDP.
+                - device_mesh["dp_cp"] if using CP ranks in FSDP.
+                - device_mesh["tp"] if using TP.
+                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
 
     Optimization parameters
     -----------------------
@@ -350,6 +364,8 @@ class TransformerLayer(torch.nn.Module):
         qk_norm_eps: float = 1e-6,
         qk_norm_before_rope: bool = False,
         softmax_type: str = "vanilla",
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
     ) -> None:
         super().__init__()
 
@@ -461,6 +477,8 @@ class TransformerLayer(torch.nn.Module):
             qk_norm_eps=qk_norm_eps,
             qk_norm_before_rope=qk_norm_before_rope,
             name=self.name + ".self_attention" if self.name is not None else None,
+            tp_mesh=tp_mesh,
+            weight_mesh=weight_mesh,
         )
 
         if layer_type == "decoder":
@@ -478,6 +496,8 @@ class TransformerLayer(torch.nn.Module):
                 qk_norm_eps=qk_norm_eps,
                 qk_norm_before_rope=qk_norm_before_rope,
                 name=self.name + ".inter_attention" if self.name is not None else None,
+                tp_mesh=tp_mesh,
+                weight_mesh=weight_mesh,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -514,6 +534,8 @@ class TransformerLayer(torch.nn.Module):
             normalization=normalization,
             device=device,
             name=self.name + ".layernorm_mlp" if self.name is not None else None,
+            tp_mesh=tp_mesh,
+            weight_mesh=weight_mesh,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -544,6 +566,9 @@ class TransformerLayer(torch.nn.Module):
                 zero_centered_gamma=zero_centered_gamma,
                 device=device,
             )
+            if tp_mesh is not None or weight_mesh is not None:
+                if hasattr(self.layernorm, "set_device_mesh"):
+                    self.layernorm.set_device_mesh(tp_mesh=tp_mesh, weight_mesh=weight_mesh)
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
@@ -561,6 +586,62 @@ class TransformerLayer(torch.nn.Module):
                 continue
             if hasattr(child, "set_tensor_parallel_group"):
                 child.set_tensor_parallel_group(tp_group)
+
+    def set_device_mesh(
+        self,
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
+    ) -> None:
+        """
+        Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
+        depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
+
+        TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
+        integration with Torch DCP checkpointing. This method should only be invoked when
+        using DTensor parameters, e.g. when using FSDP2 or DCP.
+
+        When FSDP2 fully_shard() encounters any DTensor Shard(s), it will automatically
+        convert them into FSDP-TP strided or non-strided shards depending on the current
+        sharding dimension and factor of the DTensor. When the sharding dimension of FSDP
+        matches that of TP, FSDP uses a _StridedShard placement type instead of Shard.
+        This experimental FSDP-TP logic presides in this FSDP2 initialization function:
+        ``torch.distributed.fsdp._fully_shard._fsdp_param._init_sharded_param``
+
+        Parameters
+        ----------
+        tp_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+        weight_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a weight-sharding mesh dimension. Only required
+            when using the FP8 Current (per-tensor) Scaling recipe on sharded DTensor
+            parameters and if the DTensor DeviceMesh includes dimensions that do not
+            shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
+            For example:
+                - device_mesh["dp"] for FSDP.
+                - device_mesh["dp_cp"] if using CP ranks in FSDP.
+                - device_mesh["tp"] if using TP.
+                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
+        """
+        if tp_mesh is not None:
+            # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
+            assert (
+                tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
+                (
+                    f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                    f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                ),
+            )
+            # Set the tensor parallel group from the mesh.
+            self.set_tensor_parallel_group(tp_mesh.get_group())
+
+        if tp_mesh is not None or weight_mesh is not None:
+            # Iterate through child sub-modules without deep recursion.
+            # Automatically detects TransformerEngine TP modules and
+            # the capability to call this method at any level.
+            for name, child in self.named_children():
+                if hasattr(child, "set_device_mesh"):
+                    child.set_device_mesh(tp_mesh, weight_mesh)
 
     def reset_fp8_meta_tensors(self) -> None:
         """Set TP group"""

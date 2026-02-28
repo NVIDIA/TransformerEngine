@@ -9,6 +9,8 @@ from operator import mul as multiply_op
 import warnings
 
 import torch
+from torch.distributed import DeviceMesh
+from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 
@@ -50,6 +52,7 @@ from ..distributed import (
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
+    _convert_param_to_dtensor_param,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -1035,6 +1038,19 @@ class Linear(TransformerEngineBaseModule):
                    used to decide whether this Linear layer is Column Parallel Linear or Row
                    Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
                    When set to ``None``, no communication is performed.
+    tp_mesh : Optional[DeviceMesh], default = None
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+    weight_mesh : Optional[DeviceMesh], default = None
+            A 1-D DeviceMesh containing a weight-sharding mesh dimension. Only required
+            when using the FP8 Current (per-tensor) Scaling recipe on sharded DTensor
+            parameters and if the DTensor DeviceMesh includes dimensions that do not
+            shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
+            For example:
+                - device_mesh["dp"] for FSDP.
+                - device_mesh["dp_cp"] if using CP ranks in FSDP.
+                - device_mesh["tp"] if using TP.
+                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
 
     Optimization parameters
     -----------------------
@@ -1098,6 +1114,8 @@ class Linear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
         name: Optional[str] = None,
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1295,6 +1313,9 @@ class Linear(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata()
 
+        if tp_mesh is not None or weight_mesh is not None:
+            # Apply DeviceMesh and DTensor-related modifications.
+            self.set_device_mesh(tp_mesh=tp_mesh, weight_mesh=weight_mesh)
         self.reset_parameters(defer_init=device == "meta")
 
         # For RPL, bias has to be added after TP collectives
@@ -1322,24 +1343,95 @@ class Linear(TransformerEngineBaseModule):
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
+        self._set_tensor_parallel_attributes(defer_init=defer_init)
 
-        if not defer_init:
-            # Set parallelism attributes for linear weights
+    def set_device_mesh(
+        self,
+        tp_mesh: Optional[DeviceMesh] = None,
+        weight_mesh: Optional[DeviceMesh] = None,
+    ) -> None:
+        """
+        Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
+        depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
+
+        TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
+        integration with Torch DCP checkpointing. This method should only be invoked when
+        using DTensor parameters, e.g. when using FSDP2 or DCP.
+
+        When FSDP2 fully_shard() encounters any DTensor Shard(s), it will automatically
+        convert them into FSDP-TP strided or non-strided shards depending on the current
+        sharding dimension and factor of the DTensor. When the sharding dimension of FSDP
+        matches that of TP, FSDP uses a _StridedShard placement type instead of Shard.
+        This experimental FSDP-TP logic presides in this FSDP2 initialization function:
+        ``torch.distributed.fsdp._fully_shard._fsdp_param._init_sharded_param``
+
+        Parameters
+        ----------
+        tp_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
+            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
+        weight_mesh : Optional[DeviceMesh]
+            A 1-D DeviceMesh containing a weight-sharding mesh dimension. Only required
+            when using the FP8 Current (per-tensor) Scaling recipe on sharded DTensor
+            parameters and if the DTensor DeviceMesh includes dimensions that do not
+            shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
+            For example:
+                - device_mesh["dp"] for FSDP.
+                - device_mesh["dp_cp"] if using CP ranks in FSDP.
+                - device_mesh["tp"] if using TP.
+                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
+        """
+        if tp_mesh is not None:
+            # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
+            assert (
+                tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
+                (
+                    f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                    f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
+                ),
+            )
+            # Set the tensor parallel group from the mesh.
+            self.set_tensor_parallel_group(tp_mesh.get_group())
+
+            # Construct TP-sharded DTensors.
+            from torch.distributed.tensor.placement_types import Replicate, Shard
+
             for weight in self.weight_names:
-                set_tensor_model_parallel_attributes(
-                    tensor=getattr(self, weight),
-                    is_parallel=True,
-                    dim=1 if self.parallel_mode == "row" else 0,
-                    stride=1,
+                param = getattr(self, weight)
+                placements = (Replicate(),)
+                if self.parallel_mode == "column":
+                    placements = (Shard(dim=0),)
+                elif self.parallel_mode == "row":
+                    placements = (Shard(dim=1),)
+                setattr(
+                    self,
+                    weight,
+                    _convert_param_to_dtensor_param(param, tp_mesh, placements=placements),
+                )
+            for bias in self.bias_names:
+                param = getattr(self, bias)
+                placements = (Replicate(),)
+                if self.parallel_mode == "column":
+                    placements = (Shard(dim=0),)
+                setattr(
+                    self,
+                    bias,
+                    _convert_param_to_dtensor_param(param, tp_mesh, placements=placements),
                 )
 
-            # Set parallelism attributes for linear biases
-            if self.use_bias:
-                for bias in self.bias_names:
-                    if self.parallel_mode == "row":
-                        setattr(getattr(self, bias), "sequence_parallel", self.sequence_parallel)
-                    elif self.parallel_mode == "column":
-                        set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
+        # Set amax_reduction_group to the FSDP and/or TP sharding mesh
+        # for per-tensor scaling recipes. Parameters must be registered.
+        if weight_mesh is not None and self.quantizers["scaling_fwd"]:
+            for weight in self.weight_names:
+                # Get fp8_meta_index and associated quantizer.
+                fp8_meta_index = self.param_init_meta[weight].fp8_meta_index
+                quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
+                if isinstance(quantizer, Float8CurrentScalingQuantizer):
+                    # If not set, will default to DTensor.device_mesh.get_group()!
+                    # MUST be provided when using HSDP (DP-Replicate) or when the
+                    # DeviceMesh includes dimensions that do not shard weights!
+                    quantizer.amax_reduction_group = weight_mesh.get_group()
+                    quantizer.with_amax_reduction = True
 
     @no_torch_dynamo()
     def forward(
@@ -1519,7 +1611,12 @@ class Linear(TransformerEngineBaseModule):
 
     def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""
-        unfused_weights = [getattr(self, name) for name in self.weight_names]
+        unfused_weights = []
+        for name in self.weight_names:
+            weight = getattr(self, name)
+            if isinstance(weight, DTensor):
+                weight = weight.to_local()
+            unfused_weights.append(weight)
         if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
             if self.fp8:
                 if len(unfused_weights) != 1:
@@ -1534,15 +1631,26 @@ class Linear(TransformerEngineBaseModule):
                 unfused_weights = [w.dequantize() for w in unfused_weights]
         return unfused_weights
 
-    def _get_weight_and_bias_tensors(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # Get concatenated weight and bias tensors
+    def _get_bias_tensors(self) -> List[torch.Tensor]:
+        """Get the bias tensors of the module."""
+        unfused_biases = []
+        for name in self.bias_names:
+            bias = getattr(self, name)
+            if isinstance(bias, DTensor):
+                bias = bias.to_local()
+            unfused_biases.append(bias)
+        return unfused_biases
+
+    def _get_weight_and_bias_tensors(self) -> List[Optional[torch.Tensor]]:
+        # Get concatenated weight and bias tensors.
         unfused_weights = self._get_weight_tensors()
         weight_tensor = noop_cat(unfused_weights)
         if self.use_bias:
-            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+            unfused_biases = self._get_bias_tensors()
+            bias_tensor = noop_cat(unfused_biases)
         else:
             bias_tensor = None
-        return weight_tensor, bias_tensor
+        return [weight_tensor, bias_tensor]
 
     def onnx_forward(
         self,
@@ -1669,3 +1777,23 @@ class Linear(TransformerEngineBaseModule):
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         return [weight_quantizer]
+
+    def _set_tensor_parallel_attributes(self, defer_init=False) -> None:
+        """Set tensor and sequence parallelism attributes."""
+        if not defer_init:
+            # Set parallelism attributes for linear weights
+            for weight in self.weight_names:
+                set_tensor_model_parallel_attributes(
+                    tensor=getattr(self, weight),
+                    is_parallel=True,
+                    dim=1 if self.parallel_mode == "row" else 0,
+                    stride=1,
+                )
+
+            # Set parallelism attributes for linear biases
+            if self.use_bias:
+                for bias in self.bias_names:
+                    if self.parallel_mode == "row":
+                        setattr(getattr(self, bias), "sequence_parallel", self.sequence_parallel)
+                    elif self.parallel_mode == "column":
+                        set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
