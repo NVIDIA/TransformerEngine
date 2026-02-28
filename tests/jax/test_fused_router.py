@@ -123,12 +123,12 @@ def reference_group_limited_topk(
         "reference_group_limited_topk requires valid num_groups > 0. "
         "For plain top-k, use jax.lax.top_k directly."
     )
-    assert group_topk is not None and group_topk > 0, (
-        "reference_group_limited_topk requires valid group_topk > 0."
-    )
-    assert num_experts % num_groups == 0, (
-        f"num_experts ({num_experts}) must be divisible by num_groups ({num_groups})"
-    )
+    assert (
+        group_topk is not None and group_topk > 0
+    ), "reference_group_limited_topk requires valid group_topk > 0."
+    assert (
+        num_experts % num_groups == 0
+    ), f"num_experts ({num_experts}) must be divisible by num_groups ({num_groups})"
     group_size = num_experts // num_groups
     experts_per_group = topk // group_topk
 
@@ -138,14 +138,11 @@ def reference_group_limited_topk(
         .sum(axis=-1)
     )
     group_idx = jax.lax.top_k(group_scores, k=group_topk)[1]
-    group_mask = jnp.zeros_like(group_scores).at[
-        jnp.arange(num_tokens)[:, None], group_idx
-    ].set(1)
+    group_mask = jnp.zeros_like(group_scores).at[jnp.arange(num_tokens)[:, None], group_idx].set(1)
 
-    score_mask = (
-        group_mask[:, :, None]
-        * jnp.ones((num_tokens, num_groups, group_size))
-    ).reshape(num_tokens, -1)
+    score_mask = (group_mask[:, :, None] * jnp.ones((num_tokens, num_groups, group_size))).reshape(
+        num_tokens, -1
+    )
 
     masked_scores = jnp.where(score_mask.astype(bool), scores, -jnp.inf)
     probs, top_indices = jax.lax.top_k(masked_scores, k=topk)
@@ -200,19 +197,19 @@ def reference_topk_softmax_sigmoid(
     if scaling_factor:
         probs = probs * scaling_factor
 
-    topk_masked_gates = jnp.zeros_like(logits).at[
-        jnp.arange(num_tokens)[:, None], top_indices
-    ].set(probs)
-    topk_map = jnp.zeros_like(logits, dtype=jnp.bool_).at[
-        jnp.arange(num_tokens)[:, None], top_indices
-    ].set(True)
+    topk_masked_gates = (
+        jnp.zeros_like(logits).at[jnp.arange(num_tokens)[:, None], top_indices].set(probs)
+    )
+    topk_map = (
+        jnp.zeros_like(logits, dtype=jnp.bool_)
+        .at[jnp.arange(num_tokens)[:, None], top_indices]
+        .set(True)
+    )
 
     return topk_masked_gates, topk_map
 
 
-def reference_compute_scores_for_aux_loss(
-    logits: jnp.ndarray, topk: int, score_function: str
-):
+def reference_compute_scores_for_aux_loss(logits: jnp.ndarray, topk: int, score_function: str):
     """Reference implementation for computing routing scores for aux loss."""
     if score_function == "softmax":
         scores = jax.nn.softmax(logits.astype(jnp.float32), axis=-1)
@@ -224,9 +221,11 @@ def reference_compute_scores_for_aux_loss(
 
     _, top_indices = jax.lax.top_k(scores, k=topk)
     num_tokens = logits.shape[0]
-    routing_map = jnp.zeros_like(logits, dtype=jnp.bool_).at[
-        jnp.arange(num_tokens)[:, None], top_indices
-    ].set(True)
+    routing_map = (
+        jnp.zeros_like(logits, dtype=jnp.bool_)
+        .at[jnp.arange(num_tokens)[:, None], top_indices]
+        .set(True)
+    )
     return routing_map, scores
 
 
@@ -297,62 +296,78 @@ def run_topk_comparison(
         expert_bias = None
 
     # Forward: reference (jitted)
-    ref_fwd_fn = jax.jit(partial(
-        reference_topk_softmax_sigmoid,
-        topk=topk,
-        use_pre_softmax=use_pre_softmax,
-        num_groups=num_groups,
-        group_topk=group_topk,
-        scaling_factor=scaling_factor,
-        score_function=score_function,
-        expert_bias=expert_bias,
-    ))
+    ref_fwd_fn = jax.jit(
+        partial(
+            reference_topk_softmax_sigmoid,
+            topk=topk,
+            use_pre_softmax=use_pre_softmax,
+            num_groups=num_groups,
+            group_topk=group_topk,
+            scaling_factor=scaling_factor,
+            score_function=score_function,
+            expert_bias=expert_bias,
+        )
+    )
     probs_ref, routing_map_ref = ref_fwd_fn(logits)
 
     # Forward: fused (jitted)
-    fused_fwd_fn = jax.jit(partial(
-        fused_topk_with_score_function,
-        topk=topk,
-        use_pre_softmax=use_pre_softmax,
-        num_groups=num_groups if num_groups else -1,
-        group_topk=group_topk if group_topk else -1,
-        scaling_factor=scaling_factor if scaling_factor else 1.0,
-        score_function=score_function,
-        expert_bias=expert_bias,
-    ))
+    fused_fwd_fn = jax.jit(
+        partial(
+            fused_topk_with_score_function,
+            topk=topk,
+            use_pre_softmax=use_pre_softmax,
+            num_groups=num_groups if num_groups else -1,
+            group_topk=group_topk if group_topk else -1,
+            scaling_factor=scaling_factor if scaling_factor else 1.0,
+            score_function=score_function,
+            expert_bias=expert_bias,
+        )
+    )
     probs_fused, routing_map_fused = fused_fwd_fn(logits)
 
-    assert jnp.allclose(probs_ref, probs_fused, atol=1e-5, rtol=1e-5), \
-        f"Probs mismatch: max diff = {jnp.abs(probs_ref - probs_fused).max()}"
+    assert jnp.allclose(
+        probs_ref, probs_fused, atol=1e-5, rtol=1e-5
+    ), f"Probs mismatch: max diff = {jnp.abs(probs_ref - probs_fused).max()}"
     assert jnp.array_equal(routing_map_ref, routing_map_fused), "Routing map mismatch"
 
     # Backward: reference (jitted)
     def loss_ref(logits_):
         p, _ = reference_topk_softmax_sigmoid(
-            logits_, topk, use_pre_softmax, num_groups, group_topk,
-            scaling_factor, score_function, expert_bias,
+            logits_,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
         )
         return p.sum()
 
     def loss_fused(logits_):
         p, _ = fused_topk_with_score_function(
-            logits_, topk, use_pre_softmax,
+            logits_,
+            topk,
+            use_pre_softmax,
             num_groups if num_groups else -1,
             group_topk if group_topk else -1,
             scaling_factor if scaling_factor else 1.0,
-            score_function, expert_bias,
+            score_function,
+            expert_bias,
         )
         return p.sum()
 
     grad_ref = jax.jit(jax.grad(loss_ref))(logits)
     grad_fused = jax.jit(jax.grad(loss_fused))(logits)
-    assert jnp.allclose(grad_ref, grad_fused, atol=1e-5, rtol=1e-5), \
-        f"Grad mismatch: max diff = {jnp.abs(grad_ref - grad_fused).max()}"
+    assert jnp.allclose(
+        grad_ref, grad_fused, atol=1e-5, rtol=1e-5
+    ), f"Grad mismatch: max diff = {jnp.abs(grad_ref - grad_fused).max()}"
 
 
 @pytest_parametrize_wrapper("dtype", DTYPES)
 @pytest_parametrize_wrapper(
-    "num_tokens,num_experts,topk", TOPK_CASES,
+    "num_tokens,num_experts,topk",
+    TOPK_CASES,
 )
 @pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
 @pytest_parametrize_wrapper("scaling_factor", SCALING_FACTOR_OPTIONS)
@@ -377,7 +392,8 @@ def test_topk_sigmoid(
 
 @pytest_parametrize_wrapper("dtype", DTYPES)
 @pytest_parametrize_wrapper(
-    "num_tokens,num_experts,topk", TOPK_CASES,
+    "num_tokens,num_experts,topk",
+    TOPK_CASES,
 )
 @pytest_parametrize_wrapper("use_pre_softmax", USE_PRE_SOFTMAX_OPTIONS)
 @pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
@@ -407,30 +423,36 @@ def test_topk_softmax(
 
 @pytest_parametrize_wrapper("dtype", DTYPES)
 @pytest_parametrize_wrapper(
-    "num_tokens,num_experts,topk", SCORE_AUX_LOSS_CASES,
+    "num_tokens,num_experts,topk",
+    SCORE_AUX_LOSS_CASES,
 )
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
     logits = make_logits(num_tokens, num_experts, score_function, dtype)
 
     # Forward: reference (jitted)
-    ref_fwd_fn = jax.jit(partial(
-        reference_compute_scores_for_aux_loss,
-        topk=topk,
-        score_function=score_function,
-    ))
+    ref_fwd_fn = jax.jit(
+        partial(
+            reference_compute_scores_for_aux_loss,
+            topk=topk,
+            score_function=score_function,
+        )
+    )
     routing_map_ref, scores_ref = ref_fwd_fn(logits)
 
     # Forward: fused (jitted)
-    fused_fwd_fn = jax.jit(partial(
-        fused_compute_score_for_moe_aux_loss,
-        topk=topk,
-        score_function=score_function,
-    ))
+    fused_fwd_fn = jax.jit(
+        partial(
+            fused_compute_score_for_moe_aux_loss,
+            topk=topk,
+            score_function=score_function,
+        )
+    )
     routing_map_fused, scores_fused = fused_fwd_fn(logits)
 
-    assert jnp.allclose(scores_ref, scores_fused, atol=1e-5, rtol=1e-5), \
-        f"Scores mismatch: max diff = {jnp.abs(scores_ref - scores_fused).max()}"
+    assert jnp.allclose(
+        scores_ref, scores_fused, atol=1e-5, rtol=1e-5
+    ), f"Scores mismatch: max diff = {jnp.abs(scores_ref - scores_fused).max()}"
     assert jnp.array_equal(routing_map_ref, routing_map_fused), "Routing map mismatch"
 
     # Backward (jitted)
@@ -444,8 +466,9 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
 
     grad_ref = jax.jit(jax.grad(loss_ref))(logits)
     grad_fused = jax.jit(jax.grad(loss_fused))(logits)
-    assert jnp.allclose(grad_ref, grad_fused, atol=1e-5, rtol=1e-5), \
-        f"Grad mismatch: max diff = {jnp.abs(grad_ref - grad_fused).max()}"
+    assert jnp.allclose(
+        grad_ref, grad_fused, atol=1e-5, rtol=1e-5
+    ), f"Grad mismatch: max diff = {jnp.abs(grad_ref - grad_fused).max()}"
 
 
 # =============================================================================
@@ -455,7 +478,8 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
 
 @pytest_parametrize_wrapper("dtype", DTYPES)
 @pytest_parametrize_wrapper(
-    "num_tokens,num_experts,topk", AUX_LOSS_CASES,
+    "num_tokens,num_experts,topk",
+    AUX_LOSS_CASES,
 )
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     key = jax.random.PRNGKey(SEED)
@@ -469,29 +493,34 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     coeff = 0.01
 
     # Forward: reference (jitted)
-    ref_fwd_fn = jax.jit(partial(
-        reference_aux_loss,
-        tokens_per_expert=tokens_per_expert,
-        total_num_tokens=num_tokens,
-        topk=topk,
-        num_experts=num_experts,
-        moe_aux_loss_coeff=coeff,
-    ))
+    ref_fwd_fn = jax.jit(
+        partial(
+            reference_aux_loss,
+            tokens_per_expert=tokens_per_expert,
+            total_num_tokens=num_tokens,
+            topk=topk,
+            num_experts=num_experts,
+            moe_aux_loss_coeff=coeff,
+        )
+    )
     aux_loss_ref = ref_fwd_fn(probs)
 
     # Forward: fused (jitted)
-    fused_fwd_fn = jax.jit(partial(
-        fused_moe_aux_loss,
-        tokens_per_expert=tokens_per_expert,
-        total_num_tokens=num_tokens,
-        num_experts=num_experts,
-        topk=topk,
-        coeff=coeff,
-    ))
+    fused_fwd_fn = jax.jit(
+        partial(
+            fused_moe_aux_loss,
+            tokens_per_expert=tokens_per_expert,
+            total_num_tokens=num_tokens,
+            num_experts=num_experts,
+            topk=topk,
+            coeff=coeff,
+        )
+    )
     aux_loss_fused = fused_fwd_fn(probs)
 
-    assert jnp.allclose(aux_loss_ref, aux_loss_fused, atol=1e-5, rtol=1e-5), \
-        f"Aux loss mismatch: ref={aux_loss_ref}, fused={aux_loss_fused}"
+    assert jnp.allclose(
+        aux_loss_ref, aux_loss_fused, atol=1e-5, rtol=1e-5
+    ), f"Aux loss mismatch: ref={aux_loss_ref}, fused={aux_loss_fused}"
 
     # Backward (jitted)
     def loss_ref_fn(probs_):
@@ -502,5 +531,6 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
 
     grad_ref = jax.jit(jax.grad(loss_ref_fn))(probs)
     grad_fused = jax.jit(jax.grad(loss_fused_fn))(probs)
-    assert jnp.allclose(grad_ref, grad_fused, atol=1e-5, rtol=1e-5), \
-        f"Grad mismatch: max diff = {jnp.abs(grad_ref - grad_fused).max()}"
+    assert jnp.allclose(
+        grad_ref, grad_fused, atol=1e-5, rtol=1e-5
+    ), f"Grad mismatch: max diff = {jnp.abs(grad_ref - grad_fused).max()}"

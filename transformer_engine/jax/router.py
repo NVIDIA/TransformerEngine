@@ -50,7 +50,7 @@ def _validate_score_function(score_function: Union[str, ScoreFunction]) -> Score
         return ScoreFunction[score_function.upper()]
     except (KeyError, AttributeError):
         raise ValueError(
-            f"score_function must be 'softmax', 'sigmoid', or a ScoreFunction enum, "
+            "score_function must be 'softmax', 'sigmoid', or a ScoreFunction enum, "
             f"got {score_function!r}"
         ) from None
 
@@ -140,34 +140,67 @@ def _fused_topk_with_score_function(
     compute_aux_scores: bool,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     (probs, routing_map), _ = _fused_topk_with_score_function_fwd(
-        logits, expert_bias, topk, use_pre_softmax, num_groups, group_topk,
-        scaling_factor, score_function, compute_aux_scores,
+        logits,
+        expert_bias,
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        compute_aux_scores,
     )
     return probs, routing_map
 
 
 def _fused_topk_with_score_function_fwd(
-    logits, expert_bias, topk, use_pre_softmax, num_groups, group_topk,
-    scaling_factor, score_function, compute_aux_scores,
+    logits,
+    expert_bias,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
+    compute_aux_scores,
 ):
     probs, routing_map, intermediate_output = fused_topk_with_score_function_fwd(
-        logits, topk, use_pre_softmax, num_groups, group_topk,
-        scaling_factor, score_function, expert_bias, compute_aux_scores,
+        logits,
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        expert_bias,
+        compute_aux_scores,
     )
     residuals = (routing_map, intermediate_output)
     return (probs, routing_map), residuals
 
 
 def _fused_topk_with_score_function_bwd(
-    topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,  # pylint: disable=unused-argument
-    compute_aux_scores, residuals, g,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,  # pylint: disable=unused-argument
+    compute_aux_scores,
+    residuals,
+    g,
 ):
     routing_map, intermediate_output = residuals
     grad_probs, _ = g  # routing_map gradient is None (boolean)
 
     grad_logits = fused_topk_with_score_function_bwd(
-        routing_map, intermediate_output, grad_probs,
-        topk, use_pre_softmax, scaling_factor, score_function,
+        routing_map,
+        intermediate_output,
+        grad_probs,
+        topk,
+        use_pre_softmax,
+        scaling_factor,
+        score_function,
         compute_aux_scores,
     )
     # expert_bias gradient is None: bias is not differentiated through this kernel
@@ -223,11 +256,11 @@ def fused_compute_score_for_moe_aux_loss(
         jnp.empty((0,), dtype=logits.dtype),
         topk,
         False,  # use_pre_softmax (unused for aux scores)
-        1,      # num_groups (unused for aux scores)
-        1,      # group_topk (unused for aux scores)
-        1.0,    # scaling_factor (unused for aux scores)
+        1,  # num_groups (unused for aux scores)
+        1,  # group_topk (unused for aux scores)
+        1.0,  # scaling_factor (unused for aux scores)
         score_function,
-        True,   # compute_aux_scores
+        True,  # compute_aux_scores
     )
     return routing_map, scores
 
@@ -271,7 +304,12 @@ def fused_moe_aux_loss(
         Scalar loss value.
     """
     return _fused_moe_aux_loss(
-        probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff,
+        probs,
+        tokens_per_expert,
+        total_num_tokens,
+        num_experts,
+        topk,
+        coeff,
     )
 
 
@@ -285,30 +323,54 @@ def _fused_moe_aux_loss(
     coeff: float,
 ) -> jnp.ndarray:
     aux_loss, _ = _fused_moe_aux_loss_fwd(
-        probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff,
+        probs,
+        tokens_per_expert,
+        total_num_tokens,
+        num_experts,
+        topk,
+        coeff,
     )
     return aux_loss
 
 
 def _fused_moe_aux_loss_fwd(
-    probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff,
+    probs,
+    tokens_per_expert,
+    total_num_tokens,
+    num_experts,
+    topk,
+    coeff,
 ):
     aux_loss, const_buf = fused_moe_aux_loss_fwd(
-        probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff,
+        probs,
+        tokens_per_expert,
+        total_num_tokens,
+        num_experts,
+        topk,
+        coeff,
     )
     residuals = (const_buf, tokens_per_expert, probs.shape[0], probs.shape[1])
     return aux_loss.squeeze(), residuals
 
 
 def _fused_moe_aux_loss_bwd(
-    total_num_tokens, num_experts, topk, coeff, residuals, g,  # pylint: disable=unused-argument
+    total_num_tokens,
+    num_experts,
+    topk,
+    coeff,
+    residuals,
+    g,  # pylint: disable=unused-argument
 ):
     const_buf, tokens_per_expert, num_rows, num_cols = residuals
     # g is a scalar matching the squeezed output of _fwd
     grad_aux_loss = g.reshape(1)
 
     grad_probs = fused_moe_aux_loss_bwd(
-        const_buf, tokens_per_expert, grad_aux_loss, num_rows, num_cols,
+        const_buf,
+        tokens_per_expert,
+        grad_aux_loss,
+        num_rows,
+        num_cols,
     )
     return grad_probs, None
 

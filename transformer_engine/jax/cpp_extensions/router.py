@@ -28,6 +28,7 @@ class ScoreFunction(IntEnum):
 # Fused Top-K with Score Function - Forward
 # =============================================================================
 
+
 class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
     """
     Fused Top-K with Score Function Forward Primitive.
@@ -37,7 +38,15 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
 
     name = "te_fused_topk_with_score_function_forward_ffi"
     multiple_results = True
-    impl_static_args = (2, 3, 4, 5, 6, 7, 8)  # topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, compute_aux_scores
+    impl_static_args = (
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+    )  # topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, compute_aux_scores
     inner_primitive = None
     outer_primitive = None
 
@@ -157,7 +166,10 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "num_tokens num_experts, num_experts -> num_tokens num_experts, num_tokens num_experts, num_tokens num_experts"
+        return (
+            "num_tokens num_experts, num_experts -> num_tokens num_experts, num_tokens num_experts,"
+            " num_tokens num_experts"
+        )
 
 
 register_primitive(FusedTopkWithScoreFunctionFwdPrimitive)
@@ -176,7 +188,13 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
 
     name = "te_fused_topk_with_score_function_backward_ffi"
     multiple_results = False
-    impl_static_args = (3, 4, 5, 6, 7)  # topk, use_pre_softmax, scaling_factor, score_function, compute_aux_scores
+    impl_static_args = (
+        3,
+        4,
+        5,
+        6,
+        7,
+    )  # topk, use_pre_softmax, scaling_factor, score_function, compute_aux_scores
     inner_primitive = None
     outer_primitive = None
 
@@ -285,7 +303,10 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "num_tokens num_experts, num_tokens num_experts, num_tokens num_experts -> num_tokens num_experts"
+        return (
+            "num_tokens num_experts, num_tokens num_experts, num_tokens num_experts -> num_tokens"
+            " num_experts"
+        )
 
 
 register_primitive(FusedTopkWithScoreFunctionBwdPrimitive)
@@ -340,9 +361,7 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def batcher(
-        batched_args, batch_dims, *, total_num_tokens, num_experts, topk, coeff
-    ):
+    def batcher(batched_args, batch_dims, *, total_num_tokens, num_experts, topk, coeff):
         assert FusedMoEAuxLossFwdPrimitive.outer_primitive is not None
         probs, tokens_per_expert = batched_args
         probs_bdim, _ = batch_dims
