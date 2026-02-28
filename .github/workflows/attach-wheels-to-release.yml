@@ -17,50 +17,50 @@ on:
   workflow_dispatch:
     inputs:
       runs-on:
-        description: 'The runner to use for the build'
+        description: "The runner to use for the build"
         required: true
         type: string
         default: ubuntu-22.04
       release-version:
-        description: 'Release version'
+        description: "Release version"
         required: true
-        default: '0.1.0'
+        default: "0.1.0"
       python-version:
-        description: 'Python version'
+        description: "Python version"
         required: true
-        default: '3.12'
+        default: "3.12"
       torch-version:
-        description: 'Torch version'
+        description: "Torch version"
         required: true
-        default: '2.8.0'
+        default: "2.8.0"
       cuda-version:
-        description: 'CUDA version'
+        description: "CUDA version"
         required: true
-        default: '12.9.1'
+        default: "12.9.1"
       cudnn-version:
-        description: 'CUDNN version'
+        description: "CUDNN version"
         required: true
-        default: '9'
+        default: "9"
       cxx11_abi:
-        description: 'C++11 ABI'
+        description: "C++11 ABI"
         required: true
         type: choice
-        default: 'TRUE'
+        default: "TRUE"
         options:
-          - 'TRUE'
-          - 'FALSE'
+          - "TRUE"
+          - "FALSE"
       ngc-image:
-        description: 'NGC PyTorch image (will take precedence over the source build)'
+        description: "NGC PyTorch image (will take precedence over the source build)"
         required: false
         type: string
-        default: ''
+        default: ""
 jobs:
   pre-flight:
     runs-on: ubuntu-latest
     outputs:
       build-wheel-matrix: ${{ steps.matrix.outputs.matrix }}
       release-assets-url: ${{ steps.release-assets-url.outputs.upload_url }}
-      ngc-images: ${{ steps.check_for_ngc_images.outputs.IMAGES }}
+      ngc-images-matrix: ${{ steps.check_for_ngc_images.outputs.matrix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -123,24 +123,35 @@ jobs:
         run: |
           if [[ "$EVENT" == "release" ]]; then
             bash ./.github/scripts/check_for_ngc_images.sh
-            echo "IMAGES=$(cat ngc_images.json | jq -cr)" | tee -a $GITHUB_OUTPUT
+            MATRIX=$(echo '{
+              "os": ["ubuntu-22.04", "ubuntu-22.04-arm"],
+              "release-version": ["${{ github.event.release.tag_name }}"],
+              "container-image": $(cat ngc_images.json | jq -cr)
+            }' | jq -rc)
           else
-            echo 'IMAGES=["${{ inputs.ngc-image }}"]' | tee -a "$GITHUB_OUTPUT"
+            MATRIX=$(echo '{
+              "os": ["${{ inputs.runs-on }}"],
+              "release-version": ["${{ inputs.release-version }}"],
+              "container-image": ["${{ inputs.ngc-image }}"]
+            }' | jq -rc)
           fi
+
+          echo "matrix=$MATRIX" | tee -a "$GITHUB_OUTPUT"
 
   build_wheels:
     name: Build Wheel
     runs-on: ${{ matrix.os }}
     needs: pre-flight
+    permissions: write-all
     if: ${{ github.event_name == 'release' || inputs.ngc-image == '' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.pre-flight.outputs.build-wheel-matrix) }}
     steps:
-      - name: 'Checkout'
+      - name: "Checkout"
         uses: actions/checkout@v3
 
-      - name: 'Build PyTorch Wheel'
+      - name: "Build PyTorch Wheel"
         uses: ./.github/actions/build-pytorch-wheel
         id: build-pytorch-wheel
         with:
@@ -170,20 +181,20 @@ jobs:
     name: Build Wheels for NGC PyTorch images
     runs-on: ${{ matrix.os }}
     needs: pre-flight
+    permissions: write-all
     if: ${{ github.event_name == 'release' || inputs.ngc-image != '' }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-22.04]
-        container-image: ${{ fromJson(needs.pre-flight.outputs.ngc-images) }}
+      matrix: ${{ fromJson(needs.pre-flight.outputs.ngc-images-matrix) }}
     steps:
-      - name: 'Checkout'
+      - name: "Checkout"
         uses: actions/checkout@v3
 
-      - name: 'Build PyTorch Wheel'
+      - name: "Build PyTorch Wheel"
         uses: ./.github/actions/build-pytorch-wheel
         id: build-pytorch-wheel
         with:
+          release-version: ${{ matrix.release-version }}
           base-image: ${{ matrix.container-image }}
 
       - name: Upload Release Asset
