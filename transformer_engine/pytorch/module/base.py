@@ -929,12 +929,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if torch.is_autocast_enabled():
             self.fast_setattr("activation_dtype", torch_get_autocast_gpu_dtype())
             return
-
+        dtype = inp.dtype
         # All checks after this have already been performed once, thus skip
-        if self.activation_dtype == inp.dtype:
+        if self.activation_dtype == dtype:
             return
 
-        dtype = inp.dtype
         if not self.allow_different_data_and_param_types:
             for name, param in self.named_parameters():
                 if param is not None:

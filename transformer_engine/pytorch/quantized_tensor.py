@@ -369,9 +369,13 @@ class QuantizedTensor(torch.Tensor):
         *,
         requires_grad: bool = False,
         device: Optional[torch.device] = None,
+        stride: Optional[Iterable[int]] = None,
     ):
-        # We are assuming only contiguous tensors
-        stride = _stride_from_shape(shape)
+        # For stride, We are assuming only contiguous tensors
+        # Calculate stride from shape if not provided. When creating this object from
+        # C++ code, we provide the stride computed from shape in C++ to avoid the
+        # PyobjectVectorCall overhead of calling _stride_from_shape from C++ to Python.
+        stride = _stride_from_shape(shape) if stride is None else stride
         instance = torch.Tensor._make_wrapper_subclass(
             cls,
             shape,
@@ -382,8 +386,74 @@ class QuantizedTensor(torch.Tensor):
             requires_grad=requires_grad,
             device=torch.cuda.current_device() if device is None else device,
         )
-
+        instance._requires_grad = requires_grad
+        instance._dtype = dtype
         return instance
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """
+        Return the high precision data type of the tensor
+        Attribute access of custom tensors goes through an
+        expensive Pyobject lookup. Since dtype for a tensor is never
+        change after creation, we cache it in a member variable and return
+        """
+        # Lazy initialization for tensors created via alternate paths
+        if not hasattr(self, "_dtype"):
+            # pylint: disable=unnecessary-dunder-call
+            self._dtype = torch._C.TensorBase.dtype.__get__(self, type(self))
+        return self._dtype
+
+    @dtype.setter
+    def dtype(self, value: torch.dtype) -> None:
+        """Set dtype property"""
+        self._dtype = value
+
+    @property
+    def requires_grad(self) -> bool:
+        """
+        Return whether or not the tensor requires gradient.
+        Attribute access of custom tensors goes through an
+        expensive Pyobject lookup. Since requires_grad is set during
+        initialization and may be updated, we cache it in a member variable.
+        """
+        # Fallback to parent if not cached yet
+        if not hasattr(self, "_requires_grad"):
+            # pylint: disable=unnecessary-dunder-call
+            self._requires_grad = torch._C.TensorBase.requires_grad.__get__(self, type(self))
+        return self._requires_grad
+
+    @requires_grad.setter
+    def requires_grad(self, value: bool) -> None:
+        """Set requires_grad property so that autograd engine is aware of the change"""
+        # Update the cached value and call parent class method to ensure autograd engine is aware
+        self.requires_grad_(value)
+
+    def requires_grad_(self, requires_grad: bool = True) -> QuantizedTensor:
+        """Cache requires_grad property and call parent class method"""
+        # pylint: disable=missing-function-docstring
+        # Update the cached value
+        self._requires_grad = requires_grad
+        # Call parent class method to ensure autograd engine is aware
+        super().requires_grad_(requires_grad)
+        return self
+
+    def _get_data(self) -> torch.Tensor:
+        """Get tensor data property"""
+        return super().data
+
+    def _set_data(self, tensor: torch.Tensor) -> None:
+        """Set tensor data property
+        Updates the underlying tensor data and syncs the dtype cache.
+        """
+        # Update the parent class's data descriptor
+        # pylint: disable=unnecessary-dunder-call
+        super(QuantizedTensor, type(self)).data.__set__(self, tensor)
+        # Update the dtype cache
+        self._dtype = tensor.dtype
+
+    # Create the data property with getter and setter
+    data = property(_get_data, _set_data)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Convert quantized data to standard PyTorch tensor"""

@@ -9,7 +9,9 @@
 
 #include <cuda.h>
 
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "../common.h"
 #include "../util/string.h"
@@ -29,13 +31,30 @@ void *get_symbol(const char *symbol, int cuda_version = 12010);
  * without GPUs. Indirect function calls into a lazily-initialized
  * library ensures we are accessing the correct version.
  *
+ * Symbol pointers are cached to avoid repeated lookups.
+ *
  * \param[in] symbol Function name
  * \param[in] args   Function arguments
  */
 template <typename... ArgTs>
 inline CUresult call(const char *symbol, ArgTs... args) {
   using FuncT = CUresult(ArgTs...);
-  FuncT *func = reinterpret_cast<FuncT *>(get_symbol(symbol));
+
+  static std::unordered_map<std::string, void *> symbol_cache;
+  static std::mutex cache_mutex;
+  FuncT *func;
+
+  {
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = symbol_cache.find(symbol);
+    if (it == symbol_cache.end()) {
+      void *ptr = get_symbol(symbol);
+      symbol_cache[symbol] = ptr;
+      func = reinterpret_cast<FuncT *>(ptr);
+    } else {
+      func = reinterpret_cast<FuncT *>(it->second);
+    }
+  }
   return (*func)(args...);
 }
 
