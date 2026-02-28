@@ -70,7 +70,7 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
 }
 
 void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                               NVTETensor dbias, NVTETensor workspace, cudaStream_t stream) {
+                               NVTEGroupedTensor dbias, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize_dbias);
   using namespace transformer_engine;
 
