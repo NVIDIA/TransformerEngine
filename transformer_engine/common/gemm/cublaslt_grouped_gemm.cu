@@ -440,6 +440,29 @@ inline cublasLtMatmulAlgo_t select_grouped_gemm_algo(cublasLtHandle_t handle,
   return heuristicResult.algo;
 }
 
+// Device helper: compute the element offset for tensor `idx` given shape metadata.
+// Three cases:
+//   1. Explicit per-tensor offset array provided  → use it directly.
+//   2. Per-tensor first/last dims provided but no offsets → cumulative sum of (first*last) products.
+//   3. Fully uniform shapes                        → idx * uniform_first * uniform_last.
+__forceinline__ __device__ int64_t compute_grouped_tensor_offset(const TensorShapeInfo &meta,
+                                                                 size_t idx) {
+  if (meta.offsets) {
+    return meta.offsets[idx];
+  } else if (meta.first_dims != nullptr || meta.last_dims != nullptr) {
+    // offset[i] = sum_{j < i} (first_dims[j] * last_dims[j])
+    int64_t cumsum = 0;
+    for (size_t i = 0; i < idx; i++) {
+      int64_t f = meta.first_dims ? meta.first_dims[i] : meta.uniform_first;
+      int64_t l = meta.last_dims ? meta.last_dims[i] : meta.uniform_last;
+      cumsum += f * l;
+    }
+    return cumsum;
+  } else {
+    return static_cast<int64_t>(idx) * meta.uniform_first * meta.uniform_last;
+  }
+}
+
 // Single kernel that sets up all GEMM parameters.
 // Rationale: cuBLASLt grouped matmul API needs flat arrays of pointers and per-matrix dimensions,
 // but NVTEGroupedTensor stores a single contiguous buffer + optional per-tensor offsets/shapes.
@@ -464,15 +487,11 @@ __global__ void setup_grouped_gemm_kernel(
   int64_t d_first = D_meta.first_dims ? D_meta.first_dims[idx] : D_meta.uniform_first;
   int64_t d_last = D_meta.last_dims ? D_meta.last_dims[idx] : D_meta.uniform_last;
 
-  // Compute offsets (from array or compute from uniform dims)
-  int64_t a_offset =
-      A_meta.offsets ? A_meta.offsets[idx] : (idx * A_meta.uniform_first * A_meta.uniform_last);
-  int64_t b_offset =
-      B_meta.offsets ? B_meta.offsets[idx] : (idx * B_meta.uniform_first * B_meta.uniform_last);
-  int64_t c_offset =
-      C_meta.offsets ? C_meta.offsets[idx] : (idx * C_meta.uniform_first * C_meta.uniform_last);
-  int64_t d_offset =
-      D_meta.offsets ? D_meta.offsets[idx] : (idx * D_meta.uniform_first * D_meta.uniform_last);
+  // Compute offsets (from explicit array, cumulative from per-tensor dims, or uniform)
+  int64_t a_offset = compute_grouped_tensor_offset(A_meta, idx);
+  int64_t b_offset = compute_grouped_tensor_offset(B_meta, idx);
+  int64_t c_offset = compute_grouped_tensor_offset(C_meta, idx);
+  int64_t d_offset = compute_grouped_tensor_offset(D_meta, idx);
 
   // Compute data pointers
   A_ptrs[idx] = a_base + a_offset * a_elem_size;
@@ -487,9 +506,8 @@ __global__ void setup_grouped_gemm_kernel(
   a_cols[idx] = static_cast<int>(a_first);
   b_rows[idx] = static_cast<int>(b_last);
   b_cols[idx] = static_cast<int>(b_first);
-  // For OUTPUTS (D, C): cuBLAS writes in column-major, so rows=first (M), cols=last (N).
-  d_rows[idx] = static_cast<int>(d_first);
-  d_cols[idx] = static_cast<int>(d_last);
+  d_rows[idx] = static_cast<int>(d_last);
+  d_cols[idx] = static_cast<int>(d_first);
 
   // Fill alpha/beta pointers (per-matrix)
   alpha_ptrs[idx] = alpha_ptr + idx;
@@ -534,6 +552,10 @@ inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
 }
 
 }  // namespace
+
+size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors) {
+  return grouped_gemm_setup_workspace_size(num_tensors);
+}
 
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
                        const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
@@ -642,4 +664,27 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
              CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
 }
 
+size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors) {
+  NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.2+, but compile-time cuBLAS version is ",
+             CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+  return 0;
+}
+
 #endif  // CUBLAS_VERSION >= 130200
+
+namespace {
+
+__global__ void convert_int32_to_int64_kernel(const int32_t *src, int64_t *dst, size_t n) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < n) dst[idx] = static_cast<int64_t>(src[idx]);
+}
+
+}  // namespace
+
+void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cudaStream_t stream) {
+  if (n == 0) return;
+  const int threads = 256;
+  const int blocks = static_cast<int>((n + threads - 1) / threads);
+  convert_int32_to_int64_kernel<<<blocks, threads, 0, stream>>>(src, dst, n);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}

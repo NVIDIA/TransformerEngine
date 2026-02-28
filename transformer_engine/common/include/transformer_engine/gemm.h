@@ -329,6 +329,31 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  * - Shape compatibility: if transa=false, transb=false:
  *   - A[i]: (M[i], K[i]), B[i]: (K[i], N[i]), D[i]: (M[i], N[i])
  */
+/*! \brief Return the required size in bytes for the setup workspace of grouped GEMM.
+ *
+ * The setup workspace stores pointer arrays and per-matrix dimension arrays used
+ * by the grouped GEMM kernel. Its size depends only on the number of tensors (GEMMs)
+ * in the group and is independent of matrix dimensions.
+ *
+ * Pass the result as the size of the workspace_setup tensor in nvte_grouped_gemm.
+ *
+ *  \param[in] num_tensors  Number of tensors (GEMMs) in the group.
+ *  \return Required size in bytes for workspace_setup.
+ */
+size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors);
+
+/*! \brief Convert a device array of int32 values to int64 values.
+ *
+ *  Useful for preparing group_sizes for nvte_grouped_gemm when the caller
+ *  holds int32 sizes and needs int64 values on the device.
+ *
+ *  \param[in]  src     Device pointer to source int32 array.
+ *  \param[out] dst     Device pointer to destination int64 array.
+ *  \param[in]  n       Number of elements.
+ *  \param[in]  stream  CUDA stream.
+ */
+void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cudaStream_t stream);
+
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
                        const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
                        const NVTETensor beta, NVTETensor workspace_setup,

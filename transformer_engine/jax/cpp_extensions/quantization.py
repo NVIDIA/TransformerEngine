@@ -97,7 +97,9 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         out_shape = x_aval.shape
-        assert scale_aval is None or scale_aval.dtype == jnp.float32
+        assert (
+            scale_aval is None or scale_aval.dtype == jnp.float32
+        ), f"scale must be float32 but received {scale_aval}"
         if stochastic_rounding:
             assert ScalingMode(
                 scaling_mode
@@ -1213,7 +1215,7 @@ def grouped_quantize(
     assert n_groups == len(
         quantizer.quantizers
     ), f"n_groups={n_groups} != n_quantizers = {len(quantizer.quantizers)}"
-    scale = jnp.empty((n_groups,), jnp.float32)
+    scale = jnp.ones((n_groups,), jnp.float32)
 
     if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         for i, quantizer_i in enumerate(quantizer.quantizers):

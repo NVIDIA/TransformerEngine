@@ -138,6 +138,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmCudaGraphableHandler);
 
 // Amax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
