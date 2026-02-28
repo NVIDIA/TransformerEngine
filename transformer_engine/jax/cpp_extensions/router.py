@@ -147,6 +147,14 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
+    def infer_sharding_from_operands(*args, **kwargs):
+        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+
+    @staticmethod
+    def partition(*args, **kwargs):
+        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+
+    @staticmethod
     def shardy_sharding_rule(*args):
         del args
         return "num_tokens num_experts, num_experts -> num_tokens num_experts, num_tokens num_experts, num_tokens num_experts"
@@ -267,6 +275,14 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
+    def infer_sharding_from_operands(*args, **kwargs):
+        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+
+    @staticmethod
+    def partition(*args, **kwargs):
+        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+
+    @staticmethod
     def shardy_sharding_rule(*args):
         del args
         return "num_tokens num_experts, num_tokens num_experts, num_tokens num_experts -> num_tokens num_experts"
@@ -343,6 +359,14 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
+    def infer_sharding_from_operands(*args, **kwargs):
+        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+
+    @staticmethod
+    def partition(*args, **kwargs):
+        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+
+    @staticmethod
     def shardy_sharding_rule(*args):
         del args
         return "num_tokens num_experts, num_experts -> aux_loss_one, const_buf_one"
@@ -405,6 +429,14 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
             ),
             grad_bdim,
         )
+
+    @staticmethod
+    def infer_sharding_from_operands(*args, **kwargs):
+        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
+
+    @staticmethod
+    def partition(*args, **kwargs):
+        raise NotImplementedError("Use shardy sharding rules instead of GSPMD custom partitioning")
 
     @staticmethod
     def shardy_sharding_rule(*args):
