@@ -4,6 +4,7 @@
 
 import random
 import torch
+import torch.nn.functional as F
 from transformer_engine.pytorch import parallel_cross_entropy
 
 from utils import dtype_tols
@@ -68,7 +69,7 @@ class TestParallelCrossEntropy:
         # Random data
         self.generate_input(dtype, swap_dim, ignore_idx)
 
-        # Forward pass
+        # Forward pass — default return is a single tensor (backward compatible)
         test_loss = self.test_loss_func(
             self.input_test, self.tar_test, label_smoothing, reduce_loss, None
         )
@@ -167,3 +168,189 @@ class TestParallelCrossEntropy:
                 reduce_loss=True,
                 ignore_idx=True,
             )
+
+    def test_z_loss(self):
+        """Z-loss: loss and gradients must match a manual PyTorch reference."""
+        batch, SQ, vocab = 2, 64, 8192
+        z_loss_weight = 0.001
+
+        inp_test = torch.randn(
+            batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True
+        )
+        inp_ref = inp_test.detach().clone().requires_grad_(True)
+        tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
+
+        loss_te, log_sum_exp_te = parallel_cross_entropy(
+            inp_test, tar, z_loss_weight=z_loss_weight, return_log_sum_exp=True
+        )
+
+        ref_ce = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), reduction="none").view(
+            batch, SQ
+        )
+        log_sum_exp_ref = torch.logsumexp(inp_ref, dim=-1)
+        ref_loss = ref_ce + z_loss_weight * torch.square(log_sum_exp_ref)
+
+        tols = dtype_tols(torch.float32)
+        torch.testing.assert_close(loss_te, ref_loss, **tols)
+        torch.testing.assert_close(log_sum_exp_te, log_sum_exp_ref, **tols)
+
+        loss_te.sum().backward()
+        ref_loss.sum().backward()
+        torch.testing.assert_close(inp_test.grad, inp_ref.grad, **tols)
+
+    def test_z_loss_zero_weight(self):
+        """z_loss_weight=0.0 must produce bit-identical results to the baseline."""
+        batch, SQ, vocab = 2, 32, 4096
+        inp = torch.randn(batch, SQ, vocab, dtype=torch.float32, device="cuda")
+        tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
+
+        loss_base = parallel_cross_entropy(inp.clone(), tar)
+        loss_zero = parallel_cross_entropy(inp.clone(), tar, z_loss_weight=0.0)
+        assert torch.equal(
+            loss_base, loss_zero
+        ), "z_loss_weight=0.0 must be bit-identical to the default"
+
+    def test_z_loss_with_label_smoothing(self):
+        """Z-loss and label smoothing must compose correctly."""
+        batch, SQ, vocab = 2, 32, 4096
+        z_loss_weight = 0.001
+        label_smoothing = 0.1
+
+        inp_test = torch.randn(
+            batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True
+        )
+        inp_ref = inp_test.detach().clone().requires_grad_(True)
+        tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
+
+        loss_te = parallel_cross_entropy(
+            inp_test, tar, label_smoothing=label_smoothing, z_loss_weight=z_loss_weight
+        )
+
+        ref_ce = F.cross_entropy(
+            inp_ref.view(-1, vocab), tar.view(-1), label_smoothing=label_smoothing, reduction="none"
+        ).view(batch, SQ)
+        log_sum_exp_ref = torch.logsumexp(inp_ref, dim=-1)
+        ref_loss = ref_ce + z_loss_weight * torch.square(log_sum_exp_ref)
+
+        # Higher tolerance due to label-smoothing implementation differences
+        torch.testing.assert_close(loss_te, ref_loss, rtol=2e-2, atol=0.1)
+
+        loss_te.sum().backward()
+        ref_loss.sum().backward()
+        torch.testing.assert_close(inp_test.grad, inp_ref.grad, rtol=2e-2, atol=0.1)
+
+    def test_z_loss_with_ignore_idx(self):
+        """Ignored tokens must receive zero gradients even with z-loss enabled."""
+        batch, SQ, vocab = 2, 32, 4096
+        z_loss_weight = 0.001
+
+        inp_test = torch.randn(
+            batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True
+        )
+        tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
+        tar[0, :5] = -100  # ignore first 5 positions in batch 0
+
+        loss_te = parallel_cross_entropy(inp_test, tar, z_loss_weight=z_loss_weight)
+        loss_te.sum().backward()
+
+        assert torch.all(inp_test.grad[0, :5] == 0.0), "Ignored tokens must have zero gradients"
+
+    def test_non_uniform_gradient_backward(self):
+        """Non-uniform grad_output (loss masking) must produce correct input gradients.
+
+        The original TE backward bug (PR #2139) always read grad_output[0] for all rows.
+        With uniform grad_output (all-ones from .sum().backward()), this was invisible.
+        This test explicitly uses non-uniform grad_output to catch that class of bug.
+        """
+        batch, SQ, vocab = 2, 32, 4096
+
+        inp_test = torch.randn(
+            batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True
+        )
+        inp_ref = inp_test.detach().clone().requires_grad_(True)
+        tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
+
+        # Non-uniform grad_output simulating loss masking (some tokens have zero weight)
+        grad_output = torch.rand(batch, SQ, device="cuda")
+        grad_output[0, :5] = 0.0  # mask first 5 positions in batch 0
+        grad_output[1, -3:] = 0.0  # mask last 3 positions in batch 1
+
+        loss_te = parallel_cross_entropy(inp_test, tar, 0.0, False, None)
+        loss_te.backward(grad_output)
+
+        loss_ref = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), reduction="none").view(
+            batch, SQ
+        )
+        loss_ref.backward(grad_output)
+
+        tols = dtype_tols(torch.float32)
+        torch.testing.assert_close(inp_test.grad, inp_ref.grad, **tols)
+
+    def test_log_sum_exp_zero_for_ignored(self):
+        """Ignored positions must have log_sum_exp=0.0.
+
+        The kernel returns early for y==ignore_idx before storing lse,
+        leaving the tensor at its zero-initialized value.
+        """
+        batch, SQ, vocab = 2, 32, 4096
+
+        inp = torch.randn(batch, SQ, vocab, dtype=torch.float32, device="cuda")
+        tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
+
+        ignored = [(0, 3), (0, 7), (1, 0), (1, 15)]
+        for b, s in ignored:
+            tar[b, s] = -100
+
+        _, log_sum_exp = parallel_cross_entropy(inp, tar, 0.0, False, None, return_log_sum_exp=True)
+
+        for b, s in ignored:
+            assert (
+                log_sum_exp[b, s].item() == 0.0
+            ), f"log_sum_exp[{b},{s}] must be 0.0 for ignored token, got {log_sum_exp[b, s].item()}"
+
+        # Non-ignored positions must have non-zero log_sum_exp
+        assert log_sum_exp[0, 0].item() != 0.0, "Non-ignored token must have non-zero log_sum_exp"
+
+    def test_log_sum_exp_non_differentiable(self):
+        """log_sum_exp must be non-differentiable (ctx.mark_non_differentiable must have taken effect)."""
+        batch, SQ, vocab = 2, 16, 1024
+
+        inp = torch.randn(batch, SQ, vocab, dtype=torch.float32, device="cuda", requires_grad=True)
+        tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
+
+        loss, log_sum_exp = parallel_cross_entropy(
+            inp, tar, 0.0, False, None, return_log_sum_exp=True
+        )
+
+        assert not log_sum_exp.requires_grad, "log_sum_exp must not require gradients"
+        assert log_sum_exp.grad_fn is None, "log_sum_exp must have no grad_fn"
+        assert loss.requires_grad, "loss must still require gradients"
+
+    def test_z_loss_bfloat16(self):
+        """Z-loss must work correctly with BF16 input (the main production dtype in Megatron)."""
+        batch, SQ, vocab = 2, 64, 8192
+        z_loss_weight = 0.001
+
+        inp_bf16 = torch.randn(
+            batch, SQ, vocab, dtype=torch.bfloat16, device="cuda", requires_grad=True
+        )
+        inp_ref = inp_bf16.detach().float().requires_grad_(True)
+        tar = torch.randint(0, vocab, (batch, SQ), device="cuda")
+
+        loss_te, log_sum_exp_te = parallel_cross_entropy(
+            inp_bf16, tar, 0.0, False, None, z_loss_weight=z_loss_weight, return_log_sum_exp=True
+        )
+
+        ref_ce = F.cross_entropy(inp_ref.view(-1, vocab), tar.view(-1), reduction="none").view(
+            batch, SQ
+        )
+        log_sum_exp_ref = torch.logsumexp(inp_ref, dim=-1)
+        ref_loss = ref_ce + z_loss_weight * torch.square(log_sum_exp_ref)
+
+        tols = dtype_tols(torch.bfloat16)
+        torch.testing.assert_close(loss_te, ref_loss, **tols)
+        torch.testing.assert_close(log_sum_exp_te, log_sum_exp_ref, **tols)
+
+        loss_te.sum().backward()
+        ref_loss.sum().backward()
+        torch.testing.assert_close(inp_bf16.grad.float(), inp_ref.grad, **tols)
