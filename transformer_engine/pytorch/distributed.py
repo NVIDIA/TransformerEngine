@@ -10,6 +10,7 @@ from contextlib import contextmanager, AbstractContextManager, ContextDecorator
 from functools import lru_cache
 from dataclasses import dataclass
 import math
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 
@@ -1734,56 +1735,129 @@ def gather_along_first_dim(
     return out, handle
 
 
-# Global cache to store symmetric memory tensors
-symmetric_mem_cache = {}
+# Global buffer pool for symmetric memory
+class SymmetricMemoryBufferPool:
+    """This class manages a pool of reusable symmetric memory buffers for symmetric
+    all-reduce operations. It implements automatic buffer growth and reuse to
+    minimize memory allocation overhead during distributed communication operations.
 
+    The pool maintains separate buffers for different combinations of data type,
+    device, and process group, automatically growing buffers when larger sizes
+    are requested.
 
-def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group, tag=None):
-    """
-    Gets or creates a symmetric memory tensor with specified properties.
-
-    Reuses cached tensors when available to avoid redundant creation and rendezvous operations.
-
-    Note: This function always returns a 1D tensor.
-
-    Parameters
+    Attributes
     ----------
-    tensor_numel : int
-        Number of elements in the tensor.
-    tensor_dtype : torch.dtype
-        Data type of the tensor.
-    tensor_device : torch.device
-        Device on which to allocate the tensor.
-    tp_group : dist_group_type
-        Process group for rendezvous operation.
-    tag : Any, optional
-        Optional identifier to further distinguish tensors.
+    pools : Dict[Tuple, torch.Tensor]
+        Dictionary mapping (dtype, device, group_name) tuples to allocated buffers.
+        Each buffer is a contiguous symmetric memory tensor that can be sliced
+        for individual operations.
 
-    Returns
-    -------
-    torch.Tensor
-        A symmetric memory tensor with the specified properties.
-    """
-    # Create a cache key based on tensor properties and group
-    cache_key = (tensor_numel, tensor_dtype, tensor_device, tp_group.group_name, tag)
+    pool_sizes : Dict[Tuple, int]
+        Tracks the allocated size (in elements) for each buffer pool.
 
-    # Check if we already have a symmetric memory tensor for this configuration
-    if cache_key not in symmetric_mem_cache:
-        # Create a new symmetric memory tensor if not in cache
-        msg = symm_mem.empty(
-            tensor_numel,
-            dtype=tensor_dtype,
-            device=tensor_device,
-        )
-        # Perform the rendezvous once for this tensor
-        symm_mem.rendezvous(msg, group=tp_group)
-        # Store in cache
-        symmetric_mem_cache[cache_key] = msg
-    else:
-        # Reuse the existing symmetric memory tensor
-        msg = symmetric_mem_cache[cache_key]
+    initial_pool_size : int
+        Initial number of elements to allocate for new buffer pools.
+        Default is 256M elements (1024 * 1024 * 256).
 
-    return msg
+    growth_factor : float
+        Multiplicative factor for growing buffers when current size is insufficient.
+        Default is 2.0 (doubles the buffer size on each growth)."""
+
+    _instance: Optional["SymmetricMemoryBufferPool"] = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                # Double-checked locking pattern
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        # Ensure __init__ is only called once
+        if self._initialized:
+            return
+
+        self.pools: Dict[Tuple, torch.Tensor] = {}  # (dtype, device, group_name) -> buffer
+        self.pool_sizes: Dict[Tuple, int] = {}  # Track allocated sizes
+        self.initial_pool_size = 1024 * 1024 * 256  # 256M elements initially
+        self.growth_factor = 2.0
+
+    @classmethod
+    def get_instance(cls) -> "SymmetricMemoryBufferPool":
+        """Alternative way to get the singleton instance."""
+        return cls()
+
+    def get_buffer_slice(
+        self,
+        tensor_numel: int,
+        tensor_dtype: torch.dtype,
+        tensor_device: torch.device,
+        tp_group,
+    ) -> torch.Tensor:
+        """
+        Get a slice from the buffer pool that can hold tensor_numel elements.
+        Grows the pool if necessary.
+        """
+        pool_key = (tensor_dtype, tensor_device, tp_group.group_name)
+
+        # Initialize pool if it doesn't exist
+        if pool_key not in self.pools:
+            self._create_pool(
+                pool_key, self.initial_pool_size, tensor_dtype, tensor_device, tp_group
+            )
+
+        # Check if we need to grow the pool
+        current_size = self.pool_sizes[pool_key]
+        if tensor_numel > current_size:
+            # Grow to at least accommodate the requested size
+            new_size = max(int(current_size * self.growth_factor), tensor_numel)
+            self._grow_pool(pool_key, new_size, tensor_dtype, tensor_device, tp_group)
+
+        # Return a view/slice of the buffer
+        buffer = self.pools[pool_key]
+        return buffer[:tensor_numel]
+
+    def _create_pool(
+        self, pool_key: Tuple, size: int, dtype: torch.dtype, device: torch.device, tp_group
+    ):
+        """Create a new buffer pool."""
+        buffer = symm_mem.empty(size, dtype=dtype, device=device)
+        symm_mem.rendezvous(buffer, group=tp_group)
+        self.pools[pool_key] = buffer
+        self.pool_sizes[pool_key] = size
+
+    def _grow_pool(
+        self, pool_key: Tuple, new_size: int, dtype: torch.dtype, device: torch.device, tp_group
+    ):
+        """Grow an existing buffer pool."""
+        old_buffer = self.pools[pool_key]
+
+        # Create new larger buffer
+        new_buffer = symm_mem.empty(new_size, dtype=dtype, device=device)
+        symm_mem.rendezvous(new_buffer, group=tp_group)
+
+        # Replace the old buffer
+        self.pools[pool_key] = new_buffer
+        self.pool_sizes[pool_key] = new_size
+
+        # The old buffer will be garbage collected
+        del old_buffer
+
+    def get_memory_usage(self) -> Dict[str, float]:
+        """Get memory usage statistics for all pools."""
+        stats = {}
+        for key, buffer in self.pools.items():
+            dtype, device, group = key
+            size_mb = (buffer.numel() * buffer.element_size()) / (1024 * 1024)
+            stats[f"{dtype}_{device}_{group}"] = size_mb
+        return stats
+
+
+# Global buffer pool instance
+buffer_pool = SymmetricMemoryBufferPool()
 
 
 def symmetric_all_reduce(
@@ -1794,10 +1868,10 @@ def symmetric_all_reduce(
 ):
     """
     Performs an all-reduce operation across multiple processes using symmetric memory.
-    If the input tensor is already in the symmetric memory cache we can avoid copy
-    overheads by just directly using the input tensor for all reduce.  Externally
-    created symmetric memory tensors not in the cache currently will not be able to
-    avoid the extra copies.
+    Currently we do a copy into the symmetric memory buffer in the future we would like
+    to be able to recognize if a tensor is already in symmetric memory so that we can
+    call all-reduce with no copy. Pytorch does not have functionality currently to
+    recognize if a tensor is already symmetric memory.
 
     Parameters
     ----------
@@ -1853,29 +1927,21 @@ def symmetric_all_reduce(
     tensor_dtype = inp.dtype
     tensor_device = inp.device
 
-    input_id = id(inp)
-    is_cached = any(id(cached_tensor) == input_id for cached_tensor in symmetric_mem_cache.values())
-    # Check if the input tensor is already in the symmetric memory cache. If it is we can avoid copy overheads.
-    if is_cached:
-        all_reduce_impl(
-            inp,
-            "sum",
-            group_name,
-        )
-    else:
-        # Get symmetric memory tensor. Build or retrieve from cache.
-        msg = get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group)
+    # Get a slice from the buffer pool
+    buffer_slice = buffer_pool.get_buffer_slice(tensor_numel, tensor_dtype, tensor_device, tp_group)
 
-        msg.copy_(inp.reshape(-1))
+    # Copy input to buffer slice
+    buffer_slice.copy_(inp.reshape(-1))
 
-        all_reduce_impl(
-            msg,
-            "sum",
-            group_name,
-        )
+    # Perform all-reduce on the buffer slice
+    all_reduce_impl(
+        buffer_slice,
+        "sum",
+        group_name,
+    )
 
-        # Copy the result back to the input tensor
-        inp.copy_(msg.reshape(tensor_shape))
+    # Copy result back to input tensor
+    inp.copy_(buffer_slice.reshape(tensor_shape))
 
     return inp, None
 
