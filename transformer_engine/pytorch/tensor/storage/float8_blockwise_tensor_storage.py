@@ -46,12 +46,14 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         quantizer: Quantizer,
         is_2D_scaled: bool,
         *args,
+        fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
         if cls is Float8BlockwiseQTensorStorage:
             instance = object.__new__(cls)
+            instance._dtype = fake_dtype if fake_dtype is not None else torch.float32
         else:
-            instance = super().__new__(cls, *args, **kwargs)
+            instance = super().__new__(cls, *args, fake_dtype=fake_dtype, **kwargs)
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
@@ -101,6 +103,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "is_2D_scaled": self._is_2D_scaled,
+            "fake_dtype": self._dtype,
         }
 
     def prepare_for_saving(
@@ -149,7 +152,9 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         permute_dims.append(0)
         return torch.permute(columnwise_dq, tuple(permute_dims)).contiguous()
 
-    def _dequantize_vectorwise(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def _dequantize_vectorwise(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        if dtype is None:
+            dtype = self._dtype
         block_len = 128
 
         q_M, q_K = 1, 1
@@ -211,10 +216,12 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             return self._transpose_dq_columnwise_output(result)
         return result
 
-    def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
         Construct plain PyTorch tensor from Float8BlockwiseQTensor
         """
+        if dtype is None:
+            dtype = self._dtype
         block_len = 128
         if not self._is_2D_scaled:
             return self._dequantize_vectorwise(dtype=dtype)

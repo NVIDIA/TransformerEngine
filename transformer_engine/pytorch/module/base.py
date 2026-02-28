@@ -522,6 +522,7 @@ def fill_userbuffers_buffer_for_all_gather(
             data=global_tensor_data,
             fp8_scale_inv=local_tensor._scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
+            fake_dtype=local_tensor._dtype,
             quantizer=quantizer,
         )
         return global_tensor, local_tensor
@@ -596,6 +597,7 @@ def fill_userbuffers_buffer_for_all_gather(
             fp8_dtype=local_tensor._fp8_dtype,
             quantizer=quantizer,
             with_gemm_swizzled_scales=False,
+            fake_dtype=local_tensor._dtype,
         )
         return global_tensor, local_tensor
 
