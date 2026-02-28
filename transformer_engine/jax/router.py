@@ -11,10 +11,9 @@ transformer_engine/common/fused_router/.
 Functions:
     fused_topk_with_score_function:
         Fused score_function + top-k selection. Supports softmax/sigmoid,
-        grouped top-k, expert bias, and scaling factor.
-
-    fused_compute_score_for_moe_aux_loss:
-        Compute clean scores and routing map for the auxiliary load-balancing loss.
+        grouped top-k, expert bias, and scaling factor. When compute_aux_scores=True,
+        switches to the clean score-for-aux-loss kernel (no bias/groups/scaling,
+        dense output).
 
     fused_moe_aux_loss:
         Compute the MoE auxiliary load-balancing loss scalar.
@@ -37,7 +36,6 @@ from transformer_engine.jax.cpp_extensions.router import (
 __all__ = [
     "ScoreFunction",
     "fused_topk_with_score_function",
-    "fused_compute_score_for_moe_aux_loss",
     "fused_moe_aux_loss",
 ]
 
@@ -69,9 +67,20 @@ def fused_topk_with_score_function(
     scaling_factor: float = 1.0,
     score_function: Union[str, ScoreFunction] = ScoreFunction.SOFTMAX,
     expert_bias: Optional[jnp.ndarray] = None,
+    compute_aux_scores: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Fused top-k with score function router.
+
+    When compute_aux_scores=False (default), runs the main routing kernel:
+    score_function(logits) -> [optional bias] -> top-k -> [optional post-softmax] -> scale.
+    Returns sparse probs (only top-k positions nonzero) and routing_map.
+
+    When compute_aux_scores=True, runs the score-for-aux-loss kernel instead:
+    score_function(logits) -> top-k (clean, no bias/groups/scaling).
+    Returns dense scores (all expert positions) and routing_map.
+    The expert_bias, use_pre_softmax, num_groups, group_topk, and scaling_factor
+    parameters are ignored in this mode.
 
     Parameters
     ----------
@@ -80,39 +89,55 @@ def fused_topk_with_score_function(
     topk : int
         Number of top experts to select per token.
     use_pre_softmax : bool
-        If True, apply softmax before top-k (only for softmax score function). Else, apply post top-k
+        If True, apply softmax before top-k (only for softmax score function). Else, apply post top-k.
+        Ignored when compute_aux_scores=True.
     num_groups : int
         Number of groups for grouped top-k. 1 means no grouping.
+        Ignored when compute_aux_scores=True.
     group_topk : int
         Top-k at group level. 1 means no group-level selection.
+        Ignored when compute_aux_scores=True.
     scaling_factor : float
         Scaling factor applied to output probs.
+        Ignored when compute_aux_scores=True.
     score_function : Union[str, ScoreFunction]
         Score function: "softmax" / "sigmoid" or ScoreFunction.SOFTMAX / ScoreFunction.SIGMOID.
     expert_bias : Optional[jnp.ndarray]
         Expert bias, shape [num_experts]. Only used with sigmoid.
+        Ignored when compute_aux_scores=True.
+    compute_aux_scores : bool
+        If True, use the clean score-for-aux-loss kernel. Returns dense scores
+        over all experts instead of sparse probs.
 
     Returns
     -------
-    probs : jnp.ndarray
-        Sparse probability tensor, shape [num_tokens, num_experts].
-        Non-zero only at selected expert positions.
+    probs_or_scores : jnp.ndarray
+        When compute_aux_scores=False: Sparse probability tensor, shape [num_tokens, num_experts].
+            Non-zero only at selected expert positions.
+        When compute_aux_scores=True: Dense score tensor, shape [num_tokens, num_experts].
+            All expert positions contain scores.
     routing_map : jnp.ndarray
         Boolean mask, shape [num_tokens, num_experts].
         True at selected expert positions.
     """
     score_function = _validate_score_function(score_function)
 
-    if expert_bias is not None and score_function != ScoreFunction.SIGMOID:
-        raise ValueError(
-            "expert_bias is only supported with score_function='sigmoid'. "
-            f"Got score_function='{score_function.name}'."
-        )
-
-    if expert_bias is None:
+    if compute_aux_scores:
         expert_bias = jnp.empty((0,), dtype=logits.dtype)
+        use_pre_softmax = False
+        num_groups = 1
+        group_topk = 1
+        scaling_factor = 1.0
+    else:
+        if expert_bias is not None and score_function != ScoreFunction.SIGMOID:
+            raise ValueError(
+                "expert_bias is only supported with score_function='sigmoid'. "
+                f"Got score_function='{score_function.name}'."
+            )
+        if expert_bias is None:
+            expert_bias = jnp.empty((0,), dtype=logits.dtype)
 
-    probs, routing_map = _fused_topk_with_score_function(
+    probs_or_scores, routing_map = _fused_topk_with_score_function(
         logits,
         expert_bias,
         topk,
@@ -121,10 +146,10 @@ def fused_topk_with_score_function(
         group_topk,
         scaling_factor,
         score_function,
-        False,  # compute_aux_scores
+        compute_aux_scores,
     )
 
-    return probs, routing_map
+    return probs_or_scores, routing_map
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5, 6, 7, 8))
@@ -211,58 +236,6 @@ _fused_topk_with_score_function.defvjp(
     _fused_topk_with_score_function_fwd,
     _fused_topk_with_score_function_bwd,
 )
-
-
-# =============================================================================
-# Fused Score for MoE Aux Loss
-# =============================================================================
-
-
-def fused_compute_score_for_moe_aux_loss(
-    logits: jnp.ndarray,
-    topk: int,
-    score_function: Union[str, ScoreFunction] = ScoreFunction.SOFTMAX,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Compute scores and routing map for MoE auxiliary loss.
-
-    This uses clean softmax/sigmoid + plain top-k (no group constraints,
-    no expert bias, no scaling) to produce the scores and routing map
-    used for the load-balancing auxiliary loss.
-
-    Internally delegates to the same primitive as fused_topk_with_score_function
-    with compute_aux_scores=True, selecting the score-for-aux-loss CUDA kernel.
-
-    Parameters
-    ----------
-    logits : jnp.ndarray
-        Logits from the gating GEMM, shape [num_tokens, num_experts].
-    topk : int
-        Number of top experts to select.
-    score_function : Union[str, ScoreFunction]
-        Score function: "softmax" / "sigmoid" or ScoreFunction.SOFTMAX / ScoreFunction.SIGMOID.
-
-    Returns
-    -------
-    routing_map : jnp.ndarray
-        Boolean mask, shape [num_tokens, num_experts].
-    scores : jnp.ndarray
-        Dense score tensor, shape [num_tokens, num_experts].
-    """
-    score_function = _validate_score_function(score_function)
-
-    scores, routing_map = _fused_topk_with_score_function(
-        logits,
-        jnp.empty((0,), dtype=logits.dtype),
-        topk,
-        False,  # use_pre_softmax (unused for aux scores)
-        1,  # num_groups (unused for aux scores)
-        1,  # group_topk (unused for aux scores)
-        1.0,  # scaling_factor (unused for aux scores)
-        score_function,
-        True,  # compute_aux_scores
-    )
-    return routing_map, scores
 
 
 # =============================================================================

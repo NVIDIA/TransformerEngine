@@ -10,7 +10,7 @@ Router operations process each token independently (1 warp per token), so
 sharded execution on the token dimension should produce identical results
 to processing each shard independently with the reference implementation.
 
-For fused_topk_with_score_function and fused_compute_score_for_moe_aux_loss:
+For fused_topk_with_score_function (including compute_aux_scores mode):
 - Input logits [num_tokens, num_experts] are sharded on num_tokens (DP axis)
 - Expert dimension is replicated
 - Each GPU processes its local tokens independently
@@ -36,7 +36,6 @@ from utils import assert_allclose, pytest_parametrize_wrapper
 
 from transformer_engine.jax.router import (
     fused_topk_with_score_function,
-    fused_compute_score_for_moe_aux_loss,
     fused_moe_aux_loss,
 )
 
@@ -202,7 +201,7 @@ class TestDistributedFusedTopk:
 
 
 class TestDistributedScoreForAuxLoss:
-    """Test distributed execution of fused_compute_score_for_moe_aux_loss.
+    """Test distributed execution of fused_topk_with_score_function with compute_aux_scores=True.
 
     Same sharding strategy as fused_topk: shard on token dim, replicate experts.
     Each GPU independently computes scores and routing map for its local tokens.
@@ -238,13 +237,12 @@ class TestDistributedScoreForAuxLoss:
             # === Forward ===
             @jax.jit
             def target_fwd(x):
-                return fused_compute_score_for_moe_aux_loss(
-                    x,
-                    topk=topk,
-                    score_function=score_function,
+                return fused_topk_with_score_function(
+                    x, topk=topk, score_function=score_function,
+                    compute_aux_scores=True,
                 )
 
-            target_routing_map, target_scores = target_fwd(logits_sharded)
+            target_scores, target_routing_map = target_fwd(logits_sharded)
 
             logits_shards = jnp.reshape(logits, (num_dp_devices, local_num_tokens, num_experts))
             ref_fwd_fn = jax.jit(
@@ -276,10 +274,9 @@ class TestDistributedScoreForAuxLoss:
 
             # === Backward ===
             def target_loss(x):
-                _, s = fused_compute_score_for_moe_aux_loss(
-                    x,
-                    topk=topk,
-                    score_function=score_function,
+                s, _ = fused_topk_with_score_function(
+                    x, topk=topk, score_function=score_function,
+                    compute_aux_scores=True,
                 )
                 return jnp.sum(s)
 
