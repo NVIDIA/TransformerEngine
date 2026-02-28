@@ -97,25 +97,6 @@ class AmaxCalculationPrimitive(BasePrimitive):
         return amax
 
     @staticmethod
-    def infer_sharding_from_operands(
-        amax_scope,
-        transpose_batch_sequence,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        """
-        amax calcuation infer_sharding_from_operands
-        """
-        del (amax_scope, transpose_batch_sequence, arg_infos, result_infos)  # Unused.
-        amax_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(None),
-            desc="AmaxCalculationPrimitive.out_sharding",
-        )
-        return amax_sharding
-
-    @staticmethod
     def partition(
         amax_scope,
         transpose_batch_sequence,
@@ -266,36 +247,6 @@ class RHTAmaxCalculationPrimitive(BasePrimitive):
             flatten_axis=flatten_axis,
         )
         return amax, post_rht_amax
-
-    @staticmethod
-    def infer_sharding_from_operands(
-        amax_scope,
-        transpose_batch_sequence,
-        rht_matrix_random_sign_mask_t,
-        produce_regular_amax,
-        flatten_axis,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        """
-        amax calcuation infer_sharding_from_operands
-        """
-        del (
-            amax_scope,
-            transpose_batch_sequence,
-            rht_matrix_random_sign_mask_t,
-            produce_regular_amax,
-            flatten_axis,
-            arg_infos,
-            result_infos,
-        )  # Unused.
-        amax_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(None),
-            desc="RHTAmaxCalculationPrimitive.out_sharding",
-        )
-        return amax_sharding, amax_sharding
 
     @staticmethod
     def partition(

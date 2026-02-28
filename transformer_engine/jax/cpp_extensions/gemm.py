@@ -998,51 +998,6 @@ class GemmPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(
-        out_dtype,
-        contracting_dims,
-        scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
-        use_split_accumulator,
-        transpose_batch_sequence,
-        sequence_dim,
-        is_outer,
-        collective_op,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        del (
-            out_dtype,
-            scaling_mode,
-            use_split_accumulator,
-            result_infos,
-            is_outer,
-            sequence_dim,
-        )
-
-        (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
-            GemmPrimitive._parse_operand_output_specs(
-                arg_infos, contracting_dims, transpose_batch_sequence, collective_op
-            )
-        )
-        out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
-
-        # Discard dbias gradient spec if there is no bias and grad fusion
-        if not (fuse_bias and grad):
-            dbias_specs = (None,)
-        dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_specs))
-
-        # Discard pre-GeLU output spec if there is no GeLU fusion
-        if not fuse_gelu:
-            pre_gelu_specs = (None,)
-        pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_specs))
-
-        return [out_sharding, dbias_sharding, pre_gelu_sharding]
-
-    @staticmethod
     def partition(
         out_dtype,
         contracting_dims,
@@ -1172,9 +1127,16 @@ class GemmPrimitive(BasePrimitive):
         del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer
 
         if not collective_op.is_none:
-            raise NotImplementedError(
-                "CollectiveGEMM with Shardy propagation is not supported yet! Please turn off"
-                " Shardy by exporting env var JAX_USE_SHARDY_PARTITIONER=false"
+            warnings.warn(
+                "CollectiveGEMM with Shardy propagation may produce an incorrect sharding pattern"
+                " for the output.\n To resolve this, apply a sharding constraint on the output"
+                " using one of the following options:\n"
+                "  - TE `dense` vjp: set `output_axes`.\n"
+                "  - TE `layernorm_mlp` vjp: set `dot_2_input_axes`.\n"
+                "  - TE `transformer_engine.jax.cpp_extensions.gemm`: apply"
+                " `jax.lax.with_sharding_constraint` on the output.\n"
+                "  - TE via MaxText: no action needed.",
+                UserWarning,
             )
 
         prefix = "Gemm_"

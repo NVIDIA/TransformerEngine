@@ -137,22 +137,6 @@ class SoftmaxPrimitive(BasePrimitive):
         return primitive.bind(logits, scale_factor=scale_factor), out_bdims
 
     @classmethod
-    def forward_infer_sharding_from_operands(cls, scale_factor, mesh, arg_infos, result_infos):
-        """
-        softmax_forward infer_sharding_from_operands
-        """
-        del scale_factor, result_infos  # Unused.
-        logits_spec = get_padded_spec(arg_infos[0])
-        if logits_spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the hidden dimension is not supported in {cls.name}! "
-                "Forcing XLA to not shard the hidden dim, which might introduce extra "
-                "collective ops and hurt performance."
-            )
-        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec[:-1], None))
-        return out_sharding
-
-    @classmethod
     def forward_partition(cls, impl, scale_factor, mesh, arg_infos, result_infos):
         """
         softmax_forward partitioning
@@ -215,22 +199,6 @@ class SoftmaxPrimitive(BasePrimitive):
 
         out_bdims = softmax_out_bdim
         return primitive.bind(dz, softmax_out, scale_factor=scale_factor), out_bdims
-
-    @classmethod
-    def backward_infer_sharding_from_operands(cls, scale_factor, mesh, arg_infos, result_infos):
-        """
-        softmax_backward infer_sharding_from_operands
-        """
-        del scale_factor, result_infos  # Unused.
-        dz_spec = get_padded_spec(arg_infos[0])
-        if dz_spec[-1] is not None:
-            warnings.warn(
-                f"Sharding the hidden dimension is not supported in {cls.name}! "
-                "Forcing XLA to not shard the hidden dim, which might introduce extra "
-                "collective ops and hurt performance."
-            )
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*dz_spec[:-1], None))
-        return dx_sharding
 
     @classmethod
     def backward_partition(cls, impl, scale_factor, mesh, arg_infos, result_infos):
@@ -321,12 +289,6 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
-        return ScaledSoftmaxFwdPrimitive.forward_infer_sharding_from_operands(
-            scale_factor, mesh, arg_infos, result_infos
-        )
-
-    @staticmethod
     def partition(scale_factor, mesh, arg_infos, result_infos):
         return ScaledSoftmaxFwdPrimitive.forward_partition(
             ScaledSoftmaxFwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
@@ -393,12 +355,6 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
             batched_args,
             batch_dims,
             scale_factor=scale_factor,
-        )
-
-    @staticmethod
-    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
-        return ScaledSoftmaxBwdPrimitive.backward_infer_sharding_from_operands(
-            scale_factor, mesh, arg_infos, result_infos
         )
 
     @staticmethod
@@ -526,12 +482,6 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
-        return ScaledMaskedSoftmaxFwdPrimitive.forward_infer_sharding_from_operands(
-            scale_factor, mesh, arg_infos, result_infos
-        )
-
-    @staticmethod
     def partition(scale_factor, mesh, arg_infos, result_infos):
         return ScaledMaskedSoftmaxFwdPrimitive.backward_partition(
             ScaledMaskedSoftmaxFwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
@@ -599,12 +549,6 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
             batched_args,
             batch_dims,
             scale_factor=scale_factor,
-        )
-
-    @staticmethod
-    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
-        return ScaledMaskedSoftmaxBwdPrimitive.backward_infer_sharding_from_operands(
-            scale_factor, mesh, arg_infos, result_infos
         )
 
     @staticmethod
@@ -689,12 +633,6 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
-        return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.forward_infer_sharding_from_operands(
-            scale_factor, mesh, arg_infos, result_infos
-        )
-
-    @staticmethod
     def partition(scale_factor, mesh, arg_infos, result_infos):
         return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.forward_partition(
             ScaledUpperTriangMaskedSoftmaxFwdPrimitive.impl,
@@ -770,12 +708,6 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
             batched_args,
             batch_dims,
             scale_factor=scale_factor,
-        )
-
-    @staticmethod
-    def infer_sharding_from_operands(scale_factor, mesh, arg_infos, result_infos):
-        return ScaledUpperTriangMaskedSoftmaxBwdPrimitive.backward_infer_sharding_from_operands(
-            scale_factor, mesh, arg_infos, result_infos
         )
 
     @staticmethod
