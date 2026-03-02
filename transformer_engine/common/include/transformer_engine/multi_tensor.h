@@ -150,6 +150,41 @@ void nvte_multi_tensor_adam_fp8_cuda(int chunk_size, NVTETensor noop_flag,
                                      cudaStream_t stream);
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer
+ *          when model parameters are in MXFP8 precision.
+ *
+ * The update is applied to FP32 master parameters, then the master
+ * parameters are quantized to MXFP8 rowwise and columnwise data
+ * (both are always required).
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
+ *  \param[in,out]  tensor_lists            2D array of input tensors with 8 lists in order:
+ *                                         (0) gradients, (1) FP32 master params, (2) first moment,
+ *                                         (3) second moment, (4) rowwise MXFP8 data,
+ *                                         (5) columnwise MXFP8 data, (6) rowwise scale-inv,
+ *                                         (7) columnwise scale-inv.
+ *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists. Must be 8.
+ *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
+ *  \param[in]      fp8_dtype               MXFP8 element type for quantization (E4M3/E5M2).
+ *  \param[in]      lr                      Learning rate.
+ *  \param[in]      beta1                   Coefficient for first moment of gradient.
+ *  \param[in]      beta2                   Coefficient for second moment of gradient.
+ *  \param[in]      epsilon                 Term added to the denominator for numerical stability.
+ *  \param[in]      step                    Iteration counter.
+ *  \param[in]      mode                    Whether to use AdamW (L2 penalty applied to params).
+ *  \param[in]      bias_correction         Whether to apply correction factor for moment estimates.
+ *  \param[in]      weight_decay            L2 penalty for weight decay.
+ *  \param[in]      stream                  CUDA stream used for this operation.
+ */
+void nvte_multi_tensor_adam_mxfp8_cuda(
+    int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
+    const size_t num_tensor_lists, const size_t num_tensors_per_list, const NVTEDType fp8_dtype,
+    const float lr, const float beta1, const float beta2, const float epsilon, const int step,
+    const int mode, const int bias_correction, const float weight_decay, cudaStream_t stream);
+
+/*!  \brief Compute and apply gradient update to parameters for Adam optimizer
  *          with CUDA graph support and LR scheduling.
  *
  * \warning   This API is **experimental** and subject to change.

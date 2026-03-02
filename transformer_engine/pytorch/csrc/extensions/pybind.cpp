@@ -525,6 +525,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_adam_fp8", &transformer_engine::pytorch::multi_tensor_adam_fp8_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer",
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_adam_mxfp8", &transformer_engine::pytorch::multi_tensor_adam_mxfp8_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer");
   m.def("multi_tensor_adam_capturable",
         &transformer_engine::pytorch::multi_tensor_adam_capturable_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "

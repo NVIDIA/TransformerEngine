@@ -4,12 +4,16 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <utility>
 #include <assert.h>
 #include <cuda_fp8.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include "../common.h"
+#include "../util/math.h"
 #include "../utils.cuh"
+#include "../util/ptx.cuh"
 #include "multi_tensor_apply.cuh"
 
 namespace transformer_engine {
@@ -27,6 +31,7 @@ typedef enum {
 using MATH_T = float;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
+using e8m0_t = transformer_engine::e8m0_t;
 
 template <typename T>
 struct is_fp8 : std::false_type {};
@@ -48,6 +53,31 @@ struct FP8Data {
 
 template <>
 struct FP8Data<false> {};
+
+template <typename T>
+__device__ __forceinline__ void adam_update(T &r_g, T &r_p, T &r_m, T &r_v, const float beta1,
+                                            const float beta2, const float beta1_correction,
+                                            const float beta2_correction, const float epsilon,
+                                            const float lr, adamMode_t mode, const float decay) {
+  if (mode == ADAM_MODE_0) {  // L2
+    r_g = r_g + (decay * r_p);
+    r_m = beta1 * r_m + (1 - beta1) * r_g;
+    r_v = beta2 * r_v + (1 - beta2) * r_g * r_g;
+    T next_m_unbiased = r_m / beta1_correction;
+    T next_v_unbiased = r_v / beta2_correction;
+    T denom = sqrtf(next_v_unbiased) + epsilon;
+    T update = next_m_unbiased / denom;
+    r_p = r_p - (lr * update);
+  } else {  // weight decay
+    r_m = beta1 * r_m + (1 - beta1) * r_g;
+    r_v = beta2 * r_v + (1 - beta2) * r_g * r_g;
+    T next_m_unbiased = r_m / beta1_correction;
+    T next_v_unbiased = r_v / beta2_correction;
+    T denom = sqrtf(next_v_unbiased) + epsilon;
+    T update = (next_m_unbiased / denom) + (decay * r_p);
+    r_p = r_p - (lr * update);
+  }
+}
 
 template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename MOMENT_T, typename index_t>
 struct AdamFunctorMaster {
@@ -122,24 +152,8 @@ struct AdamFunctorMaster {
       }
 #pragma unroll
       for (int ii = 0; ii < ILP; ii++) {
-        if (mode == ADAM_MODE_0) {  // L2
-          r_g[ii] = r_g[ii] + (decay * r_p[ii]);
-          r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
-          r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
-          MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
-          MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
-          MATH_T update = next_m_unbiased / denom;
-          r_p[ii] = r_p[ii] - (lr * update);
-        } else {  // weight decay
-          r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
-          r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
-          MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
-          MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
-          MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
-          MATH_T update = (next_m_unbiased / denom) + (decay * r_p[ii]);
-          r_p[ii] = r_p[ii] - (lr * update);
-        }
+        adam_update(r_g[ii], r_p[ii], r_m[ii], r_v[ii], beta1, beta2, beta1_correction,
+                    beta2_correction, epsilon, lr, mode, decay);
       }
 
 #pragma unroll
@@ -572,6 +586,188 @@ struct AdamCapturableMasterFunctor {
   }
 };
 
+template <typename FP8_T>
+__device__ __forceinline__ FP8_T cast_to_fp8(float x) {
+  return static_cast<FP8_T>(x);
+}
+
+__device__ __forceinline__ float fp8_max_norm_rcp(uint8_t fp8_dtype) {
+  if (fp8_dtype == static_cast<uint8_t>(transformer_engine::DType::kFloat8E4M3)) {
+    return transformer_engine::Quantized_Limits<fp8e4m3>::max_norm_rcp;
+  }
+  return transformer_engine::Quantized_Limits<fp8e5m2>::max_norm_rcp;
+}
+
+template <typename PARAM_T, typename GRAD_T, typename MOMENT_T, typename index_t>
+__global__ void adam_mxfp8_fused_kernel(
+    int64_t chunk_size, volatile int *noop_gmem, MXFP8TensorListMetadata tl, float beta1,
+    float beta2, float beta1_correction, float beta2_correction, float epsilon, float lr, int mode,
+    float weight_decay) {
+  // Stage 0: optional early-exit if a noop flag is set.
+  if (noop_gmem != nullptr && *noop_gmem == 1) {
+    return;
+  }
+  (void)chunk_size;
+
+  // Stage 1: map this block to a specific tensor tile.
+  const int block_idx = blockIdx.x;
+  const int tensor_idx = tl.block_to_tensor[block_idx];
+  const int tile_idx = tl.block_to_tile[block_idx];
+  const int64_t rows_val = tl.rows[tensor_idx];
+  const int64_t cols_val = tl.cols[tensor_idx];
+  if (rows_val == 0 || cols_val == 0) {
+    return;
+  }
+
+  const int64_t tiles_per_row = (cols_val + MXFP8_TILE - 1) / MXFP8_TILE;
+  const int64_t tile_row = tile_idx / tiles_per_row;
+  const int64_t tile_col = tile_idx % tiles_per_row;
+  const int64_t row_base = tile_row * MXFP8_TILE;
+  const int64_t col_base = tile_col * MXFP8_TILE;
+
+  // Stage 2: load pointers for grads/params/moments and MXFP8 outputs/scales.
+  GRAD_T *g = reinterpret_cast<GRAD_T *>(tl.addresses[0][tensor_idx]);
+  PARAM_T *p = reinterpret_cast<PARAM_T *>(tl.addresses[1][tensor_idx]);
+  MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_idx]);
+  MOMENT_T *v = reinterpret_cast<MOMENT_T *>(tl.addresses[3][tensor_idx]);
+
+  auto *rowwise_data = reinterpret_cast<uint8_t *>(tl.addresses[4][tensor_idx]);
+  auto *colwise_data = reinterpret_cast<uint8_t *>(tl.addresses[5][tensor_idx]);
+  auto *rowwise_scale_inv = reinterpret_cast<uint8_t *>(tl.addresses[6][tensor_idx]);
+  auto *colwise_scale_inv = reinterpret_cast<uint8_t *>(tl.addresses[7][tensor_idx]);
+
+  const int64_t unpadded_scales_X_rowwise = (cols_val + MXFP8_TILE - 1) / MXFP8_TILE;
+  constexpr int64_t kRowwiseScaleAlign = 4;
+  const int64_t row_stride =
+      DIVUP_TO_MULTIPLE(unpadded_scales_X_rowwise, kRowwiseScaleAlign);
+  constexpr int64_t kColwiseScaleAlign = 128;
+  const int64_t col_stride = DIVUP_TO_MULTIPLE(cols_val, kColwiseScaleAlign);
+  const uint8_t dtype = tl.fp8_dtype[tensor_idx];
+  const auto adam_mode = static_cast<transformer_engine::multi_tensor_adam::adamMode_t>(mode);
+
+  // Stage 3: initialize shared amax accumulators per row/col within the tile.
+  __shared__ float row_max_vals[MXFP8_TILE];
+  __shared__ float col_max_vals[MXFP8_TILE];
+  if (threadIdx.x < MXFP8_TILE) {
+    row_max_vals[threadIdx.x] = 0.0f;
+    col_max_vals[threadIdx.x] = 0.0f;
+  }
+  __syncthreads();
+
+  for (int t = threadIdx.x; t < MXFP8_TILE_ELEMS; t += blockDim.x) {
+    const int local_r = t / MXFP8_TILE;
+    const int local_c = t % MXFP8_TILE;
+    const int64_t r = row_base + local_r;
+    const int64_t c = col_base + local_c;
+    if (r >= rows_val || c >= cols_val) {
+      continue;
+    }
+    const index_t idx = static_cast<index_t>(r * cols_val + c);
+
+    float r_g = static_cast<float>(g[idx]);
+    float r_p = static_cast<float>(p[idx]);
+    float r_m = static_cast<float>(m[idx]);
+    float r_v = static_cast<float>(v[idx]);
+
+    // Stage 4: apply Adam update in FP32 and write back updated p/m/v.
+    transformer_engine::multi_tensor_adam::adam_update(
+        r_g, r_p, r_m, r_v, beta1, beta2, beta1_correction, beta2_correction, epsilon, lr,
+        adam_mode, weight_decay);
+
+    p[idx] = static_cast<PARAM_T>(r_p);
+    m[idx] = static_cast<MOMENT_T>(r_m);
+    v[idx] = static_cast<MOMENT_T>(r_v);
+
+    // Stage 5: accumulate per-row/col absmax for MXFP8 scaling.
+    const float abs_p = fabsf(r_p);
+    transformer_engine::atomicMaxFloat(&row_max_vals[local_r], abs_p);
+    transformer_engine::atomicMaxFloat(&col_max_vals[local_c], abs_p);
+  }
+
+  __syncthreads();
+
+  // Stage 6: write rowwise/colwise scale-inverse exponents for the tile.
+  const float max_norm_rcp = fp8_max_norm_rcp(dtype);
+
+  for (int r = threadIdx.x; r < MXFP8_TILE; r += blockDim.x) {
+    const int64_t row = row_base + r;
+    if (row >= rows_val) {
+      continue;
+    }
+    const float amax = row_max_vals[r];
+    const ::transformer_engine::e8m0_t biased_exponent =
+        transformer_engine::ptx::float_to_e8m0(amax * max_norm_rcp);
+    const size_t scale_idx = static_cast<size_t>(row * row_stride + tile_col);
+    rowwise_scale_inv[scale_idx] = reinterpret_cast<const uint8_t &>(biased_exponent);
+  }
+
+  for (int c = threadIdx.x; c < MXFP8_TILE; c += blockDim.x) {
+    const int64_t col = col_base + c;
+    if (col >= cols_val) {
+      continue;
+    }
+    const float amax = col_max_vals[c];
+    const ::transformer_engine::e8m0_t biased_exponent =
+        transformer_engine::ptx::float_to_e8m0(amax * max_norm_rcp);
+    const size_t scale_idx = static_cast<size_t>(tile_row * col_stride + col);
+    colwise_scale_inv[scale_idx] = reinterpret_cast<const uint8_t &>(biased_exponent);
+  }
+
+  __syncthreads();
+
+  // Stage 7: quantize updated params to MXFP8 using rowwise and colwise scales.
+  for (int t = threadIdx.x; t < MXFP8_TILE_ELEMS; t += blockDim.x) {
+    const int local_r = t / MXFP8_TILE;
+    const int local_c = t % MXFP8_TILE;
+    const int64_t r = row_base + local_r;
+    const int64_t c = col_base + local_c;
+    if (r >= rows_val || c >= cols_val) {
+      continue;
+    }
+    const index_t idx = static_cast<index_t>(r * cols_val + c);
+    const float r_p = static_cast<float>(p[idx]);
+
+    const size_t row_scale_idx = static_cast<size_t>(r * row_stride + tile_col);
+    const uint8_t row_raw = rowwise_scale_inv[row_scale_idx];
+    const ::transformer_engine::e8m0_t row_biased =
+        reinterpret_cast<const ::transformer_engine::e8m0_t &>(row_raw);
+    const float row_scale_inv = transformer_engine::ptx::exp2f_rcp(row_biased);
+    if (dtype == static_cast<uint8_t>(transformer_engine::DType::kFloat8E4M3)) {
+      auto *out = reinterpret_cast<fp8e4m3 *>(rowwise_data);
+      out[idx] = cast_to_fp8<fp8e4m3>(r_p * row_scale_inv);
+    } else {
+      auto *out = reinterpret_cast<fp8e5m2 *>(rowwise_data);
+      out[idx] = cast_to_fp8<fp8e5m2>(r_p * row_scale_inv);
+    }
+
+    const size_t col_scale_idx = static_cast<size_t>(tile_row * col_stride + c);
+    const uint8_t col_raw = colwise_scale_inv[col_scale_idx];
+    const ::transformer_engine::e8m0_t col_biased =
+        reinterpret_cast<const ::transformer_engine::e8m0_t &>(col_raw);
+    const float col_scale_inv = transformer_engine::ptx::exp2f_rcp(col_biased);
+    if (dtype == static_cast<uint8_t>(transformer_engine::DType::kFloat8E4M3)) {
+      auto *out = reinterpret_cast<fp8e4m3 *>(colwise_data);
+      out[idx] = cast_to_fp8<fp8e4m3>(r_p * col_scale_inv);
+    } else {
+      auto *out = reinterpret_cast<fp8e5m2 *>(colwise_data);
+      out[idx] = cast_to_fp8<fp8e5m2>(r_p * col_scale_inv);
+    }
+  }
+}
+
+inline bool requires_64bit_indexing(const std::vector<std::vector<Tensor *>> &tensor_lists) {
+  const size_t num_tensor_lists = tensor_lists.size();
+  const size_t num_tensors_per_list = tensor_lists[0].size();
+  for (size_t i = 0; i < num_tensor_lists; ++i) {
+    for (size_t j = 0; j < num_tensors_per_list; ++j) {
+      if (tensor_lists[i][j]->numel() >= INT_MAX) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void multi_tensor_adam_cuda(int chunk_size, Tensor noop_flag,
                             std::vector<std::vector<Tensor *>> tensor_lists, const float lr,
                             const float beta1, const float beta2, const float epsilon,
@@ -624,25 +820,13 @@ void multi_tensor_adam_cuda(int chunk_size, Tensor noop_flag,
     }
   }
 
-  // Check if 64-bit indices are required
-  bool requires_64bit_indexing = false;
-  for (size_t i = 0; i < num_tensor_lists; i++) {
-    for (size_t j = 0; j < num_tensors_per_list; j++) {
-      if (tensor_lists[i][j]->numel() >= INT_MAX) {
-        requires_64bit_indexing = true;
-        break;
-      }
-    }
-    if (requires_64bit_indexing) {
-      break;
-    }
-  }
+  const bool use_64bit_indexing = requires_64bit_indexing(tensor_lists);
 
   // Get moment dtype (m and v have the same dtype, already validated above)
   const auto moment_type_te = tensor_lists[2][0]->dtype();
 
   // Launch kernel
-  if (requires_64bit_indexing) {
+  if (use_64bit_indexing) {
     if (num_tensor_lists == 4) {
       // g, p, m, v
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
@@ -766,28 +950,41 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, Tensor noop_flag,
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+inline std::pair<float, float> compute_bias_correction(int bias_correction, float beta1,
+                                                       float beta2, int step) {
+  float bias_correction1 = 1.0f;
+  float bias_correction2 = 1.0f;
+  if (bias_correction == 1) {
+    bias_correction1 = 1 - std::pow(beta1, step);
+    bias_correction2 = 1 - std::pow(beta2, step);
+  }
+  return {bias_correction1, bias_correction2};
+}
+
+inline void check_tensor_list_sizes(const std::vector<std::vector<Tensor *>> &tensor_lists,
+                                    size_t expected_lists) {
+  const size_t num_tensor_lists = tensor_lists.size();
+  NVTE_CHECK(num_tensor_lists == expected_lists, "Expected ", expected_lists,
+             " tensor lists, but found ", num_tensor_lists);
+  const size_t num_tensors_per_list = tensor_lists[0].size();
+  for (size_t i = 1; i < num_tensor_lists; ++i) {
+    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list, "Tensor list ", i,
+               " has size=", tensor_lists[i].size(), ", but expected size=", num_tensors_per_list);
+  }
+}
+
+
 void multi_tensor_adam_fp8_cuda(int chunk_size, Tensor noop_flag,
                                 std::vector<std::vector<Tensor *>> tensor_lists, const float lr,
                                 const float beta1, const float beta2, const float epsilon,
                                 const int step, const int mode, const int bias_correction,
                                 const float weight_decay, const DType fp8_dtype,
                                 cudaStream_t stream) {
-  // Handle bias correction mode
-  float bias_correction1 = 1.0f, bias_correction2 = 1.0f;
-  if (bias_correction == 1) {
-    bias_correction1 = 1 - std::pow(beta1, step);
-    bias_correction2 = 1 - std::pow(beta2, step);
-  }
-
-  // Check tensor list sizes
-  // 8 tensor lists: g, p_fp8, m, v, p_master, scale, amax, scale_inv
+  auto [bias_correction1, bias_correction2] =
+      compute_bias_correction(bias_correction, beta1, beta2, step);
+  check_tensor_list_sizes(tensor_lists, 8);
   const size_t num_tensor_lists = tensor_lists.size();
-  NVTE_CHECK(num_tensor_lists == 8, "Expected 8 tensor lists, but found ", num_tensor_lists);
   const size_t num_tensors_per_list = tensor_lists[0].size();
-  for (size_t i = 1; i < num_tensor_lists; i++) {
-    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list, "Tensor list ", i,
-               " has size=", tensor_lists[i].size(), ", but expected size=", num_tensors_per_list);
-  }
 
   // Check tensor dtypes
   const auto g_in_type_te = tensor_lists[0][0]->dtype();
@@ -819,22 +1016,10 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, Tensor noop_flag,
                ", but expected dtype=", to_string(DType::kFloat32));
   }
 
-  // Check if 64-bit indices are required
-  bool requires_64bit_indexing = false;
-  for (size_t i = 0; i < num_tensor_lists; i++) {
-    for (size_t j = 0; j < num_tensors_per_list; j++) {
-      if (tensor_lists[i][j]->numel() >= INT_MAX) {
-        requires_64bit_indexing = true;
-        break;
-      }
-    }
-    if (requires_64bit_indexing) {
-      break;
-    }
-  }
+  const bool use_64bit_indexing = requires_64bit_indexing(tensor_lists);
 
   // Launch kernel
-  if (requires_64bit_indexing) {
+  if (use_64bit_indexing) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         fp8_dtype, FP8_T,
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
@@ -854,6 +1039,76 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, Tensor noop_flag,
                 bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode, weight_decay);));
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void multi_tensor_adam_mxfp8_cuda(int chunk_size, Tensor noop_flag,
+                                  std::vector<std::vector<Tensor *>> tensor_lists, const float lr,
+                                  const float beta1, const float beta2, const float epsilon,
+                                  const int step, const int mode, const int bias_correction,
+                                  const float weight_decay, const DType fp8_dtype,
+                                  cudaStream_t stream) {
+  auto [bias_correction1, bias_correction2] =
+      compute_bias_correction(bias_correction, beta1, beta2, step);
+  check_tensor_list_sizes(tensor_lists, 8);
+  const size_t num_tensor_lists = tensor_lists.size();
+  const size_t num_tensors_per_list = tensor_lists[0].size();
+
+  NVTE_CHECK(fp8_dtype == DType::kFloat8E4M3 || fp8_dtype == DType::kFloat8E5M2,
+             "fp8_dtype must be E4M3 or E5M2 for MXFP8 fused Adam.");
+
+  // Check tensor dtypes
+  const auto g_in_type_te = tensor_lists[0][0]->dtype();
+  const auto p_in_type_te = tensor_lists[1][0]->dtype();
+  const auto moment_type_te = tensor_lists[2][0]->dtype();
+  for (size_t j = 0; j < num_tensors_per_list; ++j) {
+    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te, "Grad tensor ", j,
+               " has dtype=", to_string(tensor_lists[0][j]->dtype()),
+               ", but expected dtype=", to_string(g_in_type_te));
+    NVTE_CHECK(tensor_lists[1][j]->dtype() == p_in_type_te, "Param tensor ", j,
+               " has dtype=", to_string(tensor_lists[1][j]->dtype()),
+               ", but expected dtype=", to_string(p_in_type_te));
+    {
+      const bool m_is_fp32 = tensor_lists[2][j]->dtype() == DType::kFloat32;
+      const bool m_is_bf16 = tensor_lists[2][j]->dtype() == DType::kBFloat16;
+      const bool v_is_fp32 = tensor_lists[3][j]->dtype() == DType::kFloat32;
+      const bool v_is_bf16 = tensor_lists[3][j]->dtype() == DType::kBFloat16;
+      NVTE_CHECK((m_is_fp32 && v_is_fp32) || (m_is_bf16 && v_is_bf16),
+                 "First and second moment tensors must both be Float32 or both be BFloat16, but "
+                 "tensor ",
+                 j, " has first moment dtype=", to_string(tensor_lists[2][j]->dtype()),
+                 " and second moment dtype=", to_string(tensor_lists[3][j]->dtype()));
+    }
+  }
+
+  const bool use_64bit_indexing = requires_64bit_indexing(tensor_lists);
+
+  if (use_64bit_indexing) {
+    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+        p_in_type_te, p_in_type,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+            g_in_type_te, g_in_type,
+            TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+                moment_type_te, moment_type,
+                multi_tensor_apply_mxfp8<
+                    transformer_engine::multi_tensor_adam::adam_mxfp8_fused_kernel<
+                        p_in_type, g_in_type, moment_type, int64_t>>(
+                    chunk_size, noop_flag, tensor_lists, static_cast<uint8_t>(fp8_dtype), stream,
+                    beta1, beta2, bias_correction1, bias_correction2, epsilon, lr, mode,
+                    weight_decay);)));
+  } else {
+    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+        p_in_type_te, p_in_type,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+            g_in_type_te, g_in_type,
+            TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+                moment_type_te, moment_type,
+                multi_tensor_apply_mxfp8<
+                    transformer_engine::multi_tensor_adam::adam_mxfp8_fused_kernel<
+                        p_in_type, g_in_type, moment_type, int32_t>>(
+                    chunk_size, noop_flag, tensor_lists, static_cast<uint8_t>(fp8_dtype), stream,
+                    beta1, beta2, bias_correction1, bias_correction2, epsilon, lr, mode,
+                    weight_decay);)));
+  }
 }
 
 void multi_tensor_adam_capturable_cuda(int chunk_size, Tensor noop_flag,
@@ -1013,6 +1268,19 @@ void nvte_multi_tensor_adam_fp8_cuda(int chunk_size, NVTETensor noop_flag,
   using namespace transformer_engine;
 
   multi_tensor_adam::multi_tensor_adam_fp8_cuda(
+      chunk_size, *convertNVTETensorCheck(noop_flag),
+      convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), lr, beta1, beta2,
+      epsilon, step, mode, bias_correction, weight_decay, static_cast<DType>(fp8_dtype), stream);
+}
+
+void nvte_multi_tensor_adam_mxfp8_cuda(
+    int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
+    const size_t num_tensor_lists, const size_t num_tensors_per_list, const NVTEDType fp8_dtype,
+    const float lr, const float beta1, const float beta2, const float epsilon, const int step,
+    const int mode, const int bias_correction, const float weight_decay, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_adam_mxfp8_cuda);
+  using namespace transformer_engine;
+  multi_tensor_adam::multi_tensor_adam_mxfp8_cuda(
       chunk_size, *convertNVTETensorCheck(noop_flag),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), lr, beta1, beta2,
       epsilon, step, mode, bias_correction, weight_decay, static_cast<DType>(fp8_dtype), stream);
