@@ -832,19 +832,21 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
   const size_t num_tensors = input->num_tensors;
 
-  size_t blocks = 0;
+  size_t blocks_X = 0;
+  size_t blocks_Y = 0;
+
   if (is_single_tensor) {
-    const size_t blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
-    const size_t blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
-    blocks = blocks_Y * blocks_X;
+    blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
+    blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
   } else {
     NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
                "Number of tensors in a group is larger than "
                "the MAX number of supported descriptors (64).");
-    blocks = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
+    blocks_Y = 1;
+    blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
   }
+  const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = THREADS_PER_CHUNK;
-  const dim3 grid(blocks);
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
 
