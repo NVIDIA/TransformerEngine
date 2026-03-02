@@ -61,7 +61,7 @@ jobs:
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Dependencies'
         run: |
-            pip install cmake torch ninja pybind11 numpy
+            pip install cmake ninja pybind11 numpy
             pip install torch --index-url https://download.pytorch.org/whl/cu130
             pip install "nvidia-cuda-nvcc<13.1" "nvidia-cuda-cccl<13.1" "nvidia-cuda-crt<13.1" "nvidia-nvvm<13.1" "nvidia-cuda-profiler-api<13.1" "nvidia-nvml-dev<13.1"
             ln -s $CUDA_PATH/lib/libcudart.so.13 $CUDA_HOME/lib/libcudart.so
