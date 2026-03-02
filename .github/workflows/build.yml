@@ -77,7 +77,7 @@ jobs:
 
       - name: 'Build'
         run: |
-          export CUDA_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cu13
+          export CUDA_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cu13')")
           export PATH=$CUDA_PATH/bin:$PATH
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH/lib:$LD_LIBRARY_PATH
           export LIBRARY_PATH=$LIBRARY_PATH/lib:$LIBRARY_PATH
