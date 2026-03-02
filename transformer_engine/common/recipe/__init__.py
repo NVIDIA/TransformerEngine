@@ -529,6 +529,11 @@ class CustomRecipe(Recipe):
 
     qfactory: Callable[..., Any]
 
+    # fp8_format does not affect quantization (quantization factory controls that),
+    # but TE internals (e.g. get_fp8_te_dtype, backend selection) read it
+    # from the recipe.  HYBRID (E4M3 fwd, E5M2 bwd) is a safe default.
+    fp8_format: Format = Format.HYBRID
+
     fp8_dpa: bool = False
     fp8_mha: bool = False
 

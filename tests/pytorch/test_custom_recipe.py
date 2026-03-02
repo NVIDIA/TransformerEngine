@@ -828,4 +828,131 @@ def test_custom_recipe_ds_multi_step():
     # After 3 steps, amax_history should have been updated at least once
     # The first row (amax_history[0]) should differ from the initial zeros
     # after the first step
-    assert not torch.all(amax_snapshots[0] == 0), "amax_history should be updated after first step"
+    assert not torch.all(amax_snapshots[0] == 0), (
+        "amax_history should be updated after first step"
+    )
+
+
+def test_custom_recipe_dpa_fp8():
+    """DotProductAttention forward+backward with CustomRecipe and role-based mixed quantizers.
+
+    Uses the nvfp4_linear_fp8_dpa_factory which dispatches:
+      * DPA S/dP slots -> DelayedScalingRequest (stateful)
+      * DPA QKV/O/dO/dQKV slots -> Float8CurrentScalingQuantizer
+      * Linear slots -> NVFP4Quantizer
+    """
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported on this device: {reason}")
+    if not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    from transformer_engine.pytorch.utils import get_device_compute_capability
+
+    cc = get_device_compute_capability()
+    if cc < (9, 0) or cc >= (12, 0):
+        pytest.skip(f"FP8 attention not supported on sm{cc[0]*10+cc[1]}")
+
+    from transformer_engine.pytorch.quantization import (
+        DelayedScalingRequest,
+        CustomRecipeState,
+    )
+    from transformer_engine.pytorch.tensor.float8_tensor import (
+        Float8Quantizer,
+        Float8CurrentScalingQuantizer,
+    )
+    from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+        nvfp4_linear_fp8_dpa_factory,
+    )
+
+    torch.manual_seed(42)
+
+    H = 64
+    NH = 4
+    KV = H // NH
+    B = 2
+    S = 32
+
+    # Build a small model: Linear -> DPA -> Linear
+    qkv_proj = Linear(H, 3 * H, params_dtype=torch.bfloat16, bias=False, name="qkv").cuda()
+    dpa = te.DotProductAttention(
+        NH, KV, attention_dropout=0.0, qkv_format="bshd", name="core_attention"
+    )
+    out_proj = Linear(H, H, params_dtype=torch.bfloat16, bias=False, name="proj").cuda()
+
+    custom_recipe = recipe.CustomRecipe(
+        qfactory=nvfp4_linear_fp8_dpa_factory,
+        fp8_dpa=True,
+    )
+
+    inp = torch.randn(B, S, H, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    with autocast(enabled=True, recipe=custom_recipe):
+        qkv = qkv_proj(inp).view(B, S, 3, NH, KV)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        attn_out = dpa(q, k, v, qkv_format="bshd").reshape(B, S, H)
+        out = out_proj(attn_out)
+
+    loss = out.float().sum()
+    loss.backward()
+
+    assert inp.grad is not None, "Input gradient should exist"
+
+    # Verify DPA recipe state is CustomRecipeState
+    fwd_state = dpa.fp8_meta["scaling_fwd"]
+    assert isinstance(fwd_state, CustomRecipeState), (
+        f"Expected CustomRecipeState for DPA fwd, got {type(fwd_state).__name__}"
+    )
+
+    # Verify DPA quantizers: 9 forward slots (3 GEMMs x 3)
+    fwd_quantizers = dpa.quantizers["scaling_fwd"]
+    assert len(fwd_quantizers) == 9, f"Expected 9 fwd quantizers, got {len(fwd_quantizers)}"
+
+    # Slots 0-2: QKV (GEMM1) -> current scaling (role: module_type="dpa")
+    # Slots 3-5: O   (GEMM2) -> current scaling (role: name hint "dpa_output")
+    # Slots 6-8: S   (GEMM3) -> delayed scaling (Float8Quantizer from DelayedScalingRequest)
+    for i in range(6):
+        assert isinstance(fwd_quantizers[i], Float8CurrentScalingQuantizer), (
+            f"Slot {i} (QKV/O): expected Float8CurrentScalingQuantizer, "
+            f"got {type(fwd_quantizers[i]).__name__}"
+        )
+    for i in range(6, 9):
+        assert isinstance(fwd_quantizers[i], Float8Quantizer), (
+            f"Slot {i} (S): expected Float8Quantizer (delayed scaling), "
+            f"got {type(fwd_quantizers[i]).__name__}"
+        )
+
+    # Verify DS state exists for the S/dP delayed scaling requests
+    assert fwd_state._has_delayed_scaling, "DPA fwd state should have delayed scaling for S slots"
+
+    # Verify backward quantizers exist too
+    bwd_quantizers = dpa.quantizers["scaling_bwd"]
+    assert len(bwd_quantizers) == 6, f"Expected 6 bwd quantizers, got {len(bwd_quantizers)}"
+
+    # Slots 0-1: dQKV (GEMM1) -> current scaling (role: name hint "dpa_grad_input")
+    # Slots 2-3: dO   (GEMM2) -> current scaling (role: module_type="dpa")
+    # Slots 4-5: dP   (GEMM3) -> delayed scaling
+    for i in range(4):
+        assert isinstance(bwd_quantizers[i], Float8CurrentScalingQuantizer), (
+            f"Bwd slot {i} (dQKV/dO): expected Float8CurrentScalingQuantizer, "
+            f"got {type(bwd_quantizers[i]).__name__}"
+        )
+    for i in range(4, 6):
+        assert isinstance(bwd_quantizers[i], Float8Quantizer), (
+            f"Bwd slot {i} (dP): expected Float8Quantizer (delayed scaling), "
+            f"got {type(bwd_quantizers[i]).__name__}"
+        )
+
+    # Linear modules should have CustomRecipeState with NVFP4 quantizers
+    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+
+    qkv_fwd = qkv_proj.fp8_meta["scaling_fwd"]
+    assert isinstance(qkv_fwd, CustomRecipeState), (
+        f"Expected CustomRecipeState for qkv_proj, got {type(qkv_fwd).__name__}"
+    )
+    qkv_fwd_quantizers = qkv_proj.quantizers["scaling_fwd"]
+    for i, q in enumerate(qkv_fwd_quantizers):
+        if q is not None:
+            assert isinstance(q, NVFP4Quantizer), (
+                f"qkv_proj fwd slot {i}: expected NVFP4Quantizer, got {type(q).__name__}"
+            )

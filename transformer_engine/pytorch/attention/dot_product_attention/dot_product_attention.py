@@ -588,6 +588,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
+            super().init_fp8_metadata(num_gemms=num_gemms)
             return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
@@ -760,6 +761,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
     def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
         """Override to allow multiple recipes. Init scales and amaxes for fwd | bwd."""
+        if isinstance(recipe, Recipe) and recipe.custom():
+            return TransformerEngineBaseModule.set_meta_tensor(self, fwd, recipe)
         if isinstance(recipe, Recipe):
             recipe = [recipe]
         fp8_recipe_dpa = recipe[-1]
@@ -830,14 +833,26 @@ class DotProductAttention(TransformerEngineBaseModule):
         Unused positions in each GEMM group share the role of the
         group's primary tensor.
 
-        The O (fwd) and dQKV (bwd) slots mirror the output / grad-input
-        pattern from linear modules.  Set :attr:`output_quantizer_role` /
-        :attr:`grad_input_quantizer_role` to provide consumer identity.
+        The O (fwd) and dQKV (bwd) slots are **boundary** tensors whose
+        consumer is unknown to DPA.  Set :attr:`output_quantizer_role` /
+        :attr:`grad_input_quantizer_role` to provide consumer identity
+        (e.g. from ``MultiheadAttention``).
+
+        When the consumer is not set, a hint-only ``QuantizerRole`` with
+        ``module_type=""`` and ``tensor_type=""`` is emitted.  Its ``name``
+        field carries ``"<instance>.dpa_output"`` or ``"<instance>.dpa_grad_input"``
+        so that the quantizer factory can distinguish DPA boundary slots
+        from other modules' boundary slots.  This is needed because the
+        fused-attention kernel requires FP8-compatible quantizers in all
+        slots -- the factory must return an FP8 quantizer for these hints
+        rather than e.g. NVFP4.
         """
         name = self.name or ""
         if fwd:
             qkv_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name=name)
             o_role = self._output_quantizer_role
+            if o_role is None:
+                o_role = QuantizerRole(name=f"{name}.dpa_output" if name else "dpa_output")
             s_role = QuantizerRole(module_type="dpa", tensor_type="s", name=name)
             base = [
                 qkv_role,
@@ -852,6 +867,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
         else:
             dqkv_role = self._grad_input_quantizer_role
+            if dqkv_role is None:
+                dqkv_role = QuantizerRole(
+                    name=f"{name}.dpa_grad_input" if name else "dpa_grad_input"
+                )
             do_role = QuantizerRole(module_type="dpa", tensor_type="do", name=name)
             dp_role = QuantizerRole(module_type="dpa", tensor_type="dp", name=name)
             base = [

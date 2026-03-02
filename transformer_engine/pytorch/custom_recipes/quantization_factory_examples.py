@@ -14,9 +14,16 @@ Usage::
     from transformer_engine.pytorch.quantization import autocast
     from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
         nvfp4_linear_mxfp8_grouped_linear_factory,
+        nvfp4_linear_fp8_dpa_factory,
     )
 
+    # Mixed module types: NVFP4 for Linear, MXFP8 for GroupedLinear
     recipe = CustomRecipe(qfactory=nvfp4_linear_mxfp8_grouped_linear_factory)
+    with autocast(recipe=recipe):
+        output = model(input)
+
+    # NVFP4 for Linear, FP8 current-scaling + delayed-scaling for DPA
+    recipe = CustomRecipe(qfactory=nvfp4_linear_fp8_dpa_factory, fp8_dpa=True)
     with autocast(recipe=recipe):
         output = model(input)
 """
@@ -104,3 +111,84 @@ def _make_nvfp4_quantizer(role: Optional[QuantizerRole]):
         stochastic_rounding=False,
         with_random_sign_mask=True,
     )
+
+
+def nvfp4_linear_fp8_dpa_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: NVFP4 for ``Linear``, mixed FP8 for ``DotProductAttention``.
+
+    This factory demonstrates how to use ``CustomRecipe`` with ``fp8_dpa=True``
+    to combine NVFP4 quantization for linear layers with FP8 attention.
+
+    DPA tensor types (``role.module_type == "dpa"``):
+
+    =========== ============================================================
+    tensor_type Description
+    =========== ============================================================
+    ``"qkv"``  Query, Key, Value inputs to the first attention GEMM
+    ``"s"``    Softmax output (S = softmax(Q·K^T)), fed into the second GEMM
+    ``"o"``    Attention output (O = S·V)
+    ``"do"``   Gradient of the attention output (dO), backward input
+    ``"dp"``   Gradient of the softmax output (dP = dO·V^T), backward
+    ``"dqkv"`` Gradient flowing back to Q, K, V
+    =========== ============================================================
+
+    Dispatch logic:
+        * ``role.module_type == "dpa"`` with ``tensor_type in ("s", "dp")``
+          -> FP8 delayed scaling (stateful amax tracking)
+        * ``role.module_type == "dpa"`` (QKV, dO)
+          -> FP8 current scaling (E4M3)
+        * DPA boundary hints (``"dpa_output"`` / ``"dpa_grad_input"`` in ``role.name``)
+          -> FP8 current scaling placeholder.  The fused attention kernel requires
+          FP8-compatible quantizers in all DPA slots, even when the output is
+          produced in BF16 (``fp8_mha=False``).  DPA emits these hint-only roles
+          (with empty ``module_type`` and ``tensor_type``) when the downstream
+          consumer is unknown.
+        * everything else (``"linear"`` / ``"grouped_linear"`` / ``None``)
+          -> NVFP4 (E2M1), configured per tensor role
+
+    Usage::
+
+        from transformer_engine.common.recipe import CustomRecipe
+        from transformer_engine.pytorch.quantization import autocast
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+            nvfp4_linear_fp8_dpa_factory,
+        )
+
+        recipe = CustomRecipe(
+            qfactory=nvfp4_linear_fp8_dpa_factory,
+            fp8_dpa=True,
+        )
+        with autocast(recipe=recipe):
+            output = model(input)
+    """
+    from transformer_engine.pytorch.quantization import DelayedScalingRequest
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+
+    is_dpa = role is not None and role.module_type == "dpa"
+    is_softmax_or_dp = is_dpa and role.tensor_type in ("s", "dp")
+
+    if is_softmax_or_dp:
+        return DelayedScalingRequest()
+
+    if is_dpa:
+        return Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+
+    # DPA boundary slots (O output / dQKV grad-input): the fused attention
+    # kernel only supports FP8 quantizers here, regardless of the linear recipe.
+    is_dpa_boundary = (
+        role is not None
+        and not role.module_type
+        and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
+    )
+    if is_dpa_boundary:
+        return Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+        )
+
+    return _make_nvfp4_quantizer(role)
