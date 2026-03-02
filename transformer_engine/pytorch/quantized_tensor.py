@@ -486,6 +486,21 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
 
+        # New empty op (used by DCP async staging to create CPU copies)
+        if func == torch.ops.aten.new_empty.default:
+            tensor = args[0]
+            size = args[1]
+            device = kwargs.get("device", tensor.device)
+            pin_memory = kwargs.get("pin_memory", False)
+            out = tensor._quantizer.make_empty(
+                shape=torch.Size(size),
+                dtype=tensor.dtype,
+                device=device,
+                requires_grad=tensor.requires_grad,
+                pin_memory=pin_memory,
+            )
+            return out
+
         # Empty like op
         if func == torch.ops.aten.empty_like.default:
             tensor = args[0]
