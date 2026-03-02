@@ -107,7 +107,20 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
-            raise ValueError("DelayedScaling recipe is not supported with save_original_input")
+            if module.fp8_meta["recipe"].custom():
+                # Custom recipe factory may produce DS quantizers unknown to caller.
+                # TODO(negvet): fix on Megatron side — guard should also exclude 'custom', or
+                # better: check at runtime whether quantizers are DS-based.
+                warnings.warn(
+                    "save_original_input is incompatible with delayed-scaling quantizers "
+                    "(Float8Quantizer). Disabling save_original_input for this module.",
+                    stacklevel=2,
+                )
+                save_original_input = False
+            else:
+                raise ValueError(
+                    "DelayedScaling recipe is not supported with save_original_input"
+                )
         if input_quantizers[0] is not None:
             for input_quantizer in input_quantizers:
                 input_quantizer.set_usage(

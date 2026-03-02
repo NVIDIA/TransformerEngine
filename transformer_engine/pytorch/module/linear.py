@@ -176,10 +176,22 @@ class _Linear(torch.autograd.Function):
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
             assert_dim_for_all_gather(inputmat, with_input_all_gather_nccl, input_quantizer)
-            if save_original_input:
-                assert not isinstance(
-                    input_quantizer, Float8Quantizer
-                ), "DelayedScaling recipe is not supported with save_original_input"
+            if save_original_input and isinstance(input_quantizer, Float8Quantizer):
+                if module.fp8_meta["recipe"].custom():
+                    # Custom recipe factory may produce DS quantizers unknown to caller.
+                    # TODO(negvet): fix on Megatron side — guard in attention.py checks
+                    # `fp8_recipe != 'delayed'` but should also exclude 'custom', or
+                    # better: check at runtime whether quantizers are DS-based.
+                    warnings.warn(
+                        "save_original_input is incompatible with delayed-scaling quantizers "
+                        "(Float8Quantizer). Disabling save_original_input for this module.",
+                        stacklevel=2,
+                    )
+                    save_original_input = False
+                else:
+                    raise AssertionError(
+                        "DelayedScaling recipe is not supported with save_original_input"
+                    )
 
         if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
 
