@@ -39,10 +39,6 @@ jobs:
     name: 'PyTorch'
     runs-on: ubuntu-latest
     steps:
-      - name: Move /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
-
       - name: Maximize build space
         uses: easimon/maximize-build-space@c28619d8999a147d5e09c1199f84ff6af6ad5794
         with:
@@ -53,37 +49,43 @@ jobs:
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
-          build-mount-path: '/var/lib/docker/'
-
-      - name: Restore /var/lib/docker/
-        shell: bash -euxo pipefail {0}
-        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
 
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
+      - name: "Disk space check before dependencies"
+        run: df -lh
 
-      - name: Start named container
-        run: |
-          docker run -v $(pwd):$(pwd) -w $(pwd) --name builder -d nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04 sleep infinity
-
+      - name: ccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
       - name: 'Dependencies'
         run: |
-          docker exec builder bash -c '\
-            apt-get update && \
-            apt-get install -y git python3.9 pip cudnn9-cuda-12 && \
-            pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript && \
-            apt-get clean \
-          '
+            pip install cmake torch ninja pybind11 numpy
+            pip install torch --index-url https://download.pytorch.org/whl/cu130
+            pip install "nvidia-cuda-nvcc<13.1" "nvidia-cuda-cccl<13.1" "nvidia-cuda-crt<13.1" "nvidia-nvvm<13.1" "nvidia-cuda-profiler-api<13.1" "nvidia-nvml-dev<13.1"
+            ln -s $CUDA_PATH/lib/libcudart.so.13 $CUDA_HOME/lib/libcudart.so
+            ln -s $CUDA_PATH/lib/libcublas.so.13 $CUDA_HOME/lib/libcublas.so
+            ln -s $CUDA_PATH/lib $CUDA_HOME/lib64
+        env:
+          CUDA_PATH: /usr/local/lib/python3.12/dist-packages/nvidia/cu13
+
+      - name: "Disk space check after dependencies"
+        run: df -lh
 
       - name: 'Build'
-        run: docker exec builder bash -c 'pip install --no-build-isolation . -v --no-deps'
+        run: |
+          export PATH=$CUDA_PATH/bin:$PATH
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH/lib:$LD_LIBRARY_PATH
+          export LIBRARY_PATH=$LIBRARY_PATH/lib:$LIBRARY_PATH
+          NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v --no-deps
         env:
+          CUDA_PATH: /usr/local/lib/python3.12/dist-packages/nvidia/cu13
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
+          SCCACHE_GHA_ENABLED: "true"
       - name: 'Sanity check'
-        run: docker exec builder bash -c 'python3 tests/pytorch/test_sanity_import.py'
+        run: python3 tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
     runs-on: ubuntu-latest
