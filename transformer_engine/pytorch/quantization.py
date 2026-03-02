@@ -43,6 +43,8 @@ __all__ = [
     "get_default_recipe",
     "get_align_size_for_quantization",
     "QuantizerRole",
+    "QuantizerRequest",
+    "DelayedScalingRequest",
 ]
 
 
@@ -87,6 +89,56 @@ class QuantizerRole:
         if self.name:
             parts.append(f"name={self.name}")
         return "|".join(parts) if parts else "QuantizerRole()"
+
+
+@dataclasses.dataclass(frozen=True)
+class QuantizerRequest:
+    """Base class for stateful quantizer requests.
+
+    Custom recipe factories return ``QuantizerRequest`` subclasses (instead of
+    quantizer instances) when the quantizer requires TE-managed shared state.
+    TE detects these requests, allocates the required state, and replaces them
+    with real quantizer instances.
+
+    .. warning::
+        **EXPERIMENTAL**: QuantizerRequest is experimental, still under active
+        development, and the API is subject to change without notice.
+    """
+
+
+@dataclasses.dataclass(frozen=True)
+class DelayedScalingRequest(QuantizerRequest):
+    """Request a Float8Quantizer with TE-managed delayed scaling state.
+
+    .. warning::
+        **EXPERIMENTAL**: DelayedScalingRequest is experimental, still under active
+        development, and the API is subject to change without notice.
+
+    All ``DelayedScalingRequest`` instances within the same ``CustomRecipeState``
+    must share identical parameter values.
+
+    Parameters
+    ----------
+    fp8_format : Format, default = Format.HYBRID
+        Controls fwd/bwd dtype (HYBRID = E4M3 fwd, E5M2 bwd).
+    margin : int, default = 0
+        Margin for scaling factor computation.
+    amax_history_len : int, default = 1024
+        Length of the amax history window.
+    amax_compute_algo : str or Callable, default = "max"
+        Algorithm for choosing amax from history.
+    scaling_factor_compute_algo : Callable or None, default = None
+        Custom scaling factor computation.
+    reduce_amax : bool, default = True
+        Whether to all-reduce amax across the distributed group.
+    """
+
+    fp8_format: Format = Format.HYBRID
+    margin: int = 0
+    amax_history_len: int = 1024
+    amax_compute_algo: Union[str, Callable] = "max"
+    scaling_factor_compute_algo: Optional[Callable] = None
+    reduce_amax: bool = True
 
 
 @functools.lru_cache(maxsize=None)
@@ -407,7 +459,7 @@ class FP8GlobalStateManager:
         fp8_meta: Dict[str, Any],
     ) -> None:
         """
-        Delayed scaling only.
+        Delayed scaling only (built-in or custom recipe with DS requests).
 
         The amax reduction process happens completely outside the FP8 modules.
         To participate in the reduction, the only role played by a module is
@@ -422,8 +474,8 @@ class FP8GlobalStateManager:
         wrapper. For non CG case, it's called from within the module.
         """
 
-        # delayed scaling only function, noop for any other recipe
-        if not fp8_meta["recipe"].delayed():
+        # noop unless delayed scaling state is present
+        if not _has_delayed_scaling_state(fp8_meta):
             return
 
         # Every module must call this function exactly once since
@@ -440,18 +492,32 @@ class FP8GlobalStateManager:
                 # Handles non-parameter FP8 modules, e.g. DPA.
                 continue
 
-            key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
+            state = fp8_meta[fp8_meta_tensor_key]
+
+            # Determine recipe + buffers: built-in DS or custom with DS requests
+            if isinstance(state, CustomRecipeState) and state._has_delayed_scaling:
+                inner_recipe = state._inner_delayed_scaling_recipe
+                amax_hist = state.amax_history
+                scale_tensor = state.scale
+                key = cls.get_key_in_buffer(forward, inner_recipe, fp8_meta["fp8_group"])
+                # Register inner recipe in autocast_arguments for reduction
+                autocast_key = cls.get_unique_autocast_key(inner_recipe, fp8_meta["fp8_group"])
+                cls.autocast_arguments[autocast_key] = (inner_recipe, fp8_meta["fp8_group"])
+            else:
+                amax_hist = state.amax_history
+                scale_tensor = state.scale
+                key = cls.get_key_in_buffer(
+                    forward, fp8_meta["recipe"], fp8_meta["fp8_group"]
+                )
 
             if key not in cls.global_amax_buffer:
-                cls.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
-                cls.global_amax_history_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history]
-                cls.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
+                cls.global_amax_buffer[key] = [amax_hist[0]]
+                cls.global_amax_history_buffer[key] = [amax_hist]
+                cls.global_scale_buffer[key] = [scale_tensor]
             else:
-                cls.global_amax_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
-                cls.global_amax_history_buffer[key].append(
-                    fp8_meta[fp8_meta_tensor_key].amax_history
-                )
-                cls.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
+                cls.global_amax_buffer[key].append(amax_hist[0])
+                cls.global_amax_history_buffer[key].append(amax_hist)
+                cls.global_scale_buffer[key].append(scale_tensor)
             fp8_meta[index_in_buffer].append(len(cls.global_amax_buffer[key]) - 1)
             fp8_meta[index_in_buffer].append(key)
 
@@ -661,7 +727,7 @@ class FP8GlobalStateManager:
         """
 
         # delayed scaling only function, noop for any other recipe
-        if not fp8_meta["recipe"].delayed():
+        if not _has_delayed_scaling_state(fp8_meta):
             return
 
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
@@ -687,7 +753,7 @@ class FP8GlobalStateManager:
         1 forward for indentical numerical outputs.
         """
         # delayed scaling only function, noop for any other recipe
-        if not fp8_meta["recipe"].delayed():
+        if not _has_delayed_scaling_state(fp8_meta):
             return
 
         # Store updated amaxes and scales from phase 1 post forward.
@@ -706,7 +772,7 @@ class FP8GlobalStateManager:
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
         # delayed scaling only function, noop for any other recipe
-        if not fp8_meta["recipe"].delayed():
+        if not _has_delayed_scaling_state(fp8_meta):
             return
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
@@ -1404,13 +1470,92 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
 
 
+def _handle_delayed_scaling_requests(
+    raw: list,
+    device: torch.device,
+    mode: str,
+) -> Optional["DelayedScalingRecipeState"]:
+    """Detect DelayedScalingRequest items, allocate shared state, replace with real quantizers.
+
+    All DS requests in the same RecipeState must share identical parameters.
+
+    Returns a ``DelayedScalingRecipeState`` owning the shared buffers, or
+    ``None`` when no DS requests are present.
+    """
+    ds_items = [(i, r) for i, r in enumerate(raw) if isinstance(r, DelayedScalingRequest)]
+    if not ds_items:
+        return None
+
+    r0 = ds_items[0][1]
+
+    # Validate all DS requests share same params
+    for idx, req in ds_items[1:]:
+        for field_name in (
+            "fp8_format",
+            "margin",
+            "amax_history_len",
+            "amax_compute_algo",
+            "scaling_factor_compute_algo",
+            "reduce_amax",
+        ):
+            v0 = getattr(r0, field_name)
+            vi = getattr(req, field_name)
+            if v0 != vi:
+                raise ValueError(
+                    f"All DelayedScalingRequests in one CustomRecipeState must match. "
+                    f"Slot 0 has {field_name}={v0!r}, slot {idx} has {vi!r}."
+                )
+
+    # Build a real DelayedScalingRecipeState to own the shared buffers.
+    inner_recipe = DelayedScaling(
+        fp8_format=r0.fp8_format,
+        margin=r0.margin,
+        amax_history_len=r0.amax_history_len,
+        amax_compute_algo=r0.amax_compute_algo,
+        scaling_factor_compute_algo=r0.scaling_factor_compute_algo,
+        reduce_amax=r0.reduce_amax,
+    )
+    n = len(ds_items)
+    dsrs = DelayedScalingRecipeState(
+        inner_recipe, mode=mode, num_quantizers=n, device=device,
+    )
+
+    # Splice Float8Quantizer instances (backed by dsrs buffers) into raw list.
+    quantizers = dsrs.make_quantizers()
+    for j, (idx, _req) in enumerate(ds_items):
+        raw[idx] = quantizers[j]
+
+    return dsrs
+
+
+def _has_delayed_scaling_state(fp8_meta: Dict[str, Any]) -> bool:
+    """Check if fp8_meta has delayed scaling state (built-in or custom)."""
+    if fp8_meta["recipe"].delayed():
+        return True
+    if fp8_meta["recipe"].custom():
+        for key in ("scaling_fwd", "scaling_bwd"):
+            state = fp8_meta.get(key)
+            if isinstance(state, CustomRecipeState) and state._has_delayed_scaling:
+                return True
+    return False
+
+
 class CustomRecipeState(RecipeState):
-    """State for CustomRecipe: produce quantizers per tensor."""
+    """State for CustomRecipe: produce quantizers per tensor.
+
+    Stateful quantizer support:
+    - Supports stateful quantizers (e.g. delayed scaling) via ``DelayedScalingRequest``.
+    - The factory returns request dataclasses for stateful quantizers; TE detects them,
+      allocates shared buffers, and replaces with real quantizer instances.
+    - Stateful recipe state is composed via real TE recipe state objects (e.g.
+      ``DelayedScalingRecipeState``), not reimplemented.
+    """
 
     recipe: CustomRecipe
     mode: str
     num_quantizers: int
     device: Optional[torch.device]
+    _ds_state: Optional[DelayedScalingRecipeState]
 
     def __init__(
         self,
@@ -1426,6 +1571,7 @@ class CustomRecipeState(RecipeState):
         if device is None:
             device = torch.device("cuda")
         self.device = device
+        self._ds_state = None
 
         if getattr(recipe, "qfactory", None) is None:
             raise ValueError("CustomRecipe requires `qfactory`.")
@@ -1448,8 +1594,24 @@ class CustomRecipeState(RecipeState):
                 f"({len(roles)=} vs {self.num_quantizers=})"
             )
 
-        out = []
-        for i in range(self.num_quantizers):
-            quantizer = qfactory(roles[i])
-            out.append(quantizer)
-        return out
+        raw = [qfactory(roles[i]) for i in range(self.num_quantizers)]
+        self._ds_state = _handle_delayed_scaling_requests(raw, self.device, self.mode)
+        return raw
+
+    # -- Delegation to composed DelayedScalingRecipeState --
+
+    @property
+    def _has_delayed_scaling(self) -> bool:
+        return self._ds_state is not None
+
+    @property
+    def amax_history(self) -> Optional[torch.Tensor]:
+        return self._ds_state.amax_history if self._ds_state else None
+
+    @property
+    def scale(self) -> Optional[torch.Tensor]:
+        return self._ds_state.scale if self._ds_state else None
+
+    @property
+    def _inner_delayed_scaling_recipe(self) -> Optional[DelayedScaling]:
+        return self._ds_state.recipe if self._ds_state else None

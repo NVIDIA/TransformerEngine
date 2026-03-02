@@ -27,9 +27,11 @@ from ..quantization import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
     NVFP4BlockScalingRecipeState,
+    CustomRecipeState,
     FP8GlobalStateManager,
     QuantizerRole,
     RecipeState,
+    _has_delayed_scaling_state,
 )
 from ..distributed import (
     gather_along_first_dim,
@@ -795,6 +797,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
+            if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
+                return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
@@ -932,7 +936,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Copy tensors to CPU and store
         state = {}
         state["recipe"] = self.fp8_meta["recipe"]
-        if state["recipe"].delayed():
+        if _has_delayed_scaling_state(self.fp8_meta):
             state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
             state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
             state["scale_bwd"] = to_cpu(self.fp8_meta["scaling_bwd"].scale)
@@ -1004,7 +1008,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             dst.copy_(src, non_blocking=True)
 
         # Load tensors
-        if self.fp8_meta["recipe"].delayed():
+        if _has_delayed_scaling_state(self.fp8_meta):
             copy_tensor(state["scale_fwd"], self.fp8_meta["scaling_fwd"].scale)
             copy_tensor(state["amax_history_fwd"], self.fp8_meta["scaling_fwd"].amax_history)
             copy_tensor(state["scale_bwd"], self.fp8_meta["scaling_bwd"].scale)
@@ -1131,7 +1135,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
-            delayed_scaling_recipe = self.fp8_meta["recipe"].delayed()
+            delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
             assert inp.is_cuda, "TransformerEngine needs CUDA."
@@ -1143,10 +1147,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.init_fp8_metadata(num_gemms=num_gemms)
             self._check_weight_tensor_recipe_correspondence()
 
-            delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+            delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
             if delayed_scaling_recipe:
                 if self.sequence_parallel:
-                    assert self.fp8_meta["recipe"].reduce_amax, (
+                    assert self.fp8_meta["recipe"].reduce_amax or (
+                        self.fp8_meta["recipe"].custom()
+                    ), (
                         "Amax reduction across tensor parallel group is "
                         "necessary when using sequence parallelism with FP8."
                     )
@@ -1168,7 +1174,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Required to be called at the end of the forward function to properly handle
         DelayedScaling metadata handling and the NVTX ranges.
         """
-        delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+        delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
         if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
         nvtx_range_pop()

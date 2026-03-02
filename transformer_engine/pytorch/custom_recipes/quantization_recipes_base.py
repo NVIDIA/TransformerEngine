@@ -33,6 +33,25 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import QuantizerRole
 
 
+def delayed_scaling_quantizer_factory(
+    role: Optional[QuantizerRole],
+) -> "DelayedScalingRequest":
+    """Factory that mirrors :class:`DelayedScaling` recipe defaults.
+
+    Returns a :class:`DelayedScalingRequest` for every slot.  TE allocates
+    shared scale/amax_history buffers and wires them into the existing
+    delayed-scaling reduction path.
+
+    * HYBRID format: E4M3 forward, E5M2 backward
+    * amax_history_len = 1024
+    * reduce_amax = True
+    """
+    from transformer_engine.pytorch.quantization import DelayedScalingRequest
+    from transformer_engine.common.recipe import Format
+
+    return DelayedScalingRequest(fp8_format=Format.HYBRID)
+
+
 def current_scaling_quantizer_factory(
     role: Optional[QuantizerRole],
 ) -> "Float8CurrentScalingQuantizer":

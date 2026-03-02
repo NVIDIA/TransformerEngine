@@ -23,6 +23,7 @@ from transformer_engine.pytorch.custom_recipes.quantization_recipes_base import 
     mxfp8_quantizer_factory,
     float8_block_scaling_quantizer_factory,
     nvfp4_quantizer_factory,
+    delayed_scaling_quantizer_factory,
 )
 from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import (
     nvfp4_ref_rht_2d_quantizer_factory,
@@ -383,6 +384,24 @@ def _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus):
         )
 
 
+def test_factory_matches_delayed_scaling():
+    """delayed_scaling_quantizer_factory should produce bit-identical results
+    to the built-in DelayedScaling recipe."""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    model_ref, model_cus, inp_ref, inp_cus = _make_pair()
+
+    out_ref, grad_ref, pgrads_ref = _run_linear_fwd_bwd(
+        model_ref, inp_ref, recipe.DelayedScaling()
+    )
+    out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
+        model_cus, inp_cus, recipe.CustomRecipe(qfactory=delayed_scaling_quantizer_factory)
+    )
+    _assert_match(out_ref, out_cus, grad_ref, grad_cus, pgrads_ref, pgrads_cus)
+
+
 def test_factory_matches_current_scaling():
     """current_scaling_quantizer_factory should produce bit-identical results
     to the built-in Float8CurrentScaling recipe."""
@@ -671,3 +690,146 @@ def test_custom_recipe_quantization_targets():
     _check_q(tl3_proj, Float8CurrentScalingQuantizer)
     for mod in [tl3_qkv, tl3_fc1, tl3_fc2]:
         _check_q(mod, NVFP4Quantizer, "default")
+
+
+def test_delayed_scaling_request_wiring():
+    """Shared buffers, correct views, Float8Quantizer instances."""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import (
+        DelayedScalingRequest,
+        CustomRecipeState,
+    )
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+    from transformer_engine.common.recipe import Format
+
+    def ds_factory(role):
+        return DelayedScalingRequest(fp8_format=Format.HYBRID, amax_history_len=16)
+
+    custom_recipe = recipe.CustomRecipe(qfactory=ds_factory)
+
+    # 3 quantizers (input, weight, output) like a Linear fwd
+    state = CustomRecipeState(custom_recipe, mode="forward", num_quantizers=3)
+    state.roles = [
+        QuantizerRole(module_type="linear", tensor_type="input"),
+        QuantizerRole(module_type="linear", tensor_type="weight"),
+        QuantizerRole(module_type="linear", tensor_type="output"),
+    ]
+    quantizers = state.make_quantizers()
+
+    # All quantizers should be Float8Quantizer
+    assert len(quantizers) == 3
+    for q in quantizers:
+        assert isinstance(q, Float8Quantizer), f"Expected Float8Quantizer, got {type(q).__name__}"
+
+    # Managed state should exist
+    assert state._has_delayed_scaling
+    assert state.scale is not None
+    assert state.amax_history is not None
+
+    # Shared buffers: scale shape = (3,), amax_history shape = (16, 3)
+    assert state.scale.shape == (3,)
+    assert state.amax_history.shape == (16, 3)
+
+    # Each quantizer's scale should be a view into the shared buffer
+    for i, q in enumerate(quantizers):
+        assert q.scale.data_ptr() == state.scale[i].data_ptr()
+
+    # Each quantizer's amax should be a view into amax_history[0]
+    for i, q in enumerate(quantizers):
+        assert q.amax.data_ptr() == state.amax_history[0][i].reshape((1,)).data_ptr()
+
+    # Inner recipe should be a DelayedScaling
+    inner = state._inner_delayed_scaling_recipe
+    assert isinstance(inner, recipe.DelayedScaling)
+    assert inner.amax_history_len == 16
+    assert inner.fp8_format == Format.HYBRID
+
+
+def test_custom_recipe_mixed_ds_and_stateless():
+    """Mix DelayedScalingRequest + stateless quantizers in same CustomRecipeState."""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import (
+        DelayedScalingRequest,
+        CustomRecipeState,
+    )
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+    from transformer_engine.common.recipe import Format
+
+    def mixed_factory(role):
+        # Only weight gets delayed scaling, rest get current scaling
+        if role is not None and role.tensor_type == "weight":
+            return DelayedScalingRequest(fp8_format=Format.HYBRID)
+        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+    custom_recipe = recipe.CustomRecipe(qfactory=mixed_factory)
+
+    # 3 quantizers: input(current), weight(DS), output(current)
+    state = CustomRecipeState(custom_recipe, mode="forward", num_quantizers=3)
+    state.roles = [
+        QuantizerRole(module_type="linear", tensor_type="input"),
+        QuantizerRole(module_type="linear", tensor_type="weight"),
+        QuantizerRole(module_type="linear", tensor_type="output"),
+    ]
+    quantizers = state.make_quantizers()
+    assert len(quantizers) == 3
+
+    # Slot 0 (input): current scaling
+    assert isinstance(quantizers[0], Float8CurrentScalingQuantizer)
+    # Slot 1 (weight): delayed scaling
+    assert isinstance(quantizers[1], Float8Quantizer)
+    # Slot 2 (output): current scaling
+    assert isinstance(quantizers[2], Float8CurrentScalingQuantizer)
+
+    # Only 1 DS request => shared buffers have size 1
+    assert state._has_delayed_scaling
+    assert state.scale.shape == (1,)
+    assert state.amax_history.shape == (1024, 1)
+
+
+def test_custom_recipe_ds_multi_step():
+    """amax_history updates across multiple forward steps."""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import DelayedScalingRequest
+    from transformer_engine.common.recipe import Format
+
+    def ds_factory(role):
+        return DelayedScalingRequest(fp8_format=Format.HYBRID)
+
+    in_features = 128
+    out_features = 128
+    batch = 32
+    num_steps = 3
+
+    torch.manual_seed(99)
+    model = Linear(in_features, out_features, params_dtype=torch.bfloat16, bias=False).cuda()
+    custom = recipe.CustomRecipe(qfactory=ds_factory)
+
+    amax_snapshots = []
+    for step in range(num_steps):
+        inp = torch.randn(
+            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        with autocast(enabled=True, recipe=custom):
+            out = model(inp)
+        loss = out.float().sum()
+        loss.backward()
+
+        # Capture amax_history snapshot
+        fwd_state = model.fp8_meta["scaling_fwd"]
+        amax_snapshots.append(fwd_state.amax_history.clone())
+
+    # After 3 steps, amax_history should have been updated at least once
+    # The first row (amax_history[0]) should differ from the initial zeros
+    # after the first step
+    assert not torch.all(amax_snapshots[0] == 0), (
+        "amax_history should be updated after first step"
+    )

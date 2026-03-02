@@ -499,23 +499,31 @@ class CustomRecipe(Recipe):
     Parameters
     ----------
     qfactory : Callable
-        Factory callable that returns a quantizer instance for a given `QuantizerRole`.
+        Factory callable that returns a quantizer instance *or* a
+        ``QuantizerRequest`` subclass for a given ``QuantizerRole``.
         The callable is invoked as::
 
             qfactory(
                 role: QuantizerRole,
-            ) -> Optional[Quantizer]
+            ) -> Union[Quantizer, QuantizerRequest]
 
-        `QuantizerRole` is a frozen dataclass with the following fields:
+        ``QuantizerRole`` is a frozen dataclass with the following fields:
 
-        - `module_type` (str): module type (empty string when not set), e.g.
-          `"linear"`, `"grouped_linear"`, `"dpa"`.
-        - `tensor_type` (str): what tensor is being quantized (empty
-        string when not set), e.g. `"input"`, `"weight"`, `"grad_output"`.
-        - `name` (str): caller-provided module instance name (empty
-          string when not set), e.g. `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`.
+        - ``module_type`` (str): module type (empty string when not set), e.g.
+          ``"linear"``, ``"grouped_linear"``, ``"dpa"``.
+        - ``tensor_type`` (str): what tensor is being quantized (empty
+          string when not set), e.g. ``"input"``, ``"weight"``, ``"grad_output"``.
+        - ``name`` (str): caller-provided module instance name (empty
+          string when not set), e.g. ``"qkv"``, ``"proj"``, ``"fc1"``, ``"fc2"``.
 
-        See `transformer_engine.pytorch.quantization.QuantizerRole`
+        For stateful quantizers (delayed scaling), return a
+        ``DelayedScalingRequest`` dataclass instead of a quantizer.
+        TE will allocate shared scale/amax_history buffers and create
+        ``Float8Quantizer`` instances integrated with the existing
+        delayed-scaling reduction infrastructure.
+
+        See ``transformer_engine.pytorch.quantization.QuantizerRole``
+        and ``transformer_engine.pytorch.quantization.DelayedScalingRequest``
         for full documentation.
     """
 
