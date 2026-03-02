@@ -14,6 +14,7 @@
 
 #ifdef NVTE_WITH_CUBLASMP
 #include <cublasmp.h>
+
 #include "nccl.h"
 #endif  // NVTE_WITH_CUBLASMP
 
