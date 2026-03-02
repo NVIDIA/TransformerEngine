@@ -69,8 +69,6 @@ jobs:
             ln -s $CUDA_PATH/lib/libcudart.so.13 $CUDA_PATH/lib/libcudart.so
             ln -s $CUDA_PATH/lib/libcublas.so.13 $CUDA_PATH/lib/libcublas.so
             ln -s $CUDA_PATH/lib $CUDA_PATH/lib64
-        env:
-          CUDA_PATH: /usr/local/lib/python3.12/dist-packages/nvidia/cu13
 
       - name: "Disk space check after dependencies"
         run: df -lh
@@ -78,12 +76,12 @@ jobs:
       - name: 'Build'
         run: |
           export CUDA_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cu13')")
+          export CUDNN_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cudnn')")
           export PATH=$CUDA_PATH/bin:$PATH
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH/lib:$LD_LIBRARY_PATH
           export LIBRARY_PATH=$LIBRARY_PATH/lib:$LIBRARY_PATH
           NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v --no-deps
         env:
-          CUDA_PATH: /usr/local/lib/python3.12/dist-packages/nvidia/cu13
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
