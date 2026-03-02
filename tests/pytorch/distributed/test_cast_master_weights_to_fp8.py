@@ -988,7 +988,7 @@ def main() -> None:
         run_parallel_tests()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 transpose test requires CUDA.")
+# Debugging tests for NVFP4
 def test_nvfp4_transpose_kernel() -> None:
     """Test that nvfp4_transpose kernel produces bitwise identical results to reference."""
     available, reason = is_nvfp4_available(return_reason=True)
@@ -1061,7 +1061,6 @@ def test_nvfp4_transpose_kernel() -> None:
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="NVFP4 partial-cast test requires CUDA.")
 def test_nvfp4_partial_cast_matches_full() -> None:
     """Test multi-GPU partial cast: split master weight, partial cast on each rank, all-gather, compare."""
     WORLD_RANK = int(os.getenv("RANK", "0"))
@@ -1176,12 +1175,10 @@ def test_single_gpu_partial_cast_vs_full():
     """
     Single GPU test: compare quantize_master_weights (offset=0) vs quantizer().
     This isolates whether the issue is in our manual Python scale computation or elsewhere.
-    """
-    import math
-    import os
-    from transformer_engine.pytorch.tensor import NVFP4Quantizer
-    from transformer_engine.pytorch.tensor.utils import quantize_master_weights
-    import transformer_engine_torch as tex
+    """    
+    available, reason = is_nvfp4_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
 
     torch.manual_seed(1234)
     device = torch.device("cuda")
