@@ -80,8 +80,7 @@ __global__ void __launch_bounds__(128)
                                   const int64_t *const __restrict__ offsets_ptr,
                                   const int64_t *const __restrict__ first_dims_ptr,
                                   const int64_t *const __restrict__ last_dims_ptr,
-                                  const e8m0_t *const __restrict__ scales_ptr,
-                                  const int64_t *const __restrict__ scales_offsets_ptr) {
+                                  const e8m0_t *const __restrict__ scales_ptr) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr size_t CHUNK_DIM_Y = 128;
   constexpr size_t CHUNK_DIM_X = 128;
@@ -155,9 +154,11 @@ __global__ void __launch_bounds__(128)
   const int chunk_offset_Y = block_id_Y * CHUNK_DIM_Y;
   const int chunk_offset_X = block_id_X * CHUNK_DIM_X;
 
-  // Per-tensor scale pointer offset (precomputed on host, or 0 for single tensor)
-  const size_t scales_base_offset =
-      (scales_offsets_ptr != nullptr) ? static_cast<size_t>(scales_offsets_ptr[tensor_id]) : 0;
+  // Per-tensor scale offset derived from data offset on device (CUDA graph compatible).
+  // For MXFP8 with 32-element blocks: scales_offset = data_offset / 32.
+  // This matches the group_quantize_kernel pattern (group_quantize_mxfp8.cuh:344).
+  constexpr size_t SCALE_DIVISOR = USE_ROWWISE_SCALING ? SCALE_DIM_X : SCALE_DIM_Y;
+  const size_t scales_base_offset = tensor_base / SCALE_DIVISOR;
   const e8m0_t *const tensor_scales_ptr = scales_ptr + scales_base_offset;
 
   const int scales_rowwise_chunk_offset_Y = block_id_Y * SCALES_ROWWISE_PER_CHUNK_Y;
@@ -384,68 +385,6 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 
   const SimpleTensor &input_data = use_rowwise_scaling ? input->data : input->columnwise_data;
 
-  // Precompute per-tensor scale offsets on host, upload to device
-  int64_t *scales_offsets_d = nullptr;
-  if (!is_single_tensor) {
-    // We need to read first_dims and last_dims from the host to compute offsets.
-    // For multi-tensor, these are stored on device. Copy them to host.
-    std::vector<int64_t> first_dims_h(num_tensors);
-    std::vector<int64_t> last_dims_h(num_tensors);
-    if (first_dims_ptr != nullptr) {
-      NVTE_CHECK_CUDA(cudaMemcpyAsync(first_dims_h.data(), first_dims_ptr,
-                                       num_tensors * sizeof(int64_t), cudaMemcpyDeviceToHost,
-                                       stream));
-    }
-    if (last_dims_ptr != nullptr) {
-      NVTE_CHECK_CUDA(cudaMemcpyAsync(last_dims_h.data(), last_dims_ptr,
-                                       num_tensors * sizeof(int64_t), cudaMemcpyDeviceToHost,
-                                       stream));
-    }
-    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
-
-    std::vector<int64_t> scales_offsets_h(num_tensors, 0);
-    int64_t running_offset = 0;
-    for (size_t t = 0; t < num_tensors; ++t) {
-      scales_offsets_h[t] = running_offset;
-      size_t t_rows = 0, t_cols = 0;
-      switch (shape_rep) {
-        case ShapeRepresentation::SAME_BOTH_DIMS:
-          t_rows = first_logical_dim / num_tensors;
-          t_cols = last_logical_dim;
-          break;
-        case ShapeRepresentation::VARYING_FIRST_DIM:
-          t_rows = static_cast<size_t>(first_dims_h[t]);
-          t_cols = last_logical_dim;
-          break;
-        case ShapeRepresentation::VARYING_LAST_DIM:
-          t_rows = first_logical_dim;
-          t_cols = static_cast<size_t>(last_dims_h[t]);
-          break;
-        case ShapeRepresentation::VARYING_BOTH_DIMS:
-          t_rows = static_cast<size_t>(first_dims_h[t]);
-          t_cols = static_cast<size_t>(last_dims_h[t]);
-          break;
-      }
-      if (use_rowwise_scaling) {
-        const size_t t_scale_Y =
-            DIVUP_TO_MULTIPLE(t_rows, scale_tensor_alignment_Y_rowwise);
-        const size_t t_scale_X = DIVUP_TO_MULTIPLE(
-            DIVUP(t_cols, static_cast<size_t>(32)), scale_tensor_alignment_X_rowwise);
-        running_offset += static_cast<int64_t>(t_scale_Y * t_scale_X);
-      } else {
-        const size_t t_scale_Y = DIVUP_TO_MULTIPLE(
-            DIVUP(t_rows, static_cast<size_t>(32)), scale_tensor_alignment_Y_colwise);
-        const size_t t_scale_X =
-            DIVUP_TO_MULTIPLE(t_cols, scale_tensor_alignment_X_colwise);
-        running_offset += static_cast<int64_t>(t_scale_Y * t_scale_X);
-      }
-    }
-    NVTE_CHECK_CUDA(cudaMallocAsync(&scales_offsets_d, num_tensors * sizeof(int64_t), stream));
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(scales_offsets_d, scales_offsets_h.data(),
-                                     num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice,
-                                     stream));
-  }
-
   TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
       scale_dim_Y_colwise, SCALE_DIM_Y,
       TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
@@ -482,15 +421,11 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
                   <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, shape_rep,
                                                num_tensors, first_logical_dim, last_logical_dim,
                                                offsets_ptr, first_dims_ptr, last_dims_ptr,
-                                               scales_ptr, scales_offsets_d););  // NOLINT(*)
+                                               scales_ptr););  // NOLINT(*)
           );                                                          // NOLINT(*)
       );                                                              // NOLINT(*)
   );                                                                  // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
-
-  if (scales_offsets_d != nullptr) {
-    NVTE_CHECK_CUDA(cudaFreeAsync(scales_offsets_d, stream));
-  }
 }
 
 }  // namespace mxfp8
