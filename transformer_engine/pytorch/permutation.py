@@ -42,10 +42,16 @@ class _moe_permute_index_map(torch.autograd.Function):
             return inp, torch.tensor([], device=inp.device)
 
         # Device check
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert index.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not index.is_cuda:
+            raise ValueError(f"index must be a CUDA tensor, but got tensor on {index.device}.")
         # Shape check
-        assert inp.size(0) == index.size(0), "Permute not possible"
+        if inp.size(0) != index.size(0):
+            raise ValueError(
+                f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
+                f"index.size(0) ({index.size(0)})."
+            )
 
         # Data type check
         dtype = TE_DType[inp.dtype]
@@ -119,7 +125,8 @@ class _moe_unpermute_index_map(torch.autograd.Function):
 
         # None probs check
         if probs is not None:
-            assert probs.is_cuda, "TransformerEngine needs CUDA."
+            if not probs.is_cuda:
+                raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
 
             if probs.dtype != torch.float32:
                 warnings.warn(
@@ -136,8 +143,12 @@ class _moe_unpermute_index_map(torch.autograd.Function):
             probs = torch.empty(0)
 
         # Device check
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not row_id_map.is_cuda:
+            raise ValueError(
+                f"row_id_map must be a CUDA tensor, but got tensor on {row_id_map.device}."
+            )
 
         # Data type check
         dtype = TE_DType[inp.dtype]
@@ -198,19 +209,30 @@ class _moe_permute_mask_map(torch.autograd.Function):
             ctx.probs = probs
             return inp, torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
 
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert routing_map.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not routing_map.is_cuda:
+            raise ValueError(
+                f"routing_map must be a CUDA tensor, but got tensor on {routing_map.device}."
+            )
         if probs is not None:
-            assert probs.is_cuda, "TransformerEngine needs CUDA."
+            if not probs.is_cuda:
+                raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
         if pad_offsets is not None:
-            assert pad_offsets.is_cuda, "TransformerEngine needs CUDA."
+            if not pad_offsets.is_cuda:
+                raise ValueError(
+                    f"pad_offsets must be a CUDA tensor, but got tensor on {pad_offsets.device}."
+                )
 
-        assert inp.size(0) == routing_map.size(0), "Permute not possible"
+        if inp.size(0) != routing_map.size(0):
+            raise ValueError(
+                f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
+                f"routing_map.size(0) ({routing_map.size(0)})."
+            )
         num_tokens, hidden_size = inp.size()
         num_experts = routing_map.size(1)
-        assert (
-            num_out_tokens is not None
-        ), "num_out_tokens must be provided to the fused permute function."
+        if num_out_tokens is None:
+            raise ValueError("num_out_tokens must be provided to the fused permute function.")
 
         row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
 
@@ -226,13 +248,25 @@ class _moe_permute_mask_map(torch.autograd.Function):
             if blockwise_recipe:
                 fp8_scale = inp._rowwise_scale_inv.T.contiguous()
                 scale_hidden_dim = fp8_scale.shape[1]
-                assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+                if num_tokens != fp8_scale.shape[0]:
+                    raise ValueError(
+                        f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
+                        f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                        f"Input shape: ({num_tokens}, {hidden_size}), "
+                        f"scale shape: {tuple(fp8_scale.shape)}."
+                    )
                 inp = inp._rowwise_data
             # mxfp8 scaling
             elif mxfp8_recipe:
                 fp8_scale = inp._rowwise_scale_inv.contiguous()
                 scale_hidden_dim = fp8_scale.shape[1]
-                assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+                if num_tokens != fp8_scale.shape[0]:
+                    raise ValueError(
+                        f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
+                        f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                        f"Input shape: ({num_tokens}, {hidden_size}), "
+                        f"scale shape: {tuple(fp8_scale.shape)}."
+                    )
                 inp = inp._rowwise_data
             # per-tensor scaling
             elif per_tensor_recipe:
@@ -318,9 +352,11 @@ class _moe_permute_mask_map(torch.autograd.Function):
         probs_grad = None
         if ctx.needs_input_grad[0]:
             row_id_map, pad_offsets = ctx.saved_tensors
-            assert not isinstance(
-                permuted_act_grad, QuantizedTensor
-            ), "The backward of moe_permute does not support FP8."
+            if isinstance(permuted_act_grad, QuantizedTensor):
+                raise TypeError(
+                    "The backward of moe_permute does not support FP8, but got "
+                    f"QuantizedTensor of type {type(permuted_act_grad).__name__}."
+                )
             act_grad, probs_grad = triton_permutation.unpermute_with_mask_map(
                 permuted_act_grad,
                 row_id_map,
@@ -360,17 +396,30 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
 
         with_probs = merging_probs is not None
         if with_probs:
-            assert merging_probs.is_cuda, "TransformerEngine needs CUDA."
+            if not merging_probs.is_cuda:
+                raise ValueError(
+                    "merging_probs must be a CUDA tensor, but got tensor on "
+                    f"{merging_probs.device}."
+                )
 
         # Device check
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not row_id_map.is_cuda:
+            raise ValueError(
+                f"row_id_map must be a CUDA tensor, but got tensor on {row_id_map.device}."
+            )
         if pad_offsets is not None:
-            assert pad_offsets.is_cuda, "TransformerEngine needs CUDA."
+            if not pad_offsets.is_cuda:
+                raise ValueError(
+                    f"pad_offsets must be a CUDA tensor, but got tensor on {pad_offsets.device}."
+                )
 
-        assert not isinstance(
-            inp, QuantizedTensor
-        ), "The forward of moe_unpermute does not support FP8."
+        if isinstance(inp, QuantizedTensor):
+            raise TypeError(
+                "The forward of moe_unpermute does not support FP8, but got "
+                f"QuantizedTensor of type {type(inp).__name__}."
+            )
         unpermuted_output, _ = triton_permutation.unpermute_with_mask_map(
             inp,
             row_id_map,
@@ -427,13 +476,23 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     fp8_scale = unpermuted_act_grad._rowwise_scale_inv.T.contiguous()
                     unpermuted_act_grad = unpermuted_act_grad._rowwise_data
                     scale_hidden_dim = fp8_scale.shape[1]
-                    assert ctx.num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+                    if ctx.num_tokens != fp8_scale.shape[0]:
+                        raise ValueError(
+                            f"Scale and input shape mismatch: num_tokens ({ctx.num_tokens}) != "
+                            f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                            f"Scale shape: {tuple(fp8_scale.shape)}."
+                        )
                 # mxfp8 scaling
                 elif mxfp8_recipe:
                     fp8_scale = unpermuted_act_grad._rowwise_scale_inv.contiguous()
                     unpermuted_act_grad = unpermuted_act_grad._rowwise_data
                     scale_hidden_dim = fp8_scale.shape[1]
-                    assert ctx.num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+                    if ctx.num_tokens != fp8_scale.shape[0]:
+                        raise ValueError(
+                            f"Scale and input shape mismatch: num_tokens ({ctx.num_tokens}) != "
+                            f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                            f"Scale shape: {tuple(fp8_scale.shape)}."
+                        )
                 else:
                     raise ValueError("Unsupported FP8 recipe")
             else:
@@ -442,9 +501,11 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 fp8_scale = None
 
             if ctx.with_probs:
-                assert (
-                    not fp8
-                ), "The backward of moe_unpermute with merging probs does not support FP8."
+                if fp8:
+                    raise TypeError(
+                        "The backward of moe_unpermute with merging probs does not support FP8, "
+                        f"but got FP8 gradient with dtype {fp8_dtype}."
+                    )
                 act_grad, probs_grad = (
                     triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
                         unpermuted_act_grad,
@@ -619,10 +680,12 @@ def moe_permute_and_pad_with_probs(
     align_size : int
         the alignment size for the input tensor.
     """
-    assert (
-        tokens_per_expert is not None
-    ), "tokens_per_expert must be provided to the fused permute padding function."
-    assert align_size > 0, f"align_size must be positive, got {align_size}"
+    if tokens_per_expert is None:
+        raise ValueError(
+            "tokens_per_expert must be provided to the fused permute padding function."
+        )
+    if align_size <= 0:
+        raise ValueError(f"align_size must be positive, got {align_size}.")
 
     # Ensure tokens_per_expert is on the same device as input to avoid device transfers
     if tokens_per_expert.device != inp.device:
@@ -713,15 +776,27 @@ class _moe_chunk_sort(torch.autograd.Function):
         if not inp.numel():
             return inp, probs
 
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert split_sizes.is_cuda, "TransformerEngine needs CUDA."
-        assert sorted_idxs.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not split_sizes.is_cuda:
+            raise ValueError(
+                f"split_sizes must be a CUDA tensor, but got tensor on {split_sizes.device}."
+            )
+        if not sorted_idxs.is_cuda:
+            raise ValueError(
+                f"sorted_idxs must be a CUDA tensor, but got tensor on {sorted_idxs.device}."
+            )
         if probs is not None:
-            assert probs.is_cuda, "TransformerEngine needs CUDA."
+            if not probs.is_cuda:
+                raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
 
         num_tokens, hidden_size = inp.shape
         num_splits = split_sizes.size(0)
-        assert num_splits == sorted_idxs.size(0)
+        if num_splits != sorted_idxs.size(0):
+            raise ValueError(
+                f"split_sizes.size(0) ({num_splits}) must match "
+                f"sorted_idxs.size(0) ({sorted_idxs.size(0)})."
+            )
 
         fp8 = isinstance(inp, Float8Tensor)
         if fp8:

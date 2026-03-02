@@ -193,10 +193,15 @@ def _cast_master_weights_to_fp8_delayed_scaling(
             continue
 
         # If master weight is not None, start_offset must be a valid value.
-        assert start_offset is not None
-        assert start_offset >= 0
+        assert (
+            start_offset is not None
+        ), "start_offset must not be None when master_weight is provided"
+        assert start_offset >= 0, f"start_offset must be non-negative, got {start_offset}"
         end_offset = start_offset + master_weight.numel()
-        assert end_offset <= model_weight.numel()
+        assert end_offset <= model_weight.numel(), (
+            f"end_offset ({end_offset}) exceeds model_weight numel ({model_weight.numel()}), "
+            f"start_offset={start_offset}, master_weight numel={master_weight.numel()}"
+        )
 
         # master_weight may be smaller than model_weight because it could be distributed across
         # multiple ranks. So we need to create a dummy weight using the raw data from model_weight.
@@ -280,9 +285,18 @@ def _cast_master_weights_to_fp8_current_scaling(
 
         # Make sure all the model weights have the same numerical options.
         quantizer = model_weight._get_quantizer()
-        assert quantizer.dtype == fp8_dtype
-        assert quantizer.force_pow_2_scales == force_pow_2_scales
-        assert quantizer.amax_epsilon == amax_epsilon
+        assert quantizer.dtype == fp8_dtype, (
+            "All model weights must have the same fp8 dtype, "
+            f"expected {fp8_dtype} but got {quantizer.dtype}"
+        )
+        assert quantizer.force_pow_2_scales == force_pow_2_scales, (
+            "All model weights must have the same force_pow_2_scales, "
+            f"expected {force_pow_2_scales} but got {quantizer.force_pow_2_scales}"
+        )
+        assert quantizer.amax_epsilon == amax_epsilon, (
+            "All model weights must have the same amax_epsilon, "
+            f"expected {amax_epsilon} but got {quantizer.amax_epsilon}"
+        )
 
         scales.append(quantizer.scale.view(1))
         scale_invs.append(model_weight._scale_inv.view(1))
@@ -396,19 +410,39 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
 
         # Make sure all the model weights have the same numerical options.
         quantizer = model_weight._get_quantizer()
-        assert block_len == quantizer.block_len
-        assert fp8_dtype == quantizer.dtype
-        assert force_pow_2_scales == quantizer.force_pow_2_scales
-        assert amax_epsilon == quantizer.amax_epsilon
+        assert block_len == quantizer.block_len, (
+            "All model weights must have the same block_len, "
+            f"expected {block_len} but got {quantizer.block_len}"
+        )
+        assert fp8_dtype == quantizer.dtype, (
+            "All model weights must have the same fp8 dtype, "
+            f"expected {fp8_dtype} but got {quantizer.dtype}"
+        )
+        assert force_pow_2_scales == quantizer.force_pow_2_scales, (
+            "All model weights must have the same force_pow_2_scales, "
+            f"expected {force_pow_2_scales} but got {quantizer.force_pow_2_scales}"
+        )
+        assert amax_epsilon == quantizer.amax_epsilon, (
+            "All model weights must have the same amax_epsilon, "
+            f"expected {amax_epsilon} but got {quantizer.amax_epsilon}"
+        )
 
         scale_shape = quantizer.get_scale_shape(model_weight.shape, False)
         amax = packed_amaxes[cu_amax_sizes[i] : cu_amax_sizes[i + 1]].reshape(scale_shape)
         scale = torch.empty(scale_shape, dtype=torch.float32, device=device)
         scale_inv = model_weight._rowwise_scale_inv
-        assert len(scale_shape) == 2
-        assert len(scale_inv.shape) == 2
-        assert scale_inv.shape[0] == scale_shape[0]
-        assert scale_inv.shape[1] == scale_shape[1]
+        assert (
+            len(scale_shape) == 2
+        ), f"scale_shape must be 2D, got {len(scale_shape)}D shape {scale_shape}"
+        assert (
+            len(scale_inv.shape) == 2
+        ), f"scale_inv must be 2D, got {len(scale_inv.shape)}D shape {scale_inv.shape}"
+        assert (
+            scale_inv.shape[0] == scale_shape[0]
+        ), f"scale_inv dim 0 mismatch: scale_inv.shape={scale_inv.shape}, scale_shape={scale_shape}"
+        assert (
+            scale_inv.shape[1] == scale_shape[1]
+        ), f"scale_inv dim 1 mismatch: scale_inv.shape={scale_inv.shape}, scale_shape={scale_shape}"
 
         amaxes.append(amax)
         scales.append(scale)
@@ -416,7 +450,10 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
 
         # Compute amax of the master weight and store it in packed_amaxes.
         if master_weight is not None:
-            assert len(model_weight.shape) == 2
+            assert len(model_weight.shape) == 2, (
+                "model_weight must be 2D for blockwise scaling, "
+                f"got {len(model_weight.shape)}D shape {model_weight.shape}"
+            )
             h, w = model_weight.shape
             tex.fp8_block_scaling_compute_partial_amax(
                 master_weight, amax, h, w, start_offset, block_len
@@ -467,7 +504,10 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         end_offset = start_offset + master_weight.numel()
         if not use_fsdp_shard_model_weights:
             model_weight_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
-        assert len(model_weight.shape) == 2
+        assert len(model_weight.shape) == 2, (
+            "model_weight must be 2D for blockwise scaling partial cast, "
+            f"got {len(model_weight.shape)}D shape {model_weight.shape}"
+        )
         h, w = model_weight.shape
         tex.fp8_block_scaling_partial_cast(
             master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype
@@ -500,9 +540,13 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
     cu_colwise_amax_sizes = [0]
     for model_weight, _, _, _ in params:
         rowwise_shape = model_weight._rowwise_scale_inv.shape
-        assert len(rowwise_shape) == 2
+        assert (
+            len(rowwise_shape) == 2
+        ), f"rowwise_scale_inv must be 2D, got {len(rowwise_shape)}D shape {rowwise_shape}"
         colwise_shape = model_weight._columnwise_scale_inv.shape
-        assert len(colwise_shape) == 2
+        assert (
+            len(colwise_shape) == 2
+        ), f"columnwise_scale_inv must be 2D, got {len(colwise_shape)}D shape {colwise_shape}"
         cu_rowwise_amax_sizes.append(
             cu_rowwise_amax_sizes[-1] + rowwise_shape[0] * rowwise_shape[1]
         )
@@ -541,7 +585,10 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
 
         # Compute amax of the master weight and store it in packed_amaxes.
         if master_weight is not None:
-            assert len(model_weight.shape) == 2
+            assert len(model_weight.shape) == 2, (
+                "model_weight must be 2D for MXFP8 scaling, "
+                f"got {len(model_weight.shape)}D shape {model_weight.shape}"
+            )
             h, w = model_weight.shape
             tex.mxfp8_scaling_compute_partial_amax(
                 master_weight, amax_rowwise, amax_colwise, h, w, start_offset
@@ -585,7 +632,10 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
         else:
             rowwise_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
             colwise_fragment = model_weight._columnwise_data.reshape(-1)[start_offset:end_offset]
-        assert len(model_weight.shape) == 2
+        assert len(model_weight.shape) == 2, (
+            "model_weight must be 2D for MXFP8 scaling partial cast, "
+            f"got {len(model_weight.shape)}D shape {model_weight.shape}"
+        )
         h, w = model_weight.shape
         tex.mxfp8_scaling_partial_cast(
             master_weight,

@@ -165,13 +165,25 @@ class FusedAttnHelper:
             kv_max_seqlen = q_max_seqlen
             num_gqa_groups = attn_heads
             v_head_dim = q_head_dim
-            assert nqkv == 3
+            assert nqkv == 3, (
+                f"Expected nqkv == 3 for qkvpacked layout, but got nqkv={nqkv} from"
+                f" q_aval.shape={q_aval.shape}"
+            )
         elif qkv_layout.is_kvpacked():
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
             *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, v_head_dim = k_aval.shape
-            assert q_batch_shape == kv_batch_shape
-            assert q_head_dim == v_head_dim
-            assert nkv == 2
+            assert q_batch_shape == kv_batch_shape, (
+                f"Mismatched batch shapes for kvpacked layout: q_batch_shape={q_batch_shape},"
+                f" kv_batch_shape={kv_batch_shape}"
+            )
+            assert q_head_dim == v_head_dim, (
+                f"Mismatched head dims for kvpacked layout: q_head_dim={q_head_dim},"
+                f" v_head_dim={v_head_dim}"
+            )
+            assert nkv == 2, (
+                f"Expected nkv == 2 for kvpacked layout, but got nkv={nkv} from"
+                f" k_aval.shape={k_aval.shape}"
+            )
         elif qkv_layout.is_separate():
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
             *k_batch_shape, k_max_seqlen, k_num_gqa_groups, k_head_dim = k_aval.shape
@@ -244,9 +256,13 @@ class _FusedAttnRNGStateChecker:
             )
             seed = seed.astype(self.rng_state_dtype)
 
-        assert seed.dtype == self.rng_state_dtype
+        assert (
+            seed.dtype == self.rng_state_dtype
+        ), f"Expected seed.dtype={self.rng_state_dtype}, but got seed.dtype={seed.dtype}"
         # Backend takes an int64_t seed, so only the first two u32 elements are taken
-        assert seed.size >= self.seed_size
+        assert (
+            seed.size >= self.seed_size
+        ), f"Expected seed.size >= {self.seed_size}, but got seed.size={seed.size}"
 
         return seed
 
@@ -363,7 +379,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         # 32-bit unsigned int to get the buffer size we need in the C++ kernel
         checker = _FusedAttnRNGStateChecker()
         seed_dtype = dtypes.canonicalize_dtype(seed_aval.dtype)
-        assert seed_dtype == checker.rng_state_dtype
+        assert (
+            seed_dtype == checker.rng_state_dtype
+        ), f"Expected seed_dtype={checker.rng_state_dtype}, but got seed_dtype={seed_dtype}"
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
@@ -408,11 +426,19 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
 
-        assert softmax_offset_aval.dtype == jnp.float32
+        assert (
+            softmax_offset_aval.dtype == jnp.float32
+        ), f"Expected softmax_offset_aval.dtype=float32, but got {softmax_offset_aval.dtype}"
         if config.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
-            assert softmax_offset_aval.shape == (1, attn_heads, 1, 1)
+            assert softmax_offset_aval.shape == (1, attn_heads, 1, 1), (
+                f"Expected softmax_offset_aval.shape=(1, {attn_heads}, 1, 1) for"
+                f" {config.softmax_type}, but got {softmax_offset_aval.shape}"
+            )
         else:
-            assert softmax_offset_aval.shape == (0,)
+            assert softmax_offset_aval.shape == (0,), (
+                "Expected softmax_offset_aval.shape=(0,) for VANILLA_SOFTMAX, but got"
+                f" {softmax_offset_aval.shape}"
+            )
 
         return out_aval, softmax_aux_aval, rng_state_aval, wkspace_aval
 
@@ -533,7 +559,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         _kv_segment_pos,
         config: _FusedAttnConfig,
     ):
-        assert FusedAttnFwdPrimitive.inner_primitive is not None
+        assert (
+            FusedAttnFwdPrimitive.inner_primitive is not None
+        ), "FusedAttnFwdPrimitive.inner_primitive has not been registered"
 
         sequence_descriptor = SequenceDescriptor(
             seqlens=(q_seqlen, kv_seqlen),
@@ -627,7 +655,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, config):
         check_valid_batch_dims(batch_dims)
-        assert FusedAttnFwdPrimitive.outer_primitive is not None
+        assert (
+            FusedAttnFwdPrimitive.outer_primitive is not None
+        ), "FusedAttnFwdPrimitive.outer_primitive has not been registered"
         q_bdim, _, _, _, _, seed_bdim, *_ = batch_dims
 
         out_bdims = q_bdim, q_bdim, seed_bdim
@@ -778,8 +808,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         v_dtype = dtypes.canonicalize_dtype(v_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
         doutput_dtype = dtypes.canonicalize_dtype(doutput_aval.dtype)
-        assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype
-        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
+        assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype, (
+            f"Mismatched dtypes: q_dtype={q_dtype}, k_dtype={k_dtype}, v_dtype={v_dtype},"
+            f" bias_dtype={bias_dtype}, doutput_dtype={doutput_dtype}"
+        )
+        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype, (
+            "Mismatched seqlen dtypes:"
+            f" q_seqlen_or_cu_seqlen_aval.dtype={q_seqlen_or_cu_seqlen_aval.dtype},"
+            f" kv_seqlen_or_cu_seqlen_aval.dtype={kv_seqlen_or_cu_seqlen_aval.dtype}"
+        )
 
         (
             batch_shape,
@@ -983,7 +1020,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         _kv_segment_pos,
         config,
     ):
-        assert FusedAttnBwdPrimitive.inner_primitive is not None
+        assert (
+            FusedAttnBwdPrimitive.inner_primitive is not None
+        ), "FusedAttnBwdPrimitive.inner_primitive has not been registered"
 
         sequence_descriptor = SequenceDescriptor(
             seqlens=(q_seqlen, kv_seqlen),
@@ -1023,7 +1062,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             batch, q_max_seqlen, kv_max_seqlen, *_ = FusedAttnHelper.parse_qkv_aval(
                 q, k, v, config.qkv_layout
             )
-            assert len(batch) == 1
+            assert (
+                len(batch) == 1
+            ), f"Expected len(batch) == 1, but got len(batch)={len(batch)}, batch={batch}"
             kv_batch = q_batch = batch[0]
 
             # Gather valid q_seqlen, which is greater than 0
@@ -1082,7 +1123,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, config):
         check_valid_batch_dims(batch_dims)
-        assert FusedAttnBwdPrimitive.outer_primitive is not None
+        assert (
+            FusedAttnBwdPrimitive.outer_primitive is not None
+        ), "FusedAttnBwdPrimitive.outer_primitive has not been registered"
         q_bdim, k_bdim, v_bdim, bias_bdim, softmax_offset_bdim, *_ = batch_dims
 
         out_bdims = q_bdim, k_bdim, v_bdim, bias_bdim, softmax_offset_bdim
@@ -3396,7 +3439,9 @@ def fused_attn_fwd(
         raise ValueError(f"Unknown {qkv_layout=}")
 
     if attn_bias_type == AttnBiasType.NO_BIAS:
-        assert bias is None
+        assert (
+            bias is None
+        ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias={bias}"
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
     if softmax_offset is None:
@@ -3414,10 +3459,16 @@ def fused_attn_fwd(
                 softmax_offset, (None, HEAD_AXES, None, None)
             )
         else:
-            assert softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX
+            assert softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX, (
+                "Expected VANILLA_SOFTMAX when softmax_offset is None and not OFF_BY_ONE_SOFTMAX,"
+                f" but got softmax_type={softmax_type}"
+            )
             softmax_offset = jnp.zeros(0, dtype=jnp.float32)
     else:
-        assert softmax_offset.dtype == jnp.float32
+        assert softmax_offset.dtype == jnp.float32, (
+            "Expected softmax_offset.dtype=float32, but got"
+            f" softmax_offset.dtype={softmax_offset.dtype}"
+        )
         # Shard by heads dimension if not VANILLA_SOFTMAX
         if softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_offset = with_sharding_constraint_by_logical_axes(
@@ -3556,7 +3607,9 @@ def fused_attn_bwd(
         raise ValueError(f"Unknown {qkv_layout=}")
 
     if attn_bias_type == AttnBiasType.NO_BIAS:
-        assert bias is None
+        assert (
+            bias is None
+        ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias with type={type(bias)}"
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
     if softmax_offset is None:
