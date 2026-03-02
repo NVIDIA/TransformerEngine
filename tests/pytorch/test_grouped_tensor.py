@@ -469,9 +469,7 @@ class TestGroupedTensor:
 
         quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
         quantizer.set_usage(rowwise=True, columnwise=False)
-        first_dims = torch.tensor(
-            [s[0] for s in shape], dtype=torch.int64, device="cuda"
-        )
+        first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
 
         # Quantize.
         quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)

@@ -32,22 +32,24 @@ __device__ alignas(128) CUtensorMap g_tensor_maps_input[MAX_SUPPORTED_TENSOR_DES
 __device__ alignas(128) CUtensorMap g_tensor_maps_output[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 
 // Reuse helper types and functions from group_quantize_kernel namespace
-using group_quantize_kernel::ShapeRepresentation;
-using group_quantize_kernel::get_current_tensor_id;
-using group_quantize_kernel::get_tensor_rows_num;
-using group_quantize_kernel::get_tensor_cols_num;
-using group_quantize_kernel::modify_base_tensor_map;
 using group_quantize_kernel::fence_acquire_tensormap;
+using group_quantize_kernel::get_current_tensor_id;
+using group_quantize_kernel::get_tensor_cols_num;
+using group_quantize_kernel::get_tensor_rows_num;
+using group_quantize_kernel::modify_base_tensor_map;
+using group_quantize_kernel::ShapeRepresentation;
 
 template <typename IType, typename OType>
-__global__ void update_tma_descriptors(
-    const __grid_constant__ CUtensorMap base_tensor_map_input,
-    const __grid_constant__ CUtensorMap base_tensor_map_output,
-    const IType *const __restrict__ input_data_ptr,
-    const OType *const __restrict__ output_data_ptr, const ShapeRepresentation shape_rep,
-    const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
-    const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
-    const int64_t *const __restrict__ last_dims_ptr) {
+__global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_tensor_map_input,
+                                       const __grid_constant__ CUtensorMap base_tensor_map_output,
+                                       const IType *const __restrict__ input_data_ptr,
+                                       const OType *const __restrict__ output_data_ptr,
+                                       const ShapeRepresentation shape_rep,
+                                       const size_t num_tensors, const size_t first_logical_dim,
+                                       const size_t last_logical_dim,
+                                       const int64_t *const __restrict__ offsets_ptr,
+                                       const int64_t *const __restrict__ first_dims_ptr,
+                                       const int64_t *const __restrict__ last_dims_ptr) {
   const bool leading_thread = (threadIdx.x == 0);
   const size_t tensor_id = blockIdx.x;
 
@@ -113,22 +115,21 @@ __global__ void __launch_bounds__(128)
   const size_t chunks_X_for_id = DIVUP(last_logical_dim, CHUNK_DIM_X);
   const size_t block_Y = blockIdx.x / chunks_X_for_id;
 
-  const size_t tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset,
-                                                 block_Y, first_logical_dim, last_logical_dim,
-                                                 offsets_ptr);
+  const size_t tensor_id =
+      get_current_tensor_id(shape_rep, num_tensors, block_global_offset, block_Y, first_logical_dim,
+                            last_logical_dim, offsets_ptr);
 
   const size_t rows =
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
   // Compute per-tensor scale stride from cols (matches group_quantize kernel)
-  const size_t scale_stride =
-      USE_ROWWISE_SCALING ? DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4)
-                          : DIVUP_TO_MULTIPLE(cols, 128);
+  const size_t scale_stride = USE_ROWWISE_SCALING
+                                  ? DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4)
+                                  : DIVUP_TO_MULTIPLE(cols, 128);
 
-  const bool is_single_tensor =
-      (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
-       shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
+  const bool is_single_tensor = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                 shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
 
   const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
 
@@ -302,7 +303,7 @@ __global__ void __launch_bounds__(128)
 }  // namespace group_dequantize_kernel
 
 inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
-                              cudaStream_t stream) {
+                             cudaStream_t stream) {
   using namespace group_dequantize_kernel;
   using group_quantize_kernel::ShapeRepresentation;
 
@@ -339,9 +340,8 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
     shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
   }
 
-  const bool is_single_tensor =
-      (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
-       shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
+  const bool is_single_tensor = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                 shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
 
   const size_t first_logical_dim = input->logical_shape.data[0];
   const size_t last_logical_dim = input->logical_shape.data[1];
@@ -398,18 +398,17 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
                   alignas(64) CUtensorMap tensor_map_output{};
 
                   create_2D_tensor_map(tensor_map_input, input_data, first_logical_dim,
-                                       last_logical_dim, SHMEM_DIM_Y, SHMEM_DIM_X,
-                                       last_logical_dim, 0, typeToNumBits(input->dtype()));
+                                       last_logical_dim, SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim,
+                                       0, typeToNumBits(input->dtype()));
                   create_2D_tensor_map(tensor_map_output, output->data, first_logical_dim,
-                                       last_logical_dim, SHMEM_DIM_Y, SHMEM_DIM_X,
-                                       last_logical_dim, 0, typeToNumBits(output->dtype()));
+                                       last_logical_dim, SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim,
+                                       0, typeToNumBits(output->dtype()));
 
                   // Update tensor descriptors before launching the kernel
                   if (!is_single_tensor) {
                     const IType *const input_dptr =
                         reinterpret_cast<const IType *>(input_data.dptr);
-                    OType *const output_dptr =
-                        reinterpret_cast<OType *>(output->data.dptr);
+                    OType *const output_dptr = reinterpret_cast<OType *>(output->data.dptr);
 
                     update_tma_descriptors<IType, OType><<<num_tensors, 32, 0, stream>>>(
                         tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
@@ -422,9 +421,9 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
                                                num_tensors, first_logical_dim, last_logical_dim,
                                                offsets_ptr, first_dims_ptr, last_dims_ptr,
                                                scales_ptr););  // NOLINT(*)
-          );                                                          // NOLINT(*)
-      );                                                              // NOLINT(*)
-  );                                                                  // NOLINT(*)
+          );                                                   // NOLINT(*)
+      );                                                       // NOLINT(*)
+  );                                                           // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

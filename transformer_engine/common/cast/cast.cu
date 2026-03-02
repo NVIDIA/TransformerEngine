@@ -94,7 +94,7 @@ void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor outp
   NVTE_API_CALL(nvte_group_dequantize);
   using namespace transformer_engine;
   dispatch::group_dequantize_helper(*convertNVTEGroupedTensorCheck(input),
-                                   convertNVTEGroupedTensorCheck(output), stream);
+                                    convertNVTEGroupedTensorCheck(output), stream);
 }
 
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,

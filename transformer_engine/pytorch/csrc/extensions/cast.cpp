@@ -279,8 +279,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   if (logical_first_dim == 0 || logical_last_dim == 0) {
     NoneQuantizer q{py::none()};
     auto [out_cpp, out_py] =
-        q.create_grouped_tensor(num_tensors, logical_shape,
-                                otype, py::none(), first_dims,
+        q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims,
                                 logical_first_dim, logical_last_dim);
     return py::reinterpret_borrow<py::object>(out_py);
   }
@@ -306,8 +305,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
     }
   }
   if (first_dims.has_value()) {
-    input_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64,
-                             getTensorShape(*first_dims));
+    input_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
   if (tensor_offsets.has_value()) {
     input_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
@@ -316,10 +314,8 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
 
   // Create output GroupedTensor using NoneQuantizer.
   NoneQuantizer q{py::none()};
-  auto [out_cpp, out_py] =
-      q.create_grouped_tensor(num_tensors, logical_shape,
-                              otype, py::none(), first_dims,
-                              logical_first_dim, logical_last_dim);
+  auto [out_cpp, out_py] = q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(),
+                                                   first_dims, logical_first_dim, logical_last_dim);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_group_dequantize(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());
