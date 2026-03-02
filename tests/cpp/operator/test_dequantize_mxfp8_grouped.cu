@@ -341,6 +341,13 @@ std::vector<std::vector<size_t>> input_configs = {
     {VARYING_LAST_DIM, 3, 256, 896, 128, 256, 512},
     {VARYING_BOTH_DIMS, 2, 1, (128 * 128) + (256 * 256), 128, 256, 128, 256},
     {VARYING_BOTH_DIMS, 2, 1, (256 * 128) + (512 * 640), 256, 512, 128, 640},
+    // Non-128-aligned constant dimensions
+    {SAME_BOTH_DIMS, 1, 160, 192},
+    {SAME_BOTH_DIMS, 2, 256, 96},
+    {VARYING_FIRST_DIM, 2, 384, 160, 128, 256},
+    {VARYING_FIRST_DIM, 3, 768, 96, 256, 256, 256},
+    {VARYING_LAST_DIM, 2, 160, 384, 128, 256},
+    {VARYING_LAST_DIM, 3, 96, 512, 128, 128, 256},
 };
 
 std::vector<ScalingDirection> scaling_directions = {
@@ -406,8 +413,19 @@ TEST_P(GroupedDequantizeMXFP8TestSuite, TestGroupedDequantizeMXFP8) {
     }
     offsets[t + 1] = offsets[t] + first_dims[t] * last_dims[t];
 
-    // Skip tests if tensor shape is not as required by the kernel
-    if ((first_dims[t] % 128 != 0) || (last_dims[t] % 128 != 0)) {
+    // Skip tests if varying dimensions are not 128-aligned
+    const bool first_dim_varies =
+        (shape_rep == VARYING_FIRST_DIM || shape_rep == VARYING_BOTH_DIMS);
+    const bool last_dim_varies =
+        (shape_rep == VARYING_LAST_DIM || shape_rep == VARYING_BOTH_DIMS);
+    if (first_dim_varies && (first_dims[t] % 128 != 0)) {
+      GTEST_SKIP();
+    }
+    if (last_dim_varies && (last_dims[t] % 128 != 0)) {
+      GTEST_SKIP();
+    }
+    // TMA requires last_dim * sizeof(FP8) to be 16-byte aligned
+    if (last_dims[t] % 16 != 0) {
       GTEST_SKIP();
     }
     // For colwise: first dim must be divisible by 32
