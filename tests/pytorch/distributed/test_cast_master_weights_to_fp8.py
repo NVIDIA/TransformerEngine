@@ -1175,7 +1175,7 @@ def test_single_gpu_partial_cast_vs_full():
     """
     Single GPU test: compare quantize_master_weights (offset=0) vs quantizer().
     This isolates whether the issue is in our manual Python scale computation or elsewhere.
-    """    
+    """
     available, reason = is_nvfp4_available(return_reason=True)
     if not available:
         pytest.skip(reason)
