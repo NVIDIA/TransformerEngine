@@ -36,7 +36,11 @@ NUM_LAYERS = 2
 SEQ_LEN = 32
 BATCH_PER_RANK = 2
 NUM_STEPS = 3
+LOCAL_RANK = None
 
+def dist_print(msg):
+    if LOCAL_RANK == 0:
+        print(msg)
 
 def save_custom_attrs(module):
     custom_attrs = {}
@@ -151,6 +155,8 @@ def test_fused_adam_fp8_master_weights(recipe=None):
     - Training loop completes without error
     - DTensor wrapping and QuantizedTensor local tensors are preserved
     """
+    global LOCAL_RANK
+    LOCAL_RANK = int(os.environ["LOCAL_RANK"])
     world_size, _, device = _setup()
 
     model = _build_model(fp8_init=True, recipe=recipe)
@@ -183,7 +189,7 @@ def test_fused_adam_fp8_master_weights(recipe=None):
         loss = F.mse_loss(output, target)
         loss.backward()
         optimizer.step()
-
+        dist_print(f"Step {step} completed with loss {loss.item()}")
     # Verify optimizer states
     for param in model.parameters():
         state = optimizer.state[param]
