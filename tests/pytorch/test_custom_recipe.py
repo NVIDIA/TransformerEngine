@@ -828,9 +828,7 @@ def test_custom_recipe_ds_multi_step():
     # After 3 steps, amax_history should have been updated at least once
     # The first row (amax_history[0]) should differ from the initial zeros
     # after the first step
-    assert not torch.all(amax_snapshots[0] == 0), (
-        "amax_history should be updated after first step"
-    )
+    assert not torch.all(amax_snapshots[0] == 0), "amax_history should be updated after first step"
 
 
 def test_custom_recipe_dpa_fp8():
@@ -900,9 +898,9 @@ def test_custom_recipe_dpa_fp8():
 
     # Verify DPA recipe state is CustomRecipeState
     fwd_state = dpa.fp8_meta["scaling_fwd"]
-    assert isinstance(fwd_state, CustomRecipeState), (
-        f"Expected CustomRecipeState for DPA fwd, got {type(fwd_state).__name__}"
-    )
+    assert isinstance(
+        fwd_state, CustomRecipeState
+    ), f"Expected CustomRecipeState for DPA fwd, got {type(fwd_state).__name__}"
 
     # Verify DPA quantizers: 9 forward slots (3 GEMMs x 3)
     fwd_quantizers = dpa.quantizers["scaling_fwd"]
@@ -947,12 +945,12 @@ def test_custom_recipe_dpa_fp8():
     from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 
     qkv_fwd = qkv_proj.fp8_meta["scaling_fwd"]
-    assert isinstance(qkv_fwd, CustomRecipeState), (
-        f"Expected CustomRecipeState for qkv_proj, got {type(qkv_fwd).__name__}"
-    )
+    assert isinstance(
+        qkv_fwd, CustomRecipeState
+    ), f"Expected CustomRecipeState for qkv_proj, got {type(qkv_fwd).__name__}"
     qkv_fwd_quantizers = qkv_proj.quantizers["scaling_fwd"]
     for i, q in enumerate(qkv_fwd_quantizers):
         if q is not None:
-            assert isinstance(q, NVFP4Quantizer), (
-                f"qkv_proj fwd slot {i}: expected NVFP4Quantizer, got {type(q).__name__}"
-            )
+            assert isinstance(
+                q, NVFP4Quantizer
+            ), f"qkv_proj fwd slot {i}: expected NVFP4Quantizer, got {type(q).__name__}"

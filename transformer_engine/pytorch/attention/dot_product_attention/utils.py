@@ -2128,12 +2128,12 @@ def get_attention_quantizers(fp8, quantizers):
         ("dP", dP_quantizer),
     ]:
         assert isinstance(_q, _fp8_types), (
-            f"FP8 attention requires FP8-compatible quantizers for all DPA tensor slots, "
+            "FP8 attention requires FP8-compatible quantizers for all DPA tensor slots, "
             f"but {_name} quantizer is {type(_q).__name__}. "
-            f"When using CustomRecipe with fp8_dpa=True, ensure the factory returns an "
-            f"FP8 quantizer (Float8Quantizer or Float8CurrentScalingQuantizer) for all "
-            f"DPA roles (module_type='dpa') and for None roles (boundary slots like "
-            f"O output and dQKV grad-input)."
+            "When using CustomRecipe with fp8_dpa=True, ensure the factory returns an "
+            "FP8 quantizer (Float8Quantizer or Float8CurrentScalingQuantizer) for all "
+            "DPA roles (module_type='dpa') and for None roles (boundary slots like "
+            "O output and dQKV grad-input)."
         )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
