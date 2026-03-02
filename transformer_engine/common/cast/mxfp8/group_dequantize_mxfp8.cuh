@@ -110,8 +110,13 @@ __global__ void __launch_bounds__(128)
   // Group-awareness: determine which tensor this block belongs to
   const size_t block_global_offset = blockIdx.x * ELTS_PER_CHUNK;
 
+  // Compute block_Y from 1D grid index (equivalent to blockIdx.y in 2D quantize grid)
+  const size_t chunks_X_for_id = DIVUP(last_logical_dim, CHUNK_DIM_X);
+  const size_t block_Y = blockIdx.x / chunks_X_for_id;
+
   const size_t tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset,
-                                                 first_logical_dim, last_logical_dim, offsets_ptr);
+                                                 block_Y, first_logical_dim, last_logical_dim,
+                                                 offsets_ptr);
 
   const size_t rows =
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
