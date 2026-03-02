@@ -506,9 +506,7 @@ class FP8GlobalStateManager:
             else:
                 amax_hist = state.amax_history
                 scale_tensor = state.scale
-                key = cls.get_key_in_buffer(
-                    forward, fp8_meta["recipe"], fp8_meta["fp8_group"]
-                )
+                key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
             if key not in cls.global_amax_buffer:
                 cls.global_amax_buffer[key] = [amax_hist[0]]
@@ -1502,7 +1500,7 @@ def _handle_delayed_scaling_requests(
             vi = getattr(req, field_name)
             if v0 != vi:
                 raise ValueError(
-                    f"All DelayedScalingRequests in one CustomRecipeState must match. "
+                    "All DelayedScalingRequests in one CustomRecipeState must match. "
                     f"Slot 0 has {field_name}={v0!r}, slot {idx} has {vi!r}."
                 )
 
@@ -1517,7 +1515,10 @@ def _handle_delayed_scaling_requests(
     )
     n = len(ds_items)
     dsrs = DelayedScalingRecipeState(
-        inner_recipe, mode=mode, num_quantizers=n, device=device,
+        inner_recipe,
+        mode=mode,
+        num_quantizers=n,
+        device=device,
     )
 
     # Splice Float8Quantizer instances (backed by dsrs buffers) into raw list.

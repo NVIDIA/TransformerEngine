@@ -393,9 +393,7 @@ def test_factory_matches_delayed_scaling():
 
     model_ref, model_cus, inp_ref, inp_cus = _make_pair()
 
-    out_ref, grad_ref, pgrads_ref = _run_linear_fwd_bwd(
-        model_ref, inp_ref, recipe.DelayedScaling()
-    )
+    out_ref, grad_ref, pgrads_ref = _run_linear_fwd_bwd(model_ref, inp_ref, recipe.DelayedScaling())
     out_cus, grad_cus, pgrads_cus = _run_linear_fwd_bwd(
         model_cus, inp_cus, recipe.CustomRecipe(qfactory=delayed_scaling_quantizer_factory)
     )
@@ -830,6 +828,4 @@ def test_custom_recipe_ds_multi_step():
     # After 3 steps, amax_history should have been updated at least once
     # The first row (amax_history[0]) should differ from the initial zeros
     # after the first step
-    assert not torch.all(amax_snapshots[0] == 0), (
-        "amax_history should be updated after first step"
-    )
+    assert not torch.all(amax_snapshots[0] == 0), "amax_history should be updated after first step"

@@ -118,9 +118,7 @@ class _GroupedLinear(torch.autograd.Function):
                 )
                 save_original_input = False
             else:
-                raise ValueError(
-                    "DelayedScaling recipe is not supported with save_original_input"
-                )
+                raise ValueError("DelayedScaling recipe is not supported with save_original_input")
         if input_quantizers[0] is not None:
             for input_quantizer in input_quantizers:
                 input_quantizer.set_usage(
