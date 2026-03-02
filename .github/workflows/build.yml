@@ -65,9 +65,9 @@ jobs:
             pip install torch --index-url https://download.pytorch.org/whl/cu130
             pip install "nvidia-cuda-nvcc<13.1" "nvidia-cuda-cccl<13.1" "nvidia-cuda-crt<13.1" "nvidia-nvvm<13.1" "nvidia-cuda-profiler-api<13.1" "nvidia-nvml-dev<13.1"
             export CUDA_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cu13
-            ln -s $CUDA_PATH/lib/libcudart.so.13 $CUDA_HOME/lib/libcudart.so
-            ln -s $CUDA_PATH/lib/libcublas.so.13 $CUDA_HOME/lib/libcublas.so
-            ln -s $CUDA_PATH/lib $CUDA_HOME/lib64
+            ln -s $CUDA_PATH/lib/libcudart.so.13 $CUDA_PATH/lib/libcudart.so
+            ln -s $CUDA_PATH/lib/libcublas.so.13 $CUDA_PATH/lib/libcublas.so
+            ln -s $CUDA_PATH/lib $CUDA_PATH/lib64
         env:
           CUDA_PATH: /usr/local/lib/python3.12/dist-packages/nvidia/cu13
 
