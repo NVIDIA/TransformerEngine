@@ -483,13 +483,19 @@ class MultiheadAttention(torch.nn.Module):
         self,
         qkv_fp8_output: bool,
         proj_fp8_grad: bool,
+        dpa_fp8_output: bool,
     ) -> None:
-        """Set output / grad-input quantizer roles on QKV and proj linears.
+        """Set output / grad-input quantizer roles on QKV, proj, and DPA.
 
         When the QKV linear's output feeds directly into DPA (``fp8_mha``),
         the role is switched from the default linear-consumer assumption to
         DPA-consumer roles.  Otherwise roles are reset to ``None`` so the
         modules fall back to their defaults.
+
+        Symmetrically, when DPA produces FP8 output / gradients, its
+        ``output_quantizer_role`` (O -> proj) and
+        ``grad_input_quantizer_role`` (dQKV -> QKV linear) are set to
+        describe the consuming linear module.
         """
         dpa_name = self.core_attention.name or ""
         qkv_output_role = (
@@ -514,6 +520,26 @@ class MultiheadAttention(torch.nn.Module):
                 self.query_layer.output_quantizer_role = qkv_output_role
             self.key_value.output_quantizer_role = qkv_output_role
         self.proj.grad_input_quantizer_role = proj_grad_input_role
+
+        # DPA boundary roles: O -> proj (fwd), dQKV -> QKV linear (bwd)
+        proj_name = self.proj.name or ""
+        self.core_attention.output_quantizer_role = (
+            QuantizerRole(module_type="linear", tensor_type="input", name=proj_name)
+            if dpa_fp8_output
+            else None
+        )
+        if self.attention_type == "self":
+            qkv_linear = self.layernorm_qkv if self.input_layernorm else self.qkv
+        else:
+            qkv_linear = (
+                self.layernorm_query if self.input_layernorm else self.query_layer
+            )
+        qkv_name = qkv_linear.name or ""
+        self.core_attention.grad_input_quantizer_role = (
+            QuantizerRole(module_type="linear", tensor_type="grad_output", name=qkv_name)
+            if dpa_fp8_output
+            else None
+        )
 
     def _create_qk_norm_modules(
         self,
@@ -832,7 +858,7 @@ class MultiheadAttention(torch.nn.Module):
         # Proj Gemm: match DPA output except for Float8CurrentScaling
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
 
-        self._update_output_quantizer_roles(qkv_fp8_output, proj_fp8_grad)
+        self._update_output_quantizer_roles(qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
 
         layernorm_output = None
         if self.attention_type == "self":

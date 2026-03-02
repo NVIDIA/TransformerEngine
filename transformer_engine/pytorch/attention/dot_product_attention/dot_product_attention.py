@@ -22,6 +22,7 @@ from transformer_engine.common.recipe import (
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.quantization import (
+    QuantizerRole,
     get_fp8_te_dtype,
     FP8GlobalStateManager,
     RecipeState,
@@ -804,6 +805,55 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
+
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``DotProductAttention``.
+
+        Quantizer positions follow the GEMM-slot convention used by the
+        fused-attention kernels:
+
+        Forward  (3 GEMMs x 3 = 9 slots):
+            GEMM1 -> QKV (at ``GEMM1_OUTPUT``),
+            GEMM2 -> O   (at ``GEMM2_INPUT``),
+            GEMM3 -> S   (at ``GEMM3_OUTPUT``).
+
+        Backward (3 GEMMs x 2 = 6 slots):
+            GEMM1 -> dQKV (at ``GRAD_OUTPUT1``),
+            GEMM2 -> dO   (at ``GRAD_INPUT2``),
+            GEMM3 -> dP   (at ``GRAD_INPUT3``).
+
+        Unused positions in each GEMM group share the role of the
+        group's primary tensor.
+
+        The O (fwd) and dQKV (bwd) slots mirror the output / grad-input
+        pattern from linear modules.  Set :attr:`output_quantizer_role` /
+        :attr:`grad_input_quantizer_role` to provide consumer identity.
+        """
+        name = self.name or ""
+        if fwd:
+            qkv_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name=name)
+            o_role = self._output_quantizer_role
+            s_role = QuantizerRole(module_type="dpa", tensor_type="s", name=name)
+            base = [
+                qkv_role, qkv_role, qkv_role,  # GEMM1: QKV at GEMM1_OUTPUT
+                o_role, o_role, o_role,  # GEMM2: O at GEMM2_INPUT
+                s_role, s_role, s_role,  # GEMM3: S at GEMM3_OUTPUT
+            ]
+        else:
+            dqkv_role = self._grad_input_quantizer_role
+            do_role = QuantizerRole(module_type="dpa", tensor_type="do", name=name)
+            dp_role = QuantizerRole(module_type="dpa", tensor_type="dp", name=name)
+            base = [
+                dqkv_role, dqkv_role,  # GEMM1: dQKV at GRAD_OUTPUT1
+                do_role, do_role,  # GEMM2: dO at GRAD_INPUT2
+                dp_role, dp_role,  # GEMM3: dP at GRAD_INPUT3
+            ]
+        return base[:num_quantizers]
 
     @no_torch_dynamo(recursive=False)
     def forward(
