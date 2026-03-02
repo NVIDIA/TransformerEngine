@@ -840,18 +840,27 @@ class DotProductAttention(TransformerEngineBaseModule):
             o_role = self._output_quantizer_role
             s_role = QuantizerRole(module_type="dpa", tensor_type="s", name=name)
             base = [
-                qkv_role, qkv_role, qkv_role,  # GEMM1: QKV at GEMM1_OUTPUT
-                o_role, o_role, o_role,  # GEMM2: O at GEMM2_INPUT
-                s_role, s_role, s_role,  # GEMM3: S at GEMM3_OUTPUT
+                qkv_role,
+                qkv_role,
+                qkv_role,  # GEMM1: QKV at GEMM1_OUTPUT
+                o_role,
+                o_role,
+                o_role,  # GEMM2: O at GEMM2_INPUT
+                s_role,
+                s_role,
+                s_role,  # GEMM3: S at GEMM3_OUTPUT
             ]
         else:
             dqkv_role = self._grad_input_quantizer_role
             do_role = QuantizerRole(module_type="dpa", tensor_type="do", name=name)
             dp_role = QuantizerRole(module_type="dpa", tensor_type="dp", name=name)
             base = [
-                dqkv_role, dqkv_role,  # GEMM1: dQKV at GRAD_OUTPUT1
-                do_role, do_role,  # GEMM2: dO at GRAD_INPUT2
-                dp_role, dp_role,  # GEMM3: dP at GRAD_INPUT3
+                dqkv_role,
+                dqkv_role,  # GEMM1: dQKV at GRAD_OUTPUT1
+                do_role,
+                do_role,  # GEMM2: dO at GRAD_INPUT2
+                dp_role,
+                dp_role,  # GEMM3: dP at GRAD_INPUT3
             ]
         return base[:num_quantizers]
 

@@ -531,9 +531,7 @@ class MultiheadAttention(torch.nn.Module):
         if self.attention_type == "self":
             qkv_linear = self.layernorm_qkv if self.input_layernorm else self.qkv
         else:
-            qkv_linear = (
-                self.layernorm_query if self.input_layernorm else self.query_layer
-            )
+            qkv_linear = self.layernorm_query if self.input_layernorm else self.query_layer
         qkv_name = qkv_linear.name or ""
         self.core_attention.grad_input_quantizer_role = (
             QuantizerRole(module_type="linear", tensor_type="grad_output", name=qkv_name)
