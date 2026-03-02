@@ -109,9 +109,8 @@ __global__ void __launch_bounds__(128)
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE = DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);
 
   // Group-awareness: determine which tensor this block belongs to
-  const bool is_single_tensor =
-      (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
-       shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
+  const bool is_single_tensor = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                 shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
 
   size_t tensor_id;
   size_t block_id_Y, block_id_X;
@@ -122,9 +121,8 @@ __global__ void __launch_bounds__(128)
     block_id_Y = blockIdx.x / chunks_X;
     block_id_X = blockIdx.x % chunks_X;
     const size_t block_global_offset = blockIdx.x * ELTS_PER_CHUNK;
-    tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset,
-                                      block_id_Y, first_logical_dim, last_logical_dim,
-                                      offsets_ptr);
+    tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset, block_id_Y,
+                                      first_logical_dim, last_logical_dim, offsets_ptr);
   } else if (shape_rep == ShapeRepresentation::VARYING_LAST_DIM) {
     // Virtual 2D grid: DIVUP(R,128) row-tiles x (total_cols/128) col-tiles
     const size_t chunks_X_total = last_logical_dim / CHUNK_DIM_X;
@@ -132,22 +130,20 @@ __global__ void __launch_bounds__(128)
     block_id_Y = blockIdx.x / chunks_X_total;
     // Search using column-based element offset (works with existing binary search)
     const size_t search_offset = col_chunk_global * CHUNK_DIM_X * first_logical_dim;
-    tensor_id = get_current_tensor_id(shape_rep, num_tensors, search_offset,
-                                      block_id_Y, first_logical_dim, last_logical_dim,
-                                      offsets_ptr);
-    const size_t tensor_col_start =
-        static_cast<size_t>(offsets_ptr[tensor_id]) / first_logical_dim;
+    tensor_id = get_current_tensor_id(shape_rep, num_tensors, search_offset, block_id_Y,
+                                      first_logical_dim, last_logical_dim, offsets_ptr);
+    const size_t tensor_col_start = static_cast<size_t>(offsets_ptr[tensor_id]) / first_logical_dim;
     block_id_X = col_chunk_global - tensor_col_start / CHUNK_DIM_X;
   } else {
     // VARYING_BOTH_DIMS: 1D grid, element-offset-based (both dims 128-aligned)
     const size_t block_global_offset = blockIdx.x * ELTS_PER_CHUNK;
     const size_t chunks_X_for_id = DIVUP(last_logical_dim, CHUNK_DIM_X);
     tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset,
-                                      blockIdx.x / chunks_X_for_id,
-                                      first_logical_dim, last_logical_dim, offsets_ptr);
+                                      blockIdx.x / chunks_X_for_id, first_logical_dim,
+                                      last_logical_dim, offsets_ptr);
     const size_t vb_tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
-    const size_t vb_cols = get_tensor_cols_num(tensor_id, shape_rep,
-                                               last_logical_dim, last_dims_ptr);
+    const size_t vb_cols =
+        get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
     const size_t chunks_X = DIVUP(vb_cols, CHUNK_DIM_X);
     const size_t block_id_in_tensor = blockIdx.x - vb_tensor_base / ELTS_PER_CHUNK;
     block_id_Y = block_id_in_tensor / chunks_X;
