@@ -335,6 +335,27 @@ struct GroupedTensor {
 
   NVTEGroupedTensor nvte_tensor;
 
+  /*! \brief Whether scaling factors are in format expected by GEMM
+   *
+   *  Only meaningful for MXFP8 and NVFP4.
+   */
+  bool with_gemm_swizzled_scales = false;
+
+  /*! Map from NVTEGroupedTensorParam to parameter sizes */
+  static constexpr size_t attr_sizes[] = {
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedRowwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedColumnwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedScale
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedAmax
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedRowwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedColumnwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedColumnwiseAmax
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedFirstDims
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedLastDims
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedTensorOffsets
+      sizeof(uint8_t)           // kNVTEGroupedWithGEMMSwizzledScales
+  };
+
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
       : data(),
         columnwise_data(),
@@ -401,6 +422,7 @@ struct GroupedTensor {
     num_tensors = 0;
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
+    with_gemm_swizzled_scales = false;
   }
 };
 
@@ -716,6 +738,21 @@ struct TypeInfo {
     } break;                                                         \
     default:                                                         \
       NVTE_ERROR("Invalid type.");                                   \
+  }
+
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(dtype, type, ...) \
+  switch (dtype) {                                                 \
+    using namespace transformer_engine;                            \
+    case DType::kFloat32: {                                        \
+      using type = float;                                          \
+      { __VA_ARGS__ }                                              \
+    } break;                                                       \
+    case DType::kBFloat16: {                                       \
+      using type = bf16;                                           \
+      { __VA_ARGS__ }                                              \
+    } break;                                                       \
+    default:                                                       \
+      NVTE_ERROR("Invalid type, expected Float32 or BFloat16.");   \
   }
 
 // Add a pack_size argument to select the packed type for FP4
