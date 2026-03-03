@@ -1107,6 +1107,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             For example:
             - device_mesh["dp"] for FSDP.
             - device_mesh["dp_cp"] if using CP ranks in FSDP.
+            - device_mesh["dp_shard"] if using HSDP ("dp_replicate", "dp_shard").
             - device_mesh["tp"] if using TP.
             - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
 
@@ -1484,6 +1485,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             For example:
                 - device_mesh["dp"] for FSDP.
                 - device_mesh["dp_cp"] if using CP ranks in FSDP.
+                - device_mesh["dp_shard"] if using HSDP ("dp_replicate", "dp_shard").
                 - device_mesh["tp"] if using TP.
                 - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
         """
