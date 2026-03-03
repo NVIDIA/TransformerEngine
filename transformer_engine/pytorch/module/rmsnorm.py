@@ -171,6 +171,7 @@ class RMSNorm(_RMSNormOp):
             Quantized DTensor parameters are currently not supported for FusibleOperation(s),
             and this mesh is not used.
         """
+        warnings.warn(f"weight_mesh not necessary for {self.__class__.__name__}: {weight_mesh}")
         if tp_mesh is not None:
             # Construct TP-Replicate DTensors. Used to shim non-TP parameters for compatibility
             # with DTensor parameters in TP layers to support DTensor operations.

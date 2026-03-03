@@ -1728,10 +1728,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
             parameters and if the DTensor DeviceMesh includes dimensions that do not
             shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
             For example:
-                - device_mesh["dp"] for FSDP.
-                - device_mesh["dp_cp"] if using CP ranks in FSDP.
-                - device_mesh["tp"] if using TP.
-                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
+            - device_mesh["dp"] for FSDP.
+            - device_mesh["dp_cp"] if using CP ranks in FSDP.
+            - device_mesh["tp"] if using TP.
+            - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
 
     Optimization parameters
     -----------------------
@@ -2052,12 +2052,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """
         if tp_mesh is not None:
             # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
-            assert (
-                tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
-                (
-                    f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
-                    f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
-                ),
+            assert tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(), (
+                f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
             )
             # Set the tensor parallel group from the mesh.
             self.set_tensor_parallel_group(tp_mesh.get_group())
