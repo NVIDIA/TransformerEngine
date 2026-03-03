@@ -1804,7 +1804,9 @@ def _run_dpa_fp8_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
 
 model_configs_fp8_vs_f16 = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "fp8_9": ModelConfig(2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(128, 0)),
+    "fp8_9": ModelConfig(
+        2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(128, 0)
+    ),
     "fp8_10": ModelConfig(
         2,
         4096,
