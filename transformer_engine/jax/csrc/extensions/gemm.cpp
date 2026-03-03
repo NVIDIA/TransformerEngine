@@ -558,7 +558,7 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
 Error_Type GroupedGemmCudaGraphableFFI(
     cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv, Buffer_Type rhs_data,
     Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type group_sizes, Buffer_Type alpha,
-    Buffer_Type beta, Result_Type output, Result_Type workspace, Result_Type int64_workspace,
+    Buffer_Type beta, Result_Type output, Result_Type cublas_workspace, Result_Type setup_workspace, Result_Type int64_workspace,
     size_t m, size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
     JAXX_Scaling_Mode scaling_mode, bool has_bias, bool is_grouped_dense_wgrad,
     bool use_async_d2h_group_sizes) {
@@ -575,8 +575,6 @@ Error_Type GroupedGemmCudaGraphableFFI(
   // If we call cuBLAS GEMM for A * B, the output will be:
   //   C: column-major with size [m, n] --> row-major with size [n, m].
   // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
-
-  int num_streams = nvte_get_num_compute_streams();
 
   // Inputs
   auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_data.untyped_data());
@@ -613,10 +611,11 @@ Error_Type GroupedGemmCudaGraphableFFI(
   // Outputs
   auto out_ptr = reinterpret_cast<uint8_t *>(output->untyped_data());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
+  auto setup_workspace_ptr = reinterpret_cast<uint8_t *>(setup_workspace->untyped_data());
   // Here we clear the lower 8 bits of the buffer address to ensure the buffer is 256-aligned
-  auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
-  workspace_ptr = move_ptr_to_next_256B_aligned(workspace_ptr);
-  auto workspace_total_size = product(workspace->dimensions());
+  auto cublas_workspace_ptr = reinterpret_cast<uint8_t *>(cublas_workspace->untyped_data());
+  cublas_workspace_ptr = move_ptr_to_next_256B_aligned(cublas_workspace_ptr);
+  auto workspace_total_size = product(cublas_workspace->dimensions());
 
   auto lhs_sinv_size = product(lhs_sinv.dimensions());
   auto rhs_sinv_size = product(rhs_sinv.dimensions());
@@ -632,8 +631,7 @@ Error_Type GroupedGemmCudaGraphableFFI(
     // by 16 bytes to meet the requirement of CUDA 12.9.1 and later.
     workspace_size -= tensor_scaling_sinv_aligment * (lhs_sinv_size + rhs_sinv_size);
   }
-  workspace_size = workspace_size / num_streams;
-  auto swizzled_lhs_sinv_ptr = workspace_ptr + workspace_size * num_streams;
+  auto swizzled_lhs_sinv_ptr = cublas_workspace_ptr + workspace_size;
   swizzled_lhs_sinv_ptr = move_ptr_to_next_256B_aligned(swizzled_lhs_sinv_ptr);
   auto swizzled_rhs_sinv_ptr = swizzled_lhs_sinv_ptr + lhs_sinv_size;
   swizzled_rhs_sinv_ptr = move_ptr_to_next_256B_aligned(swizzled_rhs_sinv_ptr);
@@ -686,10 +684,9 @@ Error_Type GroupedGemmCudaGraphableFFI(
                "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
   }
 
-  const size_t workspace_setup_size = nvte_grouped_gemm_setup_workspace_size(num_gemms);
-  TensorWrapper workspace_setup(workspace_ptr, std::vector<size_t>{workspace_setup_size},
+  TensorWrapper workspace_setup(setup_workspace_ptr, std::vector<size_t>{product(setup_workspace->dimensions())},
                                 DType::kByte);
-  TensorWrapper workspace_cublas(workspace_ptr + workspace_setup_size,
+  TensorWrapper workspace_cublas(cublas_workspace_ptr,
                                  std::vector<size_t>{workspace_size}, DType::kByte);
 
   TensorWrapper alpha_tensor(static_cast<void *>(alpha.untyped_data()),
@@ -774,7 +771,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmCudaGraphableHandler, GroupedGemmCudaGr
                                   .Arg<Buffer_Type>()      // alpha
                                   .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output
-                                  .Ret<Buffer_Type>()      // workspace
+                                  .Ret<Buffer_Type>()      // cublas_workspace
+                                  .Ret<Buffer_Type>()      // setup_workspace
                                   .Ret<Buffer_Type>()      // int64_workspace
                                   .Attr<int64_t>("M")
                                   .Attr<int64_t>("N")
