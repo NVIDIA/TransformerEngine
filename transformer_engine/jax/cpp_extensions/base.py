@@ -238,10 +238,11 @@ def register_primitive(cls, outer_only=False):
     if _JAX_GSPMD_SUPPORTED:
         fn = cls.__dict__.get("infer_sharding_from_operands")
         if fn is not None:
+            actual_fn = cls.infer_sharding_from_operands  # Use descriptor protocol to unwrap staticmethod
 
             def _gspmd_wrapper(*args, **kwargs):
                 _warn_gspmd_deprecation_once()
-                return fn(*args, **kwargs)
+                return actual_fn(*args, **kwargs)
 
             gspmd_kwargs = {"infer_sharding_from_operands": _gspmd_wrapper}
         else:
