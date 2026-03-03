@@ -53,6 +53,8 @@ jobs:
       #     remove-haskell: 'true'
       #     remove-codeql: 'true'
       #
+      - name: 'Container dependencies'
+        run: apt-get update && apt-get install -y git python3 python3-pip
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -62,7 +64,6 @@ jobs:
 
       - name: 'Dependencies'
         run: |
-            apt-get update && apt-get install -y python3 python3-pip
             export PIP_BREAK_SYSTEM_PACKAGES=1
             pip install cmake ninja pybind11 numpy
             pip install torch --index-url https://download.pytorch.org/whl/cu130
