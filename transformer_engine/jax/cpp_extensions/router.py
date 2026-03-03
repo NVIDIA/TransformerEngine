@@ -159,27 +159,6 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(
-        topk,
-        use_pre_softmax,
-        num_groups,
-        group_topk,
-        scaling_factor,
-        score_function,
-        compute_aux_scores,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        del topk, use_pre_softmax, num_groups, group_topk, scaling_factor
-        del score_function, compute_aux_scores, result_infos
-        logits_spec = get_padded_spec(arg_infos[0])
-        out_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
-        routing_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
-        intermediate_sharding = NamedSharding(mesh, PartitionSpec(*logits_spec))
-        return [out_sharding, routing_sharding, intermediate_sharding]
-
-    @staticmethod
     def partition(
         topk,
         use_pre_softmax,
@@ -345,22 +324,6 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(
-        topk,
-        use_pre_softmax,
-        scaling_factor,
-        score_function,
-        compute_aux_scores,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        del topk, use_pre_softmax, scaling_factor, score_function
-        del compute_aux_scores, result_infos
-        grad_spec = get_padded_spec(arg_infos[2])
-        return NamedSharding(mesh, PartitionSpec(*grad_spec))
-
-    @staticmethod
     def partition(
         topk,
         use_pre_softmax,
@@ -462,12 +425,6 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(topk, coeff, mesh, arg_infos, result_infos):
-        del topk, coeff, arg_infos, result_infos
-        scalar_sharding = NamedSharding(mesh, PartitionSpec(None))
-        return [scalar_sharding, scalar_sharding]
-
-    @staticmethod
     def partition(topk, coeff, mesh, arg_infos, result_infos):
         del result_infos
         scalar_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -540,17 +497,6 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
             ),
             grad_bdim,
         )
-
-    @staticmethod
-    def infer_sharding_from_operands(
-        num_rows,
-        num_cols,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        del num_rows, num_cols, arg_infos, result_infos
-        return NamedSharding(mesh, PartitionSpec(None, None))
 
     @staticmethod
     def partition(
