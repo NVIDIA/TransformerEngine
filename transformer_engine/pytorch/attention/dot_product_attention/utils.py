@@ -1587,9 +1587,7 @@ def get_full_cu_seqlens(
     is_inference = torch.is_inference_mode_enabled()
     cu_seqlens_cache_key = (batch_size, max_seqlen, device, is_inference)
     if cu_seqlens_cache_key not in _cu_seqlens_cache:
-        _cu_seqlens_cache[cu_seqlens_cache_key] = _get_cu_seqlens(
-            batch_size, max_seqlen, device
-        )
+        _cu_seqlens_cache[cu_seqlens_cache_key] = _get_cu_seqlens(batch_size, max_seqlen, device)
     return _cu_seqlens_cache[cu_seqlens_cache_key]
 
 
