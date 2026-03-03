@@ -2362,7 +2362,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // 2. RHT followed by columnwise quantization & transpose
       NVTE_SCOPED_GIL_RELEASE({
         nvte_quantize_with_hadamard_transform(input.data(), out.data(), rht_matrix_nvte.data(),
-                                            quant_config, stream);
+                                              quant_config, stream);
       });
     } else {
       // Use separate RNG state for columnwise to ensure different random numbers than rowwise

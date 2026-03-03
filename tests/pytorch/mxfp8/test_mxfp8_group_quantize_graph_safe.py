@@ -355,9 +355,7 @@ def check_grouped_tensor_mxfp8_with_paged_stashing(
         "random_uneven_split",
     ],
 )
-@pytest.mark.parametrize(
-    "quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "optimize_for_gemm", [True, False], ids=["optimize_for_gemm", "no_optimize_for_gemm"]
 )
@@ -422,9 +420,7 @@ def test_grouped_tensor_mxfp8_versus_reference(
         "random_uneven_split",
     ],
 )
-@pytest.mark.parametrize(
-    "quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "optimize_for_gemm", [True, False], ids=["optimize_for_gemm", "no_optimize_for_gemm"]
 )
