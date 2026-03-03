@@ -190,8 +190,8 @@ def _warn_gspmd_deprecation_once():
     if not _gspmd_deprecation_warned:
         warnings.warn(
             "GSPMD sharding propagation rules in TE-JAX are planned to be removed in June 2026."
-            " It is no longer maintained or tested. Use it at your own risk."
-            " Please use Shardy partitioner instead."
+            " They are no longer maintained or tested. Use them at your own risk."
+            " Please use Shardy propagation instead."
             " In case you cannot upgrade to a JAX version that supports Shardy, please reach out!",
             DeprecationWarning,
             stacklevel=3,
