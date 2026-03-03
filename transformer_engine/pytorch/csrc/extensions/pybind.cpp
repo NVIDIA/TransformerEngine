@@ -35,9 +35,10 @@ PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
 PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
+std::once_flag extension_init_flag;
+PyTypeObject *GroupedTensorStoragePythonClass = nullptr;
 
 void init_float8_extension() {
-  if (Float8TensorPythonClass) return;
   auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.float8_tensor");
   Float8QuantizerClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Quantizer"));
@@ -54,7 +55,6 @@ void init_float8_extension() {
 }
 
 void init_mxfp8_extension() {
-  if (MXFP8TensorPythonClass) return;
   auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.mxfp8_tensor");
   MXFP8QuantizerClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "MXFP8Quantizer"));
@@ -69,7 +69,6 @@ void init_mxfp8_extension() {
 }
 
 void init_float8blockwise_extension() {
-  if (Float8BlockwiseQTensorStoragePythonClass) return;
   auto fp8_module =
       py::module_::import("transformer_engine.pytorch.tensor.float8_blockwise_tensor");
   auto fp8_base_module = py::module_::import(
@@ -90,7 +89,6 @@ void init_float8blockwise_extension() {
 }
 
 void init_nvfp4_extensions() {
-  if (NVFP4TensorPythonClass) return;
   auto nvfp4_module = py::module_::import("transformer_engine.pytorch.tensor.nvfp4_tensor");
   NVFP4QuantizerClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Quantizer"));
@@ -104,11 +102,24 @@ void init_nvfp4_extensions() {
              "Internal error: could not initialize pyTorch NVFP4 extension.");
 }
 
+void init_grouped_tensor_extension() {
+  if (GroupedTensorStoragePythonClass) return;
+  auto grouped_tensor_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.grouped_tensor");
+  GroupedTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(grouped_tensor_module.ptr(), "GroupedTensor"));
+  NVTE_CHECK(GroupedTensorStoragePythonClass != nullptr,
+             "Internal error: could not initialize pyTorch grouped tensor extension.");
+}
+
 void init_extension() {
-  init_float8_extension();
-  init_mxfp8_extension();
-  init_float8blockwise_extension();
-  init_nvfp4_extensions();
+  std::call_once(extension_init_flag, []() {
+    init_float8_extension();
+    init_mxfp8_extension();
+    init_float8blockwise_extension();
+    init_nvfp4_extensions();
+    init_grouped_tensor_extension();
+  });
 }
 
 }  // namespace transformer_engine::pytorch
@@ -121,7 +132,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
-
+  m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
+        py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -331,19 +343,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::fused_topk_with_score_function_fwd, py::arg("logits"),
         py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"), py::arg("group_topk"),
         py::arg("scaling_factor"), py::arg("score_function"), py::arg("expert_bias"),
-        "Fused topk softmax fwd");
+        "Fused topk with score function fwd");
   m.def("fused_topk_with_score_function_bwd",
         &transformer_engine::pytorch::fused_topk_with_score_function_bwd, py::arg("num_tokens"),
         py::arg("num_experts"), py::arg("routing_map"), py::arg("intermediate_output"),
-        py::arg("grad_probs"), py::arg("topk"), py::arg("use_pre_softmax"),
-        py::arg("scaling_factor"), py::arg("score_function"), "Fused topk softmax bwd");
+        py::arg("grad_probs"), py::arg("grad_logits"), py::arg("topk"), py::arg("use_pre_softmax"),
+        py::arg("scaling_factor"), py::arg("score_function"), "Fused topk with score function bwd");
   m.def("fused_score_for_moe_aux_loss_fwd",
         &transformer_engine::pytorch::fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
-        py::arg("topk"), py::arg("score_function"), "Fused topk softmax fwd");
+        py::arg("topk"), py::arg("score_function"), "Fused aux loss with score function fwd");
   m.def("fused_score_for_moe_aux_loss_bwd",
         &transformer_engine::pytorch::fused_score_for_moe_aux_loss_bwd, py::arg("num_tokens"),
         py::arg("num_experts"), py::arg("intermediate_output"), py::arg("grad_scores"),
-        py::arg("topk"), py::arg("score_function"), "Fused topk softmax bwd");
+        py::arg("grad_logits"), py::arg("topk"), py::arg("score_function"),
+        "Fused aux loss with score function bwd");
   m.def("fused_moe_aux_loss_fwd", &transformer_engine::pytorch::fused_moe_aux_loss_fwd,
         py::arg("probs"), py::arg("tokens_per_expert"), py::arg("total_num_tokens"),
         py::arg("num_experts"), py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"),
