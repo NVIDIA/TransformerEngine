@@ -142,6 +142,14 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
             const size_t* rng_state)
 {
   using namespace cute;
+  constexpr bool is_blackwell_arch = ARCH_BLACKWELL_FAMILY;
+  if constexpr (!is_blackwell_arch) {
+    NVTE_DEVICE_ERROR(
+        "rht_gemm_device is only supported on Blackwell "
+        "with architecture-specific compilation. "
+        "Try recompiling with sm_100a or similar.");
+    return;
+  } else {
   using X = Underscore;
   // static constexpr bool kApplyStochasticRounding = true;
   using ElementAccumulator = float;
@@ -547,6 +555,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
       tile_idx_m = linear_tile_idx % tiles_in_m;
       tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
     } while (tile_idx_m < tiles_in_m && tile_idx_n < tiles_in_n);
+  }
   }
 }
 

@@ -198,8 +198,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         "with architecture-specific compilation. "
         "Try recompiling with sm_100a or similar.");
     return;
-  }
-  static_assert(kEnableRHTColQuant_ || kEnableRowQuant_,
+  } else {
+    static_assert(kEnableRHTColQuant_ || kEnableRowQuant_,
                 "group_row_col_rht_gemm_device_graph_safe must generate row-wise "
                 "and/or column-wise output.");
 #if !defined(CUTLASS_ARCH_CLC_ENABLED)
@@ -1144,6 +1144,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
 
   } else {
     cutlass::arch::warpgroup_reg_dealloc<32>();
+  }
   }
 }  // NOLINT(readability/fn_size)
 
