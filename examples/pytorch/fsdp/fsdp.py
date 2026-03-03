@@ -137,8 +137,8 @@ class StoreExplicitAction(argparse.Action):
         if self.type_converter is not None:
             try:
                 values = self.type_converter(values)
-            except (ValueError, TypeError) as e:
-                raise argparse.ArgumentTypeError(f"invalid {self.dest} value: {values}") from e
+            except (ValueError, TypeError, argparse.ArgumentTypeError) as e:
+                parser.error(f"argument {option_string}: invalid value: {values!r}: {e}")
 
         setattr(namespace, self.dest, values)
         setattr(namespace, f"{self.dest}_explicitly_set", True)
