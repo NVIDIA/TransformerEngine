@@ -35,8 +35,9 @@ PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
 PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
-std::once_flag extension_init_flag;
+PyTypeObject *GroupedTensorPythonClass = nullptr;
 PyTypeObject *GroupedTensorStoragePythonClass = nullptr;
+std::once_flag extension_init_flag;
 
 void init_float8_extension() {
   auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.float8_tensor");
@@ -103,11 +104,17 @@ void init_nvfp4_extensions() {
 }
 
 void init_grouped_tensor_extension() {
-  if (GroupedTensorStoragePythonClass) return;
+  if (GroupedTensorPythonClass && GroupedTensorStoragePythonClass) return;
   auto grouped_tensor_module =
-      py::module_::import("transformer_engine.pytorch.tensor.storage.grouped_tensor");
-  GroupedTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      py::module_::import("transformer_engine.pytorch.tensor.grouped_tensor");
+  GroupedTensorPythonClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(grouped_tensor_module.ptr(), "GroupedTensor"));
+  auto grouped_tensor_storage_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.grouped_tensor_storage");
+  GroupedTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(grouped_tensor_storage_module.ptr(), "GroupedTensorStorage"));
+  NVTE_CHECK(GroupedTensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch grouped tensor extension.");
   NVTE_CHECK(GroupedTensorStoragePythonClass != nullptr,
              "Internal error: could not initialize pyTorch grouped tensor extension.");
 }
@@ -274,6 +281,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("swap_first_dims", &transformer_engine::pytorch::swap_first_dims,
         "Swap first two tensor dimensions", py::arg("tensor"), py::kw_only(), py::arg("out"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("cumsum", &transformer_engine::pytorch::cumsum, "Exclusive cumsum with leading zero",
+        py::arg("input"), py::kw_only(), py::arg("out") = py::none(),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
         "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());

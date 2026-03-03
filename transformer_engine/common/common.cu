@@ -24,6 +24,50 @@ __global__ void __launch_bounds__(1)
   reciprocal<float>(scale_inv_ptr, scale);
 }
 
+constexpr size_t kCumsumThreadsPerBlock = 256;
+
+__global__ void __launch_bounds__(kCumsumThreadsPerBlock)
+    cumsum_with_leading_zero_kernel(const int64_t *__restrict__ input, int64_t *__restrict__ output,
+                                    size_t num_elements) {
+  __shared__ int64_t shared_prefix[kCumsumThreadsPerBlock];
+  __shared__ int64_t chunk_carry;
+
+  const size_t tid = threadIdx.x;
+  if (tid == 0) {
+    chunk_carry = 0;
+    output[0] = 0;
+  }
+  __syncthreads();
+
+  for (size_t chunk_start = 0; chunk_start < num_elements; chunk_start += blockDim.x) {
+    const size_t idx = chunk_start + tid;
+    shared_prefix[tid] = (idx < num_elements) ? input[idx] : 0;
+    __syncthreads();
+
+    for (size_t offset = 1; offset < blockDim.x; offset <<= 1) {
+      int64_t addend = 0;
+      if (tid >= offset) {
+        addend = shared_prefix[tid - offset];
+      }
+      __syncthreads();
+      shared_prefix[tid] += addend;
+      __syncthreads();
+    }
+
+    if (idx < num_elements) {
+      output[idx + 1] = chunk_carry + shared_prefix[tid];
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+      const size_t remaining = num_elements - chunk_start;
+      const size_t chunk_size = remaining < blockDim.x ? remaining : blockDim.x;
+      chunk_carry += shared_prefix[chunk_size - 1];
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
 
 cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
@@ -115,6 +159,17 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float2, stream);
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float, stream);
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, uint8_t, stream);
+}
+
+void nvte_cumsum(const int64_t *input, int64_t *output, size_t num_elements, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cumsum);
+  NVTE_CHECK(input != nullptr || num_elements == 0,
+             "Input pointer for cumsum must be allocated when num_elements > 0.");
+  NVTE_CHECK(output != nullptr, "Output pointer for cumsum must be allocated.");
+
+  cumsum_with_leading_zero_kernel<<<1, kCumsumThreadsPerBlock, 0, stream>>>(input, output,
+                                                                            num_elements);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 }  // extern "C"
 

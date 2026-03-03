@@ -427,6 +427,19 @@ int nvte_is_non_tn_fp8_gemm_supported();
 */
 void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
 
+/*! \brief Computes exclusive cumulative sum into an output buffer with leading zero.
+ *
+ *  Given `input` of length `num_elements`, writes `output` of length `num_elements + 1`:
+ *    - output[0] = 0
+ *    - output[i + 1] = sum(input[0..i]) for i in [0, num_elements)
+ *
+ *  \param[in]  input Pointer to input int64 data on device.
+ *  \param[out] output Pointer to output int64 data on device.
+ *  \param[in]  num_elements Number of elements in input.
+ *  \param[in]  stream CUDA stream to use for the operation.
+ */
+void nvte_cumsum(const int64_t *input, int64_t *output, size_t num_elements, cudaStream_t stream);
+
 /*! \brief TE Grouped Tensor type
  *
  * NVTEGroupedTensor is a collection of tensors with potentially different shapes

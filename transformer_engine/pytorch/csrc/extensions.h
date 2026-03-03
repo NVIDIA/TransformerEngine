@@ -158,6 +158,8 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype,
 
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
+at::Tensor cumsum(at::Tensor input, std::optional<at::Tensor> out = std::nullopt);
+
 /***************************************************************************************************
  * Activations
  **************************************************************************************************/
