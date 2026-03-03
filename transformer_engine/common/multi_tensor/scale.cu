@@ -97,7 +97,8 @@ struct ScaleFunctor {
         }
       }
     }
-    if (!finite) *is_infinite_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
+    if (!finite)
+      *is_infinite_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
   }
 };
 
@@ -165,7 +166,8 @@ struct ScalePtrFunctor {
         }
       }
     }
-    if (!finite) *is_infinite_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
+    if (!finite)
+      *is_infinite_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
   }
 };
 

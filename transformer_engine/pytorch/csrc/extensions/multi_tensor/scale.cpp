@@ -14,8 +14,8 @@ void multi_tensor_scale_cuda(int chunk_size, at::Tensor is_infinite,
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
 
-  nvte_multi_tensor_scale_cuda(chunk_size, is_infinite_cu.data(), tensor_lists_ptr.data(), num_lists,
-                               num_tensors, scale, at::cuda::getCurrentCUDAStream());
+  nvte_multi_tensor_scale_cuda(chunk_size, is_infinite_cu.data(), tensor_lists_ptr.data(),
+                               num_lists, num_tensors, scale, at::cuda::getCurrentCUDAStream());
 }
 
 void multi_tensor_scale_tensor_cuda(int chunk_size, at::Tensor is_infinite,
