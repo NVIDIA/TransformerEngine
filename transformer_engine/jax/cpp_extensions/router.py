@@ -7,6 +7,7 @@ from enum import IntEnum
 import jax.numpy as jnp
 from jax import dtypes, ffi
 from jax.sharding import NamedSharding, PartitionSpec
+from transformer_engine_jax import JAXX_Score_Function
 
 from .base import BasePrimitive, register_primitive
 from .misc import get_padded_spec
@@ -21,10 +22,10 @@ __all__ = [
 
 
 class ScoreFunction(IntEnum):
-    """Score function enum for fused MoE router kernels."""
+    """Score function enum for fused MoE router kernels, synced with C++ JAXX_Score_Function."""
 
-    SIGMOID = 0
-    SOFTMAX = 1
+    SIGMOID = int(JAXX_Score_Function.SIGMOID)
+    SOFTMAX = int(JAXX_Score_Function.SOFTMAX)
 
 
 # =========================================== ==================================

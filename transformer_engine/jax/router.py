@@ -120,6 +120,12 @@ def fused_topk_with_score_function(
         Boolean mask, shape [num_tokens, num_experts].
         True at selected expert positions.
     """
+    if not isinstance(scaling_factor, (int, float)):
+        raise TypeError(
+            f"scaling_factor must be a Python float or int, not {type(scaling_factor).__name__}. "
+            "If you used jnp.sqrt() or similar, use math.sqrt() instead."
+        )
+
     score_function = _validate_score_function(score_function)
 
     if compute_aux_scores:

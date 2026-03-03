@@ -12,11 +12,6 @@
 namespace transformer_engine {
 namespace jax {
 
-enum class ScoreFunction : int64_t {
-  kSigmoid = 0,
-  kSoftmax = 1,
-};
-
 // ============================================================================
 // Fused Top-K with Score Function - Forward
 // ============================================================================
@@ -29,7 +24,7 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
     Result_Type routing_map_buf,   // [num_tokens, num_experts]
     Result_Type intermediate_buf,  // [num_tokens, num_experts]
     int64_t topk, int64_t use_pre_softmax, int64_t num_groups, int64_t group_topk,
-    double scaling_factor, int64_t score_function, int64_t compute_aux_scores) {
+    double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores) {
   auto dtype = convert_ffi_datatype_to_te_dtype(logits_buf.element_type());
   auto dims = logits_buf.dimensions();
   auto num_tokens = static_cast<int>(product(dims, 0, dims.size() - 1));
@@ -86,7 +81,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler,
                                   .Attr<int64_t>("num_groups")
                                   .Attr<int64_t>("group_topk")
                                   .Attr<double>("scaling_factor")
-                                  .Attr<int64_t>("score_function")
+                                  .Attr<JAXX_Score_Function>("score_function")
                                   .Attr<int64_t>("compute_aux_scores"),
                               FFI_CudaGraph_Traits);
 
@@ -100,8 +95,8 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
     Buffer_Type intermediate_buf,  // [num_tokens, num_experts]
     Buffer_Type grad_probs_buf,   // [num_tokens, num_experts] (grad_scores when compute_aux_scores)
     Result_Type grad_logits_buf,  // [num_tokens, num_experts]
-    int64_t topk, int64_t use_pre_softmax, double scaling_factor, int64_t score_function,
-    int64_t compute_aux_scores) {
+    int64_t topk, int64_t use_pre_softmax, double scaling_factor,
+    JAXX_Score_Function score_function, int64_t compute_aux_scores) {
   auto dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type());
   auto dims = intermediate_buf.dimensions();
   auto num_tokens = static_cast<int>(product(dims, 0, dims.size() - 1));
@@ -144,7 +139,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
                                   .Attr<int64_t>("topk")
                                   .Attr<int64_t>("use_pre_softmax")
                                   .Attr<double>("scaling_factor")
-                                  .Attr<int64_t>("score_function")
+                                  .Attr<JAXX_Score_Function>("score_function")
                                   .Attr<int64_t>("compute_aux_scores"),
                               FFI_CudaGraph_Traits);
 
