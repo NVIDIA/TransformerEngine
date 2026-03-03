@@ -4224,7 +4224,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if (
                 ctx.fp8_recipe.float8_current_scaling() or ctx.fp8_recipe.mxfp8()
             ) and ctx.is_input_fp8:
-                dq, dk, dv = combine_and_quantize(ctx.dqkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
+                dq, dk, dv, _ = combine_and_quantize(ctx.dqkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
             if ctx.fp8_recipe.delayed():
                 dq, dk, dv = [
                     Float8Tensor.make_like(x, data=y, dtype=bwd_nominal_dtype)

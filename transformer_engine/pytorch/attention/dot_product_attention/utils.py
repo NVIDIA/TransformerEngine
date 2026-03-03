@@ -2258,6 +2258,10 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
             )
             q_fp8, k_fp8, v_fp8 = grouped_tensor.quantized_tensors
         else:
+            # grouped_tensor = GroupedTensor.create_and_quantize(
+            #     tensors=[q, k], quantizer=qkv_quantizer
+            # )
+            # q_fp8, k_fp8 = grouped_tensor.quantized_tensors
             q_fp8 = qkv_quantizer(q)
             k_fp8 = qkv_quantizer(k)
             v_fp8 = qkv_quantizer(v)

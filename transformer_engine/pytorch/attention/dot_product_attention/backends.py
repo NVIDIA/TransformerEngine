@@ -1339,14 +1339,15 @@ class FusedAttnFunc(torch.autograd.Function):
             # out:     torch.Tensor; dtype = torch.float16 or torch.bfloat16
             out_fp8 = out_
             out = out_
+            bwd_requires_o_f16 = is_training and (not is_bwd_fp8 or (
+                is_bwd_fp8 and ((fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16) or fp8_recipe.mxfp8())))
+            bwd_requires_o_fp8 = is_training and is_bwd_fp8 and (
+                fp8_recipe.delayed() or (fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16))
             if isinstance(out_, QuantizedTensorStorage):
-                if not is_output_fp8 or not is_bwd_fp8:
+                if not is_output_fp8 or bwd_requires_o_f16:
                     out = out_.dequantize().view(out_.shape)
             else:
-                if is_output_fp8 or (
-                    is_bwd_fp8
-                    and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
-                ):
+                if is_output_fp8 or bwd_requires_o_fp8:
                     out_fp8 = O_quantizer(out_)
 
             # print quantizers
@@ -1368,12 +1369,10 @@ class FusedAttnFunc(torch.autograd.Function):
             fp8_tensors = (None, None, None, None)
             qkvo_tensors = (None, None, None, None)
             if is_bwd_fp8:
-                if (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16) or isinstance(
-                    QKV_quantizer, MXFP8Quantizer
-                ):
+                if (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16) or fp8_recipe.mxfp8():
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, None)
                     qkvo_tensors = (None, None, None, out)
-                else:
+                elif fp8_recipe.delayed() or (fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16):
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
             else:
                 if is_input_fp8:
