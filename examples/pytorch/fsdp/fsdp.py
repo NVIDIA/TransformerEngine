@@ -76,7 +76,9 @@ def torch_dtype(d):
 def precision(d):
     typemap = ["fp32", "fp16", "fp8", "mxfp8", "nvfp4"]
     if lowercase(d) not in typemap:
-        raise TypeError
+        raise argparse.ArgumentTypeError(
+            f"invalid precision '{d}'. Supported values: {', '.join(typemap)}"
+        )
     return lowercase(d)
 
 
@@ -103,7 +105,6 @@ def get_layer_args(opts):
     hidden_size = opts.num_heads * opts.head_dim
     layer_args = (hidden_size,)
     layer_kwargs = {
-        # "params_dtype": opts.dtype,
         "device": "cuda" if opts.no_defer_init else "meta",
         "get_rng_state_tracker": get_cuda_rng_tracker,
     }
@@ -146,7 +147,7 @@ class StoreExplicitAction(argparse.Action):
 class StoreTrueExplicitAction(argparse.Action):
     """Custom action for store_true that tracks whether flag was explicitly set."""
 
-    def __init__(self, option_strings, dest, default=False, required=False, help=None):
+    def __init__(self, option_strings, dest, default=False, required=False, help=None, **kwargs):
         super().__init__(
             option_strings, dest, nargs=0, const=True, default=default, required=required, help=help
         )
@@ -328,10 +329,14 @@ def get_recipe_for_precision(precision_value):
             return MXFP8BlockScaling(fp8_format=Format.E4M3)
         case "nvfp4":
             return NVFP4BlockScaling()
-        case _:
-            # Default to DelayedScaling for fp8 or any other value
+        case "fp8":
+            # Default FP8 recipe using DelayedScaling (backward compatible)
             return DelayedScaling(
                 fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
+            )
+        case _:
+            raise NotImplementedError(
+                f"No FP8 recipe defined for precision '{precision_value}'"
             )
 
 
