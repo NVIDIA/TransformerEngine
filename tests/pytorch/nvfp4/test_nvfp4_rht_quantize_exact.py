@@ -35,7 +35,7 @@ def check_quantization_nvfp4_versus_reference(
     M: int,
     N: int,
     contiguous: bool,
-    return_identity: bool,
+    return_rowwise: bool,
     return_transpose: bool,
     use_cpp_allocator: bool,
     swizzled_scale: bool = False,
@@ -62,7 +62,7 @@ def check_quantization_nvfp4_versus_reference(
     # Quantize
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
-        rowwise=return_identity,
+        rowwise=return_rowwise,
         columnwise=return_transpose,
         with_amax_reduction=False,
         amax_reduction_group=None,
@@ -100,7 +100,7 @@ def check_quantization_nvfp4_versus_reference(
     # Reference quantization using NVFP4QuantizerRef with built-in RHT
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
-        rowwise=return_identity,
+        rowwise=return_rowwise,
         columnwise=return_transpose,
         pow_2_scales=False,
         eps=0.0,
@@ -133,7 +133,7 @@ def check_quantization_nvfp4_versus_reference(
         sx_t_ref = None
         ref_amax_colwise_t = None
 
-    if return_identity:
+    if return_rowwise:
         torch.testing.assert_close(amax_rowwise, ref_amax_rowwise, atol=0.0, rtol=0.0)
 
         torch.testing.assert_close(qx, qx_ref, atol=0.0, rtol=0.0)
@@ -189,7 +189,7 @@ def check_quantization_nvfp4_versus_reference(
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize(
-    "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
+    "quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"]
 )
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
@@ -206,14 +206,14 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     with_random_sign_mask: bool,
 ) -> None:
 
-    if quantize_mode == "quantize":
-        return_identity = True
+    if quantize_mode == "rowwise_only":
+        return_rowwise = True
         return_transpose = False
-    elif quantize_mode == "quantize_transpose":
-        return_identity = True
+    elif quantize_mode == "both_directions":
+        return_rowwise = True
         return_transpose = True
-    elif quantize_mode == "quantize_colwise_only":
-        return_identity = False
+    elif quantize_mode == "columnwise_only":
+        return_rowwise = False
         return_transpose = True
     else:
         raise ValueError(f"Invalid quantize mode: {quantize_mode}")
@@ -223,7 +223,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
         M=M,
         N=N,
         contiguous=True,
-        return_identity=return_identity,
+        return_rowwise=return_rowwise,
         return_transpose=return_transpose,
         use_cpp_allocator=use_cpp_allocator,
         with_random_sign_mask=with_random_sign_mask,
@@ -239,7 +239,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize(
-    "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
+    "quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"]
 )
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
@@ -256,14 +256,14 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     with_random_sign_mask: bool,
 ):
 
-    if quantize_mode == "quantize":
-        return_identity = True
+    if quantize_mode == "rowwise_only":
+        return_rowwise = True
         return_transpose = False
-    elif quantize_mode == "quantize_transpose":
-        return_identity = True
+    elif quantize_mode == "both_directions":
+        return_rowwise = True
         return_transpose = True
-    elif quantize_mode == "quantize_colwise_only":
-        return_identity = False
+    elif quantize_mode == "columnwise_only":
+        return_rowwise = False
         return_transpose = True
     else:
         raise ValueError(f"Invalid quantize mode: {quantize_mode}")
@@ -273,7 +273,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         M=M,
         N=N,
         contiguous=False,
-        return_identity=return_identity,
+        return_rowwise=return_rowwise,
         return_transpose=return_transpose,
         use_cpp_allocator=use_cpp_allocator,
         with_random_sign_mask=with_random_sign_mask,
