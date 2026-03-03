@@ -156,6 +156,39 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 
+at::Tensor nvfp4_data_transpose(at::Tensor input, std::optional<at::Tensor> output = std::nullopt);
+
+void nvfp4_2d_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles,
+                              int64_t K_tiles);
+
+void nvfp4_2d_multi_tensor_transpose(std::vector<at::Tensor> rowwise_data_list,
+                                     std::vector<at::Tensor> columnwise_data_list,
+                                     std::vector<at::Tensor> rowwise_scale_inv_list,
+                                     std::vector<at::Tensor> columnwise_scale_inv_list,
+                                     std::vector<int64_t> M_list, std::vector<int64_t> K_list);
+
+void nvfp4_multi_tensor_compute_partial_amax(
+    std::vector<at::Tensor> master_weight_list, std::vector<at::Tensor> partial_amax_list,
+    std::vector<at::Tensor> global_amax_list, std::vector<int64_t> h_list,
+    std::vector<int64_t> w_list, std::vector<int64_t> start_offset_list, int64_t block_len);
+
+void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output, int64_t tile_rows,
+                               int64_t tile_cols, int64_t rows_padded, int64_t block_len);
+
+void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax);
+
+void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax, at::Tensor per_block_scale,
+                       at::Tensor target_scale, at::Tensor target_amax, int64_t tile_rows,
+                       int64_t tile_cols, int64_t rows_padded, int64_t block_len);
+
+void nvfp4_multi_tensor_fused_scale(
+    std::vector<at::Tensor> block_amax_list, std::vector<at::Tensor> global_amax_list,
+    std::vector<at::Tensor> per_block_scale_list, std::vector<at::Tensor> target_scale_list,
+    std::vector<at::Tensor> target_amax_list, std::vector<int64_t> tile_rows_list,
+    std::vector<int64_t> tile_cols_list, std::vector<int64_t> rows_padded_list, int64_t block_len);
+
+void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale);
+
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
 /***************************************************************************************************
@@ -344,6 +377,19 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
                                     size_t h, size_t w, size_t start_offset, size_t block_len,
                                     const DType out_dtype);
 
+void nvfp4_2d_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h, size_t w,
+                                   size_t start_offset, size_t block_len);
+
+void nvfp4_2d_partial_cast(const at::Tensor &inp, py::handle out, const at::Tensor &scale,
+                           const at::Tensor &global_scale, size_t h, size_t w, size_t start_offset,
+                           size_t block_len);
+
+void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
+                                        std::vector<at::Tensor> out_list,
+                                        std::vector<at::Tensor> scale_list,
+                                        std::vector<at::Tensor> global_scale_list,
+                                        std::vector<int64_t> h_list, std::vector<int64_t> w_list,
+                                        std::vector<int64_t> start_offset_list, int64_t block_len);
 void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
                                         at::Tensor amax_colwise, int rows, int cols,
                                         size_t start_offset);
