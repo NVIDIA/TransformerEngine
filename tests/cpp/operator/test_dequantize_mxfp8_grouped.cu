@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <random>
@@ -92,7 +93,7 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
   const double maxAbs = Numeric_Traits<InputType>::maxNorm;
   std::uniform_real_distribution<> dis(minAbs, maxAbs);
   std::uniform_real_distribution<> dis_sign(-1.0, 1.0);
-  std::uniform_int_distribution<fp8e8m0> int_dis(0, 255);
+  std::uniform_int_distribution<int> int_dis(0, 255);
 
   for (size_t i = 0; i < elts_num; ++i) {
     const bool is_negative = (dis_sign(gen) < 0.0);
