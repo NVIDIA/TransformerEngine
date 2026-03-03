@@ -335,9 +335,7 @@ def get_recipe_for_precision(precision_value):
                 fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
             )
         case _:
-            raise NotImplementedError(
-                f"No FP8 recipe defined for precision '{precision_value}'"
-            )
+            raise NotImplementedError(f"No FP8 recipe defined for precision '{precision_value}'")
 
 
 def train(opts):
