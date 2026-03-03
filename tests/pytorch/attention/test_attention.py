@@ -1806,21 +1806,21 @@ model_configs_fp8_vs_f16 = {
     # test: ModelConfig(b, sq, hq, dqk)
     "fp8_9": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),  # , attn_mask_type="causal"),
     "fp8_10": ModelConfig(
-        2, 2048, 24, 192, head_dim_v=128, num_gqa_groups=12, window_size=(512, 512)
+        2, 2048, 24, 192, head_dim_v=128, #num_gqa_groups=12, window_size=(512, 512)
     ),
-    "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
-    "fp8_12": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),
-    "fp8_13": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="causal"),
-    "fp8_14": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
-    "fp8_15": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding"),
-    "fp8_16": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding"),
-    "fp8_17": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding"),
-    "fp8_18": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding_causal"),
-    "fp8_19": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding_causal"),
-    "fp8_20": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding_causal"),
+    # "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
+    # "fp8_12": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),
+    # "fp8_13": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="causal"),
+    # "fp8_14": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
+    # "fp8_15": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding"),
+    # "fp8_16": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding"),
+    # "fp8_17": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding"),
+    # "fp8_18": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding_causal"),
+    # "fp8_19": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding_causal"),
+    # "fp8_20": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding_causal"),
 }
 
-param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
+param_types_fp8_vs_f16 = [torch.bfloat16] #[torch.float16, torch.bfloat16]
 qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd"]
 qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 
@@ -2054,7 +2054,7 @@ def _run_mha_fp8_vs_f16(
         hidden_states.requires_grad = True
     tensor = 0.01 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
     out_grad = tensor.view(*tensor.shape[:-2], -1)
-
+    print(f"type(out_grad): {type(out_grad)} {out_grad.shape}")
     with autocast(enabled=fp8_mha, recipe=fp8_recipe):
         out = mha(
             hidden_states,

@@ -2244,10 +2244,6 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
         original_shapes = [x.shape for x in [q, k, v]]
         s_q, d_qk = q.shape[-2:]
         s_kv, d_v = v.shape[-2:]
-        print(
-            f">>>>>>>>>>>> {torch.cuda.current_device()}: {qkv_layout} s_q: {s_q}, d_qk: {d_qk},"
-            f" s_kv: {s_kv}, d_v: {d_v}, {q.shape}, {k.shape}, {v.shape}"
-        )
         assert s_q % 128 == 0
         assert s_kv % 128 == 0
         assert d_qk % 32 == 0

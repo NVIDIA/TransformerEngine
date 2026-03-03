@@ -1430,10 +1430,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         q_fp8, k_fp8, v_fp8 = (None, None, None)
         # communicate for the 'a2a' part of 'a2a+p2p'
         if cp_size_a2a > 1:
-            print(
-                f">>>>>>======================>>>>>> {torch.cuda.current_device()}: fp8: {fp8},"
-                f" is_input_fp8: {is_input_fp8}, fp8_recipe.mxfp8(): {fp8_recipe.mxfp8()}"
-            )
             if fp8 and is_input_fp8:
                 QKV_quantizer = q._quantizer
                 q_fp8, k_fp8, v_fp8 = q, k, v
@@ -1628,7 +1624,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         out = None
         o_format = qkv_format
         for i in range(cp_size + 1):
-            print(f">>>>>>>>>>>> {torch.cuda.current_device()}: i: {i}, cp_size: {cp_size}")
             if i < cp_size:
                 with torch.cuda.stream(flash_attn_streams[i % 2]):
                     # wait until KV is received
@@ -1917,10 +1912,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             softmax_lse_per_step[0],
                             seq_dim,
                         )
-                        print(
-                            f"====o/v===== {torch.cuda.current_device()}: i: {i}, {enable_mla},"
-                            f" out.shape: {out.shape} {out_per_step[0].shape} {v_shape} {o_shape}"
-                        )
                         if enable_mla:
                             out = out.view(o_shape)
                         else:
@@ -1969,12 +1960,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         elif o_format == "sbhd":
             out = out.view(-1, *out.shape[-3:])
             ctx.batch_size = out.shape[1]
-        print(f"========= {torch.cuda.current_device()}: out.shape: {out.shape} {out.dtype}")
         out_part = out.to(fwd_nominal_dtype)
-        print(
-            f"========= {torch.cuda.current_device()}: out_part.shape:"
-            f" {out_part.shape} {out_part.dtype}"
-        )
 
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size_a2a, out.device)
@@ -2077,15 +2063,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             q_f16 = q_f16.view(q.shape)
             kv_f16 = kv
             f16_tensors = (q_f16, kv_f16, out_f16)
-        if torch.cuda.current_device() == 0:
-            print(
-                "fp8_tensors:"
-                f" {[x.shape if x is not None else None for x in fp8_tensors]} {[type(x) for x in fp8_tensors]}"
-            )
-            print(
-                "f16_tensors:"
-                f" {[x.shape if x is not None else None for x in f16_tensors]} {[type(x) for x in f16_tensors]}"
-            )
 
         tensors_to_save, tensor_objects = prepare_for_saving(
             *fp8_tensors,
@@ -2367,10 +2344,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # communicate for the 'a2a' part of 'a2a+p2p'
         if cp_size_a2a > 1:
-            print(
-                f"========= {torch.cuda.current_device()}: before a2a: out.shape:"
-                f" {out.shape} {out.dtype} dout.shape: {dout.shape} {dout.dtype}"
-            )
             if not ctx.use_fused_attention:
                 # out = out.view(ctx.batch_size, -1, *out.shape[-2:])
                 dout = dout.view(*out.shape)
@@ -2385,10 +2358,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 ctx.cp_group_a2a,
                 ctx.cp_stream,
                 True,
-            )
-            print(
-                f"========= {torch.cuda.current_device()}: after a2a: dout.shape:"
-                f" {dout.shape} {dout.dtype} {q.shape} {ctx.v_shape}"
             )
 
         if ctx.enable_mla:
@@ -3272,15 +3241,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             f16_tensors = (q, k, v, out)
         else:
             f16_tensors = (q, k, v, out)
-        if torch.cuda.current_device() == 0:
-            print(
-                "fp8_tensors:"
-                f" {[x.shape if x is not None else None for x in fp8_tensors]} {[type(x) for x in fp8_tensors]}"
-            )
-            print(
-                "f16_tensors:"
-                f" {[x.shape if x is not None else None for x in f16_tensors]} {[type(x) for x in f16_tensors]}"
-            )
 
         tensors_to_save, tensor_objects = prepare_for_saving(
             *fp8_tensors,
@@ -3385,8 +3345,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if ctx.fp8 and not ctx.fp8_recipe.mxfp8():
             q, k, v = [x._data for x in [q_fp8, k_fp8, v_fp8]]
 
-        if torch.cuda.current_device() == 0:
-            print(f"ctx.q_shape: {ctx.q_shape} {ctx.k_shape} {ctx.v_shape}")
         dq = torch.empty(ctx.q_shape, dtype=ctx.fwd_nominal_dtype, device=q.device)
         dk = torch.zeros(
             (ctx.k_shape[0] * cp_size, *ctx.k_shape[1:]),
@@ -3398,10 +3356,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dtype=ctx.fwd_nominal_dtype,
             device=v.device,
         )
-        if torch.cuda.current_device() == 0:
-            print(f"dq: {dq.shape} {dq.dtype} {dq.device}")
-            print(f"dk: {dk.shape} {dk.dtype} {dk.device}")
-            print(f"dv: {dv.shape} {dv.dtype} {dv.device}")
         dq_per_step = [None, None]
         dk_per_step = [None, None]
         dv_per_step = [None, None]
@@ -3512,23 +3466,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 q_part, k_part, v_part, new_qkv_layout = combine_and_quantize(
                                     qkv_layout, q_part, k_part, v_part, ctx.QKV_quantizer
                                 )
-                                print(
-                                    "aux_ctx_tensors:"
-                                    f" {len(aux_ctx_tensors)} {[x.shape if x is not None else None for x in aux_ctx_tensors]} {[type(x) for x in aux_ctx_tensors]}"
-                                )
                                 dout_part, d_out_format = dpa_utils.permute_to_grouped_tensor(
                                     d_out_format, dout_part
                                 )
                                 aux_ctx_tensors.append(dout_part)
                                 dout_part = ctx.dO_quantizer(dout_part)
-                        print(
-                            "q_part type:"
-                            f" {type(q_part)} {type(k_part)} {type(v_part)} {type(out_part)} {type(dout_part)}"
-                        )
-                        print(
-                            "q_part shape:"
-                            f" {q_part.shape} {k_part.shape} {v_part.shape} {out_part.shape} {dout_part.shape}"
-                        )
                         dq_per_step[i], dk_per_step[i], dv_per_step[i], *_ = fused_attn_bwd(
                             ctx.max_seqlen_q,
                             max_seqlen_kv,
@@ -3606,11 +3548,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
             if i > 0:
                 with torch.cuda.stream(flash_attn_streams[i - 1]):
-                    if torch.cuda.current_device() == 0:
-                        print(
-                            f"dq.shape: {dq.shape} dq_per_step[i - 1].shape:"
-                            f" {dq_per_step[i - 1].shape}"
-                        )
                     if ctx.qkv_format == "bshd":
                         dq[:, i - 1].copy_(dq_per_step[i - 1])
                     elif ctx.qkv_format == "sbhd":
@@ -4431,19 +4368,6 @@ def attn_forward_func_with_cp(
     in Megatron-LM.
 
     """
-    print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {cp_comm_type=}")
-    print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {qkv_format=}")
-    # print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {deterministic=}")
-    print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {use_fused_attention=}")
-    print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {fp8=}")
-    # print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {fp8_meta=}")
-    # print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {cp_group=}")
-    print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {cp_global_ranks=}")
-    # print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {cp_stream=}")
-    # print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {quantizers=}")
-    print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {pad_between_seqs=}")
-    print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {fp8_output=}")
-    # print(f"rank {torch.distributed.get_rank()} attn_forward_func_with_cp: {layer_number=}")
     if cp_comm_type == "a2a+p2p":
         assert (
             isinstance(cp_group, list) and len(cp_group) == 2
