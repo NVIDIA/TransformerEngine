@@ -2264,7 +2264,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // 1. Rowwise quantization
       // 2. RHT followed by columnwise quantization & transpose
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_hadamard_transform_cast_fusion(input.data(), out.data(), rht_matrix_nvte.data(),
+        nvte_quantize_with_hadamard_transform(input.data(), out.data(), rht_matrix_nvte.data(),
                                             quant_config, stream);
       });
     } else {
