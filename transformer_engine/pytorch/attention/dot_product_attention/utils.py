@@ -2304,7 +2304,7 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
         for x in [q_data, k_data, v_data]
     ]
 
-    return q_fp8, k_fp8, v_fp8
+    return q_fp8, k_fp8, v_fp8, qkv_layout
 
 
 def combine_and_dequantize(
