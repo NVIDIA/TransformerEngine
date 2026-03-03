@@ -428,8 +428,9 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
     @staticmethod
     def partition(topk, coeff, mesh, arg_infos, result_infos):
         del result_infos
-        scalar_sharding = NamedSharding(mesh, PartitionSpec(None))
-        out_shardings = [scalar_sharding, scalar_sharding]
+        aux_loss_sharding = NamedSharding(mesh, PartitionSpec())
+        const_buf_sharding = NamedSharding(mesh, PartitionSpec(None))
+        out_shardings = [aux_loss_sharding, const_buf_sharding]
         arg_shardings = (arg_infos[0].sharding, arg_infos[1].sharding)
 
         def sharded_impl(probs, tokens_per_expert):

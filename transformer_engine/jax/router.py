@@ -62,8 +62,8 @@ def fused_topk_with_score_function(
     logits: jnp.ndarray,
     topk: int,
     use_pre_softmax: bool = False,
-    num_groups: int = 1,
-    group_topk: int = 1,
+    num_groups: int = -1,
+    group_topk: int = -1,
     scaling_factor: float = 1.0,
     score_function: Union[str, ScoreFunction] = ScoreFunction.SOFTMAX,
     expert_bias: Optional[jnp.ndarray] = None,
@@ -92,10 +92,10 @@ def fused_topk_with_score_function(
         If True, apply softmax before top-k (only for softmax score function). Else, apply post top-k.
         Ignored when compute_aux_scores=True.
     num_groups : int
-        Number of groups for grouped top-k. 1 means no grouping.
+        Number of groups for grouped top-k. <= 0 disables grouping (default).
         Ignored when compute_aux_scores=True.
     group_topk : int
-        Top-k at group level. 1 means no group-level selection.
+        Top-k at group level. <= 0 disables group-level selection (default).
         Ignored when compute_aux_scores=True.
     scaling_factor : float
         Scaling factor applied to output probs.
@@ -131,8 +131,8 @@ def fused_topk_with_score_function(
     if compute_aux_scores:
         expert_bias = jnp.empty((0,), dtype=logits.dtype)
         use_pre_softmax = False
-        num_groups = 1
-        group_topk = 1
+        num_groups = -1
+        group_topk = -1
         scaling_factor = 1.0
     else:
         if expert_bias is not None and score_function != ScoreFunction.SIGMOID:

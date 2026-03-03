@@ -83,6 +83,7 @@ pybind11::dict Registrations() {
 
   dict["te_inspect_ffi"] =
       pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
+
   // Router
   dict["te_fused_topk_with_score_function_forward_ffi"] =
       EncapsulateFFI(FusedTopkWithScoreFunctionForwardHandler);
@@ -90,8 +91,6 @@ pybind11::dict Registrations() {
       EncapsulateFFI(FusedTopkWithScoreFunctionBackwardHandler);
   dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
   dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
-  dict["te_inspect_ffi"] =
-      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
 
   return dict;
 }
