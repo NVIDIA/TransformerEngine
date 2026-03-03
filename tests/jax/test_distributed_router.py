@@ -382,14 +382,7 @@ class TestDistributedMoEAuxLoss:
             # === Forward ===
             @jax.jit
             def target_fwd(p, tpe):
-                return fused_moe_aux_loss(
-                    p,
-                    tpe,
-                    total_num_tokens=num_tokens,
-                    num_experts=num_experts,
-                    topk=topk,
-                    coeff=coeff,
-                )
+                return fused_moe_aux_loss(p, tpe, topk=topk, coeff=coeff)
 
             target_loss = target_fwd(probs_dev, tpe_dev)
 
@@ -414,12 +407,7 @@ class TestDistributedMoEAuxLoss:
             # === Backward ===
             def target_loss_fn(p):
                 return fused_moe_aux_loss(
-                    p,
-                    tokens_per_expert,
-                    total_num_tokens=num_tokens,
-                    num_experts=num_experts,
-                    topk=topk,
-                    coeff=coeff,
+                    p, tokens_per_expert, topk=topk, coeff=coeff,
                 )
 
             def ref_loss_fn(p):

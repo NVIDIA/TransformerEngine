@@ -414,44 +414,40 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
 
     name = "te_fused_moe_aux_loss_forward_ffi"
     multiple_results = True
-    impl_static_args = (2, 3, 4, 5)  # total_num_tokens, num_experts, topk, coeff
+    impl_static_args = (2, 3)  # topk, coeff
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(probs_aval, tokens_per_expert_aval, total_num_tokens, num_experts, topk, coeff):
-        del total_num_tokens, num_experts, topk, coeff, tokens_per_expert_aval
+    def abstract(probs_aval, tokens_per_expert_aval, topk, coeff):
+        del topk, coeff, tokens_per_expert_aval
         i_dtype = dtypes.canonicalize_dtype(probs_aval.dtype)
-        aux_loss_aval = probs_aval.update(shape=(1,), dtype=i_dtype)
+        aux_loss_aval = probs_aval.update(shape=(), dtype=i_dtype)
         const_buf_aval = probs_aval.update(shape=(1,), dtype=jnp.float32)
         return aux_loss_aval, const_buf_aval
 
     @staticmethod
-    def lowering(ctx, probs, tokens_per_expert, *, total_num_tokens, num_experts, topk, coeff):
+    def lowering(ctx, probs, tokens_per_expert, *, topk, coeff):
         return ffi.ffi_lowering(FusedMoEAuxLossFwdPrimitive.name)(
             ctx,
             probs,
             tokens_per_expert,
-            total_num_tokens=total_num_tokens,
-            num_experts=num_experts,
             topk=topk,
             coeff=coeff,
         )
 
     @staticmethod
-    def impl(probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff):
+    def impl(probs, tokens_per_expert, topk, coeff):
         assert FusedMoEAuxLossFwdPrimitive.inner_primitive is not None
         return FusedMoEAuxLossFwdPrimitive.inner_primitive.bind(
             probs,
             tokens_per_expert,
-            total_num_tokens=total_num_tokens,
-            num_experts=num_experts,
             topk=topk,
             coeff=coeff,
         )
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, total_num_tokens, num_experts, topk, coeff):
+    def batcher(batched_args, batch_dims, *, topk, coeff):
         assert FusedMoEAuxLossFwdPrimitive.outer_primitive is not None
         probs, tokens_per_expert = batched_args
         probs_bdim, _ = batch_dims
@@ -459,8 +455,6 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
             FusedMoEAuxLossFwdPrimitive.outer_primitive.bind(
                 probs,
                 tokens_per_expert,
-                total_num_tokens=total_num_tokens,
-                num_experts=num_experts,
                 topk=topk,
                 coeff=coeff,
             ),
@@ -468,29 +462,13 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def infer_sharding_from_operands(
-        total_num_tokens,
-        num_experts,
-        topk,
-        coeff,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
-        del total_num_tokens, num_experts, topk, coeff, arg_infos, result_infos
+    def infer_sharding_from_operands(topk, coeff, mesh, arg_infos, result_infos):
+        del topk, coeff, arg_infos, result_infos
         scalar_sharding = NamedSharding(mesh, PartitionSpec(None))
         return [scalar_sharding, scalar_sharding]
 
     @staticmethod
-    def partition(
-        total_num_tokens,
-        num_experts,
-        topk,
-        coeff,
-        mesh,
-        arg_infos,
-        result_infos,
-    ):
+    def partition(topk, coeff, mesh, arg_infos, result_infos):
         del result_infos
         scalar_sharding = NamedSharding(mesh, PartitionSpec(None))
         out_shardings = [scalar_sharding, scalar_sharding]
@@ -498,12 +476,7 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
 
         def sharded_impl(probs, tokens_per_expert):
             return FusedMoEAuxLossFwdPrimitive.impl(
-                probs,
-                tokens_per_expert,
-                total_num_tokens,
-                num_experts,
-                topk,
-                coeff,
+                probs, tokens_per_expert, topk, coeff,
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -511,7 +484,7 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "num_tokens num_experts, num_experts -> aux_loss_one, const_buf_one"
+        return "num_tokens num_experts, num_experts -> , const_buf_one"
 
 
 register_primitive(FusedMoEAuxLossFwdPrimitive)
@@ -544,13 +517,9 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def lowering(ctx, const_buf, tokens_per_expert, grad_aux_loss, *, num_rows, num_cols):
+        del num_rows, num_cols
         return ffi.ffi_lowering(FusedMoEAuxLossBwdPrimitive.name)(
-            ctx,
-            const_buf,
-            tokens_per_expert,
-            grad_aux_loss,
-            num_rows=num_rows,
-            num_cols=num_cols,
+            ctx, const_buf, tokens_per_expert, grad_aux_loss,
         )
 
     @staticmethod
@@ -665,7 +634,7 @@ def fused_topk_with_score_function_fwd(
 
     Returns
     -------
-    probs_or_scores, routing_map, intermediate_output
+    probs_or_scores, routing_map, saved_scores
     """
     return FusedTopkWithScoreFunctionFwdPrimitive.outer_primitive.bind(
         logits,
@@ -682,7 +651,7 @@ def fused_topk_with_score_function_fwd(
 
 def fused_topk_with_score_function_bwd(
     routing_map: jnp.ndarray,
-    intermediate_output: jnp.ndarray,
+    saved_scores: jnp.ndarray,
     grad_probs: jnp.ndarray,
     topk: int,
     use_pre_softmax: bool,
@@ -698,7 +667,7 @@ def fused_topk_with_score_function_bwd(
     """
     return FusedTopkWithScoreFunctionBwdPrimitive.outer_primitive.bind(
         routing_map,
-        intermediate_output,
+        saved_scores,
         grad_probs,
         topk=int(topk),
         use_pre_softmax=int(use_pre_softmax),
@@ -711,8 +680,6 @@ def fused_topk_with_score_function_bwd(
 def fused_moe_aux_loss_fwd(
     probs: jnp.ndarray,
     tokens_per_expert: jnp.ndarray,
-    total_num_tokens: int,
-    num_experts: int,
     topk: int,
     coeff: float,
 ):
@@ -726,8 +693,6 @@ def fused_moe_aux_loss_fwd(
     return FusedMoEAuxLossFwdPrimitive.outer_primitive.bind(
         probs,
         tokens_per_expert,
-        total_num_tokens=int(total_num_tokens),
-        num_experts=int(num_experts),
         topk=int(topk),
         coeff=float(coeff),
     )

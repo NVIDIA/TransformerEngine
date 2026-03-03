@@ -515,8 +515,6 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
         partial(
             fused_moe_aux_loss,
             tokens_per_expert=tokens_per_expert,
-            total_num_tokens=num_tokens,
-            num_experts=num_experts,
             topk=topk,
             coeff=coeff,
         )
@@ -532,7 +530,7 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
         return reference_aux_loss(probs_, tokens_per_expert, num_tokens, topk, num_experts, coeff)
 
     def loss_fused_fn(probs_):
-        return fused_moe_aux_loss(probs_, tokens_per_expert, num_tokens, num_experts, topk, coeff)
+        return fused_moe_aux_loss(probs_, tokens_per_expert, topk, coeff)
 
     grad_ref = jax.jit(jax.grad(loss_ref_fn))(probs)
     grad_fused = jax.jit(jax.grad(loss_fused_fn))(probs)

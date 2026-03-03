@@ -189,7 +189,7 @@ def _fused_topk_with_score_function_fwd(
     score_function,
     compute_aux_scores,
 ):
-    probs, routing_map, intermediate_output = fused_topk_with_score_function_fwd(
+    probs, routing_map, saved_scores = fused_topk_with_score_function_fwd(
         logits,
         topk,
         use_pre_softmax,
@@ -200,27 +200,28 @@ def _fused_topk_with_score_function_fwd(
         expert_bias,
         compute_aux_scores,
     )
-    residuals = (routing_map, intermediate_output)
+    residuals = (routing_map, saved_scores)
     return (probs, routing_map), residuals
 
 
 def _fused_topk_with_score_function_bwd(
     topk,
     use_pre_softmax,
-    num_groups,  # pylint: disable=unused-argument
-    group_topk,  # pylint: disable=unused-argument
+    num_groups,
+    group_topk,
     scaling_factor,
     score_function,
     compute_aux_scores,
     residuals,
     g,
 ):
-    routing_map, intermediate_output = residuals
-    grad_probs, _ = g  # routing_map gradient is None (boolean)
+    del num_groups, group_topk
+    routing_map, saved_scores = residuals
+    grad_probs, _ = g
 
     grad_logits = fused_topk_with_score_function_bwd(
         routing_map,
-        intermediate_output,
+        saved_scores,
         grad_probs,
         topk,
         use_pre_softmax,
@@ -228,7 +229,6 @@ def _fused_topk_with_score_function_bwd(
         score_function,
         compute_aux_scores,
     )
-    # expert_bias gradient is None: bias is not differentiated through this kernel
     return grad_logits, None
 
 
@@ -246,8 +246,6 @@ _fused_topk_with_score_function.defvjp(
 def fused_moe_aux_loss(
     probs: jnp.ndarray,
     tokens_per_expert: jnp.ndarray,
-    total_num_tokens: int,
-    num_experts: int,
     topk: int,
     coeff: float,
 ) -> jnp.ndarray:
@@ -256,16 +254,14 @@ def fused_moe_aux_loss(
 
     loss = (E * coeff / (k * T^2)) * sum_i(sum_t(probs[t,i]) * tokens_per_expert[i])
 
+    where T = probs.shape[0] (num_tokens) and E = probs.shape[1] (num_experts).
+
     Parameters
     ----------
     probs : jnp.ndarray
         Probability/score tensor, shape [num_tokens, num_experts].
     tokens_per_expert : jnp.ndarray
         Token counts per expert, shape [num_experts]. Integer tensor.
-    total_num_tokens : int
-        Total token count for normalization.
-    num_experts : int
-        Number of experts.
     topk : int
         Top-k value.
     coeff : float
@@ -276,74 +272,33 @@ def fused_moe_aux_loss(
     aux_loss : jnp.ndarray
         Scalar loss value.
     """
-    return _fused_moe_aux_loss(
-        probs,
-        tokens_per_expert,
-        total_num_tokens,
-        num_experts,
-        topk,
-        coeff,
-    )
+    return _fused_moe_aux_loss(probs, tokens_per_expert, topk, coeff)
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5))
+@partial(jax.custom_vjp, nondiff_argnums=(2, 3))
 def _fused_moe_aux_loss(
     probs: jnp.ndarray,
     tokens_per_expert: jnp.ndarray,
-    total_num_tokens: int,
-    num_experts: int,
     topk: int,
     coeff: float,
 ) -> jnp.ndarray:
-    aux_loss, _ = _fused_moe_aux_loss_fwd(
-        probs,
-        tokens_per_expert,
-        total_num_tokens,
-        num_experts,
-        topk,
-        coeff,
-    )
+    aux_loss, _ = _fused_moe_aux_loss_fwd(probs, tokens_per_expert, topk, coeff)
     return aux_loss
 
 
-def _fused_moe_aux_loss_fwd(
-    probs,
-    tokens_per_expert,
-    total_num_tokens,
-    num_experts,
-    topk,
-    coeff,
-):
-    aux_loss, const_buf = fused_moe_aux_loss_fwd(
-        probs,
-        tokens_per_expert,
-        total_num_tokens,
-        num_experts,
-        topk,
-        coeff,
-    )
+def _fused_moe_aux_loss_fwd(probs, tokens_per_expert, topk, coeff):
+    aux_loss, const_buf = fused_moe_aux_loss_fwd(probs, tokens_per_expert, topk, coeff)
     residuals = (const_buf, tokens_per_expert, probs.shape[0], probs.shape[1])
-    return aux_loss.squeeze(), residuals
+    return aux_loss, residuals
 
 
-def _fused_moe_aux_loss_bwd(
-    total_num_tokens,  # pylint: disable=unused-argument
-    num_experts,  # pylint: disable=unused-argument
-    topk,  # pylint: disable=unused-argument
-    coeff,  # pylint: disable=unused-argument
-    residuals,
-    g,
-):
+def _fused_moe_aux_loss_bwd(topk, coeff, residuals, g):
+    del topk, coeff
     const_buf, tokens_per_expert, num_rows, num_cols = residuals
-    # g is a scalar matching the squeezed output of _fwd
     grad_aux_loss = g.reshape(1)
 
     grad_probs = fused_moe_aux_loss_bwd(
-        const_buf,
-        tokens_per_expert,
-        grad_aux_loss,
-        num_rows,
-        num_cols,
+        const_buf, tokens_per_expert, grad_aux_loss, num_rows, num_cols,
     )
     return grad_probs, None
 
