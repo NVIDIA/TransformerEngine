@@ -869,12 +869,9 @@ class GroupedLinear(TransformerEngineBaseModule):
         """
         if tp_mesh is not None:
             # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
-            assert (
-                tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(),
-                (
-                    f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
-                    f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
-                ),
+            assert tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(), (
+                f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
+                f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
             )
             # Set the tensor parallel group from the mesh.
             self.set_tensor_parallel_group(tp_mesh.get_group())
