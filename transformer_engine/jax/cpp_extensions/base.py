@@ -194,7 +194,7 @@ def _warn_gspmd_deprecation_once():
             " Please use Shardy propagation instead."
             " In case you cannot upgrade to a JAX version that supports Shardy, please reach out!",
             DeprecationWarning,
-            stacklevel=3,
+            stacklevel=2,
         )
         _gspmd_deprecation_warned = True
 
