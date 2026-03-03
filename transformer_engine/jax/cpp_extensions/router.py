@@ -433,7 +433,10 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
 
         def sharded_impl(probs, tokens_per_expert):
             return FusedMoEAuxLossFwdPrimitive.impl(
-                probs, tokens_per_expert, topk, coeff,
+                probs,
+                tokens_per_expert,
+                topk,
+                coeff,
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -476,7 +479,10 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
     def lowering(ctx, const_buf, tokens_per_expert, grad_aux_loss, *, num_rows, num_cols):
         del num_rows, num_cols
         return ffi.ffi_lowering(FusedMoEAuxLossBwdPrimitive.name)(
-            ctx, const_buf, tokens_per_expert, grad_aux_loss,
+            ctx,
+            const_buf,
+            tokens_per_expert,
+            grad_aux_loss,
         )
 
     @staticmethod

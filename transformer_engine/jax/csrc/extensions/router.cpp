@@ -153,7 +153,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
 // ============================================================================
 
 Error_Type FusedMoEAuxLossForwardFFI(cudaStream_t stream,
-                                     Buffer_Type probs_buf,              // [num_tokens, num_experts]
+                                     Buffer_Type probs_buf,  // [num_tokens, num_experts]
                                      Buffer_Type tokens_per_expert_buf,  // [num_experts]
                                      Result_Type aux_loss_buf,           // scalar
                                      Result_Type const_buf,              // scalar
@@ -201,7 +201,7 @@ Error_Type FusedMoEAuxLossBackwardFFI(cudaStream_t stream,
                                       Buffer_Type const_buf_in,           // scalar float32
                                       Buffer_Type tokens_per_expert_buf,  // [num_experts]
                                       Buffer_Type grad_aux_loss_buf,      // scalar
-                                      Result_Type grad_probs_buf) {        // [num_tokens, num_experts]
+                                      Result_Type grad_probs_buf) {  // [num_tokens, num_experts]
   auto grad_dtype = convert_ffi_datatype_to_te_dtype(grad_aux_loss_buf.element_type());
   auto tpe_dtype = convert_ffi_datatype_to_te_dtype(tokens_per_expert_buf.element_type());
 

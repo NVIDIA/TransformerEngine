@@ -407,7 +407,10 @@ class TestDistributedMoEAuxLoss:
             # === Backward ===
             def target_loss_fn(p):
                 return fused_moe_aux_loss(
-                    p, tokens_per_expert, topk=topk, coeff=coeff,
+                    p,
+                    tokens_per_expert,
+                    topk=topk,
+                    coeff=coeff,
                 )
 
             def ref_loss_fn(p):
