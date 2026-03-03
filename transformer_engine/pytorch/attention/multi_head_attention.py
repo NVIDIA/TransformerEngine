@@ -5,7 +5,7 @@
 """Multi-head Attention."""
 import os
 import collections
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
@@ -477,6 +477,10 @@ class MultiheadAttention(torch.nn.Module):
             name=name + ".proj" if name is not None else None,
             **common_gemm_kwargs,
         )
+
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """Fast attribute set for non-parameter fields."""
+        self.__dict__[name] = value
 
     def _create_qk_norm_modules(
         self,
