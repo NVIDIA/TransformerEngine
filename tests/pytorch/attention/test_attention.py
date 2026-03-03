@@ -1804,13 +1804,14 @@ def _run_dpa_fp8_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
 
 model_configs_fp8_vs_f16 = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "fp8_9": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),  # , attn_mask_type="causal"),
+    "fp8_9": ModelConfig(2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(128, 0)),
     "fp8_10": ModelConfig(
         2,
-        2048,
-        24,
+        4096,
+        128,
         192,
-        head_dim_v=128,  # num_gqa_groups=12, window_size=(512, 512)
+        head_dim_v=128,
+        attn_mask_type="causal",
     ),
     # "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
     # "fp8_12": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),
@@ -1871,7 +1872,7 @@ def test_mha_fp8_vs_f16(
         )
     elif scaling_mode == "mxfp8":
         fp8_recipe = recipe.MXFP8BlockScaling(
-            fp8_format=recipe.Format.HYBRID,
+            fp8_format=recipe.Format.E4M3,
             fp8_dpa=True,
             fp8_mha=True,
         )
@@ -2058,7 +2059,6 @@ def _run_mha_fp8_vs_f16(
         hidden_states.requires_grad = True
     tensor = 0.01 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
     out_grad = tensor.view(*tensor.shape[:-2], -1)
-    print(f"type(out_grad): {type(out_grad)} {out_grad.shape}")
     with autocast(enabled=fp8_mha, recipe=fp8_recipe):
         out = mha(
             hidden_states,
@@ -2128,7 +2128,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         )
     elif scaling_mode == "mxfp8":
         fp8_recipe = recipe.MXFP8BlockScaling(
-            fp8_format=recipe.Format.HYBRID,
+            fp8_format=recipe.Format.E4M3,
             fp8_dpa=True,
             fp8_mha=False,
         )
@@ -2401,7 +2401,6 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
-            fp8_output=fp8_dpa,
         )
     if is_training:
         out.backward(out_grad)
