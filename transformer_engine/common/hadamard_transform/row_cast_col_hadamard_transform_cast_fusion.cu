@@ -1378,11 +1378,11 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
 
 }  // namespace transformer_engine
 
-void nvte_hadamard_transform_cast_fusion(const NVTETensor input, NVTETensor output,
+void nvte_quantize_with_hadamard_transform(const NVTETensor input, NVTETensor output,
                                          const NVTETensor hadamard_matrix,
                                          const NVTEQuantizationConfig quant_config,
                                          cudaStream_t stream) {
-  NVTE_API_CALL(nvte_hadamard_transform_cast_fusion);
+  NVTE_API_CALL(nvte_quantize_with_hadamard_transform);
   using namespace transformer_engine;
   QuantizationConfig quant_config_cpp;
   if (quant_config != nullptr) {

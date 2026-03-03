@@ -48,7 +48,7 @@ void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int
 
 /*! \brief Perform the columnwise hadamard transform cast fusion.
  *
- *  This has been deprecated in favor of nvte_hadamard_transform_cast_fusion.
+ *  This has been deprecated in favor of nvte_quantize_with_hadamard_transform.
  *
  *  \param[in]      input           Input tensor to apply Hadamard transform.
  *  \param[in,out]  output          Output tensor.
@@ -71,7 +71,7 @@ void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTE
  *  \param[in]      quant_config    Quantization configuration.
  *  \param[in]      stream          CUDA stream used for the operation.
  */
-void nvte_hadamard_transform_cast_fusion(const NVTETensor input, NVTETensor output,
+void nvte_quantize_with_hadamard_transform(const NVTETensor input, NVTETensor output,
                                          const NVTETensor hadamard_matrix,
                                          const NVTEQuantizationConfig quant_config,
                                          cudaStream_t stream);
