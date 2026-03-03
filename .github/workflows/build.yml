@@ -78,7 +78,7 @@ jobs:
           export PATH=$CUDA_PATH/bin:$PATH
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH/lib:$LD_LIBRARY_PATH
           export LIBRARY_PATH=$LIBRARY_PATH/lib:$LIBRARY_PATH
-          NVTE_USE_CCACHE=1 NVTE_CCACHE_BIN=sccache pip install --no-build-isolation . -v --no-deps
+          pip install --no-build-isolation . -v --no-deps
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
