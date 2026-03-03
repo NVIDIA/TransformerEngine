@@ -388,10 +388,12 @@ def train(opts):
 
         # Apply explicit dtype override with warning
         if dtype_explicitly_set:
-            dtype = opts.dtype
-            dist_print(
-                f"Warning: --dtype {dtype} overrides --precision {opts.precision} dtype setting"
-            )
+            new_dtype = opts.dtype
+            if new_dtype != preset_dtype:
+                dtype = new_dtype
+                dist_print(
+                    f"Warning: --dtype {dtype} overrides --precision {opts.precision} dtype setting"
+                )
 
             # If FP8 is still enabled, keep recipe based on precision
             # (dtype only affects parameter storage, not FP8 recipe)
