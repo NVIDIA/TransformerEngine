@@ -35,7 +35,7 @@ __device__ __forceinline__ void load_store(T *dst, T *src, int dst_offset, int s
 
 template <typename in_t, typename out_t>
 struct ScaleFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
+  __device__ __forceinline__ void operator()(int chunk_size, volatile int *is_infinite_gmem,
                                              TensorListMetadata<2> &tl,  // NOLINT(*)
                                              float scale) {
     // I'd like this kernel to propagate infs/nans.
@@ -81,7 +81,6 @@ struct ScaleFunctor {
           int i = i_start + threadIdx.x + ii * blockDim.x;
           if (i < n && i < chunk_size) r_in[ii] = in[i];
         }
-        // note for clarification to future michael:
         // From a pure memory dependency perspective, there's likely no point unrolling
         // the write loop, since writes just fire off once their LDGs arrive.
         // Put another way, the STGs are dependent on the LDGs, but not on each other.
@@ -98,13 +97,13 @@ struct ScaleFunctor {
         }
       }
     }
-    if (!finite) *noop_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
+    if (!finite) *is_infinite_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
   }
 };
 
 template <typename in_t, typename out_t>
 struct ScalePtrFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
+  __device__ __forceinline__ void operator()(int chunk_size, volatile int *is_infinite_gmem,
                                              TensorListMetadata<2> &tl,  // NOLINT(*)
                                              float *scale_ptr) {
     // I'd like this kernel to propagate infs/nans.
@@ -150,7 +149,6 @@ struct ScalePtrFunctor {
           int i = i_start + threadIdx.x + ii * blockDim.x;
           if (i < n && i < chunk_size) r_in[ii] = in[i];
         }
-        // note for clarification to future michael:
         // From a pure memory dependency perspective, there's likely no point unrolling
         // the write loop, since writes just fire off once their LDGs arrive.
         // Put another way, the STGs are dependent on the LDGs, but not on each other.
@@ -167,30 +165,30 @@ struct ScalePtrFunctor {
         }
       }
     }
-    if (!finite) *noop_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
+    if (!finite) *is_infinite_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
   }
 };
 
-void multi_tensor_scale_cuda(int chunk_size, Tensor noop_flag,
+void multi_tensor_scale_cuda(int chunk_size, Tensor is_infinite,
                              std::vector<std::vector<Tensor *>> tensor_lists, float scale,
                              cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       tensor_lists[0][0]->dtype(), p_in_type,
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
           tensor_lists[1][0]->dtype(), g_in_type,
-          multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+          multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, is_infinite, tensor_lists,
                                 ScaleFunctor<p_in_type, g_in_type>(), stream, scale);))
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void multi_tensor_scale_tensor_cuda(int chunk_size, Tensor noop_flag,
+void multi_tensor_scale_tensor_cuda(int chunk_size, Tensor is_infinite,
                                     std::vector<std::vector<Tensor *>> tensor_lists, float *scale,
                                     cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       tensor_lists[0][0]->dtype(), p_in_type,
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
           tensor_lists[1][0]->dtype(), g_in_type,
-          multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+          multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, is_infinite, tensor_lists,
                                 ScalePtrFunctor<p_in_type, g_in_type>(), stream, scale);))
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -198,18 +196,18 @@ void multi_tensor_scale_tensor_cuda(int chunk_size, Tensor noop_flag,
 }  // namespace multi_tensor_scale
 }  // namespace transformer_engine
 
-void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
+void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor is_infinite, NVTETensor **tensor_lists,
                                   const size_t num_tensor_lists, const size_t num_tensors_per_list,
                                   float scale, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_scale_cuda);
   using namespace transformer_engine;
 
   multi_tensor_scale::multi_tensor_scale_cuda(
-      chunk_size, *convertNVTETensorCheck(noop_flag),
+      chunk_size, *convertNVTETensorCheck(is_infinite),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), scale, stream);
 }
 
-void nvte_multi_tensor_scale_tensor_cuda(int chunk_size, NVTETensor noop_flag,
+void nvte_multi_tensor_scale_tensor_cuda(int chunk_size, NVTETensor is_infinite,
                                          NVTETensor **tensor_lists, const size_t num_tensor_lists,
                                          const size_t num_tensors_per_list, NVTETensor scale,
                                          cudaStream_t stream) {
@@ -218,7 +216,7 @@ void nvte_multi_tensor_scale_tensor_cuda(int chunk_size, NVTETensor noop_flag,
 
   Tensor *scale_tensor = convertNVTETensorCheck(scale);
   multi_tensor_scale::multi_tensor_scale_tensor_cuda(
-      chunk_size, *convertNVTETensorCheck(noop_flag),
+      chunk_size, *convertNVTETensorCheck(is_infinite),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
       reinterpret_cast<float *>(scale_tensor->data.dptr), stream);
 }
