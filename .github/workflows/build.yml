@@ -54,7 +54,7 @@ jobs:
       #     remove-codeql: 'true'
       #
       - name: 'Container dependencies'
-        run: apt-get update && apt-get install -y git python3 python3-pip
+        run: apt-get update && apt-get install -y git python3 python3-pip ccache
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -65,7 +65,7 @@ jobs:
       - name: 'Dependencies'
         run: |
             export PIP_BREAK_SYSTEM_PACKAGES=1
-            pip install cmake ninja pybind11 numpy
+            pip install cmake ninja pybind11 numpy packaging
             pip install torch --index-url https://download.pytorch.org/whl/cu130
             pip install "nvidia-cuda-nvcc<13.1" "nvidia-cuda-cccl<13.1" "nvidia-cuda-crt<13.1" "nvidia-nvvm<13.1" "nvidia-cuda-profiler-api<13.1" "nvidia-nvml-dev<13.1"
             export CUDA_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cu13')")
@@ -76,7 +76,13 @@ jobs:
 
       - name: "Disk space check after dependencies"
         run: df -lh
-
+      - uses: actions/cache@v4
+        with:
+          path: /root/.ccache
+          key: ccache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: ccache-${{ runner.os }}-
+      - name: "Disk space check after dependencies and ccache"
+        run: df -lh
       - name: 'Build'
         run: |
           export CUDA_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cu13')")
@@ -86,11 +92,12 @@ jobs:
           export LIBRARY_PATH=$LIBRARY_PATH/lib:$LIBRARY_PATH
           export NVTE_BUILD_USE_NVIDIA_WHEELS=1
           export PIP_BREAK_SYSTEM_PACKAGES=1
-          pip install --no-build-isolation . -v --no-deps
+          NVTE_USE_CCACHE=1 pip install --no-build-isolation . -v --no-deps
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 2
-          SCCACHE_GHA_ENABLED: "true"
+          CCACHE_DIR: /root/.ccache
+          CCACHE_MAXSIZE: 2G
       - name: 'Sanity check'
         run: python3 tests/pytorch/test_sanity_import.py
   jax:
