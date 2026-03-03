@@ -2301,43 +2301,6 @@ void fused_attn_fp8_bwd_impl_v1(
         generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_t_stride.data(), q_format, false);
         generateMatrixStridesWithFormat(b, hg, s_kv, d_qk, k_t_stride.data(), kv_format, false);
         generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_t_stride.data(), d_out_format, false);
-        printf("q_t_stride: %d, %d, %d, %d\n", q_t_stride[0], q_t_stride[1], q_t_stride[2],
-               q_t_stride[3]);
-        printf("k_t_stride: %d, %d, %d, %d\n", k_t_stride[0], k_t_stride[1], k_t_stride[2],
-               k_t_stride[3]);
-        printf("dO_t_stride: %d, %d, %d, %d\n", dO_t_stride[0], dO_t_stride[1], dO_t_stride[2],
-               dO_t_stride[3]);
-        printf("qkv_tensor_type: %d, %d, %d\n", qkv_tensor_type,
-               cudnn_frontend::DataType_t::FP8_E4M3, cudnn_frontend::DataType_t::FP8_E5M2);
-        printf("o_tensor_type: %d, %d, %d\n", o_tensor_type, cudnn_frontend::DataType_t::HALF,
-               cudnn_frontend::DataType_t::BFLOAT16);
-        printf("do_tensor_type: %d, %d, %d\n", do_tensor_type, cudnn_frontend::DataType_t::FP8_E4M3,
-               cudnn_frontend::DataType_t::FP8_E5M2);
-        printf("dqkv_tensor_type: %d, %d, %d\n", dqkv_tensor_type,
-               cudnn_frontend::DataType_t::FP8_E4M3, cudnn_frontend::DataType_t::FP8_E5M2);
-        printf("qkv_layout: %d, %d, %d\n", qkv_layout, NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD,
-               NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD);
-        printf("o_format: %d, %d, %d\n", o_format, NVTE_QKV_Format::NVTE_BSHD,
-               NVTE_QKV_Format::NVTE_BHSD);
-        printf("d_out_format: %d, %d, %d\n", d_out_format, NVTE_QKV_Format::NVTE_BSHD,
-               NVTE_QKV_Format::NVTE_BHSD);
-        printf("dqkv_layout: %d, %d, %d\n", dqkv_layout, NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD,
-               NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD);
-        printf("b: %d\n", b);
-        printf("h: %d\n", h);
-        printf("hg: %d\n", hg);
-        printf("s_q: %d\n", s_q);
-        printf("s_kv: %d\n", s_kv);
-        printf("d_qk: %d\n", d_qk);
-        printf("d_v: %d\n", d_v);
-        printf("is_delayed_scaling: %d\n", is_delayed_scaling);
-        printf("is_current_scaling: %d\n", is_current_scaling);
-        printf("is_O_in_F16: %d\n", is_O_in_F16);
-        printf("is_mxfp8: %d\n", is_mxfp8);
-        printf("is_causal: %d\n", is_causal);
-        printf("is_padding: %d\n", is_padding);
-        printf("is_dropout: %d\n", is_dropout);
-        printf("is_bias: %d\n", is_bias);
         Q_t = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("Q_t")
                                     .set_dim({b, h, s_q, d_qk})
@@ -2360,18 +2323,6 @@ void fused_attn_fp8_bwd_impl_v1(
                                        .set_data_type(o_tensor_type));
         // Descale_q, Descale_q_t, Descale_k, Descale_k_t, Descale_v, Descale_dO, Descale_dO_t
         auto padded = pad_s_d_for_mxfp8(s_q, s_kv, d_qk, d_v);
-        printf("s_q_padded: %d\n", padded.s_q_padded);
-        printf("s_kv_padded: %d\n", padded.s_kv_padded);
-        printf("s_q_scale: %d\n", padded.s_q_scale);
-        printf("s_kv_scale: %d\n", padded.s_kv_scale);
-        printf("s_q_scale_padded: %d\n", padded.s_q_scale_padded);
-        printf("s_kv_scale_padded: %d\n", padded.s_kv_scale_padded);
-        printf("d_qk_padded: %d\n", padded.d_qk_padded);
-        printf("d_v_padded: %d\n", padded.d_v_padded);
-        printf("d_qk_scale: %d\n", padded.d_qk_scale);
-        printf("d_v_scale: %d\n", padded.d_v_scale);
-        printf("d_qk_scale_padded: %d\n", padded.d_qk_scale_padded);
-        printf("d_v_scale_padded: %d\n", padded.d_v_scale_padded);
         std::vector<int64_t> q_scale_strides(4);
         std::vector<int64_t> q_t_scale_strides(4);
         std::vector<int64_t> k_scale_strides(4);
@@ -2393,20 +2344,6 @@ void fused_attn_fp8_bwd_impl_v1(
                                         dO_scale_strides.data(), d_out_format, false);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_v_padded,
                                         dO_t_scale_strides.data(), d_out_format, false);
-        printf("q_scale_strides: %d, %d, %d, %d\n", q_scale_strides[0], q_scale_strides[1],
-               q_scale_strides[2], q_scale_strides[3]);
-        printf("q_t_scale_strides: %d, %d, %d, %d\n", q_t_scale_strides[0], q_t_scale_strides[1],
-               q_t_scale_strides[2], q_t_scale_strides[3]);
-        printf("k_scale_strides: %d, %d, %d, %d\n", k_scale_strides[0], k_scale_strides[1],
-               k_scale_strides[2], k_scale_strides[3]);
-        printf("k_t_scale_strides: %d, %d, %d, %d\n", k_t_scale_strides[0], k_t_scale_strides[1],
-               k_t_scale_strides[2], k_t_scale_strides[3]);
-        printf("v_scale_strides: %d, %d, %d, %d\n", v_scale_strides[0], v_scale_strides[1],
-               v_scale_strides[2], v_scale_strides[3]);
-        printf("dO_scale_strides: %d, %d, %d, %d\n", dO_scale_strides[0], dO_scale_strides[1],
-               dO_scale_strides[2], dO_scale_strides[3]);
-        printf("dO_t_scale_strides: %d, %d, %d, %d\n", dO_t_scale_strides[0], dO_t_scale_strides[1],
-               dO_t_scale_strides[2], dO_t_scale_strides[3]);
         descale_q =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Descale_q")
@@ -2562,9 +2499,6 @@ void fused_attn_fp8_bwd_impl_v1(
                                NVTE_QKV_Matrix::NVTE_K_Matrix);
       generateMatrixStrides_v1(b, hg, hg, s_q, s_kv, d_qk, d_v, dv_stride.data(), dqkv_layout,
                                NVTE_QKV_Matrix::NVTE_V_Matrix);
-      printf("dq_stride: %d, %d, %d, %d\n", dq_stride[0], dq_stride[1], dq_stride[2], dq_stride[3]);
-      printf("dk_stride: %d, %d, %d, %d\n", dk_stride[0], dk_stride[1], dk_stride[2], dk_stride[3]);
-      printf("dv_stride: %d, %d, %d, %d\n", dv_stride[0], dv_stride[1], dv_stride[2], dv_stride[3]);
       dQ->set_output(true)
           .set_dim({b, h, s_q, d_qk})
           .set_stride(dq_stride)
@@ -2712,42 +2646,6 @@ void fused_attn_fp8_bwd_impl_v1(
       // variant_pack[descale_dO] = devPtrDescaledO;
       variant_pack[descale_dO_t] = devPtrDescaledO_t;
     }
-    int64_t modulo = 16;
-    printf("devPtrQ: %p, is_aligned: %d\n", devPtrQ, is_aligned_modulo(devPtrQ, modulo));
-    printf("devPtrK: %p, is_aligned: %d\n", devPtrK, is_aligned_modulo(devPtrK, modulo));
-    printf("devPtrV: %p, is_aligned: %d\n", devPtrV, is_aligned_modulo(devPtrV, modulo));
-    printf("devPtrO: %p, is_aligned: %d\n", devPtrO, is_aligned_modulo(devPtrO, modulo));
-    printf("devPtrM: %p, is_aligned: %d\n", devPtrM, is_aligned_modulo(devPtrM, modulo));
-    printf("devPtrdO: %p, is_aligned: %d\n", devPtrdO, is_aligned_modulo(devPtrdO, modulo));
-    printf("devPtrDescaleQ: %p, is_aligned: %d\n", devPtrDescaleQ,
-           is_aligned_modulo(devPtrDescaleQ, modulo));
-    printf("devPtrDescaleK: %p, is_aligned: %d\n", devPtrDescaleK,
-           is_aligned_modulo(devPtrDescaleK, modulo));
-    printf("devPtrDescaleV: %p, is_aligned: %d\n", devPtrDescaleV,
-           is_aligned_modulo(devPtrDescaleV, modulo));
-    printf("devPtrDescaledO: %p, is_aligned: %d\n", devPtrDescaledO,
-           is_aligned_modulo(devPtrDescaledO, modulo));
-    printf("devPtrDescaledO_t: %p, is_aligned: %d\n", devPtrDescaledO_t,
-           is_aligned_modulo(devPtrDescaledO_t, modulo));
-    printf("devPtrdQ: %p, is_aligned: %d\n", devPtrdQ, is_aligned_modulo(devPtrdQ, modulo));
-    printf("devPtrdK: %p, is_aligned: %d\n", devPtrdK, is_aligned_modulo(devPtrdK, modulo));
-    printf("devPtrdV: %p, is_aligned: %d\n", devPtrdV, is_aligned_modulo(devPtrdV, modulo));
-    printf("devPtrAmaxdQ: %p, is_aligned: %d\n", devPtrAmaxdQ,
-           is_aligned_modulo(devPtrAmaxdQ, modulo));
-    printf("devPtrAmaxdK: %p, is_aligned: %d\n", devPtrAmaxdK,
-           is_aligned_modulo(devPtrAmaxdK, modulo));
-    printf("devPtrAmaxdV: %p, is_aligned: %d\n", devPtrAmaxdV,
-           is_aligned_modulo(devPtrAmaxdV, modulo));
-    printf("devPtrQ_t: %p, is_aligned: %d\n", devPtrQ_t, is_aligned_modulo(devPtrQ_t, modulo));
-    printf("devPtrK_t: %p, is_aligned: %d\n", devPtrK_t, is_aligned_modulo(devPtrK_t, modulo));
-    printf("devPtrdO_f16: %p, is_aligned: %d\n", devPtrdO_f16,
-           is_aligned_modulo(devPtrdO_f16, modulo));
-    printf("devPtrdO_t: %p, is_aligned: %d\n", devPtrdO_t, is_aligned_modulo(devPtrdO_t, modulo));
-    printf("devPtrDescaleQ_t: %p, is_aligned: %d\n", devPtrDescaleQ_t,
-           is_aligned_modulo(devPtrDescaleQ_t, modulo));
-    printf("devPtrDescaleK_t: %p, is_aligned: %d\n", devPtrDescaleK_t,
-           is_aligned_modulo(devPtrDescaleK_t, modulo));
-
     /* if (is_bias) {
        variant_pack[bias] = devPtrBias;
        if ((bias_b == 1) && (bias_h == h)) {
