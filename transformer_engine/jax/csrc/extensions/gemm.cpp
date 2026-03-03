@@ -558,8 +558,8 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
 Error_Type GroupedGemmCudaGraphableFFI(
     cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv, Buffer_Type rhs_data,
     Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type group_sizes, Buffer_Type alpha,
-    Buffer_Type beta, Result_Type output, Result_Type cublas_workspace, Result_Type setup_workspace, Result_Type int64_workspace,
-    size_t m, size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
+    Buffer_Type beta, Result_Type output, Result_Type cublas_workspace, Result_Type setup_workspace,
+    Result_Type int64_workspace, size_t m, size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
     JAXX_Scaling_Mode scaling_mode, bool has_bias, bool is_grouped_dense_wgrad,
     bool use_async_d2h_group_sizes) {
   // Notes on matrix layouts and transpose:
@@ -684,10 +684,11 @@ Error_Type GroupedGemmCudaGraphableFFI(
                "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
   }
 
-  TensorWrapper workspace_setup(setup_workspace_ptr, std::vector<size_t>{product(setup_workspace->dimensions())},
+  TensorWrapper workspace_setup(setup_workspace_ptr,
+                                std::vector<size_t>{product(setup_workspace->dimensions())},
                                 DType::kByte);
-  TensorWrapper workspace_cublas(cublas_workspace_ptr,
-                                 std::vector<size_t>{workspace_size}, DType::kByte);
+  TensorWrapper workspace_cublas(cublas_workspace_ptr, std::vector<size_t>{workspace_size},
+                                 DType::kByte);
 
   TensorWrapper alpha_tensor(static_cast<void *>(alpha.untyped_data()),
                              std::vector<size_t>{num_gemms},

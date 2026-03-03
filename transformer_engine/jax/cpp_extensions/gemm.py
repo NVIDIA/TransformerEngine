@@ -1444,7 +1444,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv_aval,
         bias_aval,
         group_sizes_aval,
-        *additional_args, # group_offset_aval, unused_placeholder OR alpha_aval, beta_aval
+        *additional_args,  # group_offset_aval, unused_placeholder OR alpha_aval, beta_aval
         M,
         N,
         K,
@@ -1492,8 +1492,12 @@ class GroupedGemmPrimitive(BasePrimitive):
         num_groups = group_sizes_aval.size
 
         cublas_workspace_aval = jax.core.ShapedArray(
-            shape=(GroupedGemmPrimitive._compute_cublas_workspace_size(scaling_mode, lhs_scale_inv_aval, rhs_scale_inv_aval, use_cuda_graphable_ffi),),
-            dtype=jnp.uint8
+            shape=(
+                GroupedGemmPrimitive._compute_cublas_workspace_size(
+                    scaling_mode, lhs_scale_inv_aval, rhs_scale_inv_aval, use_cuda_graphable_ffi
+                ),
+            ),
+            dtype=jnp.uint8,
         )
 
         out_shape = (M, N)
@@ -1502,24 +1506,44 @@ class GroupedGemmPrimitive(BasePrimitive):
         out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
         if use_cuda_graphable_ffi:
-            setup_workspace_aval = jax.core.ShapedArray(shape=(get_grouped_gemm_setup_workspace_size(num_groups),), dtype=jnp.uint8)
+            setup_workspace_aval = jax.core.ShapedArray(
+                shape=(get_grouped_gemm_setup_workspace_size(num_groups),), dtype=jnp.uint8
+            )
             # Temporary buffer for int32 -> int64 conversion of group_sizes on device.
             int64_workspace_size = num_groups * jnp.dtype(jnp.int64).itemsize
-            int64_workspace_aval = jax.core.ShapedArray(shape=(int64_workspace_size,), dtype=jnp.uint8)
+            int64_workspace_aval = jax.core.ShapedArray(
+                shape=(int64_workspace_size,), dtype=jnp.uint8
+            )
 
-            assert len(additional_args) == 2, f"Expected additional_args to contain alpha, beta for the graph-safe grouped GEMM primitive, but got {len(additional_args)} arguments."
+            assert len(additional_args) == 2, (
+                "Expected additional_args to contain alpha, beta for the graph-safe grouped GEMM"
+                f" primitive, but got {len(additional_args)} arguments."
+            )
             alpha_aval, beta_aval = additional_args
-            assert alpha_aval.shape == (num_groups,), f"Expected alpha shape {(num_groups,)}, got {alpha_aval.shape}"
-            assert alpha_aval.dtype == jnp.float32, f"Expected alpha dtype float32, got {alpha_aval.dtype}"
-            assert beta_aval.shape == (num_groups,), f"Expected beta shape {(num_groups,)}, got {beta_aval.shape}"
-            assert beta_aval.dtype == jnp.float32, f"Expected beta dtype float32, got {beta_aval.dtype}"
+            assert alpha_aval.shape == (
+                num_groups,
+            ), f"Expected alpha shape {(num_groups,)}, got {alpha_aval.shape}"
+            assert (
+                alpha_aval.dtype == jnp.float32
+            ), f"Expected alpha dtype float32, got {alpha_aval.dtype}"
+            assert beta_aval.shape == (
+                num_groups,
+            ), f"Expected beta shape {(num_groups,)}, got {beta_aval.shape}"
+            assert (
+                beta_aval.dtype == jnp.float32
+            ), f"Expected beta dtype float32, got {beta_aval.dtype}"
 
             return (out_aval, cublas_workspace_aval, setup_workspace_aval, int64_workspace_aval)
-        
+
         return (out_aval, cublas_workspace_aval)
 
     @staticmethod
-    def _compute_cublas_workspace_size(scaling_mode: ScalingMode, lhs_scale_inv_aval, rhs_scale_inv_aval, use_cuda_graphable_ffi: bool):
+    def _compute_cublas_workspace_size(
+        scaling_mode: ScalingMode,
+        lhs_scale_inv_aval,
+        rhs_scale_inv_aval,
+        use_cuda_graphable_ffi: bool,
+    ):
         """Compute the required cuBLAS workspace size based on the scaling mode and alignment requirements."""
         stream_count = 1 if use_cuda_graphable_ffi else num_cublas_streams
 
@@ -2145,7 +2169,10 @@ def grouped_gemm(
 
     has_bias = bias is not None
     if has_bias:
-        assert bias.shape == (group_sizes.size, N), f"bias shape {bias.shape} does not match expected shape {(group_sizes.size, N)}"
+        assert bias.shape == (
+            group_sizes.size,
+            N,
+        ), f"bias shape {bias.shape} does not match expected shape {(group_sizes.size, N)}"
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
     assert group_offset is None, (
@@ -2154,14 +2181,16 @@ def grouped_gemm(
         " and padded with zeros to not affect the result of the MoE block."
     )
 
-    use_cuda_graphable_ffi = _can_use_cuda_graphable_grouped_gemm(scaling_mode, lhs_data.dtype, has_bias)
+    use_cuda_graphable_ffi = _can_use_cuda_graphable_grouped_gemm(
+        scaling_mode, lhs_data.dtype, has_bias
+    )
     if use_cuda_graphable_ffi:
         num_gemms = group_sizes.shape[0]
-        additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)   # alpha
+        additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
         additional_arg_1 = jnp.zeros((num_gemms,), jnp.float32)  # beta
     else:
-        additional_arg_0 = jnp.zeros((1,), jnp.int32)   # group_offset
-        additional_arg_1 = jnp.zeros((0,), jnp.int32)   # unused placeholder
+        additional_arg_0 = jnp.zeros((1,), jnp.int32)  # group_offset
+        additional_arg_1 = jnp.zeros((0,), jnp.int32)  # unused placeholder
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
