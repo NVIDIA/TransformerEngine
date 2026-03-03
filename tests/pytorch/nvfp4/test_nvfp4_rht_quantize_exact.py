@@ -188,9 +188,7 @@ def check_quantization_nvfp4_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
@@ -238,9 +236,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )

@@ -150,9 +150,7 @@ def check_group_quantization_nvfp4_versus_reference(
         "random_uneven_split",
     ],
 )
-@pytest.mark.parametrize(
-    "quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "with_random_sign_mask", [True, False], ids=["with_random_sign_mask", "no_random_sign_mask"]
 )

@@ -103,9 +103,7 @@ def check_mxfp8_quantize_swizzle_fusion(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 def test_mxfp8_quantize_swizzle_fusion(
     x_dtype: torch.dtype,
     M: int,
