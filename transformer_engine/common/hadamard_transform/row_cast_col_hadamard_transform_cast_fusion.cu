@@ -195,8 +195,8 @@ __global__ static void row_col_rht_gemm_device(
         "with architecture-specific compilation. "
         "Try recompiling with sm_100a or similar.");
     return;
-  }
-  static_assert(kEnableRHTColQuant_ || kEnableRowQuant_,
+  } else {
+    static_assert(kEnableRHTColQuant_ || kEnableRowQuant_,
                 "row_col_rht_gemm_device must generate row-wise "
                 "and/or column-wise output.");
 #if !defined(CUTLASS_ARCH_CLC_ENABLED)
@@ -1026,6 +1026,7 @@ __global__ static void row_col_rht_gemm_device(
   } else {
       cutlass::arch::warpgroup_reg_dealloc<32>();
   }
+  } // sm100 compile guard end
 } // NOLINT(readability/fn_size)
 
 
