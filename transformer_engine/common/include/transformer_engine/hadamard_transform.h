@@ -48,8 +48,7 @@ void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int
 
 /*! \brief Perform the columnwise hadamard transform cast fusion.
  *
- *  This function is experimental and the API is not stable.
- *  This function will later be deprecated and replaced by nvte_hadamard_transform_cast_fusion
+ *  This has been deprecated in favor of nvte_hadamard_transform_cast_fusion.
  *
  *  \param[in]      input           Input tensor to apply Hadamard transform.
  *  \param[in,out]  output          Output tensor.
