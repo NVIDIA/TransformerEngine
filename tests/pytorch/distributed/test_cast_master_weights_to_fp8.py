@@ -5,6 +5,7 @@
 import argparse
 import datetime
 import os
+import tempfile
 import subprocess
 import sys
 import pathlib
@@ -1241,17 +1242,37 @@ def test_single_gpu_partial_cast_vs_full():
     if test_tensor._amax_rowwise is not None:
         test_tensor._amax_rowwise.zero_()
 
-    # Create a mock distributed group for single GPU
+    # Create a local single-rank process group when running under plain pytest.
+    initialized_here = False
+    rendezvous_file = None
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl", init_method="env://", rank=0, world_size=1)
-    mock_group = dist.new_group(ranks=[0])
+        torch.cuda.set_device(0)
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            rendezvous_file = pathlib.Path(f.name)
+        dist.init_process_group(
+            backend="nccl",
+            init_method=rendezvous_file.resolve().as_uri(),
+            rank=0,
+            world_size=1,
+        )
+        initialized_here = True
 
-    quantize_master_weights(
-        [test_tensor],
-        [master_weight.view(-1)],  # Flatten as expected
-        [0],  # offset=0 means full tensor
-        mock_group,
-    )
+    if dist.get_world_size() != 1:
+        pytest.skip("test_single_gpu_partial_cast_vs_full requires world_size == 1")
+
+    mock_group = dist.new_group(ranks=[0], backend="nccl")
+    try:
+        quantize_master_weights(
+            [test_tensor],
+            [master_weight.view(-1)],  # Flatten as expected
+            [0],  # offset=0 means full tensor
+            mock_group,
+        )
+    finally:
+        if initialized_here:
+            dist.destroy_process_group()
+        if rendezvous_file is not None:
+            rendezvous_file.unlink(missing_ok=True)
 
     # Compare amax
     amax_match = torch.equal(test_tensor._amax_rowwise, ref_amax)
