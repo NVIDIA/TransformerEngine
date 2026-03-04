@@ -323,9 +323,11 @@ def train(opts):
         # Original behavior: --dtype and --no-fp8 control training directly
         dtype = opts.dtype
         no_fp8 = opts.no_fp8
-        recipe = DelayedScaling(
-            fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
-        ) if not no_fp8 else None
+        recipe = (
+            DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max")
+            if not no_fp8
+            else None
+        )
 
     dtype_name = str(dtype).replace("torch.", "")
 
@@ -432,7 +434,9 @@ def train(opts):
             device="cuda",
         )
         # autocast needs to be given the FSDP process group for amax reductions
-        with te.autocast(enabled=not no_fp8, recipe=recipe or DelayedScaling(), amax_reduction_group=all_gpus):
+        with te.autocast(
+            enabled=not no_fp8, recipe=recipe or DelayedScaling(), amax_reduction_group=all_gpus
+        ):
             y = te_model(x)
             loss = y.sum()
         # calculate gradient and take training step outside the autocast context
