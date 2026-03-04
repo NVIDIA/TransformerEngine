@@ -1172,9 +1172,16 @@ class GemmPrimitive(BasePrimitive):
         del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer
 
         if not collective_op.is_none:
-            raise NotImplementedError(
-                "CollectiveGEMM with Shardy propagation is not supported yet! Please turn off"
-                " Shardy by exporting env var JAX_USE_SHARDY_PARTITIONER=false"
+            warnings.warn(
+                "CollectiveGEMM with Shardy propagation may produce an incorrect sharding pattern"
+                " for the output.\n To resolve this, apply a sharding constraint on the output"
+                " using one of the following options:\n"
+                "  - TE `dense` vjp: set `output_axes`.\n"
+                "  - TE `layernorm_mlp` vjp: set `dot_2_input_axes`.\n"
+                "  - TE `transformer_engine.jax.cpp_extensions.gemm`: apply"
+                " `jax.lax.with_sharding_constraint` on the output.\n"
+                "  - TE via MaxText: no action needed.",
+                UserWarning,
             )
 
         prefix = "Gemm_"
