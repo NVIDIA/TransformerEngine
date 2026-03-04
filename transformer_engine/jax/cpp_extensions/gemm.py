@@ -2000,7 +2000,7 @@ def _can_use_cuda_graphable_grouped_gemm(
         if "cublas" in str(e).lower():
             # If the workspace size function is not available, it means the cuda-graphable implementation is not available.
             return False
-        raise e
+        raise
 
     return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
 
