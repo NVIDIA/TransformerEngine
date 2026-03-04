@@ -395,8 +395,9 @@ def common_lib_has_symbol(symbol: str) -> bool:
         pass
 
     # Then site packages.
-    candidates += [Path(s) / "transformer_engine" / "libtransformer_engine.so"
-                   for s in site.getsitepackages()]
+    candidates += [
+        Path(s) / "transformer_engine" / "libtransformer_engine.so" for s in site.getsitepackages()
+    ]
 
     # Remaining candidates: editable-install root, default CMake build dir,
     # and user-specified CMake build dir.
