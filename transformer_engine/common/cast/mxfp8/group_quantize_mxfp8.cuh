@@ -19,6 +19,7 @@
 #include "../../common.h"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
+#include "../../util/cuda_runtime.h"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
 #include "swizzle.cuh"
@@ -36,14 +37,29 @@ __device__ alignas(128) CUtensorMap g_tensor_maps_act_input[MAX_SUPPORTED_TENSOR
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_rowwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 
+enum class PersistentStrategy : int {
+  NONE = 0,
+  DYNAMIC_WORK_STEALING = 1,
+  STATIC_GRID_STRIDE = 2,
+};
+
 struct TunableConfig {
   static constexpr size_t CHUNK_DIM_Y = 128;
   static constexpr size_t CHUNK_DIM_X = 128;
   static constexpr size_t THREADS_PER_CHUNK = 128;
   static constexpr size_t PREFETCH_STAGES = 1;
-  // Set false to run one-CTA-per-block (non-persistent) mode.
-  static constexpr bool PERSISTENT = true;
+  static constexpr PersistentStrategy PERSISTENT_STRATEGY =
+      PersistentStrategy::STATIC_GRID_STRIDE;
+  // Launch static persistent grid as (SM_count * STATIC_PERSISTENT_BLOCKS_PER_SM, 1, 1).
+  static constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = 1;
 };
+
+constexpr bool DYNAMIC_PERSISTENT =
+    TunableConfig::PERSISTENT_STRATEGY == PersistentStrategy::DYNAMIC_WORK_STEALING;
+constexpr bool STATIC_PERSISTENT =
+    TunableConfig::PERSISTENT_STRATEGY == PersistentStrategy::STATIC_GRID_STRIDE;
+static_assert(TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM > 0,
+              "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero.");
 
 constexpr size_t SCALE_DIM_Y = 32;
 constexpr size_t SCALE_DIM_X = 32;
@@ -251,7 +267,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, e8m0_t *const __restrict__ scales_rowwise_ptr,
     e8m0_t *const __restrict__ scales_colwise_ptr, const float *__restrict__ noop,
-    float *const __restrict__ dbias_workspace, float *const __restrict__ amax_ptr) {
+    float *const __restrict__ dbias_workspace, float *const __restrict__ amax_ptr,
+    const size_t work_blocks_X, const size_t work_blocks_Y) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
@@ -315,8 +332,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   float block_amax = 0.0f;
 
   __shared__ uint64_t workID_mbar;
-  __shared__ __uint128_t workID_response;
-  constexpr uint32_t workID_response_size = sizeof(workID_response);
+  [[maybe_unused]] __shared__ __uint128_t workID_response;
+  [[maybe_unused]] constexpr uint32_t workID_response_size = sizeof(workID_response);
   static_assert(workID_response_size == 16);
 
   __shared__ uint64_t IN_buff_readable_mbar[BUFFS_NUM];
@@ -331,16 +348,32 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   }
   __syncthreads();
 
+  const size_t total_work_blocks = work_blocks_X * work_blocks_Y;
+  const size_t launch_block_id =
+      static_cast<size_t>(blockIdx.y) * static_cast<size_t>(gridDim.x) + static_cast<size_t>(blockIdx.x);
+
   int IN_buff_readable_parity[BUFFS_NUM] = {0};
-  int ctaid_parity = 0;
-  int32_t ctaid_X = blockIdx.x;
-  int32_t ctaid_Y = blockIdx.y;
+  [[maybe_unused]] int ctaid_parity = 0;
+  int32_t ctaid_X = static_cast<int32_t>(blockIdx.x);
+  int32_t ctaid_Y = static_cast<int32_t>(blockIdx.y);
+  [[maybe_unused]] size_t static_next_block_id = 0;
+  [[maybe_unused]] size_t static_block_stride = 0;
+  if constexpr (STATIC_PERSISTENT) {
+    if (launch_block_id >= total_work_blocks) {
+      return;
+    }
+    ctaid_X = static_cast<int32_t>(launch_block_id % work_blocks_X);
+    ctaid_Y = static_cast<int32_t>(launch_block_id / work_blocks_X);
+    static_block_stride = static_cast<size_t>(gridDim.x) * static_cast<size_t>(gridDim.y);
+    static_next_block_id = launch_block_id + static_block_stride;
+  }
   bool job_finished = false;
   int buff_in = 0;
+  bool has_prefetched_current_job = true;
 
   // Prefetch the first stage of the first job.
   {
-    const size_t block_ID = static_cast<size_t>(ctaid_Y) * gridDim.x + static_cast<size_t>(ctaid_X);
+    const size_t block_ID = static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
     const size_t block_global_offset =
         is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
                             static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
@@ -352,7 +385,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const size_t rows =
         get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
     const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-    if (rows == 0 || cols == 0) {
+    if (block_ID >= total_work_blocks || rows == 0 || cols == 0) {
       return;
     }
     if (shape_rep != SAME_BOTH_DIMS) {
@@ -415,7 +448,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   }
 
   while (!job_finished) {
-    const size_t block_ID = static_cast<size_t>(ctaid_Y) * gridDim.x + static_cast<size_t>(ctaid_X);
+    const size_t block_ID = static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
     const size_t block_global_offset =
         is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
                             static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
@@ -428,7 +461,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
         get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
     const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
-    bool current_job_is_valid = (rows != 0) && (cols != 0);
+    bool current_job_is_valid = (block_ID < total_work_blocks) && (rows != 0) && (cols != 0);
     if (shape_rep != SAME_BOTH_DIMS) {
       const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[tensor_id]);
       const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
@@ -445,11 +478,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
     }
     if (!current_job_is_valid) {
-      // A stage-0 prefetch may already be in flight for this CTA. Drain it before exiting.
-      ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
-                                                       IN_buff_readable_parity[buff_in]);
-      IN_buff_readable_parity[buff_in] ^= 1;
-      ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+      if (has_prefetched_current_job) {
+        // A stage-0 prefetch may already be in flight for this CTA. Drain it before exiting.
+        ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
+                                                         IN_buff_readable_parity[buff_in]);
+        IN_buff_readable_parity[buff_in] ^= 1;
+        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+      }
       break;
     }
 
@@ -520,38 +555,56 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
     }
 
-    if constexpr (TunableConfig::PERSISTENT) {
+    if constexpr (DYNAMIC_PERSISTENT) {
       if (leading_thread) {
         ptx::mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(&workID_mbar, workID_response_size);
         ptx::try_cancel_cta(&workID_mbar, &workID_response);
       }
     }
 
+    bool prefetched_next_job = false;
 #pragma unroll
     for (int stage = 0; stage < STAGES; ++stage) {
       const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+      bool allow_next_job_prefetch = true;
 
       if (stage == STAGES - PREFETCH_STAGES) {
-        if constexpr (TunableConfig::PERSISTENT) {
+        if constexpr (DYNAMIC_PERSISTENT) {
           ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&workID_mbar, ctaid_parity);
           ptx::get_cancelled_cta_id_2D(&workID_response, ctaid_X, ctaid_Y);
           ctaid_parity ^= 1;
+        } else if constexpr (STATIC_PERSISTENT) {
+          if (static_next_block_id < total_work_blocks) {
+            ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
+            ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
+            static_next_block_id += static_block_stride;
+          } else {
+            // Next loop iteration exits via current_job_is_valid check.
+            ctaid_X = 0;
+            ctaid_Y = static_cast<int32_t>(work_blocks_Y);
+            allow_next_job_prefetch = false;
+          }
         } else {
           ctaid_X = -1;
           ctaid_Y = -1;
         }
-        if (ctaid_X == -1 && ctaid_Y == -1) {
-          job_finished = true;
+        if constexpr (!STATIC_PERSISTENT) {
+          if (ctaid_X == -1 && ctaid_Y == -1) {
+            job_finished = true;
+          }
         }
       }
 
-      if (!job_finished || (stage < STAGES - PREFETCH_STAGES)) {
+      if ((stage < STAGES - PREFETCH_STAGES) || (allow_next_job_prefetch && !job_finished)) {
         const size_t next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
         const size_t next_prefetch_stage = (stage + PREFETCH_STAGES) % STAGES;
         const size_t next_prefetch_stage_offset_Y = next_prefetch_stage * BUFF_DIM_Y;
+        if (stage >= STAGES - PREFETCH_STAGES) {
+          prefetched_next_job = true;
+        }
 
         const size_t prefetch_block_ID =
-            static_cast<size_t>(ctaid_Y) * gridDim.x + static_cast<size_t>(ctaid_X);
+            static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
         const size_t prefetch_block_global_offset =
             is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
                                 static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
@@ -851,6 +904,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
       buff_in = (buff_in + 1) % BUFFS_NUM;
     }
+    has_prefetched_current_job = prefetched_next_job;
 
     if constexpr (IS_DBIAS) {
       if (is_single_tensor) {
@@ -969,20 +1023,30 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
   const size_t num_tensors = input->num_tensors;
 
-  size_t blocks_X = 0;
-  size_t blocks_Y = 0;
+  size_t work_blocks_X = 0;
+  size_t work_blocks_Y = 0;
 
   if (is_single_tensor) {
-    blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
-    blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
+    work_blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
+    work_blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
   } else {
     NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
                "Number of tensors in a group is larger than "
                "the MAX number of supported descriptors (64).");
-    blocks_Y = 1;
-    blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
+    work_blocks_Y = 1;
+    work_blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
   }
-  const dim3 grid(blocks_X, blocks_Y);
+
+  size_t launch_blocks_X = work_blocks_X;
+  size_t launch_blocks_Y = work_blocks_Y;
+  if constexpr (STATIC_PERSISTENT) {
+    const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
+    const size_t static_grid_size = sm_num * TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM;
+    NVTE_CHECK(static_grid_size > 0, "Static persistent grid size must be greater than zero.");
+    launch_blocks_X = static_grid_size;
+    launch_blocks_Y = 1;
+  }
+  const dim3 grid(launch_blocks_X, launch_blocks_Y);
   const size_t block_size = THREADS_PER_CHUNK;
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
@@ -1138,7 +1202,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                   tensor_map_output_colwise, shape_rep, num_tensors, first_logical_dim,
                   last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
-                  scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr);
+                  scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr, work_blocks_X,
+                  work_blocks_Y);
 
               if constexpr (IS_DBIAS) {
                 common::grouped_reduce_dbias<IType>(
