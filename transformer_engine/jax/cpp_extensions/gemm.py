@@ -1623,21 +1623,20 @@ class GroupedGemmPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode.value,
                 is_grouped_dense_wgrad=is_grouped_dense_wgrad,
             )
-        else:
-            ffi_name = GroupedGemmPrimitive.name
-            return jax.ffi.ffi_lowering(ffi_name)(
-                ctx,
-                *args,
-                M=M,
-                N=N,
-                K=K,
-                lhs_is_trans=lhs_is_trans,
-                rhs_is_trans=rhs_is_trans,
-                scaling_mode=scaling_mode.value,
-                has_bias=has_bias,
-                is_grouped_dense_wgrad=is_grouped_dense_wgrad,
-                use_async_d2h_group_sizes=use_async_d2h_group_sizes,
-            )
+        ffi_name = GroupedGemmPrimitive.name
+        return jax.ffi.ffi_lowering(ffi_name)(
+            ctx,
+            *args,
+            M=M,
+            N=N,
+            K=K,
+            lhs_is_trans=lhs_is_trans,
+            rhs_is_trans=rhs_is_trans,
+            scaling_mode=scaling_mode.value,
+            has_bias=has_bias,
+            is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+        )
 
     @staticmethod
     def impl(
