@@ -817,35 +817,51 @@ class DotProductAttention(TransformerEngineBaseModule):
     ) -> Optional[List[QuantizerRole]]:
         """QuantizerRole list for quantizers used by ``DotProductAttention``.
 
-        Quantizer positions follow the GEMM-slot convention used by the
-        fused-attention kernels:
+        DPA internally performs two matmuls::
 
-        Forward  (3 GEMMs x 3 = 9 slots):
-            GEMM1 -> QKV (at ``GEMM1_OUTPUT``),
-            GEMM2 -> O   (at ``GEMM2_INPUT``),
-            GEMM3 -> S   (at ``GEMM3_OUTPUT``).
+            S = softmax(Q · K^T)   (GEMM1)
+            O = S · V              (GEMM2)
 
-        Backward (3 GEMMs x 2 = 6 slots):
-            GEMM1 -> dQKV (at ``GRAD_OUTPUT1``),
-            GEMM2 -> dO   (at ``GRAD_INPUT2``),
-            GEMM3 -> dP   (at ``GRAD_INPUT3``).
+        cuDNN's fused-attention API exposes FP8 scale/amax descriptors as
+        a flat array of **slot groups** numbered 1-3.  The numbering is a
+        cuDNN convention — it does *not* correspond to operation order
+        inside DPA:
 
-        Unused positions in each GEMM group share the role of the
-        group's primary tensor.
+        Forward  (3 slot groups × 3 positions = 9 slots):
 
-        The O (fwd) and dQKV (bwd) slots are **boundary** tensors whose
-        consumer is unknown to DPA.  Set :attr:`output_quantizer_role` /
-        :attr:`grad_input_quantizer_role` to provide consumer identity
-        (e.g. from ``MultiheadAttention``).
+        =========== =========================================== ===========
+        Slot group  Primary tensor                              cuDNN enum
+        =========== =========================================== ===========
+        Group 1     QKV — inputs to GEMM1 (Q·K^T)              GEMM1_OUTPUT
+        Group 2     O — output of GEMM2 (S·V)                  GEMM2_INPUT
+        Group 3     S — post-softmax, input to GEMM2 (S·V)     GEMM3_OUTPUT
+        =========== =========================================== ===========
 
-        When the consumer is not set, a hint-only ``QuantizerRole`` with
-        ``module_type=""`` and ``tensor_type=""`` is emitted.  Its ``name``
-        field carries ``"<instance>.dpa_output"`` or ``"<instance>.dpa_grad_input"``
-        so that the quantizer factory can distinguish DPA boundary slots
-        from other modules' boundary slots.  This is needed because the
-        fused-attention kernel requires FP8-compatible quantizers in all
-        slots -- the factory must return an FP8 quantizer for these hints
-        rather than e.g. NVFP4.
+        Backward (3 slot groups × 2 positions = 6 slots):
+
+        =========== =========================================== ===========
+        Slot group  Primary tensor                              cuDNN enum
+        =========== =========================================== ===========
+        Group 1     dQKV — gradients flowing back to Q, K, V   GRAD_OUTPUT1
+        Group 2     dO — gradient of the attention output       GRAD_INPUT2
+        Group 3     dP — gradient of the softmax output         GRAD_INPUT3
+        =========== =========================================== ===========
+
+        Unused positions within a group share the role of the group's
+        primary tensor.
+
+        **Boundary slots** — O (fwd) and dQKV (bwd) leave DPA and enter
+        the next module (e.g. proj linear).  DPA does not know that
+        consumer, so these default to ``None``.  The parent module
+        (e.g. ``MultiheadAttention``) can set
+        :attr:`output_quantizer_role` / :attr:`grad_input_quantizer_role`
+        to fill in the consumer identity.
+
+        When not set, a hint-only ``QuantizerRole`` with empty
+        ``module_type`` / ``tensor_type`` is emitted, with ``name``
+        containing ``"dpa_output"`` or ``"dpa_grad_input"``.  This lets
+        the factory return a DPA-compatible quantizer (required by the
+        fused kernel) even when the downstream consumer is unknown.
         """
         name = self.name or ""
         if fwd:
@@ -857,13 +873,13 @@ class DotProductAttention(TransformerEngineBaseModule):
             base = [
                 qkv_role,
                 qkv_role,
-                qkv_role,  # GEMM1: QKV at GEMM1_OUTPUT
+                qkv_role,  # Group 1: QKV (inputs to Q·K^T)
                 o_role,
                 o_role,
-                o_role,  # GEMM2: O at GEMM2_INPUT
+                o_role,  # Group 2: O (output of S·V) — boundary
                 s_role,
                 s_role,
-                s_role,  # GEMM3: S at GEMM3_OUTPUT
+                s_role,  # Group 3: S (post-softmax, input to S·V)
             ]
         else:
             dqkv_role = self._grad_input_quantizer_role
@@ -875,11 +891,11 @@ class DotProductAttention(TransformerEngineBaseModule):
             dp_role = QuantizerRole(module_type="dpa", tensor_type="dp", name=name)
             base = [
                 dqkv_role,
-                dqkv_role,  # GEMM1: dQKV at GRAD_OUTPUT1
+                dqkv_role,  # Group 1: dQKV (grads to Q,K,V) — boundary
                 do_role,
-                do_role,  # GEMM2: dO at GRAD_INPUT2
+                do_role,  # Group 2: dO (grad of attention output)
                 dp_role,
-                dp_role,  # GEMM3: dP at GRAD_INPUT3
+                dp_role,  # Group 3: dP (grad of softmax output)
             ]
         return base[:num_quantizers]
 
