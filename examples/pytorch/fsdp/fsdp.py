@@ -336,6 +336,7 @@ def train(opts):
     no_fp8_explicitly_set = getattr(opts, "no_fp8_explicitly_set", False)
 
     # Validate flag combinations before touching distributed state.
+    # Error if user requests FP8-based precision but also sets --no-fp8
     # Safe to raise here because torchrun guarantees all ranks receive
     # identical CLI arguments; all ranks will raise simultaneously.
     if opts.precision in ["fp8", "mxfp8", "nvfp4"] and no_fp8_explicitly_set:
