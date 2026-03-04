@@ -142,7 +142,14 @@ class StoreTrueExplicitAction(argparse.Action):
 
     def __init__(self, option_strings, dest, default=False, required=False, help=None, **kwargs):
         super().__init__(
-            option_strings, dest, nargs=0, const=True, default=default, required=required, help=help, **kwargs
+            option_strings,
+            dest,
+            nargs=0,
+            const=True,
+            default=default,
+            required=required,
+            help=help,
+            **kwargs,
         )
 
     def __call__(self, parser, namespace, values, option_string=None):
@@ -382,7 +389,8 @@ def train(opts):
                     recipe = get_recipe_for_precision(opts.precision)
             else:
                 dist_print(
-                    f"Info: --dtype {new_dtype} matches --precision {opts.precision} preset default, no override needed"
+                    f"Info: --dtype {new_dtype} matches --precision {opts.precision} preset"
+                    " default, no override needed"
                 )
 
                 # If FP8 is still enabled, keep recipe based on precision
