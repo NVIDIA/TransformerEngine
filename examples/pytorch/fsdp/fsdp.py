@@ -137,26 +137,6 @@ class StoreExplicitAction(argparse.Action):
         setattr(namespace, f"{self.dest}_explicitly_set", True)
 
 
-class StoreTrueExplicitAction(argparse.Action):
-    """Custom action for store_true that tracks whether flag was explicitly set."""
-
-    def __init__(self, option_strings, dest, default=False, required=False, help=None, **kwargs):
-        super().__init__(
-            option_strings,
-            dest,
-            nargs=0,
-            const=True,
-            default=default,
-            required=required,
-            help=help,
-            **kwargs,
-        )
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        setattr(namespace, self.dest, True)
-        setattr(namespace, f"{self.dest}_explicitly_set", True)
-
-
 def parse_fsdp_args():
     parser = argparse.ArgumentParser(
         description="Run Transformer Engine modules with the "
@@ -216,7 +196,7 @@ def parse_fsdp_args():
     )
     parser.add_argument(
         "--no-fp8",
-        action=StoreTrueExplicitAction,
+        action="store_true",
         default=False,
         help=(
             "Disables the te.autocast() context. When set, FP8 training is disabled and the model"
@@ -333,13 +313,12 @@ def get_recipe_for_precision(precision_value):
 def train(opts):
     # Check which flags were explicitly set
     dtype_explicitly_set = getattr(opts, "dtype_explicitly_set", False)
-    no_fp8_explicitly_set = getattr(opts, "no_fp8_explicitly_set", False)
 
     # Validate flag combinations before touching distributed state.
     # Error if user requests FP8-based precision but also sets --no-fp8
     # Safe to raise here because torchrun guarantees all ranks receive
     # identical CLI arguments; all ranks will raise simultaneously.
-    if opts.precision in ["fp8", "mxfp8", "nvfp4"] and no_fp8_explicitly_set:
+    if opts.precision in ["fp8", "mxfp8", "nvfp4"] and opts.no_fp8:
         raise ValueError(
             f"Cannot use --no-fp8 with --precision {opts.precision}. "
             "These flags are incompatible. "
@@ -366,6 +345,10 @@ def train(opts):
                 fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
             )
         else:
+             # recipe=None is intentional: te.autocast substitutes get_default_fp8_recipe()
+            # internally when recipe is None, and skips check_recipe_support entirely
+            # when enabled=False, so this is safe. The global FP8 state will be populated
+            # with a default recipe, but it has no effect since FP8 is disabled.
             recipe = None
     else:
         # Case 2: Precision preset was explicitly specified
@@ -383,14 +366,16 @@ def train(opts):
             new_dtype = opts.dtype
             if new_dtype != preset_dtype:
                 dtype = new_dtype
+                dtype_name = str(dtype).replace("torch.", "")
                 dist_print(
-                    f"Warning: --dtype {dtype} overrides --precision {opts.precision} dtype setting"
+                    f"Warning: --dtype {dtype_name} overrides --precision {opts.precision} dtype setting"
                 )
                 if not no_fp8:
                     recipe = get_recipe_for_precision(opts.precision)
             else:
+                new_dtype_name = str(new_dtype).replace("torch.", "")
                 dist_print(
-                    f"Info: --dtype {new_dtype} matches --precision {opts.precision} preset"
+                    f"Info: --dtype {new_dtype_name} matches --precision {opts.precision} preset"
                     " default, no override needed"
                 )
 
