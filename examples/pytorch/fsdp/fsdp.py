@@ -285,6 +285,11 @@ def train(opts):
             f"Either remove --no-fp8 to use {opts.precision} training, "
             "or use --precision fp32/fp16 for non-FP8 training."
         )
+    if opts.precision in ["fp32", "fp16"] and opts.no_fp8:
+        dist_print(
+            f"Warning: --no-fp8 is redundant when using --precision {opts.precision} "
+            "(FP8 is already disabled by this preset). The flag will be ignored."
+        )
 
     # Initialize torch.distributed global process group
     dist.init_process_group(backend="nccl")
@@ -407,6 +412,8 @@ def train(opts):
     if recipe is None:
         recipe = DelayedScaling()
 
+    # MXFP8 and NVFP4 use local block scaling — no distributed amax reduction group needed.
+    # amax_reduction_group is only required for DelayedScaling (global AMAX allreduce).
     amax_group = all_gpus if (not no_fp8 and isinstance(recipe, DelayedScaling)) else None
 
     for i in range(opts.num_iters):
