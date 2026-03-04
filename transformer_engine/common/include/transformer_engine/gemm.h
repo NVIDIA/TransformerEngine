@@ -340,7 +340,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  *  \param[in] num_tensors  Number of tensors (GEMMs) in the group.
  *  \return Required size in bytes for workspace_setup.
  */
-size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors);
+size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors);
 
 /*! \brief Convert a device array of int32 values to int64 values.
  *

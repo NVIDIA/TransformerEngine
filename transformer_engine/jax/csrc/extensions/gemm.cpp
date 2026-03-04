@@ -580,6 +580,9 @@ Error_Type GroupedGemmCudaGraphableFFI(
   //   C: column-major with size [m, n] --> row-major with size [n, m].
   // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
 
+  // Not used by the CUDA-graphable path (async D2H only applies to the legacy path).
+  (void)use_async_d2h_group_sizes;
+
   // Inputs
   auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_data.untyped_data());
   auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_data.untyped_data());

@@ -72,6 +72,18 @@ __all__ = [
 
 num_cublas_streams = get_num_compute_streams()
 
+# Cache whether the CUDA-graphable grouped GEMM implementation is available at import time.
+# Calling get_grouped_gemm_setup_workspace_size raises a RuntimeError mentioning "cublas" when
+# compiled against cuBLAS < 13.2, in which case the cuda-graphable path is unavailable.
+try:
+    get_grouped_gemm_setup_workspace_size(1)
+    _cuda_graphable_grouped_gemm_available = True
+except RuntimeError as e:
+    if "cublas" in str(e).lower():
+        _cuda_graphable_grouped_gemm_available = False
+    else:
+        raise
+
 
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
@@ -1994,13 +2006,8 @@ def _can_use_cuda_graphable_grouped_gemm(
     # feature-compatible with the main branch.
     # Bias can be supported in a kernel or in pure-JAX in the future.
 
-    try:
-        get_grouped_gemm_setup_workspace_size(1)
-    except RuntimeError as e:
-        if "cublas" in str(e).lower():
-            # If the workspace size function is not available, it means the cuda-graphable implementation is not available.
-            return False
-        raise
+    if not _cuda_graphable_grouped_gemm_available:
+        return False
 
     return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
 
