@@ -329,15 +329,13 @@ def train(opts):
     # When no --precision is set, respect --no-fp8 and --dtype directly (original behavior)
     if opts.precision is None:
         no_fp8 = opts.no_fp8
-        if opts.dtype is not None:
-            dtype = opts.dtype
+        dtype = opts.dtype
         # Preserve original default: FP8 enabled → use DelayedScaling as before
         if not no_fp8:
             recipe = DelayedScaling(
                 fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
             )
     else:
-        no_fp8 = preset_no_fp8
         dist_print(f"Using precision preset: {opts.precision}")
 
     dtype_name = str(dtype).replace("torch.", "")
