@@ -471,7 +471,7 @@ void JAXX_GroupedTensorWrapper::set_rowwise(Buffer_Type const &data,
   m_data_tensor =
       NVTEBasicTensor{reinterpret_cast<uint8_t *>(data.untyped_data()), data_dtype, m_data_shape};
 
-  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedRowwiseData, &m_data_tensor);
+  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedRowwiseData, &m_data_tensor, sizeof(m_data_tensor));
 
   if (scale_inv.has_value()) {
     NVTEDType scale_inv_dtype =
@@ -491,7 +491,7 @@ void JAXX_GroupedTensorWrapper::set_rowwise(Buffer_Type const &data,
     m_scale_inv_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(scale_inv->untyped_data()),
                                          scale_inv_dtype, logical_scale_shape};
     nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedRowwiseScaleInv,
-                                  &m_scale_inv_tensor);
+                                  &m_scale_inv_tensor, sizeof(m_scale_inv_tensor));
   }
 }
 
@@ -523,8 +523,8 @@ void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const &group_sizes,
   m_offsets_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(group_offsets.untyped_data()),
                                      NVTEDType::kNVTEInt64, shape};
 
-  nvte_set_grouped_tensor_param(&m_grouped_tensor, group_sizes_param_name, &m_sizes_tensor);
-  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedTensorOffsets, &m_offsets_tensor);
+  nvte_set_grouped_tensor_param(&m_grouped_tensor, group_sizes_param_name, &m_sizes_tensor, sizeof(m_sizes_tensor));
+  nvte_set_grouped_tensor_param(&m_grouped_tensor, kNVTEGroupedTensorOffsets, &m_offsets_tensor, sizeof(m_offsets_tensor));
 }
 
 void JAXX_GroupedTensorWrapper::set_group_sizes_only(
@@ -534,7 +534,7 @@ void JAXX_GroupedTensorWrapper::set_group_sizes_only(
   shape.data[0] = num_tensors;
   m_sizes_tensor = NVTEBasicTensor{reinterpret_cast<uint8_t *>(const_cast<int64_t *>(sizes_ptr)),
                                    NVTEDType::kNVTEInt64, shape};
-  nvte_set_grouped_tensor_param(&m_grouped_tensor, group_sizes_param_name, &m_sizes_tensor);
+  nvte_set_grouped_tensor_param(&m_grouped_tensor, group_sizes_param_name, &m_sizes_tensor, sizeof(m_sizes_tensor));
   // Intentionally no offset tensor: offsets will be computed by the setup kernel.
 }
 

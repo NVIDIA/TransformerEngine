@@ -554,6 +554,7 @@ inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
 }  // namespace
 
 size_t nvte_grouped_gemm_setup_workspace_size(size_t num_tensors) {
+  NVTE_API_CALL(nvte_grouped_gemm_setup_workspace_size);
   return grouped_gemm_setup_workspace_size(num_tensors);
 }
 
@@ -682,6 +683,7 @@ __global__ void convert_int32_to_int64_kernel(const int32_t *src, int64_t *dst, 
 }  // namespace
 
 void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_convert_int32_to_int64);
   if (n == 0) return;
   const int threads = 256;
   const int blocks = static_cast<int>((n + threads - 1) / threads);
