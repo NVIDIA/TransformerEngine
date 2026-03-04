@@ -164,3 +164,87 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<2>(info.param));
     return name;
     });
+
+    void performTestSwizzleUnswizzleRoundtrip(const int num_tiles_M, const int num_tiles_K, bool rowwise, bool columnwise, const bool transa) {
+      using namespace test;
+    
+      int SF_MODE_X, SF_MODE_Y;
+      if (rowwise) {
+        SF_MODE_X = 1;
+        SF_MODE_Y = 32;
+      }
+      if (columnwise) {
+        SF_MODE_X = 32;
+        SF_MODE_Y = 1;
+      }
+    
+      if ((rowwise && columnwise) || !(rowwise || columnwise)){
+        GTEST_SKIP() << "TEST SKIPPED, The scaling mode " + std::to_string(SF_MODE_X) + "x" +
+          std::to_string(SF_MODE_Y) + "is not implemented.";
+      }
+    
+      DType dtype = DType::kFloat8E4M3;
+    
+      const size_t M = num_tiles_M * MAT_TILE_DIM_M;
+      const size_t K = num_tiles_K * MAT_TILE_DIM_K;
+      const auto data_shape = transa ? std::vector<size_t>{M, K} : std::vector<size_t>{K, M};
+    
+      const auto scale_shape = std::vector<size_t>{data_shape[0] / SF_MODE_X, data_shape[1] /SF_MODE_Y};
+    
+      Tensor input("input", data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
+      Tensor swizzled("swizzled", data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
+      swizzled.set_with_gemm_swizzled_scales(true);
+      Tensor output("output", data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
+    
+      fillUniform(&input);
+    
+      nvte_swizzle_scaling_factors(input.data(), swizzled.data(), 0);
+      nvte_unswizzle_scaling_factors(swizzled.data(), output.data(), 0);
+    
+      cudaDeviceSynchronize();
+      auto err = cudaGetLastError();
+      ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+    
+      input.to_cpu();
+      output.to_cpu();
+      if (rowwise) {
+        compareResults("roundtrip_rowwise", output.rowwise_cpu_scale_inv_ptr<uint8_t>(),
+                       input.rowwise_cpu_scale_inv_ptr<uint8_t>(), scale_shape[0] * scale_shape[1]);
+      } else {
+        compareResults("roundtrip_columnwise", output.columnwise_cpu_scale_inv_ptr<uint8_t>(),
+                       input.columnwise_cpu_scale_inv_ptr<uint8_t>(), scale_shape[0] * scale_shape[1]);
+      }
+    }
+    
+    class SwizzleUnswizzleRoundtripTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool>> {};
+    
+    TEST_P(SwizzleUnswizzleRoundtripTestSuite, TestSwizzleUnswizzleRoundtrip) {
+      using namespace transformer_engine;
+      using namespace test;
+    
+      const auto num_tiles = std::get<0>(GetParam());
+      const auto scaling_mode = std::get<1>(GetParam());
+      const auto transa = std::get<2>(GetParam());
+    
+      performTestSwizzleUnswizzleRoundtrip(num_tiles.first, num_tiles.second,
+                                           scaling_mode.first, scaling_mode.second,
+                                           transa);
+    }
+    
+    INSTANTIATE_TEST_SUITE_P(
+      OperatorTest,
+      SwizzleUnswizzleRoundtripTestSuite,
+      ::testing::Combine(
+        ::testing::ValuesIn(num_tiles),
+        ::testing::ValuesIn(scaling_mode),
+        ::testing::ValuesIn(transa)
+      ),
+      [](const testing::TestParamInfo<SwizzleUnswizzleRoundtripTestSuite::ParamType>& info) {
+        std::string name = "roundtrip_ntiles" +
+          std::to_string(std::get<0>(info.param).first) + "X" +
+          std::to_string(std::get<0>(info.param).second) + "smode" +
+          std::to_string(std::get<1>(info.param).first) + "X"+
+          std::to_string(std::get<1>(info.param).second) + "trans" +
+          std::to_string(std::get<2>(info.param));
+        return name;
+        });
