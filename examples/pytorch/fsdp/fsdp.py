@@ -424,6 +424,12 @@ def train(opts):
         torch.cuda.synchronize()
         start.record()
 
+     # Ensure recipe is always a concrete object before passing to te.autocast.
+    # When FP8 is disabled, te.autocast ignores the recipe, but some TE versions
+    # perform attribute access on it regardless of the enabled flag.
+    if recipe is None:
+        recipe = DelayedScaling()
+
     for i in range(opts.num_iters):
         # Generate a random input batch
         x = torch.rand(
@@ -432,13 +438,7 @@ def train(opts):
             opts.num_heads * opts.head_dim,
             dtype=dtype,
             device="cuda",
-        )
-
-        # Ensure recipe is always a concrete object before passing to te.autocast.
-        # When FP8 is disabled, te.autocast ignores the recipe, but some TE versions
-        # perform attribute access on it regardless of the enabled flag.
-        if recipe is None:
-            recipe = DelayedScaling()
+        ) 
 
         # autocast needs to be given the FSDP process group for amax reductions
         with te.autocast(enabled=not no_fp8, recipe=recipe, amax_reduction_group=all_gpus):
