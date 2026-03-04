@@ -201,14 +201,14 @@ Error_Type FusedMoEAuxLossBackwardFFI(cudaStream_t stream,
   auto tpe_dtype = convert_ffi_datatype_to_te_dtype(tokens_per_expert_buf.element_type());
 
   auto grad_probs_dims = grad_probs_buf->dimensions();
-  auto num_rows = static_cast<int>(grad_probs_dims[0]);
-  auto num_cols = static_cast<int>(grad_probs_dims[1]);
+  auto num_tokens = static_cast<int>(grad_probs_dims[0]);
+  auto num_experts = static_cast<int>(grad_probs_dims[1]);
 
   auto scalar_shape = std::vector<size_t>{1};
   auto tpe_dims = tokens_per_expert_buf.dimensions();
   auto tpe_shape = std::vector<size_t>{static_cast<size_t>(tpe_dims[0])};
   auto grad_probs_shape =
-      std::vector<size_t>{static_cast<size_t>(num_rows), static_cast<size_t>(num_cols)};
+      std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)};
 
   auto const_buf_tensor = TensorWrapper(const_buf_in.untyped_data(), scalar_shape, DType::kFloat32);
   auto tpe_tensor = TensorWrapper(tokens_per_expert_buf.untyped_data(), tpe_shape, tpe_dtype);
@@ -217,8 +217,9 @@ Error_Type FusedMoEAuxLossBackwardFFI(cudaStream_t stream,
   auto grad_probs_tensor =
       TensorWrapper(grad_probs_buf->untyped_data(), grad_probs_shape, grad_dtype);
 
-  nvte_fused_moe_aux_loss_backward(const_buf_tensor.data(), tpe_tensor.data(), num_rows, num_cols,
-                                   grad_aux_loss_tensor.data(), grad_probs_tensor.data(), stream);
+  nvte_fused_moe_aux_loss_backward(const_buf_tensor.data(), tpe_tensor.data(), num_tokens,
+                                   num_experts, grad_aux_loss_tensor.data(),
+                                   grad_probs_tensor.data(), stream);
 
   return ffi_with_cuda_error_check();
 }
