@@ -787,6 +787,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                     grouped_weights.quantized_tensors[i].copy_(weights[i])
 
         # Re-register as a single grouped weight parameter.
+        assert (
+            isinstance(grouped_weights, torch.Tensor) and not weight_quantizers[0].internal
+        ), "Found internal quantizer with `single_grouped_parameter=True`."
         self.register_parameter(
             "weight",
             torch.nn.Parameter(grouped_weights),

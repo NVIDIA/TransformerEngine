@@ -264,9 +264,9 @@ class GroupedTensorStorage:
         self.fake_dtype = torch.float32
 
     def __repr__(self) -> str:
-        """String representation of the GroupedTensor."""
+        """String representation of the GroupedTensorStorage."""
         return (
-            f"GroupedTensor(num_tensors={self.num_tensors}, "
+            f"GroupedTensorStorage(num_tensors={self.num_tensors}, "
             f"shapes={self.tensor_shapes}, "
             f"logical_shape={self.logical_shape}, "
             f"quantizer={self.quantizer}, "
