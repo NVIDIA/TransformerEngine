@@ -424,7 +424,6 @@ def train(opts):
             fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
         )
 
-
     for i in range(opts.num_iters):
         # Generate a random input batch
         x = torch.rand(
