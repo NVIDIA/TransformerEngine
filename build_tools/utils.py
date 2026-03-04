@@ -10,6 +10,7 @@ import importlib
 import os
 import re
 import shutil
+import site
 import subprocess
 import sys
 import platform
@@ -382,8 +383,6 @@ def common_lib_has_symbol(symbol: str) -> bool:
     Searches for the library in known build/install locations and uses
     ``nm -D --defined-only`` to inspect the dynamic symbol table.
     """
-    root = Path(__file__).resolve().parent.parent
-
     # First candidate: derive from the installed transformer_engine module location.
     # This covers source and PyPI installs where the SO lives inside the package dir.
     candidates = []
@@ -395,8 +394,13 @@ def common_lib_has_symbol(symbol: str) -> bool:
     except (ModuleNotFoundError, ValueError):
         pass
 
+    # Then site packages.
+    candidates += [Path(s) / "transformer_engine" / "libtransformer_engine.so"
+                   for s in site.getsitepackages()]
+
     # Remaining candidates: editable-install root, default CMake build dir,
     # and user-specified CMake build dir.
+    root = Path(__file__).resolve().parent.parent
     candidates += [
         root / "libtransformer_engine.so",
         root / "build" / "cmake" / "libtransformer_engine.so",
