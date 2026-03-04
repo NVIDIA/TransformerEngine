@@ -128,9 +128,6 @@ def get_layer_args(opts):
 class StoreExplicitAction(argparse.Action):
     """Custom action that tracks whether an argument was explicitly set."""
 
-    def __init__(self, option_strings, dest, **kwargs):
-        super().__init__(option_strings, dest, **kwargs)
-
     def __call__(self, parser, namespace, values, option_string=None):
         # values already converted by argparse via action.type
         setattr(namespace, self.dest, values)
