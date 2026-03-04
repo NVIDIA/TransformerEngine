@@ -406,7 +406,8 @@ def train(opts):
     # perform attribute access on it regardless of the enabled flag.
     if recipe is None:
         recipe = DelayedScaling()
-    amax_group = all_gpus if isinstance(recipe, DelayedScaling) else None
+    
+    amax_group = all_gpus if (not no_fp8 and isinstance(recipe, DelayedScaling)) else None
 
     for i in range(opts.num_iters):
         # Generate a random input batch
