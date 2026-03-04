@@ -329,6 +329,51 @@ __device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tenso
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
+// Issue TMA global->shared transfer for one stage of input (and optional activation input).
+template <typename IType, bool IS_DACT>
+__device__ __forceinline__ void prefetch_input_stage(
+    IType *in_sh, IType *act_in_sh, const CUtensorMap &tensor_map_input,
+    const CUtensorMap &tensor_map_act_input, const size_t global_offset_X, const size_t global_offset_Y,
+    const size_t buff_offset, const size_t shmem_buff_size, uint64_t *barrier, const bool leading_thread) {
+  if (leading_thread) {
+    ptx::mbarrier_arrive_expect_tx(barrier, shmem_buff_size);
+    ptx::cp_async_bulk_tensor_2d_global_to_shared(
+        reinterpret_cast<uint64_t *>(&in_sh[buff_offset]),
+        reinterpret_cast<const uint64_t *>(&tensor_map_input), global_offset_X, global_offset_Y,
+        barrier);
+    if constexpr (IS_DACT) {
+      ptx::cp_async_bulk_tensor_2d_global_to_shared(
+          reinterpret_cast<uint64_t *>(&act_in_sh[buff_offset]),
+          reinterpret_cast<const uint64_t *>(&tensor_map_act_input), global_offset_X, global_offset_Y,
+          barrier);
+    }
+  }
+}
+
+// Issue TMA shared->global transfer for one stage of outputs.
+template <typename OType, bool ROWWISE_SCALING, bool COLWISE_SCALING>
+__device__ __forceinline__ void store_output_stage(
+    OType *out_rowwise_data_sh, OType *out_colwise_data_sh,
+    const CUtensorMap &tensor_map_output_rowwise, const CUtensorMap &tensor_map_output_colwise,
+    const int global_offset_X, const int global_offset_Y, const int buff_offset,
+    const bool leading_thread) {
+  if (!leading_thread) {
+    return;
+  }
+
+  if constexpr (ROWWISE_SCALING) {
+    ptx::cp_async_bulk_tensor_2d_shared_to_global(
+        reinterpret_cast<const uint64_t *>(&tensor_map_output_rowwise), global_offset_X, global_offset_Y,
+        reinterpret_cast<uint64_t *>(&out_rowwise_data_sh[buff_offset]));
+  }
+  if constexpr (COLWISE_SCALING) {
+    ptx::cp_async_bulk_tensor_2d_shared_to_global(
+        reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise), global_offset_X, global_offset_Y,
+        reinterpret_cast<uint64_t *>(&out_colwise_data_sh[buff_offset]));
+  }
+  ptx::cp_async_bulk_commit_group();
+}
+
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES>
@@ -480,19 +525,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t global_offset_X = first_block.block_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
       uint64_t *barrier = &IN_buff_readable_mbar[buff];
-      if (leading_thread) {
-        ptx::mbarrier_arrive_expect_tx(barrier, shmem_buff_size);
-        ptx::cp_async_bulk_tensor_2d_global_to_shared(
-            reinterpret_cast<uint64_t *>(&in_sh[buff_offset]),
-            reinterpret_cast<const uint64_t *>(&tensor_map_input), global_offset_X, global_offset_Y,
-            barrier);
-        if constexpr (IS_DACT) {
-          ptx::cp_async_bulk_tensor_2d_global_to_shared(
-              reinterpret_cast<uint64_t *>(&act_in_sh[buff_offset]),
-              reinterpret_cast<const uint64_t *>(&tensor_map_act_input), global_offset_X,
-              global_offset_Y, barrier);
-        }
-      }
+      prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, tensor_map_input, tensor_map_act_input,
+                                           global_offset_X, global_offset_Y, buff_offset,
+                                           shmem_buff_size, barrier, leading_thread);
     }
   }
 
@@ -596,6 +631,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     for (int stage = 0; stage < STAGES; ++stage) {
       const size_t stage_offset_Y = stage * BUFF_DIM_Y;
       bool allow_next_job_prefetch = true;
+      JobDescriptor prefetch_job = current_job;
+      BlockDescriptor prefetch_block = current_block;
 
       if (stage == STAGES - PREFETCH_STAGES) {
         if constexpr (DYNAMIC_PERSISTENT) {
@@ -627,10 +664,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       // Stage-(STAGES - PREFETCH_STAGES) prefetches stage-0 of the next job.
       // Validate that job before issuing TMA reads to avoid OOB accesses on graph-safe tails.
       if ((stage >= STAGES - PREFETCH_STAGES) && allow_next_job_prefetch && !job_finished) {
-        const JobDescriptor next_job =
+        prefetch_job =
             decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
                        work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
-        allow_next_job_prefetch = is_job_valid(next_job, shape_rep, total_work_blocks, offsets_ptr);
+        allow_next_job_prefetch = is_job_valid(prefetch_job, shape_rep, total_work_blocks, offsets_ptr);
+        if (allow_next_job_prefetch) {
+          prefetch_block = decode_block(prefetch_job, is_single_tensor, offsets_ptr);
+        }
       }
 
       if ((stage < STAGES - PREFETCH_STAGES) || (allow_next_job_prefetch && !job_finished)) {
@@ -640,11 +680,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
         if (stage >= STAGES - PREFETCH_STAGES) {
           prefetched_next_job = true;
         }
-
-        const JobDescriptor prefetch_job =
-            decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
-                       work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
-        const BlockDescriptor prefetch_block = decode_block(prefetch_job, is_single_tensor, offsets_ptr);
 
         const size_t global_offset_Y = prefetch_block.block_offset_Y + next_prefetch_stage_offset_Y;
         const size_t global_offset_X = prefetch_block.block_offset_X;
@@ -663,18 +698,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
               fence_acquire_tensormap(&prefetch_tensor_map_act_input);
             }
           }
-          ptx::mbarrier_arrive_expect_tx(barrier, shmem_buff_size);
-          ptx::cp_async_bulk_tensor_2d_global_to_shared(
-              reinterpret_cast<uint64_t *>(&in_sh[next_prefetch_buff_offset]),
-              reinterpret_cast<const uint64_t *>(&prefetch_tensor_map_input), global_offset_X,
-              global_offset_Y, barrier);
-          if constexpr (IS_DACT) {
-            ptx::cp_async_bulk_tensor_2d_global_to_shared(
-                reinterpret_cast<uint64_t *>(&act_in_sh[next_prefetch_buff_offset]),
-                reinterpret_cast<const uint64_t *>(&prefetch_tensor_map_act_input), global_offset_X,
-                global_offset_Y, barrier);
-          }
         }
+        prefetch_input_stage<IType, IS_DACT>(
+            in_sh, act_in_sh, prefetch_tensor_map_input, prefetch_tensor_map_act_input, global_offset_X,
+            global_offset_Y, next_prefetch_buff_offset, shmem_buff_size, barrier, leading_thread);
         ptx::fence_proxy_async_shared_cta();
       }
 
@@ -686,6 +713,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t buff = buff_in;
       float thread_amax = 0.0f;
       if constexpr (COLWISE_SCALING) {
+        // Column-wise path:
+        // 1) load/compute values for one [32x1] stripe per thread
+        // 2) compute/write E8M0 scale
+        // 3) scale and write FP8 values into shared output buffer
         const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
         thread_amax = 0.0f;
         float in_compute_colwise[BUFF_DIM_Y];
@@ -766,6 +797,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
 
       if constexpr (ROWWISE_SCALING) {
+        // Row-wise path:
+        // 1) load/compute values for one [1x32] stripe per thread
+        // 2) compute/write E8M0 scale
+        // 3) scale and write FP8 values into shared output buffer
         const size_t shmem_offset_base_rowwise =
             buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
         thread_amax = 0.0f;
@@ -904,23 +939,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       ptx::fence_proxy_async_shared_cta();
       __syncthreads();
 
-      if (leading_thread) {
-        const int global_offset_Y = block_offset_Y + stage_offset_Y;
-        const int global_offset_X = block_offset_X;
-        const int buff_offset = buff * BUFF_DIM;
-
-        if constexpr (ROWWISE_SCALING) {
-          ptx::cp_async_bulk_tensor_2d_shared_to_global(
-              reinterpret_cast<const uint64_t *>(&tensor_map_output_rowwise), global_offset_X,
-              global_offset_Y, reinterpret_cast<uint64_t *>(&out_rowwise_data_sh[buff_offset]));
-        }
-        if constexpr (COLWISE_SCALING) {
-          ptx::cp_async_bulk_tensor_2d_shared_to_global(
-              reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise), global_offset_X,
-              global_offset_Y, reinterpret_cast<uint64_t *>(&out_colwise_data_sh[buff_offset]));
-        }
-        ptx::cp_async_bulk_commit_group();
-      }
+      // Publish the stage from shared memory into global outputs via TMA.
+      const int global_offset_Y = block_offset_Y + stage_offset_Y;
+      const int global_offset_X = block_offset_X;
+      const int buff_offset = buff * BUFF_DIM;
+      store_output_stage<OType, ROWWISE_SCALING, COLWISE_SCALING>(
+          out_rowwise_data_sh, out_colwise_data_sh, tensor_map_output_rowwise, tensor_map_output_colwise,
+          global_offset_X, global_offset_Y, buff_offset, leading_thread);
 
       buff_in = (buff_in + 1) % BUFFS_NUM;
     }
