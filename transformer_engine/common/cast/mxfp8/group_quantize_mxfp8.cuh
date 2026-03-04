@@ -48,16 +48,13 @@ struct TunableConfig {
   static constexpr size_t CHUNK_DIM_X = 128;
   static constexpr size_t THREADS_PER_CHUNK = 128;
   static constexpr size_t PREFETCH_STAGES = 1;
-  static constexpr PersistentStrategy PERSISTENT_STRATEGY =
-      PersistentStrategy::STATIC_GRID_STRIDE;
+  static constexpr PersistentStrategy PERSISTENT_STRATEGY = PersistentStrategy::STATIC_GRID_STRIDE;
   // Launch static persistent grid as (SM_count * STATIC_PERSISTENT_BLOCKS_PER_SM, 1, 1).
   static constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = 4;
 };
 
-constexpr bool DYNAMIC_PERSISTENT =
-    TunableConfig::PERSISTENT_STRATEGY == PersistentStrategy::DYNAMIC_WORK_STEALING;
-constexpr bool STATIC_PERSISTENT =
-    TunableConfig::PERSISTENT_STRATEGY == PersistentStrategy::STATIC_GRID_STRIDE;
+constexpr bool DYNAMIC_PERSISTENT = TunableConfig::PERSISTENT_STRATEGY == PersistentStrategy::DYNAMIC_WORK_STEALING;
+constexpr bool STATIC_PERSISTENT = TunableConfig::PERSISTENT_STRATEGY == PersistentStrategy::STATIC_GRID_STRIDE;
 static_assert(TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM > 0,
               "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero.");
 
