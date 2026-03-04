@@ -464,22 +464,23 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
 
     name = "te_fused_moe_aux_loss_backward_ffi"
     multiple_results = False
-    impl_static_args = (3, 4)  # num_rows, num_cols
+    impl_static_args = (3,)  # num_tokens
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(const_buf_aval, tokens_per_expert_aval, grad_aux_loss_aval, num_rows, num_cols):
-        del const_buf_aval, tokens_per_expert_aval
+    def abstract(const_buf_aval, tokens_per_expert_aval, grad_aux_loss_aval, num_tokens):
+        del const_buf_aval
+        num_experts = tokens_per_expert_aval.shape[0]
         out_dtype = dtypes.canonicalize_dtype(grad_aux_loss_aval.dtype)
         return grad_aux_loss_aval.update(
-            shape=(num_rows, num_cols),
+            shape=(num_tokens, num_experts),
             dtype=out_dtype,
         )
 
     @staticmethod
-    def lowering(ctx, const_buf, tokens_per_expert, grad_aux_loss, *, num_rows, num_cols):
-        del num_rows, num_cols
+    def lowering(ctx, const_buf, tokens_per_expert, grad_aux_loss, *, num_tokens):
+        del num_tokens
         return ffi.ffi_lowering(FusedMoEAuxLossBwdPrimitive.name)(
             ctx,
             const_buf,
@@ -488,28 +489,33 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def impl(const_buf, tokens_per_expert, grad_aux_loss, num_rows, num_cols):
+    def impl(const_buf, tokens_per_expert, grad_aux_loss, num_tokens):
         assert FusedMoEAuxLossBwdPrimitive.inner_primitive is not None
         return FusedMoEAuxLossBwdPrimitive.inner_primitive.bind(
-            const_buf, tokens_per_expert, grad_aux_loss, num_rows=num_rows, num_cols=num_cols
+            const_buf,
+            tokens_per_expert,
+            grad_aux_loss,
+            num_tokens=num_tokens,
         )
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, num_rows, num_cols):
+    def batcher(batched_args, batch_dims, *, num_tokens):
         assert FusedMoEAuxLossBwdPrimitive.outer_primitive is not None
         const_buf, tokens_per_expert, grad_aux_loss = batched_args
         _, _, grad_bdim = batch_dims
         return (
             FusedMoEAuxLossBwdPrimitive.outer_primitive.bind(
-                const_buf, tokens_per_expert, grad_aux_loss, num_rows=num_rows, num_cols=num_cols
+                const_buf,
+                tokens_per_expert,
+                grad_aux_loss,
+                num_tokens=num_tokens,
             ),
             grad_bdim,
         )
 
     @staticmethod
     def partition(
-        num_rows,
-        num_cols,
+        num_tokens,
         mesh,
         arg_infos,
         result_infos,
@@ -527,8 +533,7 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
                 const_buf,
                 tokens_per_expert,
                 grad_aux_loss,
-                num_rows,
-                num_cols,
+                num_tokens,
             )
 
         return mesh, sharded_impl, out_sharding, arg_shardings
@@ -656,8 +661,7 @@ def fused_moe_aux_loss_bwd(
     const_buf: jnp.ndarray,
     tokens_per_expert: jnp.ndarray,
     grad_aux_loss: jnp.ndarray,
-    num_rows: int,
-    num_cols: int,
+    num_tokens: int,
 ):
     """
     Fused MoE aux loss backward pass.
@@ -666,6 +670,5 @@ def fused_moe_aux_loss_bwd(
         const_buf,
         tokens_per_expert,
         grad_aux_loss,
-        num_rows=int(num_rows),
-        num_cols=int(num_cols),
+        num_tokens=int(num_tokens),
     )
