@@ -39,6 +39,8 @@ from transformer_engine.jax.router import (
     fused_moe_aux_loss,
 )
 
+jax.config.update("jax_use_shardy_partitioner", True)
+
 from test_fused_router import (
     reference_topk_softmax_sigmoid,
     reference_compute_scores_for_aux_loss,
@@ -85,8 +87,6 @@ class TestDistributedFusedTopk:
         topk,
         score_function,
     ):
-        jax.config.update("jax_use_shardy_partitioner", True)
-
         logits = make_logits(num_tokens, num_experts, score_function)
 
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
@@ -218,8 +218,6 @@ class TestDistributedScoreForAuxLoss:
         topk,
         score_function,
     ):
-        jax.config.update("jax_use_shardy_partitioner", True)
-
         logits = make_logits(num_tokens, num_experts, score_function)
 
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
@@ -354,8 +352,6 @@ class TestDistributedMoEAuxLoss:
         num_experts,
         topk,
     ):
-        jax.config.update("jax_use_shardy_partitioner", True)
-
         key = jax.random.PRNGKey(42)
         _, subkey1, _ = jax.random.split(key, 3)
 

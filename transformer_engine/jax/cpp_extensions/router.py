@@ -199,7 +199,7 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
     def shardy_sharding_rule(*args):
         del args
         return (
-            "num_tokens num_experts, num_experts -> num_tokens num_experts, num_tokens num_experts,"
+            "num_tokens num_experts, bias_dim -> num_tokens num_experts, num_tokens num_experts,"
             " num_tokens num_experts"
         )
 
@@ -541,7 +541,11 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "const_buf_one, num_experts, grad_one -> num_tokens num_experts"
+        # num_tokens only appears in the output (not in any input) because the
+        # backward reconstructs the full [num_tokens, num_experts] grad_probs from
+        # scalar inputs.  Shardy will leave num_tokens unsharded, which matches the
+        # replicated PartitionSpec(None, None) in partition().
+        return "const_buf_one, num_experts, grad_one -> i num_experts"
 
 
 register_primitive(FusedMoEAuxLossBwdPrimitive)
