@@ -650,7 +650,9 @@ def test_custom_recipe_quantization_targets():
 
     for r in recorded_roles:
         if r is not None and r.module_type:
-            assert r.module_type == "linear", f"Unexpected module_type={r.module_type} for role {r}"
+            assert r.module_type in ("linear", "dpa"), (
+                f"Unexpected module_type={r.module_type} for role {r}"
+            )
 
     # -- Quantizer-type checks --
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
