@@ -388,7 +388,7 @@ def train(opts):
         f"Training configuration: dtype={dtype}, "
         f"FP8={'disabled' if no_fp8 else f'enabled ({type(recipe).__name__})'}"
     )
-    
+
     # Construct a simple homogeneous model (only one layer type) with NO PARALLELISM
     layer_args, layer_kwargs = get_layer_args(opts)
     layer_kwargs["params_dtype"] = dtype
