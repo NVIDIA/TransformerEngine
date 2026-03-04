@@ -409,15 +409,21 @@ def train(opts):
         torch.cuda.synchronize()
         start.record()
 
+    # MXFP8 and NVFP4 use local block scaling — no distributed amax reduction group needed.
+    # amax_reduction_group is only required for DelayedScaling (global AMAX allreduce).
+    # Also skip when FP8 is disabled to avoid unnecessary distributed communication.
+    # Compute amax_group BEFORE the recipe fallback so isinstance() reflects the actual
+    # recipe, not the defensive DelayedScaling() substituted for None.
+    amax_group = all_gpus if (not no_fp8 and isinstance(recipe, DelayedScaling)) else None
+
     # Ensure recipe is always a concrete object before passing to te.autocast.
     # When FP8 is disabled, te.autocast ignores the recipe, but some TE versions
     # perform attribute access on it regardless of the enabled flag.
     if recipe is None:
-        recipe = DelayedScaling()
+        recipe = DelayedScaling(
+            fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
+        )
 
-    # MXFP8 and NVFP4 use local block scaling — no distributed amax reduction group needed.
-    # amax_reduction_group is only required for DelayedScaling (global AMAX allreduce).
-    amax_group = all_gpus if (not no_fp8 and isinstance(recipe, DelayedScaling)) else None
 
     for i in range(opts.num_iters):
         # Generate a random input batch
