@@ -51,7 +51,7 @@ struct TunableConfig {
   static constexpr PersistentStrategy PERSISTENT_STRATEGY =
       PersistentStrategy::STATIC_GRID_STRIDE;
   // Launch static persistent grid as (SM_count * STATIC_PERSISTENT_BLOCKS_PER_SM, 1, 1).
-  static constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = 1;
+  static constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = 4;
 };
 
 constexpr bool DYNAMIC_PERSISTENT =
@@ -593,6 +593,44 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
             job_finished = true;
           }
         }
+      }
+
+      // Stage-(STAGES - PREFETCH_STAGES) prefetches stage-0 of the next job.
+      // Validate that job before issuing TMA reads to avoid OOB accesses on graph-safe tails.
+      if ((stage >= STAGES - PREFETCH_STAGES) && allow_next_job_prefetch && !job_finished) {
+        const size_t next_block_ID =
+            static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
+        const size_t next_block_global_offset =
+            is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
+                                static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
+                             : (next_block_ID * ELTS_PER_CHUNK);
+        const size_t next_tensor_id =
+            get_current_tensor_id(shape_rep, num_tensors, next_block_global_offset, ctaid_Y,
+                                  first_logical_dim, last_logical_dim, offsets_ptr);
+        const size_t next_rows =
+            get_tensor_rows_num(next_tensor_id, shape_rep, first_logical_dim, first_dims_ptr,
+                                num_tensors);
+        const size_t next_cols =
+            get_tensor_cols_num(next_tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
+
+        bool next_job_is_valid =
+            (next_block_ID < total_work_blocks) && (next_rows != 0) && (next_cols != 0);
+        if (shape_rep != SAME_BOTH_DIMS) {
+          const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[next_tensor_id]);
+          const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[next_tensor_id + 1]);
+          if (next_block_global_offset >= tensor_end_offset) {
+            next_job_is_valid = false;
+          }
+          if (next_job_is_valid) {
+            const size_t tensor_offset_from_start = next_block_global_offset - tensor_start_offset;
+            const size_t block_offset_Y_in_tensor = tensor_offset_from_start / next_cols;
+            const size_t block_offset_X_in_tensor = tensor_offset_from_start % next_cols;
+            if (block_offset_Y_in_tensor >= next_rows || block_offset_X_in_tensor >= next_cols) {
+              next_job_is_valid = false;
+            }
+          }
+        }
+        allow_next_job_prefetch = next_job_is_valid;
       }
 
       if ((stage < STAGES - PREFETCH_STAGES) || (allow_next_job_prefetch && !job_finished)) {
