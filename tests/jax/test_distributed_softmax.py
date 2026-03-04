@@ -87,12 +87,9 @@ class TestDistributedSoftmax:
         dtype,
         bad_sharding,
         broadcast_batch_mask,
-        use_shardy,
     ):
         if broadcast_batch_mask and softmax_fusion_type != SoftmaxFusionType.SCALED_MASKED:
             pytest.skip("Softmax type has no mask.")
-
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         target_func = partial(
             self.target_func, scale_factor=scale_factor, softmax_fusion_type=softmax_fusion_type
         )
@@ -181,35 +178,4 @@ class TestDistributedSoftmax:
             dtype,
             bad_sharding,
             broadcast_batch_mask,
-            use_shardy=True,
-        )
-
-    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize(
-        "softmax_fusion_type", [SoftmaxFusionType.SCALED, SoftmaxFusionType.SCALED_MASKED]
-    )
-    @pytest.mark.parametrize("bad_sharding", [False, True])
-    @pytest.mark.parametrize("broadcast_batch_mask", [False, True])
-    def test_softmax_gspmd(
-        self,
-        device_count,
-        mesh_shape,
-        mesh_axes,
-        mesh_resource,
-        softmax_fusion_type,
-        bad_sharding,
-        broadcast_batch_mask,
-    ):
-        self.impl_test_softmax(
-            device_count,
-            mesh_shape,
-            mesh_axes,
-            mesh_resource,
-            data_shape=[32, 12, 128, 128],
-            softmax_fusion_type=softmax_fusion_type,
-            scale_factor=1.0,
-            dtype=DTYPES[0],
-            bad_sharding=bad_sharding,
-            broadcast_batch_mask=broadcast_batch_mask,
-            use_shardy=False,
         )
