@@ -152,6 +152,84 @@ __device__ __forceinline__ size_t get_tensor_cols_num(
   return cols_num;
 }
 
+// Logical work-item decoded from CTA coordinates.
+struct JobDescriptor {
+  size_t block_id = 0;
+  size_t block_global_offset = 0;
+  size_t tensor_id = 0;
+  size_t rows = 0;
+  size_t cols = 0;
+};
+
+// Tensor-local coordinates for a work-item.
+struct BlockDescriptor {
+  size_t tensor_base = 0;
+  size_t block_id_in_current_tensor = 0;
+  size_t block_id_Y = 0;
+  size_t block_id_X = 0;
+  size_t block_offset_Y = 0;
+  size_t block_offset_X = 0;
+};
+
+__device__ __forceinline__ JobDescriptor decode_job(
+    const ShapeRepresentation shape_rep, const bool is_single_tensor, const size_t num_tensors,
+    const size_t first_logical_dim, const size_t last_logical_dim, const size_t work_blocks_X,
+    const int32_t ctaid_X, const int32_t ctaid_Y, const int64_t *const __restrict__ offsets_ptr,
+    const int64_t *const __restrict__ first_dims_ptr, const int64_t *const __restrict__ last_dims_ptr) {
+  JobDescriptor job{};
+  job.block_id = static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
+  job.block_global_offset =
+      is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
+                          static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
+                       : (job.block_id * ELTS_PER_CHUNK);
+  job.tensor_id = get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset, ctaid_Y,
+                                        first_logical_dim, last_logical_dim, offsets_ptr);
+  job.rows =
+      get_tensor_rows_num(job.tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+  job.cols = get_tensor_cols_num(job.tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
+  return job;
+}
+
+__device__ __forceinline__ bool is_job_valid(const JobDescriptor &job,
+                                             const ShapeRepresentation shape_rep,
+                                             const size_t total_work_blocks,
+                                             const int64_t *const __restrict__ offsets_ptr) {
+  bool is_valid = (job.block_id < total_work_blocks) && (job.rows != 0) && (job.cols != 0);
+  if (!is_valid || shape_rep == SAME_BOTH_DIMS) {
+    return is_valid;
+  }
+
+  const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[job.tensor_id]);
+  const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[job.tensor_id + 1]);
+  if (job.block_global_offset >= tensor_end_offset) {
+    return false;
+  }
+
+  const size_t tensor_offset_from_start = job.block_global_offset - tensor_start_offset;
+  const size_t block_offset_Y_in_tensor = tensor_offset_from_start / job.cols;
+  const size_t block_offset_X_in_tensor = tensor_offset_from_start % job.cols;
+  if (block_offset_Y_in_tensor >= job.rows || block_offset_X_in_tensor >= job.cols) {
+    return false;
+  }
+
+  return true;
+}
+
+__device__ __forceinline__ BlockDescriptor decode_block(const JobDescriptor &job,
+                                                        const bool is_single_tensor,
+                                                        const int64_t *const __restrict__ offsets_ptr) {
+  BlockDescriptor block{};
+  block.tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[job.tensor_id]);
+  const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, static_cast<size_t>(128));
+  block.block_id_in_current_tensor =
+      is_single_tensor ? job.block_id : (job.block_id - block.tensor_base / ELTS_PER_CHUNK);
+  block.block_id_Y = block.block_id_in_current_tensor / blocks_X_num_in_current_tensor;
+  block.block_id_X = block.block_id_in_current_tensor % blocks_X_num_in_current_tensor;
+  block.block_offset_Y = block.block_id_Y * CHUNK_DIM_Y;
+  block.block_offset_X = block.block_id_X * CHUNK_DIM_X;
+  return block;
+}
+
 // Copies the base tensor map to shmem, modifies the copy, stores the modified tensor map at index
 __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_tensor_map,
                                                        CUtensorMap *global_tensor_map,
@@ -335,6 +413,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
   __shared__ uint64_t IN_buff_readable_mbar[BUFFS_NUM];
 
+  // Initialize barriers shared by the entire CTA:
+  // - IN_buff_readable_mbar tracks per-buffer TMA global->shared completion.
+  // - workID_mbar synchronizes WorkID query response in dynamic persistent mode.
   if (leading_thread) {
 #pragma unroll
     for (int buff = 0; buff < BUFFS_NUM; ++buff) {
@@ -355,6 +436,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   int32_t ctaid_Y = static_cast<int32_t>(blockIdx.y);
   [[maybe_unused]] size_t static_next_block_id = 0;
   [[maybe_unused]] size_t static_block_stride = 0;
+  // In STATIC_PERSISTENT mode physical CTAs iterate over a virtual work grid via grid-stride.
   if constexpr (STATIC_PERSISTENT) {
     if (launch_block_id >= total_work_blocks) {
       return;
@@ -368,50 +450,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   int buff_in = 0;
   bool has_prefetched_current_job = true;
 
-  // Prefetch the first stage of the first job.
+  // Prime the pipeline with stage-0 of the first job assigned to this CTA.
   {
-    const size_t block_ID = static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
-    const size_t block_global_offset =
-        is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
-                            static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
-                         : (block_ID * ELTS_PER_CHUNK);
-
-    const size_t tensor_id =
-        get_current_tensor_id(shape_rep, num_tensors, block_global_offset, ctaid_Y,
-                              first_logical_dim, last_logical_dim, offsets_ptr);
-    const size_t rows =
-        get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
-    const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-    if (block_ID >= total_work_blocks || rows == 0 || cols == 0) {
+    const JobDescriptor first_job =
+        decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
+                   work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
+    if (!is_job_valid(first_job, shape_rep, total_work_blocks, offsets_ptr)) {
       return;
     }
-    if (shape_rep != SAME_BOTH_DIMS) {
-      const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[tensor_id]);
-      const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
-      if (block_global_offset >= tensor_end_offset) {
-        return;
-      }
-      const size_t tensor_offset_from_start = block_global_offset - tensor_start_offset;
-      const size_t block_offset_Y_in_tensor = tensor_offset_from_start / cols;
-      const size_t block_offset_X_in_tensor = tensor_offset_from_start % cols;
-      if (block_offset_Y_in_tensor >= rows || block_offset_X_in_tensor >= cols) {
-        return;
-      }
-    }
-
-    const size_t blocks_X_num_in_current_tensor = DIVUP(cols, static_cast<size_t>(128));
-    const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
-    const size_t block_id_in_current_tensor =
-        is_single_tensor ? block_ID : (block_ID - tensor_base / ELTS_PER_CHUNK);
-    const size_t block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
-    const size_t block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
-    const size_t block_offset_Y = block_id_Y * CHUNK_DIM_Y;
-    const size_t block_offset_X = block_id_X * CHUNK_DIM_X;
+    const BlockDescriptor first_block = decode_block(first_job, is_single_tensor, offsets_ptr);
 
     const CUtensorMap &tensor_map_input =
-        is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[tensor_id];
+        is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[first_job.tensor_id];
     const CUtensorMap &tensor_map_act_input =
-        is_single_tensor ? tensor_map_act_input_static : g_tensor_maps_act_input[tensor_id];
+        is_single_tensor ? tensor_map_act_input_static : g_tensor_maps_act_input[first_job.tensor_id];
 
     if (leading_thread && (!is_single_tensor)) {
       fence_acquire_tensormap(&tensor_map_input);
@@ -424,8 +476,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
       const size_t buff = stage;
       const size_t stage_offset_Y = stage * BUFF_DIM_Y;
-      const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
-      const size_t global_offset_X = block_offset_X;
+      const size_t global_offset_Y = first_block.block_offset_Y + stage_offset_Y;
+      const size_t global_offset_X = first_block.block_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
       uint64_t *barrier = &IN_buff_readable_mbar[buff];
       if (leading_thread) {
@@ -444,36 +496,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
   }
 
+  // Main persistent loop: decode current job, run all 32-row stages, schedule/prefetch next job.
   while (!job_finished) {
-    const size_t block_ID = static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
-    const size_t block_global_offset =
-        is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
-                            static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
-                         : (block_ID * ELTS_PER_CHUNK);
-    const size_t tensor_id =
-        get_current_tensor_id(shape_rep, num_tensors, block_global_offset, ctaid_Y,
-                              first_logical_dim, last_logical_dim, offsets_ptr);
-
-    const size_t rows =
-        get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
-    const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-
-    bool current_job_is_valid = (block_ID < total_work_blocks) && (rows != 0) && (cols != 0);
-    if (shape_rep != SAME_BOTH_DIMS) {
-      const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[tensor_id]);
-      const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
-      if (block_global_offset >= tensor_end_offset) {
-        current_job_is_valid = false;
-      }
-      if (current_job_is_valid) {
-        const size_t tensor_offset_from_start = block_global_offset - tensor_start_offset;
-        const size_t block_offset_Y_in_tensor = tensor_offset_from_start / cols;
-        const size_t block_offset_X_in_tensor = tensor_offset_from_start % cols;
-        if (block_offset_Y_in_tensor >= rows || block_offset_X_in_tensor >= cols) {
-          current_job_is_valid = false;
-        }
-      }
-    }
+    // Decode CTA assignment into logical tensor coordinates and validate bounds.
+    const JobDescriptor current_job =
+        decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
+                   work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
+    const bool current_job_is_valid =
+        is_job_valid(current_job, shape_rep, total_work_blocks, offsets_ptr);
     if (!current_job_is_valid) {
       if (has_prefetched_current_job) {
         // A stage-0 prefetch may already be in flight for this CTA. Drain it before exiting.
@@ -485,21 +515,22 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       break;
     }
 
+    const size_t tensor_id = current_job.tensor_id;
+    const size_t rows = current_job.rows;
+    const size_t cols = current_job.cols;
+    const BlockDescriptor current_block = decode_block(current_job, is_single_tensor, offsets_ptr);
+
     const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
     const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
 
-    const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
+    const size_t tensor_base = current_block.tensor_base;
     const size_t tensor_base_for_scales = (is_single_tensor && num_tensors > 1)
                                               ? static_cast<size_t>(offsets_ptr[tensor_id])
                                               : tensor_base;
-    const size_t blocks_X_num_in_current_tensor = DIVUP(cols, static_cast<size_t>(128));
-    const size_t block_id_in_current_tensor =
-        is_single_tensor ? block_ID : (block_ID - tensor_base / ELTS_PER_CHUNK);
-    const size_t block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
-    const size_t block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
-
-    const size_t block_offset_Y = block_id_Y * CHUNK_DIM_Y;
-    const size_t block_offset_X = block_id_X * CHUNK_DIM_X;
+    const size_t block_id_Y = current_block.block_id_Y;
+    const size_t block_id_X = current_block.block_id_X;
+    const size_t block_offset_Y = current_block.block_offset_Y;
+    const size_t block_offset_X = current_block.block_offset_X;
 
     e8m0_t *const scales_rowwise =
         scales_rowwise_ptr + (is_single_tensor ? 0 : tensor_base / SCALE_DIM_X);
@@ -560,6 +591,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
 
     bool prefetched_next_job = false;
+    // Process one [CHUNK_DIM_Y x CHUNK_DIM_X] block in STAGES slices (32 rows each).
 #pragma unroll
     for (int stage = 0; stage < STAGES; ++stage) {
       const size_t stage_offset_Y = stage * BUFF_DIM_Y;
@@ -595,39 +627,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       // Stage-(STAGES - PREFETCH_STAGES) prefetches stage-0 of the next job.
       // Validate that job before issuing TMA reads to avoid OOB accesses on graph-safe tails.
       if ((stage >= STAGES - PREFETCH_STAGES) && allow_next_job_prefetch && !job_finished) {
-        const size_t next_block_ID =
-            static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
-        const size_t next_block_global_offset =
-            is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
-                                static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
-                             : (next_block_ID * ELTS_PER_CHUNK);
-        const size_t next_tensor_id =
-            get_current_tensor_id(shape_rep, num_tensors, next_block_global_offset, ctaid_Y,
-                                  first_logical_dim, last_logical_dim, offsets_ptr);
-        const size_t next_rows =
-            get_tensor_rows_num(next_tensor_id, shape_rep, first_logical_dim, first_dims_ptr,
-                                num_tensors);
-        const size_t next_cols =
-            get_tensor_cols_num(next_tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-
-        bool next_job_is_valid =
-            (next_block_ID < total_work_blocks) && (next_rows != 0) && (next_cols != 0);
-        if (shape_rep != SAME_BOTH_DIMS) {
-          const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[next_tensor_id]);
-          const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[next_tensor_id + 1]);
-          if (next_block_global_offset >= tensor_end_offset) {
-            next_job_is_valid = false;
-          }
-          if (next_job_is_valid) {
-            const size_t tensor_offset_from_start = next_block_global_offset - tensor_start_offset;
-            const size_t block_offset_Y_in_tensor = tensor_offset_from_start / next_cols;
-            const size_t block_offset_X_in_tensor = tensor_offset_from_start % next_cols;
-            if (block_offset_Y_in_tensor >= next_rows || block_offset_X_in_tensor >= next_cols) {
-              next_job_is_valid = false;
-            }
-          }
-        }
-        allow_next_job_prefetch = next_job_is_valid;
+        const JobDescriptor next_job =
+            decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
+                       work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
+        allow_next_job_prefetch = is_job_valid(next_job, shape_rep, total_work_blocks, offsets_ptr);
       }
 
       if ((stage < STAGES - PREFETCH_STAGES) || (allow_next_job_prefetch && !job_finished)) {
@@ -638,37 +641,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
           prefetched_next_job = true;
         }
 
-        const size_t prefetch_block_ID =
-            static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
-        const size_t prefetch_block_global_offset =
-            is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
-                                static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
-                             : (prefetch_block_ID * ELTS_PER_CHUNK);
-        const size_t prefetch_tensor_id =
-            get_current_tensor_id(shape_rep, num_tensors, prefetch_block_global_offset, ctaid_Y,
-                                  first_logical_dim, last_logical_dim, offsets_ptr);
-        const size_t prefetch_tensor_base =
-            is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[prefetch_tensor_id]);
-        const size_t prefetch_cols =
-            get_tensor_cols_num(prefetch_tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-        const size_t prefetch_blocks_X_num_in_current_tensor =
-            DIVUP(prefetch_cols, static_cast<size_t>(128));
-        const size_t prefetch_block_id_in_current_tensor =
-            is_single_tensor ? prefetch_block_ID
-                             : (prefetch_block_ID - prefetch_tensor_base / ELTS_PER_CHUNK);
-        const size_t prefetch_block_id_Y =
-            prefetch_block_id_in_current_tensor / prefetch_blocks_X_num_in_current_tensor;
-        const size_t prefetch_block_id_X =
-            prefetch_block_id_in_current_tensor % prefetch_blocks_X_num_in_current_tensor;
+        const JobDescriptor prefetch_job =
+            decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
+                       work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
+        const BlockDescriptor prefetch_block = decode_block(prefetch_job, is_single_tensor, offsets_ptr);
 
-        const size_t global_offset_Y = prefetch_block_id_Y * CHUNK_DIM_Y + next_prefetch_stage_offset_Y;
-        const size_t global_offset_X = prefetch_block_id_X * CHUNK_DIM_X;
+        const size_t global_offset_Y = prefetch_block.block_offset_Y + next_prefetch_stage_offset_Y;
+        const size_t global_offset_X = prefetch_block.block_offset_X;
         const size_t next_prefetch_buff_offset = next_prefetch_buff * BUFF_DIM;
 
         const CUtensorMap &prefetch_tensor_map_input =
-            is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[prefetch_tensor_id];
+            is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[prefetch_job.tensor_id];
         const CUtensorMap &prefetch_tensor_map_act_input =
-            is_single_tensor ? tensor_map_act_input_static : g_tensor_maps_act_input[prefetch_tensor_id];
+            is_single_tensor ? tensor_map_act_input_static : g_tensor_maps_act_input[prefetch_job.tensor_id];
 
         uint64_t *barrier = &IN_buff_readable_mbar[next_prefetch_buff];
         if (leading_thread) {
