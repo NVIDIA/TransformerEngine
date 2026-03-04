@@ -375,10 +375,8 @@ def train(opts):
                     " default, no override needed"
                 )
 
-                # If FP8 is still enabled, keep recipe based on precision
-                # (dtype only affects parameter storage, not FP8 recipe)
-                if not no_fp8:
-                    recipe = get_recipe_for_precision(opts.precision)
+            # recipe is already set correctly from preset_recipe above;
+            # dtype only affects parameter storage, not the quantization recipe
 
     # Always log the final configuration being used
     dist_print(
