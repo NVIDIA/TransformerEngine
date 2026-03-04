@@ -128,18 +128,11 @@ def get_layer_args(opts):
 class StoreExplicitAction(argparse.Action):
     """Custom action that tracks whether an argument was explicitly set."""
 
-    def __init__(self, option_strings, dest, type=None, **kwargs):
+    def __init__(self, option_strings, dest, **kwargs):
         super().__init__(option_strings, dest, **kwargs)
-        self.type_converter = type  # Store the type converter
 
     def __call__(self, parser, namespace, values, option_string=None):
-        # Apply the type converter if one was provided
-        if self.type_converter is not None:
-            try:
-                values = self.type_converter(values)
-            except (ValueError, TypeError, argparse.ArgumentTypeError) as e:
-                parser.error(f"argument {option_string}: invalid value: {values!r}: {e}")
-
+        # values already converted by argparse via action.type
         setattr(namespace, self.dest, values)
         setattr(namespace, f"{self.dest}_explicitly_set", True)
 
@@ -391,8 +384,11 @@ def train(opts):
                     recipe = get_recipe_for_precision(opts.precision)
 
     # Always log the final configuration being used
-    dist_print(f"Training configuration: dtype={dtype}, FP8={'disabled' if no_fp8 else 'enabled'}")
-
+    dist_print(
+        f"Training configuration: dtype={dtype}, "
+        f"FP8={'disabled' if no_fp8 else f'enabled ({type(recipe).__name__})'}"
+    )
+    
     # Construct a simple homogeneous model (only one layer type) with NO PARALLELISM
     layer_args, layer_kwargs = get_layer_args(opts)
     layer_kwargs["params_dtype"] = dtype
