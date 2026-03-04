@@ -368,8 +368,6 @@ def train(opts):
                     f"Warning: --dtype {dtype_name} overrides --precision {opts.precision} dtype"
                     " setting"
                 )
-                if not no_fp8:
-                    recipe = get_recipe_for_precision(opts.precision)
             else:
                 new_dtype_name = str(new_dtype).replace("torch.", "")
                 dist_print(
@@ -385,7 +383,7 @@ def train(opts):
     # Always log the final configuration being used
     dist_print(
         f"Training configuration: dtype={dtype}, "
-        f"FP8={'disabled' if no_fp8 else f'enabled ({type(recipe).__name__})'}"
+        f"quantization={'disabled' if no_fp8 else f'enabled ({type(recipe).__name__})'}"
     )
 
     # Construct a simple homogeneous model (only one layer type) with NO PARALLELISM
