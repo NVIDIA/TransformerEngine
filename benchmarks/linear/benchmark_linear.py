@@ -282,6 +282,7 @@ if __name__ == "__main__":
     else:
         recipe_list = [args.recipe]
 
+    profiler_ctx = None
     if args.profile:
         hidden_dim_to_profile = 4096 if args.hidden_dim is None else args.hidden_dim
         output_dim_to_profile = 4096 if args.output_dim is None else args.output_dim
@@ -293,7 +294,8 @@ if __name__ == "__main__":
             " fp8_sub_channel, mxfp8, nvfp4, or bf16"
         )
         recipe_list = [args.recipe]
-        torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
+        profiler_ctx = torch.autograd.profiler.emit_nvtx(record_shapes=True)
+        profiler_ctx.__enter__()
 
     # Initialize a dataframe to store the results
     df_linears = pd.DataFrame()
@@ -327,4 +329,4 @@ if __name__ == "__main__":
     print(df_linears)
 
     if args.profile:
-        torch.autograd.profiler.emit_nvtx().__exit__(None, None, None)
+        profiler_ctx.__exit__(None, None, None)
