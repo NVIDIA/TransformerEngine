@@ -10,7 +10,6 @@ import importlib
 import os
 import re
 import shutil
-import site
 import subprocess
 import sys
 import platform
