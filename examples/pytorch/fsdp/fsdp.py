@@ -324,18 +324,10 @@ def get_recipe_for_precision(precision_value):
     Returns:
         Recipe object for FP8 training
     """
-    match precision_value:
-        case "mxfp8":
-            return MXFP8BlockScaling(fp8_format=Format.E4M3)
-        case "nvfp4":
-            return NVFP4BlockScaling()
-        case "fp8":
-            # Default FP8 recipe using DelayedScaling (backward compatible)
-            return DelayedScaling(
-                fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
-            )
-        case _:
-            raise NotImplementedError(f"No FP8 recipe defined for precision '{precision_value}'")
+    _, _, recipe = get_precision_preset(precision_value)
+    if recipe is None:
+        raise NotImplementedError(f"No FP8 recipe defined for precision '{precision_value}'")
+    return recipe
 
 
 def train(opts):
@@ -370,7 +362,7 @@ def train(opts):
 
         # Check for incompatible flag combinations
         # Error if user requests FP8-based precision but also sets --no-fp8
-        if opts.precision in ["fp8", "mxfp8", "nvfp4"] and no_fp8_explicitly_set and opts.no_fp8:
+        if opts.precision in ["fp8", "mxfp8", "nvfp4"] and no_fp8_explicitly_set:
             raise ValueError(
                 f"Cannot use --no-fp8 with --precision {opts.precision}. "
                 "These flags are incompatible. "
@@ -393,10 +385,10 @@ def train(opts):
                     f"Warning: --dtype {dtype} overrides --precision {opts.precision} dtype setting"
                 )
 
-            # If FP8 is still enabled, keep recipe based on precision
-            # (dtype only affects parameter storage, not FP8 recipe)
-            if not no_fp8:
-                recipe = get_recipe_for_precision(opts.precision)
+                # If FP8 is still enabled, keep recipe based on precision
+                # (dtype only affects parameter storage, not FP8 recipe)
+                if not no_fp8:
+                    recipe = get_recipe_for_precision(opts.precision)
 
     # Always log the final configuration being used
     dist_print(f"Training configuration: dtype={dtype}, FP8={'disabled' if no_fp8 else 'enabled'}")
