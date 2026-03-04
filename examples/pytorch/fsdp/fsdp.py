@@ -331,7 +331,7 @@ def train(opts):
         no_fp8 = opts.no_fp8
         if opts.dtype is not None:
             dtype = opts.dtype
-         # Preserve original default: FP8 enabled → use DelayedScaling as before
+        # Preserve original default: FP8 enabled → use DelayedScaling as before
         if not no_fp8:
             recipe = DelayedScaling(
                 fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
