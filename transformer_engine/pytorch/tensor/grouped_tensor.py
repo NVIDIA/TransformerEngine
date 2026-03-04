@@ -14,7 +14,7 @@ from ..quantized_tensor import QuantizedTensorStorage, Quantizer
 from .storage.grouped_tensor_storage import GroupedTensorStorage
 
 
-# For now, conservatively ban all shape manipulatimg ops.
+# For now, conservatively ban all shape manipulating ops.
 BANNED_SHAPE_OPS = {
     torch.ops.aten.view.default,
     torch.ops.aten._unsafe_view.default,
