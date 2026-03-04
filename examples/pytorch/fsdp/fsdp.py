@@ -439,11 +439,9 @@ def train(opts):
         # perform attribute access on it regardless of the enabled flag.
         if recipe is None:
             recipe = DelayedScaling()
-        
+
         # autocast needs to be given the FSDP process group for amax reductions
-        with te.autocast(
-            enabled=not no_fp8, recipe=recipe, amax_reduction_group=all_gpus
-        ):
+        with te.autocast(enabled=not no_fp8, recipe=recipe, amax_reduction_group=all_gpus):
             y = te_model(x)
             loss = y.sum()
         # calculate gradient and take training step outside the autocast context
