@@ -197,19 +197,7 @@ def parse_fsdp_args():
         "--no-fp8",
         action="store_true",
         default=False,
-        help=(
-            "Disables the te.autocast() context. When set, FP8 training is disabled and the model"
-            " trains in standard precision (as specified by --dtype). PRECEDENCE: This flag is"
-            " incompatible with FP8-based --precision presets. BEHAVIOR: - Without --precision:"
-            " Disables FP8 training (original behavior) - With --precision fp32/fp16: Redundant but"
-            " harmless (already non-FP8) - With --precision fp8/mxfp8/nvfp4: RAISES ERROR"
-            " (incompatible flags) RATIONALE: FP8 presets explicitly request FP8 training, so"
-            " disabling FP8 would contradict the user's intent. Use --precision fp32/fp16 instead"
-            " for non-FP8 training. EXAMPLES: '--no-fp8' disables FP8 (original behavior)."
-            " '--precision fp8 --no-fp8' raises ValueError (incompatible). '--precision fp16' is"
-            " the correct way to request non-FP8 training. Default: False (FP8 enabled based on"
-            " configuration)."
-        ),
+        help="Disable te.autocast() FP8 context. Incompatible with --precision fp8/mxfp8/nvfp4. Default: False.",
     )
     parser.add_argument(
         "--no-defer-init",
@@ -226,34 +214,13 @@ def parse_fsdp_args():
         type=torch_dtype,
         default=torch.bfloat16,
         action=StoreExplicitAction,
-        help=(
-            "Data type for input tensor and Transformer Engine module parameters. Supported values:"
-            " fp32/float32, fp16/float16, bf16/bfloat16. PRECEDENCE: When explicitly set, this flag"
-            " overrides the dtype from --precision preset. BEHAVIOR: - Without --precision:"
-            " Controls parameter dtype directly - With --precision: Overrides preset's dtype but"
-            " preserves FP8 recipe selection EXAMPLES: '--dtype bf16' uses bfloat16 parameters"
-            " (original behavior). '--precision mxfp8 --dtype fp16' uses fp16 parameters with"
-            " MXFP8BlockScaling recipe. A warning is issued when overriding --precision dtype."
-            " Default: bfloat16."
-        ),
+        help="Parameter dtype: fp32/float32, fp16/float16, bf16/bfloat16. Overrides --precision dtype when explicitly set. Default: bfloat16.",
     )
     parser.add_argument(
         "--precision",
         type=precision,
         default=None,
-        help=(
-            "Precision preset for model training. Supported values: fp32, fp16, fp8, mxfp8, nvfp4."
-            " This is a convenience flag that configures both dtype and FP8 settings automatically."
-            " - fp32/fp16: Non-FP8 training with specified dtype - fp8: FP8 training with"
-            " DelayedScaling recipe (bf16 parameters) - mxfp8: FP8 training with MXFP8BlockScaling"
-            " recipe (bf16 parameters) - nvfp4: FP8 training with NVFP4BlockScaling recipe (bf16"
-            " parameters) PRECEDENCE RULES: - If --dtype is explicitly set, it overrides the dtype"
-            " from this preset (with warning) - If --no-fp8 is set with fp8/mxfp8/nvfp4 presets, an"
-            " error is raised (incompatible) - If this flag is not set, original behavior is used"
-            " (--dtype and --no-fp8 control training) EXAMPLES: '--precision mxfp8' enables MXFP8"
-            " FP8 training with bf16 parameters. '--precision fp8 --dtype fp16' uses fp16"
-            " parameters but keeps DelayedScaling recipe. Default: None (backward compatible mode)."
-        ),
+        help="Precision preset: fp32, fp16, fp8, mxfp8, nvfp4. Configures dtype and FP8 recipe automatically. Overridden by explicit --dtype. Default: None (use --dtype and --no-fp8 directly).",
     )
     return parser.parse_args()
 
@@ -429,6 +396,7 @@ def train(opts):
     # perform attribute access on it regardless of the enabled flag.
     if recipe is None:
         recipe = DelayedScaling()
+    amax_group = all_gpus if isinstance(recipe, DelayedScaling) else None
 
     for i in range(opts.num_iters):
         # Generate a random input batch
@@ -441,7 +409,7 @@ def train(opts):
         )
 
         # autocast needs to be given the FSDP process group for amax reductions
-        with te.autocast(enabled=not no_fp8, recipe=recipe, amax_reduction_group=all_gpus):
+        with te.autocast(enabled=not no_fp8, recipe=recipe, amax_reduction_group=amax_group):
             y = te_model(x)
             loss = y.sum()
         # calculate gradient and take training step outside the autocast context
