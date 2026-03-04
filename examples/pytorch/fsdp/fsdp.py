@@ -297,7 +297,7 @@ def train(opts):
     dist_print(f"WORLD_SIZE = {WORLD_SIZE}")
     torch.manual_seed(opts.seed)
 
-    preset_dtype: torch.dtype = opts.dtype   # sensible fallback
+    preset_dtype: torch.dtype = opts.dtype  # sensible fallback
     preset_recipe = None
 
     if opts.precision is not None:
