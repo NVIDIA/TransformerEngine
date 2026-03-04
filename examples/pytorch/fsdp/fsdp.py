@@ -302,7 +302,7 @@ def get_precision_preset(precision_value):
             )
             return torch.bfloat16, False, recipe
         case "mxfp8":
-            recipe = MXFP8BlockScaling(fp8_format=Format.E4M3)
+            recipe = MXFP8BlockScaling()
             return torch.bfloat16, False, recipe
         case "nvfp4":
             recipe = NVFP4BlockScaling()
@@ -335,6 +335,16 @@ def train(opts):
     dtype_explicitly_set = getattr(opts, "dtype_explicitly_set", False)
     no_fp8_explicitly_set = getattr(opts, "no_fp8_explicitly_set", False)
 
+    # Check for incompatible flag combinations
+    # Error if user requests FP8-based precision but also sets --no-fp8
+    if opts.precision in ["fp8", "mxfp8", "nvfp4"] and no_fp8_explicitly_set:
+        raise ValueError(
+            f"Cannot use --no-fp8 with --precision {opts.precision}. "
+            "These flags are incompatible. "
+            f"Either remove --no-fp8 to use {opts.precision} training, "
+            "or use --precision fp32/fp16 for non-FP8 training."
+        )
+
     # Initialize torch.distributed global process group
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(LOCAL_RANK)
@@ -359,16 +369,6 @@ def train(opts):
         # Case 2: Precision preset was explicitly specified
         # Start with precision preset values
         preset_dtype, preset_no_fp8, preset_recipe = get_precision_preset(opts.precision)
-
-        # Check for incompatible flag combinations
-        # Error if user requests FP8-based precision but also sets --no-fp8
-        if opts.precision in ["fp8", "mxfp8", "nvfp4"] and no_fp8_explicitly_set:
-            raise ValueError(
-                f"Cannot use --no-fp8 with --precision {opts.precision}. "
-                "These flags are incompatible. "
-                f"Either remove --no-fp8 to use {opts.precision} training, "
-                "or use --precision fp32/fp16 for non-FP8 training."
-            )
 
         dtype = preset_dtype
         no_fp8 = preset_no_fp8
