@@ -286,10 +286,6 @@ def get_precision_preset(precision_value):
         case "nvfp4":
             recipe = NVFP4BlockScaling()
             return torch.bfloat16, False, recipe
-        case None:
-            # Default case: no precision preset specified, use original behavior.
-            # dtype and no_fp8 are controlled directly by --dtype and --no-fp8 flags.
-            return torch.bfloat16, True, None
         case _:
             raise ValueError(
                 f"Invalid precision preset: {precision_value}. "
@@ -319,24 +315,17 @@ def train(opts):
     dist_print(f"WORLD_SIZE = {WORLD_SIZE}")
     torch.manual_seed(opts.seed)
 
-    # Start with precision preset values
-    preset_dtype, preset_no_fp8, preset_recipe = get_precision_preset(opts.precision)
-
-    dtype = preset_dtype
-    no_fp8 = preset_no_fp8
-    recipe = preset_recipe
-
-    # When no --precision is set, respect --no-fp8 and --dtype directly (original behavior)
-    if opts.precision is None:
-        no_fp8 = opts.no_fp8
-        dtype = opts.dtype
-        # Preserve original default: FP8 enabled → use DelayedScaling as before
-        if not no_fp8:
-            recipe = DelayedScaling(
-                fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
-            )
-    else:
+    if opts.precision is not None:
+        preset_dtype, preset_no_fp8, preset_recipe = get_precision_preset(opts.precision)
+        dtype, no_fp8, recipe = preset_dtype, preset_no_fp8, preset_recipe
         dist_print(f"Using precision preset: {opts.precision}")
+    else:
+        # Original behavior: --dtype and --no-fp8 control training directly
+        dtype = opts.dtype
+        no_fp8 = opts.no_fp8
+        recipe = DelayedScaling(
+            fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
+        ) if not no_fp8 else None
 
     dtype_name = str(dtype).replace("torch.", "")
 
@@ -443,7 +432,7 @@ def train(opts):
             device="cuda",
         )
         # autocast needs to be given the FSDP process group for amax reductions
-        with te.autocast(enabled=not no_fp8, recipe=recipe, amax_reduction_group=all_gpus):
+        with te.autocast(enabled=not no_fp8, recipe=recipe or DelayedScaling(), amax_reduction_group=all_gpus):
             y = te_model(x)
             loss = y.sum()
         # calculate gradient and take training step outside the autocast context
