@@ -299,8 +299,8 @@ __device__ void unswizzle_row_scaling_kernel_impl(const void* input, void* outpu
     n_tiles_in_tb = (K_i32 - 1) % N_TILES_IN_TB + 1;
   }
 
-  const int input_offset = bid_y * SF_TILE_DIM_M_I32 * K_i32 +
-                           bid_x * N_TILES_IN_TB * SF_TILE_SIZE_I32;
+  const int input_offset =
+      bid_y * SF_TILE_DIM_M_I32 * K_i32 + bid_x * N_TILES_IN_TB * SF_TILE_SIZE_I32;
   const int* input_i32 = reinterpret_cast<const int*>(input) + input_offset;
   const int output_offset = bid_y * SF_TILE_DIM_M_I32 * K_i32 + bid_x * N_TILES_IN_TB;
   uint8_t* output_u8 = reinterpret_cast<uint8_t*>(output);
@@ -331,7 +331,8 @@ __device__ void unswizzle_row_scaling_kernel_impl(const void* input, void* outpu
       for (int j = 0; j < N_TILE_PER_TD * sizeof(int); j++) {
         const int index = (output_offset + thread_offset) * sizeof(int) + j;
         if (index / K < original_M && index % K < original_K) {
-          output_u8[index / K * original_K + index % K] = reinterpret_cast<uint8_t*>(regs_vec + i)[j];
+          output_u8[index / K * original_K + index % K] =
+              reinterpret_cast<uint8_t*>(regs_vec + i)[j];
         }
       }
     }
@@ -411,7 +412,8 @@ __device__ void unswizzle_col_scaling_kernel_impl(const void* input, void* outpu
       for (int j = 0; j < N_TILE_PER_TD * sizeof(int); j++) {
         const int index = (output_offset + thread_offset) * sizeof(int) + j;
         if (index / M < original_K && index % M < original_M) {
-          output_u8[index / M * original_M + index % M] = reinterpret_cast<uint8_t*>(regs_vec + i)[j];
+          output_u8[index / M * original_M + index % M] =
+              reinterpret_cast<uint8_t*>(regs_vec + i)[j];
         }
       }
     }
@@ -902,8 +904,8 @@ void launch_multi_tensor_swizzle_scaling_factors(MultiSwizzleArgs& kernel_args,
 
 template <int SF_TILE_DIM_M, int SF_TILE_DIM_K>
 void launch_multi_tensor_unswizzle_scaling_factors(MultiSwizzleArgs& kernel_args,
-                                                  const int vec_load_size, const bool is_rowwise,
-                                                  cudaStream_t stream) {
+                                                   const int vec_load_size, const bool is_rowwise,
+                                                   cudaStream_t stream) {
   int n_tiles_in_tb = TB_DIM * vec_load_size;
   int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
   for (size_t j = 0; j < kernel_args.num_tensors; j++) {
@@ -1161,7 +1163,8 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
   CheckInputTensor(*input, "scaling_factor_input");
   CheckInputTensor(*output, "scaling_factor_output");
   NVTE_CHECK(input->with_gemm_swizzled_scales, "Expected input tensor with swizzled scales.");
-  NVTE_CHECK(!output->with_gemm_swizzled_scales, "Expected output tensor in row-major compact format.");
+  NVTE_CHECK(!output->with_gemm_swizzled_scales,
+             "Expected output tensor in row-major compact format.");
 
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
@@ -1280,10 +1283,10 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
           original_K = output->flat_last_dim() / NVFP4_BLOCK_SIZE;
           input_scale_inv_ptr = input->scale_inv.dptr;
           output_scale_inv_ptr = output->scale_inv.dptr;
-          NVTE_CHECK(
-              static_cast<size_t>(original_M) * original_K == output->scale_inv.numel(),
-              "Expected output tensor to have ", static_cast<size_t>(original_M) * original_K,
-              " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
+          NVTE_CHECK(static_cast<size_t>(original_M) * original_K == output->scale_inv.numel(),
+                     "Expected output tensor to have ",
+                     static_cast<size_t>(original_M) * original_K,
+                     " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
         } else if (has_columnwise_scale_inv) {
           original_M = output->flat_last_dim();
           original_K = output->flat_first_dim() / NVFP4_BLOCK_SIZE;
@@ -1565,7 +1568,8 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
   multi_tensor_swizzle_scaling_factors(input_list, output_list, stream);
 }
 
-void nvte_unswizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
+void nvte_unswizzle_scaling_factors(const NVTETensor input, NVTETensor output,
+                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_unswizzle_scaling_factors);
   using namespace transformer_engine;
   unswizzle_scaling_factors(convertNVTETensorCheck(input), convertNVTETensorCheck(output), stream);
