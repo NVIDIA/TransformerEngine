@@ -322,7 +322,7 @@ def train(opts):
         if new_dtype != preset_dtype:
             if opts.precision in ["fp8", "mxfp8", "nvfp4"] and new_dtype == torch.float16:
                 dist_print(
-                    f"Warning: --dtype float16 may be incompatible with --precision"
+                    "Warning: --dtype float16 may be incompatible with --precision"
                     f" {opts.precision}, which expects bfloat16 accumulation."
                 )
 
