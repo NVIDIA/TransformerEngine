@@ -197,7 +197,10 @@ def parse_fsdp_args():
         "--no-fp8",
         action="store_true",
         default=False,
-        help="Disable te.autocast() FP8 context. Incompatible with --precision fp8/mxfp8/nvfp4. Default: False.",
+        help=(
+            "Disable te.autocast() FP8 context. Incompatible with --precision fp8/mxfp8/nvfp4."
+            " Default: False."
+        ),
     )
     parser.add_argument(
         "--no-defer-init",
@@ -214,13 +217,20 @@ def parse_fsdp_args():
         type=torch_dtype,
         default=torch.bfloat16,
         action=StoreExplicitAction,
-        help="Parameter dtype: fp32/float32, fp16/float16, bf16/bfloat16. Overrides --precision dtype when explicitly set. Default: bfloat16.",
+        help=(
+            "Parameter dtype: fp32/float32, fp16/float16, bf16/bfloat16. Overrides --precision"
+            " dtype when explicitly set. Default: bfloat16."
+        ),
     )
     parser.add_argument(
         "--precision",
         type=precision,
         default=None,
-        help="Precision preset: fp32, fp16, fp8, mxfp8, nvfp4. Configures dtype and FP8 recipe automatically. Overridden by explicit --dtype. Default: None (use --dtype and --no-fp8 directly).",
+        help=(
+            "Precision preset: fp32, fp16, fp8, mxfp8, nvfp4. Configures dtype and FP8 recipe"
+            " automatically. Overridden by explicit --dtype. Default: None (use --dtype and"
+            " --no-fp8 directly)."
+        ),
     )
     return parser.parse_args()
 
