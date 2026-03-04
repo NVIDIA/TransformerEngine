@@ -77,10 +77,10 @@ num_cublas_streams = get_num_compute_streams()
 # compiled against cuBLAS < 13.2, in which case the cuda-graphable path is unavailable.
 try:
     get_grouped_gemm_setup_workspace_size(1)
-    _cuda_graphable_grouped_gemm_available = True
+    _v2_grouped_gemm_available = True
 except RuntimeError as e:
     if "cublas" in str(e).lower():
-        _cuda_graphable_grouped_gemm_available = False
+        _v2_grouped_gemm_available = False
     else:
         raise
 
@@ -1449,7 +1449,7 @@ class GroupedGemmPrimitive(BasePrimitive):
     # args = lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, group_offset, unused_placeholder
     name = "te_grouped_gemm_ffi"
     # args = lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, alpha, beta
-    name_graph_safe = "te_grouped_gemm_cuda_graphable_ffi"
+    name_graph_safe = "te_grouped_gemm_v2_ffi"
     multiple_results = True
     impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
     inner_primitive = None
@@ -1474,7 +1474,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
-        use_cuda_graphable_ffi,
+        use_v2_ffi,
     ):
         """
         Grouped GEMM operation.
@@ -1513,7 +1513,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         cublas_workspace_aval = jax.core.ShapedArray(
             shape=(
                 GroupedGemmPrimitive._compute_cublas_workspace_size(
-                    scaling_mode, lhs_scale_inv_aval, rhs_scale_inv_aval, use_cuda_graphable_ffi
+                    scaling_mode, lhs_scale_inv_aval, rhs_scale_inv_aval, use_v2_ffi
                 ),
             ),
             dtype=jnp.uint8,
@@ -1524,7 +1524,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             out_shape = (num_groups, M, N)
         out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
-        if use_cuda_graphable_ffi:
+        if use_v2_ffi:
             setup_workspace_aval = jax.core.ShapedArray(
                 shape=(get_grouped_gemm_setup_workspace_size(num_groups),), dtype=jnp.uint8
             )
@@ -1561,10 +1561,10 @@ class GroupedGemmPrimitive(BasePrimitive):
         scaling_mode: ScalingMode,
         lhs_scale_inv_aval,
         rhs_scale_inv_aval,
-        use_cuda_graphable_ffi: bool,
+        use_v2_ffi: bool,
     ):
         """Compute the required cuBLAS workspace size based on the scaling mode and alignment requirements."""
-        stream_count = 1 if use_cuda_graphable_ffi else num_cublas_streams
+        stream_count = 1 if use_v2_ffi else num_cublas_streams
 
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * stream_count
@@ -1607,26 +1607,37 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
-        use_cuda_graphable_ffi,
+        use_v2_ffi,
     ):
         del out_dtype
-        if use_cuda_graphable_ffi:
+        if use_v2_ffi:
             ffi_name = GroupedGemmPrimitive.name_graph_safe
+            return jax.ffi.ffi_lowering(ffi_name)(
+                ctx,
+                *args,
+                M=M,
+                N=N,
+                K=K,
+                lhs_is_trans=lhs_is_trans,
+                rhs_is_trans=rhs_is_trans,
+                scaling_mode=scaling_mode.value,
+                is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            )
         else:
             ffi_name = GroupedGemmPrimitive.name
-        return jax.ffi.ffi_lowering(ffi_name)(
-            ctx,
-            *args,
-            M=M,
-            N=N,
-            K=K,
-            lhs_is_trans=lhs_is_trans,
-            rhs_is_trans=rhs_is_trans,
-            scaling_mode=scaling_mode.value,
-            has_bias=has_bias,
-            is_grouped_dense_wgrad=is_grouped_dense_wgrad,
-            use_async_d2h_group_sizes=use_async_d2h_group_sizes,
-        )
+            return jax.ffi.ffi_lowering(ffi_name)(
+                ctx,
+                *args,
+                M=M,
+                N=N,
+                K=K,
+                lhs_is_trans=lhs_is_trans,
+                rhs_is_trans=rhs_is_trans,
+                scaling_mode=scaling_mode.value,
+                has_bias=has_bias,
+                is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+                use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+            )
 
     @staticmethod
     def impl(
@@ -1648,10 +1659,10 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
-        use_cuda_graphable_ffi,
+        use_v2_ffi,
     ):
         assert GroupedGemmPrimitive.inner_primitive is not None
-        if use_cuda_graphable_ffi:
+        if use_v2_ffi:
             additional_args = (additional_arg_0, additional_arg_1)
         else:
             additional_args = (additional_arg_0,)
@@ -1673,7 +1684,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             has_bias=has_bias,
             is_grouped_dense_wgrad=is_grouped_dense_wgrad,
             use_async_d2h_group_sizes=use_async_d2h_group_sizes,
-            use_cuda_graphable_ffi=use_cuda_graphable_ffi,
+            use_v2_ffi=use_v2_ffi,
         )
         return (out,)
 
@@ -1995,7 +2006,7 @@ def grouped_gemm_copy_group_sizes(
     return out
 
 
-def _can_use_cuda_graphable_grouped_gemm(
+def _can_use_v2_grouped_gemm(
     scaling_mode: ScalingMode,
     dtype: jnp.dtype,
     has_bias: bool,
@@ -2006,7 +2017,7 @@ def _can_use_cuda_graphable_grouped_gemm(
     # feature-compatible with the main branch.
     # Bias can be supported in a kernel or in pure-JAX in the future.
 
-    if not _cuda_graphable_grouped_gemm_available:
+    if not _v2_grouped_gemm_available:
         return False
 
     return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
@@ -2195,10 +2206,10 @@ def grouped_gemm(
         " and padded with zeros to not affect the result of the MoE block."
     )
 
-    use_cuda_graphable_ffi = _can_use_cuda_graphable_grouped_gemm(
+    use_v2_ffi = _can_use_v2_grouped_gemm(
         scaling_mode, lhs_data.dtype, has_bias
     )
-    if use_cuda_graphable_ffi:
+    if use_v2_ffi:
         num_gemms = group_sizes.shape[0]
         additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
         additional_arg_1 = jnp.zeros((num_gemms,), jnp.float32)  # beta
@@ -2225,6 +2236,6 @@ def grouped_gemm(
         has_bias=has_bias,
         is_grouped_dense_wgrad=is_grouped_dense_wgrad,
         use_async_d2h_group_sizes=use_async_d2h_group_sizes,
-        use_cuda_graphable_ffi=use_cuda_graphable_ffi,
+        use_v2_ffi=use_v2_ffi,
     )
     return out

@@ -559,13 +559,12 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
   return std::move(grouped_tensor_wrapper);
 }
 
-Error_Type GroupedGemmCudaGraphableFFI(
+Error_Type GroupedGemmV2FFI(
     cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv, Buffer_Type rhs_data,
     Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type group_sizes, Buffer_Type alpha,
     Buffer_Type beta, Result_Type output, Result_Type cublas_workspace, Result_Type setup_workspace,
     Result_Type int64_workspace, size_t m, size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
-    JAXX_Scaling_Mode scaling_mode, bool has_bias, bool is_grouped_dense_wgrad,
-    bool use_async_d2h_group_sizes) {
+    JAXX_Scaling_Mode scaling_mode, bool is_grouped_dense_wgrad) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -580,9 +579,6 @@ Error_Type GroupedGemmCudaGraphableFFI(
   //   C: column-major with size [m, n] --> row-major with size [n, m].
   // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
 
-  // Not used by the CUDA-graphable path (async D2H only applies to the legacy path).
-  (void)use_async_d2h_group_sizes;
-
   // Inputs
   auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_data.untyped_data());
   auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_data.untyped_data());
@@ -592,6 +588,7 @@ Error_Type GroupedGemmCudaGraphableFFI(
   auto rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs_data.element_type());
   auto lhs_sinv_dtype = convert_ffi_datatype_to_te_dtype(lhs_sinv.element_type());
   auto rhs_sinv_dtype = convert_ffi_datatype_to_te_dtype(rhs_sinv.element_type());
+  bool has_bias = product(bias.dimensions()) > 0;
   auto bias_ptr = has_bias ? reinterpret_cast<uint8_t *>(bias.untyped_data()) : nullptr;
   auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
 
@@ -767,7 +764,7 @@ Error_Type GroupedGemmCudaGraphableFFI(
   return ffi_with_cuda_error_check();
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmCudaGraphableHandler, GroupedGemmCudaGraphableFFI,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // lhs_data
@@ -788,9 +785,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmCudaGraphableHandler, GroupedGemmCudaGr
                                   .Attr<bool>("lhs_is_trans")
                                   .Attr<bool>("rhs_is_trans")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("has_bias")
-                                  .Attr<bool>("is_grouped_dense_wgrad")
-                                  .Attr<bool>("use_async_d2h_group_sizes"),
+                                  .Attr<bool>("is_grouped_dense_wgrad"),
                               FFI_CudaGraph_Traits);
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
