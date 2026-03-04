@@ -375,6 +375,271 @@ __device__ __forceinline__ void store_output_stage(
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &), typename IType, typename OType,
+          bool ROWWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES>
+__device__ __forceinline__ float process_colwise_stage(
+    const size_t buff, const int stage, const size_t tid_X_colwise,
+    const size_t scales_offset_Y_colwise, const size_t scales_offset_X_colwise,
+    const size_t scale_stride_colwise, const size_t tensor_base_for_scales, const size_t rows,
+    const size_t cols, IType *in_sh, IType *act_in_sh, IType *cached_act_sh,
+    OType *out_colwise_data_sh, e8m0_t *scales_colwise, float &partial_dbias_colwise) {
+  constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
+  constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
+  constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING;
+  if constexpr (!IS_CACHED_ACT_OP) {
+    (void)cached_act_sh;
+  }
+  if constexpr (!IS_DACT) {
+    (void)act_in_sh;
+  }
+  if constexpr (!IS_DBIAS) {
+    (void)partial_dbias_colwise;
+  }
+  if constexpr (!WITH_GEMM_SWIZZLED_SCALES) {
+    (void)tensor_base_for_scales;
+    (void)rows;
+  }
+
+  const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
+  float thread_amax = 0.0f;
+  float in_compute_colwise[BUFF_DIM_Y];
+  IType in_colwise_IType[BUFF_DIM_Y];
+
+  if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+    IType thread_amax_f16 = static_cast<IType>(0.0f);
+#pragma unroll
+    for (int i = 0; i < BUFF_DIM_Y; ++i) {
+      const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+      in_colwise_IType[i] = in_sh[shmem_offset_colwise];
+      thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
+    }
+    thread_amax = static_cast<float>(thread_amax_f16);
+  } else {
+#pragma unroll
+    for (int i = 0; i < BUFF_DIM_Y; ++i) {
+      const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+
+      float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
+      if constexpr (IS_ACT) {
+        elt = OP(elt, {});
+      }
+      if constexpr (IS_DACT) {
+        float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
+        elt *= OP(act_in_elt, {});
+      }
+      if constexpr (IS_DBIAS) {
+        partial_dbias_colwise += elt;
+      }
+      if constexpr (!std::is_same_v<IType, float>) {
+        elt = static_cast<float>(static_cast<IType>(elt));
+      }
+      if constexpr (IS_CACHED_ACT_OP) {
+        cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
+      }
+      thread_amax = fmaxf(thread_amax, fabsf(elt));
+      in_compute_colwise[i] = elt;
+    }
+  }
+
+  const e8m0_t biased_exponent =
+      ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+
+  const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
+  const size_t global_scales_offset_X = scales_offset_X_colwise;
+
+  size_t scale_idx = 0;
+  if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+    const size_t tensor_base_row = tensor_base_for_scales / cols;
+    const size_t tensor_scales_offset_Y_base = tensor_base_row / SCALE_DIM_Y;
+    const size_t tensor_scales_offset_colwise_base = tensor_base_for_scales / SCALE_DIM_Y;
+    const size_t local_scales_offset_Y = global_scales_offset_Y - tensor_scales_offset_Y_base;
+    scale_idx = tensor_scales_offset_colwise_base +
+                transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
+                    global_scales_offset_X, local_scales_offset_Y,
+                    DIVUP(rows, static_cast<size_t>(128)));
+  } else {
+    scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+  }
+  scales_colwise[scale_idx] = biased_exponent;
+
+  const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+
+#pragma unroll
+  for (int i = 0; i < SCALE_DIM_Y; ++i) {
+    float in;
+    if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+      in = static_cast<float>(in_colwise_IType[i]);
+    } else {
+      in = in_compute_colwise[i];
+    }
+    const float scaled_out = in * block_scale_inverse;
+
+    const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
+    out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
+  }
+
+  return thread_amax;
+}
+
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &), typename IType, typename OType,
+          bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES>
+__device__ __forceinline__ float process_rowwise_stage(
+    const size_t buff, const size_t stage_offset_Y, const size_t thread_offset_Y_rowwise,
+    const size_t thread_offset_X_rowwise, const int bank_group,
+    const size_t scales_offset_Y_rowwise, const size_t scales_offset_X_rowwise,
+    const size_t scale_stride_rowwise, const bool rowwise_scale_is_within_bounds,
+    const size_t cols, IType *in_sh, IType *act_in_sh, IType *cached_act_sh,
+    OType *out_rowwise_data_sh, e8m0_t *scales_rowwise, float *thread_dbias_rowwise) {
+  using IType2 = typename ptx::FPx2<IType>;
+  using OType2 = typename ptx::FPx2<OType>;
+  constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
+  constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
+  constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && COLWISE_SCALING;
+  if constexpr (!IS_DACT) {
+    (void)act_in_sh;
+  }
+  if constexpr (!IS_CACHED_ACT_OP) {
+    (void)cached_act_sh;
+  }
+  if constexpr (!(IS_DBIAS && (!COLWISE_SCALING))) {
+    (void)thread_dbias_rowwise;
+  }
+  if constexpr (!WITH_GEMM_SWIZZLED_SCALES) {
+    (void)cols;
+  }
+
+  const size_t shmem_offset_base_rowwise = buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
+  float thread_amax = 0.0f;
+  float in_compute_rowwise[SCALE_DIM_X];
+  Vec<IType, PACK_SIZE> in_cached[WAVES];
+  Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
+
+  if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+    IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#pragma unroll
+    for (int w = 0; w < WAVES; ++w) {
+      const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+      const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+      const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
+      in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
+#pragma unroll
+      for (int e = 0; e < PACK_SIZE / 2; ++e) {
+        ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
+      }
+    }
+    thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+  } else if constexpr (IS_CACHED_ACT_OP) {
+    __syncthreads();
+    IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#pragma unroll
+    for (int w = 0; w < WAVES; ++w) {
+      const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+      const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+      const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
+      in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
+      if constexpr (std::is_same_v<IType, float>) {
+#pragma unroll
+        for (int e = 0; e < PACK_SIZE; ++e) {
+          thread_amax = fmaxf(thread_amax, fabsf(in_cached[w].data.elt[e]));
+        }
+      } else {
+#pragma unroll
+        for (int e = 0; e < PACK_SIZE; e += 2) {
+          const IType2 in_cached_2x = {in_cached[w].data.elt[e], in_cached[w].data.elt[e + 1]};
+          ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
+        }
+      }
+    }
+    if constexpr (!std::is_same_v<IType, float>) {
+      thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+    }
+  } else {
+#pragma unroll
+    for (int w = 0; w < WAVES; ++w) {
+      const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+      const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+      const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
+
+      Vec<IType, PACK_SIZE> in;
+      Vec<IType, PACK_SIZE> act_in;
+
+      in.load_from(&in_sh[shmem_offset_rowwise]);
+      if constexpr (IS_DACT) {
+        act_in.load_from(&act_in_sh[shmem_offset_rowwise]);
+      }
+#pragma unroll
+      for (int e = 0; e < PACK_SIZE; ++e) {
+        const int j = w * PACK_SIZE + e;
+        float elt = static_cast<float>(in.data.elt[e]);
+        if constexpr (IS_ACT) {
+          elt = OP(elt, {});
+        }
+        if constexpr (IS_DACT) {
+          float act_in_elt = static_cast<float>(act_in.data.elt[e]);
+          elt *= OP(act_in_elt, {});
+        }
+
+        if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
+          thread_dbias_rowwise[j] += elt;
+        }
+        if constexpr (!std::is_same_v<IType, float>) {
+          elt = static_cast<float>(static_cast<IType>(elt));
+        }
+        thread_amax = fmaxf(thread_amax, fabsf(elt));
+        in_compute_rowwise[j] = elt;
+      }
+    }
+  }
+
+  const e8m0_t biased_exponent =
+      ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+  const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
+  const int stage_scales_offset_X = scales_offset_X_rowwise;
+
+  size_t scale_idx = 0;
+  if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+    scale_idx = transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
+        stage_scales_offset_Y, stage_scales_offset_X, DIVUP(cols, static_cast<size_t>(128)));
+  } else {
+    scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
+  }
+  if (rowwise_scale_is_within_bounds) {
+    scales_rowwise[scale_idx] = biased_exponent;
+  }
+
+  const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+  const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
+
+#pragma unroll
+  for (int w = 0; w < WAVES; ++w) {
+    Vec<OType2, PACK_SIZE / 2> out;
+#pragma unroll
+    for (int e = 0; e < PACK_SIZE / 2; ++e) {
+      IType2 in;
+      OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
+      if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+        in = in_IType[w].data.elt[e];
+      } else if constexpr (IS_CACHED_ACT_OP) {
+        in.x = in_cached[w].data.elt[2 * e];
+        in.y = in_cached[w].data.elt[2 * e + 1];
+      } else {
+        const int j = w * PACK_SIZE + 2 * e;
+        in.x = in_compute_rowwise[j];
+        in.y = in_compute_rowwise[j + 1];
+      }
+      ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
+    }
+    const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+    const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+    const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
+    out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
+  }
+
+  return thread_amax;
+}
+
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel(
@@ -393,18 +658,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
 
-  using IType2 = typename ptx::FPx2<IType>;
-  using OType2 = typename ptx::FPx2<OType>;
-
-  using transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
-
   if constexpr (NO_ACTIVATIONS) {
     if (noop != nullptr && noop[0] == 1.0f) {
       return;
     }
   }
-
-  constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING && COLWISE_SCALING;
 
   const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
@@ -713,223 +971,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t buff = buff_in;
       float thread_amax = 0.0f;
       if constexpr (COLWISE_SCALING) {
-        // Column-wise path:
-        // 1) load/compute values for one [32x1] stripe per thread
-        // 2) compute/write E8M0 scale
-        // 3) scale and write FP8 values into shared output buffer
-        const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
-        thread_amax = 0.0f;
-        float in_compute_colwise[BUFF_DIM_Y];
-        IType in_colwise_IType[BUFF_DIM_Y];
-
-        if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-          IType thread_amax_f16 = static_cast<IType>(0.0f);
-#pragma unroll
-          for (int i = 0; i < BUFF_DIM_Y; ++i) {
-            const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-            in_colwise_IType[i] = in_sh[shmem_offset_colwise];
-            thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
-          }
-          thread_amax = static_cast<float>(thread_amax_f16);
-        } else {
-#pragma unroll
-          for (int i = 0; i < BUFF_DIM_Y; ++i) {
-            const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-
-            float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
-            if constexpr (IS_ACT) {
-              elt = OP(elt, {});
-            }
-            if constexpr (IS_DACT) {
-              float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
-              elt *= OP(act_in_elt, {});
-            }
-            if constexpr (IS_DBIAS) {
-              partial_dbias_colwise += elt;
-            }
-            if constexpr (!std::is_same_v<IType, float>) {
-              elt = static_cast<float>(static_cast<IType>(elt));
-            }
-            if constexpr (IS_CACHED_ACT_OP) {
-              cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
-            }
-            thread_amax = fmaxf(thread_amax, fabsf(elt));
-            in_compute_colwise[i] = elt;
-          }
-        }
-
-        const e8m0_t biased_exponent =
-            ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-
-        const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
-        const size_t global_scales_offset_X = scales_offset_X_colwise;
-
-        size_t scale_idx = 0;
-        if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-          const size_t tensor_base_row = tensor_base_for_scales / cols;
-          const size_t tensor_scales_offset_Y_base = tensor_base_row / SCALE_DIM_Y;
-          const size_t tensor_scales_offset_colwise_base = tensor_base_for_scales / SCALE_DIM_Y;
-          const size_t local_scales_offset_Y = global_scales_offset_Y - tensor_scales_offset_Y_base;
-          scale_idx = tensor_scales_offset_colwise_base +
-                      gemm_swizzled_scale_idx(global_scales_offset_X, local_scales_offset_Y,
-                                              DIVUP(rows, static_cast<size_t>(128)));
-        } else {
-          scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-        }
-        scales_colwise[scale_idx] = biased_exponent;
-
-        const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-        const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
-
-#pragma unroll
-        for (int i = 0; i < SCALE_DIM_Y; ++i) {
-          float in;
-          if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-            in = static_cast<float>(in_colwise_IType[i]);
-          } else {
-            in = in_compute_colwise[i];
-          }
-          const float scaled_out = in * block_scale_inverse;
-
-          const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-          out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
-        }
+        thread_amax = process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                            ROWWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
+            buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
+            scale_stride_colwise, tensor_base_for_scales, rows, cols, in_sh, act_in_sh, cached_act_sh,
+            out_colwise_data_sh, scales_colwise, partial_dbias_colwise);
       }
 
       if constexpr (ROWWISE_SCALING) {
-        // Row-wise path:
-        // 1) load/compute values for one [1x32] stripe per thread
-        // 2) compute/write E8M0 scale
-        // 3) scale and write FP8 values into shared output buffer
-        const size_t shmem_offset_base_rowwise =
-            buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
-        thread_amax = 0.0f;
-        float in_compute_rowwise[SCALE_DIM_X];
-        Vec<IType, PACK_SIZE> in_cached[WAVES];
-        Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
-
-        if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-          IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#pragma unroll
-          for (int w = 0; w < WAVES; ++w) {
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-            const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-            const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-            in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
-#pragma unroll
-            for (int e = 0; e < PACK_SIZE / 2; ++e) {
-              ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
-            }
-          }
-          thread_amax =
-              static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
-        } else if constexpr (IS_CACHED_ACT_OP) {
-          __syncthreads();
-          IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#pragma unroll
-          for (int w = 0; w < WAVES; ++w) {
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-            const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-            const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-            in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
-            if constexpr (std::is_same_v<IType, float>) {
-#pragma unroll
-              for (int e = 0; e < PACK_SIZE; ++e) {
-                thread_amax = fmaxf(thread_amax, fabsf(in_cached[w].data.elt[e]));
-              }
-            } else {
-#pragma unroll
-              for (int e = 0; e < PACK_SIZE; e += 2) {
-                const IType2 in_cached_2x = {in_cached[w].data.elt[e], in_cached[w].data.elt[e + 1]};
-                ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
-              }
-            }
-          }
-          if constexpr (!std::is_same_v<IType, float>) {
-            thread_amax =
-                static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
-          }
-        } else {
-#pragma unroll
-          for (int w = 0; w < WAVES; ++w) {
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-            const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-            const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-
-            Vec<IType, PACK_SIZE> in;
-            Vec<IType, PACK_SIZE> act_in;
-
-            in.load_from(&in_sh[shmem_offset_rowwise]);
-            if constexpr (IS_DACT) {
-              act_in.load_from(&act_in_sh[shmem_offset_rowwise]);
-            }
-#pragma unroll
-            for (int e = 0; e < PACK_SIZE; ++e) {
-              const int j = w * PACK_SIZE + e;
-              float elt = static_cast<float>(in.data.elt[e]);
-              if constexpr (IS_ACT) {
-                elt = OP(elt, {});
-              }
-              if constexpr (IS_DACT) {
-                float act_in_elt = static_cast<float>(act_in.data.elt[e]);
-                elt *= OP(act_in_elt, {});
-              }
-
-              if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
-                thread_dbias_rowwise[j] += elt;
-              }
-              if constexpr (!std::is_same_v<IType, float>) {
-                elt = static_cast<float>(static_cast<IType>(elt));
-              }
-              thread_amax = fmaxf(thread_amax, fabsf(elt));
-              in_compute_rowwise[j] = elt;
-            }
-          }
-        }
-
-        const e8m0_t biased_exponent =
-            ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
-        const int stage_scales_offset_X = scales_offset_X_rowwise;
-
-        size_t scale_idx = 0;
-        if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-          scale_idx = gemm_swizzled_scale_idx(stage_scales_offset_Y, stage_scales_offset_X,
-                                              DIVUP(cols, static_cast<size_t>(128)));
-        } else {
-          scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
-        }
-        if (rowwise_scale_is_within_bounds) {
-          scales_rowwise[scale_idx] = biased_exponent;
-        }
-
-        const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-        const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
-
-#pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          Vec<OType2, PACK_SIZE / 2> out;
-#pragma unroll
-          for (int e = 0; e < PACK_SIZE / 2; ++e) {
-            IType2 in;
-            OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
-            if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-              in = in_IType[w].data.elt[e];
-            } else if constexpr (IS_CACHED_ACT_OP) {
-              in.x = in_cached[w].data.elt[2 * e];
-              in.y = in_cached[w].data.elt[2 * e + 1];
-            } else {
-              const int j = w * PACK_SIZE + 2 * e;
-              in.x = in_compute_rowwise[j];
-              in.y = in_compute_rowwise[j + 1];
-            }
-            ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
-          }
-          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-          const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
-          out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
-        }
+        thread_amax = process_rowwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                            COLWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
+            buff, stage_offset_Y, thread_offset_Y_rowwise, thread_offset_X_rowwise, bank_group,
+            scales_offset_Y_rowwise, scales_offset_X_rowwise, scale_stride_rowwise,
+            rowwise_scale_is_within_bounds, cols, in_sh, act_in_sh, cached_act_sh, out_rowwise_data_sh,
+            scales_rowwise, thread_dbias_rowwise);
       }
 
       __builtin_assume(block_amax >= 0);
