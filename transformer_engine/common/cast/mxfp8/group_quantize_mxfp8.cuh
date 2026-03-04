@@ -36,17 +36,26 @@ __device__ alignas(128) CUtensorMap g_tensor_maps_act_input[MAX_SUPPORTED_TENSOR
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_rowwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 
+struct TunableConfig {
+  static constexpr size_t CHUNK_DIM_Y = 128;
+  static constexpr size_t CHUNK_DIM_X = 128;
+  static constexpr size_t THREADS_PER_CHUNK = 128;
+  static constexpr size_t PREFETCH_STAGES = 1;
+  // Set false to run one-CTA-per-block (non-persistent) mode.
+  static constexpr bool PERSISTENT = true;
+};
+
 constexpr size_t SCALE_DIM_Y = 32;
 constexpr size_t SCALE_DIM_X = 32;
 
-constexpr size_t PREFETCH_STAGES = 1;
+constexpr size_t PREFETCH_STAGES = TunableConfig::PREFETCH_STAGES;
 constexpr size_t BUFFS_NUM = PREFETCH_STAGES + 1;
 constexpr size_t PACK_SIZE = 4;
 constexpr size_t WAVES = SCALE_DIM_X / PACK_SIZE;
 
-constexpr size_t CHUNK_DIM_Y = 128;
-constexpr size_t CHUNK_DIM_X = 128;
-constexpr size_t THREADS_PER_CHUNK = 128;
+constexpr size_t CHUNK_DIM_Y = TunableConfig::CHUNK_DIM_Y;
+constexpr size_t CHUNK_DIM_X = TunableConfig::CHUNK_DIM_X;
+constexpr size_t THREADS_PER_CHUNK = TunableConfig::THREADS_PER_CHUNK;
 
 constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
 
@@ -511,9 +520,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
     }
 
-    if (leading_thread) {
-      ptx::mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(&workID_mbar, workID_response_size);
-      ptx::try_cancel_cta(&workID_mbar, &workID_response);
+    if constexpr (TunableConfig::PERSISTENT) {
+      if (leading_thread) {
+        ptx::mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(&workID_mbar, workID_response_size);
+        ptx::try_cancel_cta(&workID_mbar, &workID_response);
+      }
     }
 
 #pragma unroll
@@ -521,12 +532,17 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t stage_offset_Y = stage * BUFF_DIM_Y;
 
       if (stage == STAGES - PREFETCH_STAGES) {
-        ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&workID_mbar, ctaid_parity);
-        ptx::get_cancelled_cta_id_2D(&workID_response, ctaid_X, ctaid_Y);
+        if constexpr (TunableConfig::PERSISTENT) {
+          ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&workID_mbar, ctaid_parity);
+          ptx::get_cancelled_cta_id_2D(&workID_response, ctaid_X, ctaid_Y);
+          ctaid_parity ^= 1;
+        } else {
+          ctaid_X = -1;
+          ctaid_Y = -1;
+        }
         if (ctaid_X == -1 && ctaid_Y == -1) {
           job_finished = true;
         }
-        ctaid_parity ^= 1;
       }
 
       if (!job_finished || (stage < STAGES - PREFETCH_STAGES)) {
