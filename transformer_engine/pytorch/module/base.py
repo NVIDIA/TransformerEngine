@@ -828,8 +828,70 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     ) -> Optional[List[QuantizerRole]]:
         """Return an ordered list of :class:`QuantizerRole` for quantizers.
 
-        The returned list must have length `num_quantizers`.
-        Returning `None` means "no explicit roles".
+        Overview
+        --------
+        When using ``CustomRecipe``, the quantizer factory is called once
+        per quantizer slot.  Each call receives a ``QuantizerRole`` that
+        tells the factory *what* is being quantized so it can return the
+        right quantizer.
+
+        This method builds the role list.  Subclasses override it to
+        describe their internal GEMM layout.
+
+        Slot layout
+        -----------
+        Return one ``QuantizerRole`` per slot, in the same order as the
+        module's quantizer array.  For example, ``Linear`` uses 3
+        forward slots ``[input, weight, output]`` and 2 backward slots
+        ``[grad_output, grad_input]``.  Multi-GEMM modules like
+        ``LayerNormMLP`` repeat that pattern for each GEMM:
+        ``[fc1_input, fc1_weight, fc1_output, fc2_input, fc2_weight, fc2_output]``.
+
+        What to put in each slot
+        ------------------------
+        Create a ``QuantizerRole(module_type=..., tensor_type=...,
+        name=...)`` for each slot:
+
+        * **module_type** — the kind of module: ``"linear"``,
+          ``"grouped_linear"``, ``"dpa"``, etc.  The factory can dispatch
+          on this to use different quantization formats per module type.
+        * **tensor_type** — what tensor this slot holds, in the module's
+          own vocabulary.  For linears: ``"input"``, ``"weight"``,
+          ``"grad_output"``, etc.  For DPA: ``"qkv"``, ``"s"``,
+          ``"do"``, ``"dp"``, etc.
+        * **name** — the instance name (e.g. ``"encoder.layer0.fc1"``),
+          propagated from the ``name=`` constructor argument.  The factory
+          can dispatch on this to target specific layers.
+
+        Boundary slots
+        --------------
+        The last slot of a forward GEMM group (output) and the last slot
+        of a backward group (grad_input) are **boundary** slots — the
+        tensor leaves this module and enters an unknown consumer.  For
+        these slots, use ``self._output_quantizer_role`` (fwd) and
+        ``self._grad_input_quantizer_role`` (bwd), which default to
+        ``None``.  A parent module (e.g. ``MultiheadAttention``) can set
+        these attributes to fill in the consumer identity; see
+        ``MultiheadAttention._update_output_quantizer_roles`` for an
+        example.
+
+        Return value
+        ------------
+        * A list of ``QuantizerRole`` with length ``num_quantizers``.
+        * ``None`` to opt out of role-based dispatch.
+
+        Not implemented (default)
+        ~~~~~~~~~~~~~~~~~~~~~~~~~
+        The base implementation returns ``None``.  When ``None`` is
+        returned, ``CustomRecipeState`` emits a warning and falls back
+        to bare ``QuantizerRole()`` instances (all fields empty) for
+        every slot.  The factory still gets called once per slot, but
+        every call receives an identical empty role — it cannot
+        distinguish input from weight, forward from backward, or one
+        module from another.  What happens then depends entirely on the
+        factory: it may return the same quantizer for all slots (acting
+        as a uniform recipe), or it may raise an error if it requires
+        meaningful roles to dispatch on.
         """
         return None
 
