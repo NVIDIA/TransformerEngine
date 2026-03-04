@@ -15,6 +15,7 @@ quantization, and distributed training through sharding constraints.
 
 from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -274,6 +275,13 @@ def _layernorm_mlp_fwd_rule(
 
     assert not collective_op_set_1.forward.is_reduce_scatter
     assert not collective_op_set_2.forward.is_all_gather
+
+    if collective_op_set_1 != tex.noop_collective_op_set and not dot_2_input_axes:
+        warnings.warn(
+            "Collective GEMM with Shardy propagation may produce an incorrect sharding pattern"
+            " for the output. Set `dot_2_input_axes` to apply the correct sharding constraint.",
+            UserWarning,
+        )
 
     # x should be in shape of (batch..., hidden)
     # Kernel_1 should be in shape of (hidden_in, activation_len, intermediate)

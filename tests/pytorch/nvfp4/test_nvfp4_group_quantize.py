@@ -23,126 +23,14 @@ import torch
 import random
 import math
 
+from nvfp4_utils import (
+    get_nvfp4_scale_shape_no_padding,
+    generate_split_sections,
+    assert_same_shape_and_dtype,
+    reference_group_quantize,
+)
+
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
-
-
-def generate_random_multiples_sum(total=8192, n=4, multiple=64):
-    if total % multiple != 0:
-        raise ValueError(f"Total ({total}) must be a multiple of {multiple}")
-    if (total // multiple) < n:
-        raise ValueError("Total too small for given n and multiple.")
-
-    # Work in units of multiples
-    total_units = total // multiple
-
-    # choose n−1 random cut points in [1, total_units−1)
-    cuts = sorted(random.sample(range(1, total_units), n - 1))
-
-    # convert to segment lengths
-    parts = (
-        [cuts[0]] + [cuts[i] - cuts[i - 1] for i in range(1, len(cuts))] + [total_units - cuts[-1]]
-    )
-
-    # convert back to multiples
-    return [p * multiple for p in parts]
-
-
-def generate_split_sections(M: int, N: int, edge_cases: str) -> list[int]:
-    least_multiple = 64
-    num_chunks = 4
-    split_sections = None
-
-    avg_split = M // num_chunks
-
-    if M == 0 or N == 0:
-        # all zeros
-        return [0] * num_chunks
-    if edge_cases == "regular":
-        split_sections = [avg_split] * num_chunks
-    elif edge_cases == "zero_tokens_front":
-        split_sections = [0] + [avg_split] * (num_chunks - 2) + [avg_split * 2]
-    elif edge_cases == "zero_tokens_end":
-        split_sections = [avg_split * 2] + [avg_split] * (num_chunks - 2) + [0]
-    elif edge_cases == "zero_tokens_middle":
-        split_sections = [avg_split] * (num_chunks - 2) + [0] + [avg_split * 2]
-    elif edge_cases == "random_uneven_split":
-        split_sections = generate_random_multiples_sum(M, num_chunks, least_multiple)
-    else:
-        raise ValueError(f"Invalid edge case: {edge_cases}")
-
-    # adds up the split_sections to make it M
-    assert sum(split_sections) == M, "The split_sections do not add up to M"
-
-    # make sure every split_section is a multiple of least_multiple
-    for split_section in split_sections:
-        assert (
-            split_section % least_multiple == 0
-        ), "The split_sections are not multiples of least_multiple"
-
-    return split_sections
-
-
-# Calculate the shape of the scaling tensor for NVFP4 1D blockwise quantization without padding
-def get_nvfp4_scale_shape_no_padding(shape, columnwise):
-    M, K = 1, 1
-    M = math.prod(shape[:-1])
-    K = shape[-1]
-
-    if columnwise:
-        outer = K
-        inner = math.ceil(M / 16)
-        return (outer, inner)
-    # rowwise
-    outer = M
-    inner = math.ceil(K / 16)
-    return (outer, inner)
-
-
-def reference_group_quantize(
-    x: torch.Tensor,
-    quantizers: list[NVFP4Quantizer],
-    split_sections: list[int],
-    return_identity: bool,
-    return_transpose: bool,
-) -> torch.Tensor:
-    x_view = x.reshape(-1, x.size(-1))
-    x_chunks = torch.split(x, split_sections)
-
-    # rowwise quantization
-    x_qx = []
-    x_sx = []
-    x_amax_rowwise = []
-    # columnwise quantization
-    x_qx_t = []
-    x_sx_t = []
-    x_amax_colwise = []
-
-    for i in range(len(x_chunks)):
-        x_chunk = x_chunks[i]
-        x_nvfp4_res = quantizers[i](x_chunk)
-        if return_identity:
-            x_qx.append(x_nvfp4_res._rowwise_data.view(dtype=torch.uint8))
-            x_sx.append(x_nvfp4_res._rowwise_scale_inv)
-            x_amax_rowwise.append(x_nvfp4_res._amax_rowwise)
-        else:
-            x_qx.append(None)
-            x_sx.append(None)
-            x_amax_rowwise.append(None)
-        if return_transpose:
-            x_qx_t.append(x_nvfp4_res._columnwise_data.view(dtype=torch.uint8))
-            x_sx_t.append(x_nvfp4_res._columnwise_scale_inv)
-            x_amax_colwise.append(x_nvfp4_res._amax_columnwise)
-        else:
-            x_qx_t.append(None)
-            x_sx_t.append(None)
-            x_amax_colwise.append(None)
-
-    return x_qx, x_sx, x_amax_rowwise, x_qx_t, x_sx_t, x_amax_colwise
-
-
-def assert_same_shape_and_dtype(x: torch.Tensor, y: torch.Tensor) -> None:
-    assert x.shape == y.shape
-    assert x.dtype == y.dtype
 
 
 def check_group_quantization_nvfp4_versus_reference(
@@ -279,7 +167,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     with_rht: bool,
 ) -> None:
 
-    split_sections = generate_split_sections(M, N, edge_cases)
+    split_sections = generate_split_sections(M, N, edge_cases, least_multiple=64)
 
     # currently disable pre-RHT amax
     with_post_rht_amax = with_rht
