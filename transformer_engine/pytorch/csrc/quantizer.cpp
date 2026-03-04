@@ -178,17 +178,29 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
   }
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
-  py::object out_py = GroupedTensorClass(
-      std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                           static_cast<int64_t>(logical_last_dim)},
-      GetATenDType(dtype), "num_tensors"_a = num_tensors, "quantizer"_a = quantizer,
-      "data"_a = maybe_tensor_to_py(rowwise_data),
-      "columnwise_data"_a = maybe_tensor_to_py(columnwise_data), "scale_inv"_a = py::none(),
-      "columnwise_scale_inv"_a = py::none(), "amax"_a = py::none(),
-      "columnwise_amax"_a = py::none(), "scale"_a = py::none(),
-      "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
-      "last_dims"_a = py::none(),
-      "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none());
+  py::dict kwargs;
+  py::tuple args(0);
+  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                                  static_cast<int64_t>(logical_last_dim)});
+  kwargs["dtype"] = py::cast(GetATenDType(dtype));
+  kwargs["num_tensors"] = py::cast(num_tensors);
+  kwargs["quantizer"] = quantizer;
+  kwargs["data"] = maybe_tensor_to_py(rowwise_data);
+  kwargs["columnwise_data"] = maybe_tensor_to_py(columnwise_data);
+  kwargs["scale_inv"] = py::none();
+  kwargs["columnwise_scale_inv"] = py::none();
+  kwargs["amax"] = py::none();
+  kwargs["columnwise_amax"] = py::none();
+  kwargs["scale"] = py::none();
+  kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
+  kwargs["last_dims"] = py::none();
+  kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
+  if (result == nullptr) {
+    PyErr_Print();
+  }
+  NVTE_CHECK(result != nullptr, "Failed to create GroupedTensor instance");
+  py::object out_py = py::reinterpret_steal<py::object>(result);
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -372,18 +384,29 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   }
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
-  py::object out_py = GroupedTensorClass(
-      std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                           static_cast<int64_t>(logical_last_dim)},
-      GetATenDType(dtype), "num_tensors"_a = num_tensors, "quantizer"_a = quantizer,
-      "data"_a = maybe_tensor_to_py(rowwise_data),
-      "columnwise_data"_a = maybe_tensor_to_py(columnwise_data),
-      "scale_inv"_a = maybe_tensor_to_py(rowwise_scale_inv),
-      "columnwise_scale_inv"_a = maybe_tensor_to_py(columnwise_scale_inv), "amax"_a = amax,
-      "columnwise_amax"_a = py::none(), "scale"_a = py::none(),
-      "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
-      "last_dims"_a = py::none(),
-      "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none());
+  py::dict kwargs;
+  py::tuple args(0);
+  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                                  static_cast<int64_t>(logical_last_dim)});
+  kwargs["dtype"] = py::cast(GetATenDType(dtype));
+  kwargs["num_tensors"] = py::cast(num_tensors);
+  kwargs["quantizer"] = quantizer;
+  kwargs["data"] = maybe_tensor_to_py(rowwise_data);
+  kwargs["columnwise_data"] = maybe_tensor_to_py(columnwise_data);
+  kwargs["scale_inv"] = maybe_tensor_to_py(rowwise_scale_inv);
+  kwargs["columnwise_scale_inv"] = maybe_tensor_to_py(columnwise_scale_inv);
+  kwargs["amax"] = amax;
+  kwargs["columnwise_amax"] = py::none();
+  kwargs["scale"] = py::none();
+  kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
+  kwargs["last_dims"] = py::none();
+  kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
+  if (result == nullptr) {
+    PyErr_Print();
+  }
+  NVTE_CHECK(result != nullptr, "Failed to create GroupedTensor instance");
+  py::object out_py = py::reinterpret_steal<py::object>(result);
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -679,18 +702,29 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   }
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
-  py::object out_py = GroupedTensorClass(
-      std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                           static_cast<int64_t>(logical_last_dim)},
-      GetATenDType(dtype), "num_tensors"_a = num_tensors, "quantizer"_a = quantizer,
-      "data"_a = maybe_tensor_to_py(rowwise_data),
-      "columnwise_data"_a = maybe_tensor_to_py(columnwise_data),
-      "scale_inv"_a = maybe_tensor_to_py(rowwise_scale_inv),
-      "columnwise_scale_inv"_a = maybe_tensor_to_py(columnwise_scale_inv), "amax"_a = amax,
-      "columnwise_amax"_a = py::none(), "scale"_a = scale,
-      "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
-      "last_dims"_a = py::none(),
-      "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none());
+  py::dict kwargs;
+  py::tuple args(0);
+  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                                  static_cast<int64_t>(logical_last_dim)});
+  kwargs["dtype"] = py::cast(GetATenDType(dtype));
+  kwargs["num_tensors"] = py::cast(num_tensors);
+  kwargs["quantizer"] = quantizer;
+  kwargs["data"] = maybe_tensor_to_py(rowwise_data);
+  kwargs["columnwise_data"] = maybe_tensor_to_py(columnwise_data);
+  kwargs["scale_inv"] = maybe_tensor_to_py(rowwise_scale_inv);
+  kwargs["columnwise_scale_inv"] = maybe_tensor_to_py(columnwise_scale_inv);
+  kwargs["amax"] = amax;
+  kwargs["columnwise_amax"] = py::none();
+  kwargs["scale"] = scale;
+  kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
+  kwargs["last_dims"] = py::none();
+  kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
+  if (result == nullptr) {
+    PyErr_Print();
+  }
+  NVTE_CHECK(result != nullptr, "Failed to create GroupedTensor instance");
+  py::object out_py = py::reinterpret_steal<py::object>(result);
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -1026,18 +1060,29 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   }
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
-  py::object out_py = GroupedTensorClass(
-      std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                           static_cast<int64_t>(logical_last_dim)},
-      GetATenDType(dtype), "num_tensors"_a = num_tensors, "quantizer"_a = quantizer,
-      "data"_a = maybe_tensor_to_py(rowwise_data),
-      "columnwise_data"_a = maybe_tensor_to_py(columnwise_data),
-      "scale_inv"_a = maybe_tensor_to_py(rowwise_scale_inv),
-      "columnwise_scale_inv"_a = maybe_tensor_to_py(columnwise_scale_inv), "amax"_a = py::none(),
-      "columnwise_amax"_a = py::none(), "scale"_a = py::none(),
-      "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
-      "last_dims"_a = py::none(),
-      "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none());
+  py::dict kwargs;
+  py::tuple args(0);
+  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                                  static_cast<int64_t>(logical_last_dim)});
+  kwargs["dtype"] = py::cast(GetATenDType(dtype));
+  kwargs["num_tensors"] = py::cast(num_tensors);
+  kwargs["quantizer"] = quantizer;
+  kwargs["data"] = maybe_tensor_to_py(rowwise_data);
+  kwargs["columnwise_data"] = maybe_tensor_to_py(columnwise_data);
+  kwargs["scale_inv"] = maybe_tensor_to_py(rowwise_scale_inv);
+  kwargs["columnwise_scale_inv"] = maybe_tensor_to_py(columnwise_scale_inv);
+  kwargs["amax"] = py::none();
+  kwargs["columnwise_amax"] = py::none();
+  kwargs["scale"] = py::none();
+  kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
+  kwargs["last_dims"] = py::none();
+  kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
+  if (result == nullptr) {
+    PyErr_Print();
+  }
+  NVTE_CHECK(result != nullptr, "Failed to create GroupedTensor instance");
+  py::object out_py = py::reinterpret_steal<py::object>(result);
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -1431,18 +1476,29 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   out_cpp.set_with_gemm_swizzled_scales(this->optimize_for_gemm);
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
-  py::object out_py = GroupedTensorClass(
-      std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                           static_cast<int64_t>(logical_last_dim)},
-      GetATenDType(dtype), "num_tensors"_a = num_tensors, "quantizer"_a = quantizer,
-      "data"_a = maybe_tensor_to_py(rowwise_data),
-      "columnwise_data"_a = maybe_tensor_to_py(columnwise_data),
-      "scale_inv"_a = maybe_tensor_to_py(rowwise_scale_inv),
-      "columnwise_scale_inv"_a = maybe_tensor_to_py(columnwise_scale_inv), "amax"_a = py::none(),
-      "columnwise_amax"_a = py::none(), "scale"_a = py::none(),
-      "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
-      "last_dims"_a = py::none(),
-      "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none());
+  py::dict kwargs;
+  py::tuple args(0);
+  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                                  static_cast<int64_t>(logical_last_dim)});
+  kwargs["dtype"] = py::cast(GetATenDType(dtype));
+  kwargs["num_tensors"] = py::cast(num_tensors);
+  kwargs["quantizer"] = quantizer;
+  kwargs["data"] = maybe_tensor_to_py(rowwise_data);
+  kwargs["columnwise_data"] = maybe_tensor_to_py(columnwise_data);
+  kwargs["scale_inv"] = maybe_tensor_to_py(rowwise_scale_inv);
+  kwargs["columnwise_scale_inv"] = maybe_tensor_to_py(columnwise_scale_inv);
+  kwargs["amax"] = py::none();
+  kwargs["columnwise_amax"] = py::none();
+  kwargs["scale"] = py::none();
+  kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
+  kwargs["last_dims"] = py::none();
+  kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
+  if (result == nullptr) {
+    PyErr_Print();
+  }
+  NVTE_CHECK(result != nullptr, "Failed to create GroupedTensor instance");
+  py::object out_py = py::reinterpret_steal<py::object>(result);
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -1848,19 +1904,29 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   out_cpp.set_with_gemm_swizzled_scales(this->optimize_for_gemm);
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
-  py::object out_py = GroupedTensorClass(
-      std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                           static_cast<int64_t>(logical_last_dim)},
-      GetATenDType(dtype), "num_tensors"_a = num_tensors, "quantizer"_a = quantizer,
-      "data"_a = maybe_tensor_to_py(rowwise_data),
-      "columnwise_data"_a = maybe_tensor_to_py(columnwise_data),
-      "scale_inv"_a = maybe_tensor_to_py(rowwise_scale_inv),
-      "columnwise_scale_inv"_a = maybe_tensor_to_py(columnwise_scale_inv),
-      "amax"_a = maybe_tensor_to_py(rowwise_amax),
-      "columnwise_amax"_a = maybe_tensor_to_py(columnwise_amax), "scale"_a = py::none(),
-      "first_dims"_a = first_dims.has_value() ? py::cast(*first_dims) : py::none(),
-      "last_dims"_a = py::none(),
-      "tensor_offsets"_a = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none());
+  py::dict kwargs;
+  py::tuple args(0);
+  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
+                                                  static_cast<int64_t>(logical_last_dim)});
+  kwargs["dtype"] = py::cast(GetATenDType(dtype));
+  kwargs["num_tensors"] = py::cast(num_tensors);
+  kwargs["quantizer"] = quantizer;
+  kwargs["data"] = maybe_tensor_to_py(rowwise_data);
+  kwargs["columnwise_data"] = maybe_tensor_to_py(columnwise_data);
+  kwargs["scale_inv"] = maybe_tensor_to_py(rowwise_scale_inv);
+  kwargs["columnwise_scale_inv"] = maybe_tensor_to_py(columnwise_scale_inv);
+  kwargs["amax"] = maybe_tensor_to_py(rowwise_amax);
+  kwargs["columnwise_amax"] = maybe_tensor_to_py(columnwise_amax);
+  kwargs["scale"] = py::none();
+  kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
+  kwargs["last_dims"] = py::none();
+  kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
+  if (result == nullptr) {
+    PyErr_Print();
+  }
+  NVTE_CHECK(result != nullptr, "Failed to create GroupedTensor instance");
+  py::object out_py = py::reinterpret_steal<py::object>(result);
 
   return {std::move(out_cpp), std::move(out_py)};
 }
