@@ -384,9 +384,20 @@ def common_lib_has_symbol(symbol: str) -> bool:
     """
     root = Path(__file__).resolve().parent.parent
 
-    # Candidate paths: editable-install root, default CMake build dir,
+    # First candidate: derive from the installed transformer_engine module location.
+    # This covers source and PyPI installs where the SO lives inside the package dir.
+    candidates = []
+    try:
+        te_spec = importlib.util.find_spec("transformer_engine")
+        if te_spec is not None and te_spec.origin is not None:
+            te_dir = Path(te_spec.origin).parent
+            candidates.append(te_dir / "libtransformer_engine.so")
+    except (ModuleNotFoundError, ValueError):
+        pass
+
+    # Remaining candidates: editable-install root, default CMake build dir,
     # and user-specified CMake build dir.
-    candidates = [
+    candidates += [
         root / "libtransformer_engine.so",
         root / "build" / "cmake" / "libtransformer_engine.so",
     ]
