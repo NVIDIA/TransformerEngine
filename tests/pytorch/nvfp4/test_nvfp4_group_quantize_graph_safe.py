@@ -10,7 +10,7 @@ from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4Qu
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.common.recipe import NVFP4BlockScaling
-from transformer_engine.pytorch.tensor.storage.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 
 import pytest
 import torch
