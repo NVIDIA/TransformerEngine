@@ -560,12 +560,13 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
 }
 
 // This FFI is EXPERIMENTAL and subject to change without deprecation, intended for use in JAX's internal implementation of grouped GEMM.
-Error_Type GroupedGemmV2FFI(
-    cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv, Buffer_Type rhs_data,
-    Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type group_sizes, Buffer_Type alpha,
-    Buffer_Type beta, Result_Type output, Result_Type cublas_workspace, Result_Type setup_workspace,
-    Result_Type int64_workspace, size_t m, size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
-    JAXX_Scaling_Mode scaling_mode, bool is_grouped_dense_wgrad) {
+Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
+                            Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
+                            Buffer_Type group_sizes, Buffer_Type alpha, Buffer_Type beta,
+                            Result_Type output, Result_Type cublas_workspace,
+                            Result_Type setup_workspace, Result_Type int64_workspace, size_t m,
+                            size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
+                            JAXX_Scaling_Mode scaling_mode, bool is_grouped_dense_wgrad) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T

@@ -2205,9 +2205,7 @@ def grouped_gemm(
         " and padded with zeros to not affect the result of the MoE block."
     )
 
-    use_v2_ffi = _can_use_v2_grouped_gemm(
-        scaling_mode, lhs_data.dtype, has_bias
-    )
+    use_v2_ffi = _can_use_v2_grouped_gemm(scaling_mode, lhs_data.dtype, has_bias)
     if use_v2_ffi:
         num_gemms = group_sizes.shape[0]
         additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
