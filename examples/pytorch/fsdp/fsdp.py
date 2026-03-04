@@ -345,7 +345,7 @@ def train(opts):
                 fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
             )
         else:
-             # recipe=None is intentional: te.autocast substitutes get_default_fp8_recipe()
+            # recipe=None is intentional: te.autocast substitutes get_default_fp8_recipe()
             # internally when recipe is None, and skips check_recipe_support entirely
             # when enabled=False, so this is safe. The global FP8 state will be populated
             # with a default recipe, but it has no effect since FP8 is disabled.
@@ -368,7 +368,8 @@ def train(opts):
                 dtype = new_dtype
                 dtype_name = str(dtype).replace("torch.", "")
                 dist_print(
-                    f"Warning: --dtype {dtype_name} overrides --precision {opts.precision} dtype setting"
+                    f"Warning: --dtype {dtype_name} overrides --precision {opts.precision} dtype"
+                    " setting"
                 )
                 if not no_fp8:
                     recipe = get_recipe_for_precision(opts.precision)
