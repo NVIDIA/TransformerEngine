@@ -6,6 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
+import warnings
 from typing import Dict, Optional, Tuple, Union
 import functools
 
@@ -156,6 +157,12 @@ class NVFP4Quantizer(Quantizer):
             with_random_sign_mask, torch.cuda.current_device()
         )
         self.rht_matrix = get_rht_matrix(with_random_sign_mask, torch.cuda.current_device())
+
+    def __getstate__(self):
+        """Exclude unpicklable process group from serialized state."""
+        state = self.__dict__.copy()
+        state["amax_reduction_group"] = None
+        return state
 
     def update_quantized(
         self,
@@ -616,6 +623,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 )
                 # pylint: disable=unnecessary-dunder-call
                 super(NVFP4Tensor, type(self)).data.__set__(self, dummy_tensor)
+
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
             self._quantizer = tensor._quantizer
@@ -634,6 +642,35 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
 
     # Cast to FP8 when setting NVFP4Tensor.data
     data = property(_get_data, _set_data)
+
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("NVFP4Tensor has no data!")
+
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            byte_shape = self._rowwise_data.shape
+            return torch.Size(byte_shape[:-1] + (byte_shape[-1] * 2,))
+        if self._columnwise_data is not None:
+            byte_shape = self._columnwise_data.shape
+            return torch.Size(byte_shape[1:-1] + (byte_shape[-1] * 2, byte_shape[0]))
+        raise RuntimeError("NVFP4Tensor has no data!")
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.is_cuda
+        if self._columnwise_data is not None:
+            return self._columnwise_data.is_cuda
+        raise RuntimeError("NVFP4Tensor has no data!")
 
 
 class _ViewFunc(torch.autograd.Function):
@@ -671,10 +708,14 @@ class _ViewFunc(torch.autograd.Function):
                     shape[i] = d_inferred
                     break
         if shape[-1] != cur_shape[-1]:
-            raise RuntimeError(
+            warnings.warn(
                 "NVFP4Tensor does not support reshaping inner dimension "
-                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                "then ignore this warning since this view is not going to be used anywhere.",
+                stacklevel=2,
             )
+            return tensor.dequantize().view(*shape)
 
         # Reshape data
         new_rowwise_data = None
@@ -793,10 +834,14 @@ class _ReshapeFunc(torch.autograd.Function):
                     shape[i] = d_inferred
                     break
         if shape[-1] != cur_shape[-1]:
-            raise RuntimeError(
+            warnings.warn(
                 "NVFP4Tensor does not support reshaping inner dimension "
-                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                "then ignore this warning since this view is not going to be used anywhere.",
+                stacklevel=2,
             )
+            return tensor.dequantize().reshape(*shape)
 
         # Reshape data
         new_rowwise_data = None

@@ -242,6 +242,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
 
+    def __getstate__(self):
+        """Exclude unpicklable process group from serialized state."""
+        state = self.__dict__.copy()
+        state["amax_reduction_group"] = None
+        return state
+
     def copy(self) -> Float8CurrentScalingQuantizer:
         """Create shallow copy"""
 
@@ -842,6 +848,25 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             columnwise_usage=columnwise_usage,
         )
         return out, all_gather_outputs
+
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._data is not None:
+            return self._data.shape
+        if self._transpose is not None:
+            transpose_shape = self._transpose.shape
+            return torch.Size(tuple(transpose_shape[1:]) + (transpose_shape[0],))
+        raise RuntimeError("Both data and transpose are None")
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        if self._data is not None:
+            return self._data.is_cuda
+        if self._transpose is not None:
+            return self._transpose.is_cuda
+        raise RuntimeError("Both data and transpose are None")
 
     @classmethod
     def _make_in_reduce_ex(

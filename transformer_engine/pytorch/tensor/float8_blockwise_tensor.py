@@ -6,6 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
+import warnings
 from typing import Any, Optional, Tuple, Union
 
 import torch
@@ -511,6 +512,24 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
     # Cast to FP8 when setting Float8BlockwiseQTensor.data
     data = property(_get_data, _set_data)
 
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.shape
+        if self._columnwise_data is not None:
+            return self._columnwise_data.shape
+        raise RuntimeError("Float8BlockwiseQTensor has no data!")
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.is_cuda
+        if self._columnwise_data is not None:
+            return self._columnwise_data.is_cuda
+        raise RuntimeError("Float8BlockwiseQTensor has no data!")
+
 
 class _ViewFunc(torch.autograd.Function):
     """View function
@@ -548,19 +567,27 @@ class _ViewFunc(torch.autograd.Function):
         if tensor._is_2D_scaled:
             # For the case of 2D scaled tensor, the last 2 dimensions should not change
             if shape[-1] != ctx.shape[-1] or shape[-2] != ctx.shape[-2]:
-                raise RuntimeError(
+                warnings.warn(
                     "2D scaled Float8BlockwiseQTensor does not support view "
                     "the last 2 dimensions "
-                    f"(attempted to view dims={tuple(tensor.shape)} to {tuple(shape)})"
+                    f"(attempted to view dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                    "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                    "then ignore this warning since this view is not going to be used anywhere.",
+                    stacklevel=2,
                 )
+                return tensor.dequantize().view(*shape)
         else:
             # For the case of 1D scaled tensor, the last dimension should not change
             if shape[-1] != ctx.shape[-1]:
-                raise RuntimeError(
+                warnings.warn(
                     "1D scaled Float8BlockwiseQTensor does not support view "
                     "the last dimension "
-                    f"(attempted to view dims={tuple(tensor.shape)} to {tuple(shape)})"
+                    f"(attempted to view dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                    "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                    "then ignore this warning since this view is not going to be used anywhere.",
+                    stacklevel=2,
                 )
+                return tensor.dequantize().view(*shape)
 
         if list(shape) == list(tensor.shape):
             return tensor
@@ -655,19 +682,27 @@ class _ReshapeFunc(torch.autograd.Function):
         if tensor._is_2D_scaled:
             # For the case of 2D scaled tensor, the last 2 dimensions should not change
             if shape[-1] != ctx.shape[-1] or shape[-2] != ctx.shape[-2]:
-                raise RuntimeError(
+                warnings.warn(
                     "2D scaled Float8BlockwiseQTensor does not support reshaping "
                     "the last 2 dimensions "
-                    f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                    f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                    "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                    "then ignore this warning since this view is not going to be used anywhere.",
+                    stacklevel=2,
                 )
+                return tensor.dequantize().reshape(*shape)
         else:
             # For the case of 1D scaled tensor, the last dimension should not change
             if shape[-1] != ctx.shape[-1]:
-                raise RuntimeError(
+                warnings.warn(
                     "1D scaled Float8BlockwiseQTensor does not support reshaping "
                     "the last dimension "
-                    f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                    f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                    "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                    "then ignore this warning since this view is not going to be used anywhere.",
+                    stacklevel=2,
                 )
+                return tensor.dequantize().reshape(*shape)
         if list(shape) == list(tensor.shape):
             return tensor
 
