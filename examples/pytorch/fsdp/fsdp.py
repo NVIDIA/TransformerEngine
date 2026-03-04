@@ -69,7 +69,9 @@ def torch_dtype(d):
         "bfloat16": torch.bfloat16,
     }
     if lowercase(d) not in typemap.keys():
-        raise TypeError
+        raise argparse.ArgumentTypeError(
+            f"invalid dtype '{d}'. Supported values: fp32/float32, fp16/float16, bf16/bfloat16"
+        )
     return typemap[lowercase(d)]
 
 
@@ -284,27 +286,15 @@ def get_precision_preset(precision_value):
         case "nvfp4":
             recipe = NVFP4BlockScaling()
             return torch.bfloat16, False, recipe
+        case None:
+            # Default case: no precision preset specified, use original behavior.
+            # dtype and no_fp8 are controlled directly by --dtype and --no-fp8 flags.
+            return torch.bfloat16, True, None
         case _:
-            # Fail loudly if validation is bypassed or new preset added without updating this function
             raise ValueError(
                 f"Invalid precision preset: {precision_value}. "
                 "Supported values: fp32, fp16, fp8, mxfp8, nvfp4"
             )
-
-
-def get_recipe_for_precision(precision_value):
-    """Get FP8 recipe based on precision preset (when FP8 is enabled).
-
-    Args:
-        precision_value: The precision preset string
-
-    Returns:
-        Recipe object for FP8 training
-    """
-    _, _, recipe = get_precision_preset(precision_value)
-    if recipe is None:
-        raise NotImplementedError(f"No FP8 recipe defined for precision '{precision_value}'")
-    return recipe
 
 
 def train(opts):
@@ -329,58 +319,47 @@ def train(opts):
     dist_print(f"WORLD_SIZE = {WORLD_SIZE}")
     torch.manual_seed(opts.seed)
 
-    # Determine final configuration based on precedence rules
+   
+    # Start with precision preset values
+    preset_dtype, preset_no_fp8, preset_recipe = get_precision_preset(opts.precision)
+
+    dtype = preset_dtype
+    no_fp8 = preset_no_fp8
+    recipe = preset_recipe
+
+    # When no --precision is set, respect --no-fp8 and --dtype directly (original behavior)
     if opts.precision is None:
-        # Case 1: Backward compatibility - no precision preset specified
-        # Use original behavior with dtype and no_fp8 flags
-        dtype = opts.dtype
         no_fp8 = opts.no_fp8
-
-        # Set up recipe if FP8 is enabled
-        if not no_fp8:
-            recipe = DelayedScaling(
-                fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
-            )
-        else:
-            # recipe=None is intentional: te.autocast substitutes get_default_fp8_recipe()
-            # internally when recipe is None, and skips check_recipe_support entirely
-            # when enabled=False, so this is safe. The global FP8 state will be populated
-            # with a default recipe, but it has no effect since FP8 is disabled.
-            recipe = None
+        if opts.dtype is not None:
+            dtype = opts.dtype
     else:
-        # Case 2: Precision preset was explicitly specified
-        # Start with precision preset values
-        preset_dtype, preset_no_fp8, preset_recipe = get_precision_preset(opts.precision)
-
-        dtype = preset_dtype
         no_fp8 = preset_no_fp8
-        recipe = preset_recipe
-
         dist_print(f"Using precision preset: {opts.precision}")
 
-        # Apply explicit dtype override with warning
-        if dtype_explicitly_set:
-            new_dtype = opts.dtype
-            if new_dtype != preset_dtype:
-                dtype = new_dtype
-                dtype_name = str(dtype).replace("torch.", "")
-                dist_print(
-                    f"Warning: --dtype {dtype_name} overrides --precision {opts.precision} dtype"
-                    " setting"
-                )
-            else:
-                new_dtype_name = str(new_dtype).replace("torch.", "")
-                dist_print(
-                    f"Info: --dtype {new_dtype_name} matches --precision {opts.precision} preset"
-                    " default, no override needed"
-                )
+    dtype_name = str(dtype).replace("torch.", "")
 
-            # recipe is already set correctly from preset_recipe above;
-            # dtype only affects parameter storage, not the quantization recipe
+    # Apply explicit dtype override with warning
+    if dtype_explicitly_set and opts.precision is not None:
+        new_dtype = opts.dtype
+        if new_dtype != preset_dtype:
+            dtype = new_dtype
+            dist_print(
+                f"Warning: --dtype {dtype_name} overrides --precision {opts.precision} dtype"
+                " setting"
+            )
+        else:
+            new_dtype_name = str(new_dtype).replace("torch.", "")
+            dist_print(
+                f"Info: --dtype {new_dtype_name} matches --precision {opts.precision} preset"
+                " default, no override needed"
+            )
+
+        # recipe is already set correctly from preset_recipe above;
+        # dtype only affects parameter storage, not the quantization recipe
 
     # Always log the final configuration being used
     dist_print(
-        f"Training configuration: dtype={dtype}, "
+        f"Training configuration: dtype={dtype_name}, "
         f"quantization={'disabled' if no_fp8 else f'enabled ({type(recipe).__name__})'}"
     )
 
