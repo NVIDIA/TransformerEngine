@@ -24,6 +24,7 @@ from transformer_engine_jax import (
     get_device_compute_capability,
     initialize_cgemm_communicator,
     get_cgemm_num_max_streams,
+    get_grouped_gemm_setup_workspace_size,
 )
 
 from .base import BasePrimitive, register_primitive
@@ -70,6 +71,18 @@ __all__ = [
 
 
 num_cublas_streams = get_num_compute_streams()
+
+# Cache whether the CUDA-graphable grouped GEMM implementation is available at import time.
+# Calling get_grouped_gemm_setup_workspace_size raises a RuntimeError mentioning "cublas" when
+# compiled against cuBLAS < 13.2, in which case the cuda-graphable path is unavailable.
+try:
+    get_grouped_gemm_setup_workspace_size(1)
+    _v2_grouped_gemm_available = True
+except RuntimeError as e:
+    if "cublas" in str(e).lower():
+        _v2_grouped_gemm_available = False
+    else:
+        raise
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -591,7 +604,7 @@ class GemmPrimitive(BasePrimitive):
         assert_cublas_requirements(
             scaling_mode,
             lhs_contracting_size,
-            "LHS",
+            f"LHS {lhs_aval.shape} with contracting dims {lhs_cdims}",
         )
         rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
         rhs_contracting_size = (
@@ -602,7 +615,7 @@ class GemmPrimitive(BasePrimitive):
         assert_cublas_requirements(
             scaling_mode,
             rhs_contracting_size,
-            "RHS",
+            f"RHS {rhs_aval.shape} with contracting dims {rhs_cdims}",
         )
 
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta)
@@ -1430,12 +1443,15 @@ register_primitive(GroupedGemmCopySizesPrimitive)
 
 class GroupedGemmPrimitive(BasePrimitive):
     """
-    Primitive for grouped GEMM
+    Primitive for grouped GEMM using nvte_multi_tensor_gemm (supports all scaling modes) or nvte_grouped_gemm (supporting BF16).
     """
 
+    # args = lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, group_offset, unused_placeholder
     name = "te_grouped_gemm_ffi"
+    # args = lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, alpha, beta
+    name_graph_safe = "te_grouped_gemm_v2_ffi"
     multiple_results = True
-    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
     inner_primitive = None
     outer_primitive = None
 
@@ -1447,8 +1463,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv_aval,
         bias_aval,
         group_sizes_aval,
-        group_offset_aval,
-        *,
+        *additional_args,  # group_offset_aval, unused_placeholder OR alpha_aval, beta_aval
         M,
         N,
         K,
@@ -1459,6 +1474,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
+        use_v2_ffi,
     ):
         """
         Grouped GEMM operation.
@@ -1470,7 +1486,11 @@ class GroupedGemmPrimitive(BasePrimitive):
             rhs_scale_inv: Right-hand side input scale_inv matrix, 1D flattened array
             bias: Bias matrix of shape (G, N)
             group_sizes: 1D array containing the sizes of each group
-            group_offset: 1D array containing offsets for each group (not yet implemented)
+            additional_args: Either
+                * group_offsets: 1D array containing offsets for each group (not yet implemented)
+                OR
+                * alpha: 1D array of shape (G,) containing alpha values for each group
+                * beta: 1D array of shape (G,) containing beta values for each group
             M: Number of rows in the output matrix
             N: Number of columns in the output matrix
             K: Number of columns in the left-hand side matrix
@@ -1485,10 +1505,69 @@ class GroupedGemmPrimitive(BasePrimitive):
         Returns:
             A jnp.ndarray containing the result of the grouped GEMM operation
         """
-        del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
+        del lhs_data_aval, rhs_data_aval, bias_aval
         del K, lhs_is_trans, rhs_is_trans, has_bias, use_async_d2h_group_sizes
+
+        num_groups = group_sizes_aval.size
+
+        cublas_workspace_aval = jax.core.ShapedArray(
+            shape=(
+                GroupedGemmPrimitive._compute_cublas_workspace_size(
+                    scaling_mode, lhs_scale_inv_aval, rhs_scale_inv_aval, use_v2_ffi
+                ),
+            ),
+            dtype=jnp.uint8,
+        )
+
+        out_shape = (M, N)
+        if is_grouped_dense_wgrad:
+            out_shape = (num_groups, M, N)
+        out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
+
+        if use_v2_ffi:
+            setup_workspace_aval = jax.core.ShapedArray(
+                shape=(get_grouped_gemm_setup_workspace_size(num_groups),), dtype=jnp.uint8
+            )
+            # Temporary buffer for int32 -> int64 conversion of group_sizes on device.
+            int64_workspace_size = num_groups * jnp.dtype(jnp.int64).itemsize
+            int64_workspace_aval = jax.core.ShapedArray(
+                shape=(int64_workspace_size,), dtype=jnp.uint8
+            )
+
+            assert len(additional_args) == 2, (
+                "Expected additional_args to contain alpha, beta for the graph-safe grouped GEMM"
+                f" primitive, but got {len(additional_args)} arguments."
+            )
+            alpha_aval, beta_aval = additional_args
+            assert alpha_aval.shape == (
+                num_groups,
+            ), f"Expected alpha shape {(num_groups,)}, got {alpha_aval.shape}"
+            assert (
+                alpha_aval.dtype == jnp.float32
+            ), f"Expected alpha dtype float32, got {alpha_aval.dtype}"
+            assert beta_aval.shape == (
+                num_groups,
+            ), f"Expected beta shape {(num_groups,)}, got {beta_aval.shape}"
+            assert (
+                beta_aval.dtype == jnp.float32
+            ), f"Expected beta dtype float32, got {beta_aval.dtype}"
+
+            return (out_aval, cublas_workspace_aval, setup_workspace_aval, int64_workspace_aval)
+
+        return (out_aval, cublas_workspace_aval)
+
+    @staticmethod
+    def _compute_cublas_workspace_size(
+        scaling_mode: ScalingMode,
+        lhs_scale_inv_aval,
+        rhs_scale_inv_aval,
+        use_v2_ffi: bool,
+    ):
+        """Compute the required cuBLAS workspace size based on the scaling mode and alignment requirements."""
+        stream_count = 1 if use_v2_ffi else num_cublas_streams
+
         # TODO(Phuong): move some shape checks from Cpp to here
-        workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
+        workspace_size = get_cublas_workspace_size_bytes() * stream_count
         workspace_alignment_padding = 256
         tensor_scaling_sinv_aligment = 16
         mxfp8_scaling_sinv_alignment_padding = 256
@@ -1507,18 +1586,12 @@ class GroupedGemmPrimitive(BasePrimitive):
             # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
             workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
             workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
-        workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
-
-        out_shape = (M, N)
-        if is_grouped_dense_wgrad:
-            out_shape = (group_sizes_aval.size, M, N)
-        out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
-        return (out_aval, workspace_aval)
+        return workspace_size
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        (out_aval, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
-        return (out_aval,)
+        (out, *_) = GroupedGemmPrimitive.abstract(*args, **kwargs)
+        return (out,)
 
     @staticmethod
     def lowering(
@@ -1534,9 +1607,24 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
+        use_v2_ffi,
     ):
         del out_dtype
-        return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
+        if use_v2_ffi:
+            ffi_name = GroupedGemmPrimitive.name_graph_safe
+            return jax.ffi.ffi_lowering(ffi_name)(
+                ctx,
+                *args,
+                M=M,
+                N=N,
+                K=K,
+                lhs_is_trans=lhs_is_trans,
+                rhs_is_trans=rhs_is_trans,
+                scaling_mode=scaling_mode.value,
+                is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            )
+        ffi_name = GroupedGemmPrimitive.name
+        return jax.ffi.ffi_lowering(ffi_name)(
             ctx,
             *args,
             M=M,
@@ -1558,7 +1646,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset,
+        additional_arg_0,  # group_offset (non-graph-safe) OR alpha (graph-safe)
+        additional_arg_1,  # unused placeholder (non-graph-safe) OR beta (graph-safe)
         M,
         N,
         K,
@@ -1569,16 +1658,21 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
+        use_v2_ffi,
     ):
         assert GroupedGemmPrimitive.inner_primitive is not None
-        (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
+        if use_v2_ffi:
+            additional_args = (additional_arg_0, additional_arg_1)
+        else:
+            additional_args = (additional_arg_0,)
+        (out, *_) = GroupedGemmPrimitive.inner_primitive.bind(
             lhs_data,
             lhs_scale_inv,
             rhs_data,
             rhs_scale_inv,
             bias,
             group_sizes,
-            group_offset,
+            *additional_args,
             M=M,
             N=N,
             K=K,
@@ -1589,6 +1683,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             has_bias=has_bias,
             is_grouped_dense_wgrad=is_grouped_dense_wgrad,
             use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+            use_v2_ffi=use_v2_ffi,
         )
         return (out,)
 
@@ -1910,6 +2005,23 @@ def grouped_gemm_copy_group_sizes(
     return out
 
 
+def _can_use_v2_grouped_gemm(
+    scaling_mode: ScalingMode,
+    dtype: jnp.dtype,
+    has_bias: bool,
+) -> bool:
+    """Determine whether the cuda-graphable grouped GEMM implementation can be used based on the input parameters."""
+    # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
+    # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
+    # feature-compatible with the main branch.
+    # Bias can be supported in a kernel or in pure-JAX in the future.
+
+    if not _v2_grouped_gemm_available:
+        return False
+
+    return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
+
+
 def grouped_gemm(
     lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
     rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
@@ -1944,8 +2056,6 @@ def grouped_gemm(
         lhs: [M, K] or [K, N]
         rhs: [G, N, K] or [G, K, N] or [G * K, N] or [N, G * K]
     """
-    # TODO(Phuong): implement the group_offset
-    group_offset = group_offset or jnp.zeros((1,), jnp.int32)
 
     # TODO(Phuong): implement the precision
     del precision
@@ -2081,11 +2191,28 @@ def grouped_gemm(
     else:
         assert group_sizes.size == rhs_shape[0]
 
-    assert group_offset.size == 1
-
     has_bias = bias is not None
-    assert not has_bias or bias.shape == (group_sizes.size, N)
+    if has_bias:
+        assert bias.shape == (
+            group_sizes.size,
+            N,
+        ), f"bias shape {bias.shape} does not match expected shape {(group_sizes.size, N)}"
     bias = jnp.empty((), jnp.float32) if bias is None else bias
+
+    assert group_offset is None, (
+        "group_offset is not supported yet and is instead computed"
+        " internally assuming contiguous grouping. Any padding is included in the group_sizes"
+        " and padded with zeros to not affect the result of the MoE block."
+    )
+
+    use_v2_ffi = _can_use_v2_grouped_gemm(scaling_mode, lhs_data.dtype, has_bias)
+    if use_v2_ffi:
+        num_gemms = group_sizes.shape[0]
+        additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
+        additional_arg_1 = jnp.zeros((num_gemms,), jnp.float32)  # beta
+    else:
+        additional_arg_0 = jnp.zeros((1,), jnp.int32)  # group_offset
+        additional_arg_1 = jnp.zeros((0,), jnp.int32)  # unused placeholder
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
@@ -2094,7 +2221,8 @@ def grouped_gemm(
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset,
+        additional_arg_0,
+        additional_arg_1,
         M=M,
         N=N,
         K=K_lhs,
@@ -2105,5 +2233,6 @@ def grouped_gemm(
         has_bias=has_bias,
         is_grouped_dense_wgrad=is_grouped_dense_wgrad,
         use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+        use_v2_ffi=use_v2_ffi,
     )
     return out
