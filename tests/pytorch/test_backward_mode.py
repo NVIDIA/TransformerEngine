@@ -25,7 +25,7 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch.quantized_tensor import restore_from_saved
 
-from utils import quantization_tols, reset_rng_states
+from utils import assert_close, make_recipe, quantization_tols, reset_rng_states
 
 
 # --------------------------
@@ -42,15 +42,11 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_s
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 bf16_available, reason_for_no_bf16 = te.is_bf16_available(return_reason=True)
 
-# Broad dtype coverage for modules touched by this change.
 _core_dtypes = [torch.float16, torch.float32]
-if bf16_available:
-    _core_dtypes.insert(1, torch.bfloat16)
-
-# Fused GEMM+bias+activation requires FP16/BF16 output.
 _fused_dtypes = [torch.float16]
 if bf16_available:
-    _fused_dtypes.append(torch.bfloat16)
+    _core_dtypes.insert(1, torch.bfloat16)
+    _fused_dtypes.insert(1, torch.bfloat16)
 
 
 @pytest.fixture(autouse=True)
@@ -69,18 +65,6 @@ def backward_mode(request: pytest.FixtureRequest) -> str:
 # --------------------------
 # Shared helpers
 # --------------------------
-
-
-def _assert_exact(test: torch.Tensor, ref: torch.Tensor) -> None:
-    torch.testing.assert_close(test, ref, rtol=0, atol=0)
-
-
-def _assert_forward_matches_quantized_ref(
-    test: torch.Tensor,
-    ref: torch.Tensor,
-    recipe_name: str,
-) -> None:
-    torch.testing.assert_close(test, ref, **_fprop_tolerances(recipe_name))
 
 
 def _restore_saved_operands(output: torch.Tensor) -> list[Optional[torch.Tensor]]:
@@ -326,30 +310,25 @@ _shape_test_cases = [
     pytest.param((32, 1, 64), 64, id="3d_m32_s1_k64_n64"),
     pytest.param((8, 4, 64), 128, id="3d_m32_k64_n128"),
     pytest.param((16, 2, 128), 64, id="3d_m32_k128_n64"),
+    pytest.param((160, 64), 64, id="2d_m160_k64_n64"),
+    pytest.param((5, 64, 64), 64, id="3d_m320_k64_n64"),
+    pytest.param((3, 5, 32, 64), 96, id="4d_m480_k64_n96"),
+    pytest.param((2, 5, 16, 128), 64, id="4d_m160_k128_n64"),
+    # Intentionally unaligned token dimensions to exercise skip/support logic.
+    pytest.param((3, 64), 64, id="2d_m3_k64_n64_unaligned"),
+    pytest.param((3, 10, 64), 64, id="3d_m30_k64_n64_unaligned"),
 ]
 
 _bias_activation_shape_cases = [
     pytest.param((32, 64), id="2d_m32_k64"),
     pytest.param((8, 4, 64), id="3d_m32_k64"),
+    pytest.param((160, 64), id="2d_m160_k64"),
+    pytest.param((5, 64, 64), id="3d_m320_k64"),
+    pytest.param((3, 5, 32, 64), id="4d_m480_k64"),
+    # Intentionally unaligned token dimensions to exercise skip/support logic.
+    pytest.param((3, 64), id="2d_m3_k64_unaligned"),
+    pytest.param((3, 10, 64), id="3d_m30_k64_unaligned"),
 ]
-
-
-def _make_recipe(recipe_name: str, *, backward_mode: str) -> recipe.Recipe:
-    kwargs = {"backward_mode": backward_mode}
-    if recipe_name == "fp8_current_scaling":
-        return recipe.Float8CurrentScaling(fp8_format=recipe.Format.E4M3, **kwargs)
-    if recipe_name == "mxfp8":
-        return recipe.MXFP8BlockScaling(fp8_format=recipe.Format.E4M3, **kwargs)
-    if recipe_name == "fp8_block_scaling":
-        return recipe.Float8BlockScaling(fp8_format=recipe.Format.E4M3, **kwargs)
-    if recipe_name == "nvfp4":
-        return recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-            **kwargs,
-        )
-    raise ValueError(f"Unsupported recipe for backward-mode test: {recipe_name}")
 
 
 def _copy_named_parameters(src_module: torch.nn.Module, dst_module: torch.nn.Module) -> None:
@@ -371,7 +350,7 @@ def _fprop_tolerances(recipe_name: str) -> dict[str, float]:
     raise ValueError(f"Unsupported recipe for backward-mode test: {recipe_name}")
 
 
-def _maybe_skip_recipe_dtype(recipe_name: str, dtype: torch.dtype, backward_mode: str) -> None:
+def _maybe_skip_recipe_dtype(recipe_name: str, dtype: torch.dtype) -> None:
     if dtype == torch.bfloat16 and not bf16_available:
         pytest.skip(reason_for_no_bf16)
     if recipe_name == "nvfp4" and dtype != torch.bfloat16:
@@ -705,8 +684,8 @@ def test_backward_mode_recipe_matches_requested_mode(
     recipe_name: str,
     backward_mode: str,
 ) -> None:
-    mode_recipe = _make_recipe(recipe_name, backward_mode=backward_mode)
-    quant_recipe = _make_recipe(recipe_name, backward_mode="default")
+    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+    quant_recipe = make_recipe(recipe_name, backward_mode="default")
     assert mode_recipe.backward_mode == backward_mode
     assert quant_recipe.backward_mode == "default"
 
@@ -726,13 +705,13 @@ def test_linear_like_backward_mode_matches_reference(
     backward_mode: str,
 ) -> None:
     reset_rng_states()
-    _maybe_skip_recipe_dtype(recipe_name, dtype, backward_mode)
+    _maybe_skip_recipe_dtype(recipe_name, dtype)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, module_type)
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
 
     in_features = input_shape[-1]
-    quantized_ref_recipe = _make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = _make_recipe(recipe_name, backward_mode=backward_mode)
+    quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
+    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
 
     module_quantized_ref = _make_linear_like_module(
         module_type,
@@ -882,13 +861,13 @@ def test_linear_like_backward_mode_matches_reference(
         _raise_if_ref_failed(ref_exc)
         assert dx_ref is not None and dw_ref is not None and db_ref is not None
 
-    _assert_forward_matches_quantized_ref(y_bwd_mode, y_quantized_ref, recipe_name)
-    _assert_exact(dx_bwd_mode, dx_ref)
-    _assert_exact(dw_bwd_mode, dw_ref)
+    assert_close(y_bwd_mode, y_quantized_ref, check_dtype=True, **_fprop_tolerances(recipe_name))
+    assert_close(dx_bwd_mode, dx_ref, rtol=0, atol=0, check_dtype=True)
+    assert_close(dw_bwd_mode, dw_ref, rtol=0, atol=0, check_dtype=True)
     if use_bias:
         assert db_bwd_mode is not None
         assert db_ref is not None
-        _assert_exact(db_bwd_mode, db_ref)
+        assert_close(db_bwd_mode, db_ref, rtol=0, atol=0, check_dtype=True)
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -910,7 +889,7 @@ def test_grouped_linear_backward_mode_matches_reference(
         pytest.skip("NVFP4 not supported for grouped linear")
 
     reset_rng_states()
-    _maybe_skip_recipe_dtype(recipe_name, dtype, backward_mode)
+    _maybe_skip_recipe_dtype(recipe_name, dtype)
     _maybe_skip_unsupported_grouped_splits(recipe_name, m_splits)
 
     in_features = 64
@@ -918,8 +897,8 @@ def test_grouped_linear_backward_mode_matches_reference(
     num_gemms = len(m_splits)
     num_tokens = sum(m_splits)
 
-    quantized_ref_recipe = _make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = _make_recipe(recipe_name, backward_mode=backward_mode)
+    quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
+    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
 
     module_quantized_ref = te.GroupedLinear(
         num_gemms,
@@ -1045,15 +1024,15 @@ def test_grouped_linear_backward_mode_matches_reference(
         _raise_if_ref_failed(ref_exc)
         assert dx_ref is not None
 
-    _assert_forward_matches_quantized_ref(y_bwd_mode, y_quantized_ref, recipe_name)
-    _assert_exact(dx_bwd_mode, dx_ref)
+    assert_close(y_bwd_mode, y_quantized_ref, check_dtype=True, **_fprop_tolerances(recipe_name))
+    assert_close(dx_bwd_mode, dx_ref, rtol=0, atol=0, check_dtype=True)
     for test_dw, ref_dw in zip(dw_bwd_mode, dw_ref):
-        _assert_exact(test_dw, ref_dw)
+        assert_close(test_dw, ref_dw, rtol=0, atol=0, check_dtype=True)
     if use_bias:
         for test_db, ref_db_i in zip(db_bwd_mode, db_ref):
             assert test_db is not None
             assert ref_db_i is not None
-            _assert_exact(test_db, ref_db_i)
+            assert_close(test_db, ref_db_i, rtol=0, atol=0, check_dtype=True)
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -1074,7 +1053,7 @@ def test_fused_linear_paths_match_backward_mode_reference(
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
-    _maybe_skip_recipe_dtype(recipe_name, dtype, backward_mode)
+    _maybe_skip_recipe_dtype(recipe_name, dtype)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     _maybe_skip_unsupported_recipe_shape(recipe_name, (m, 64), "ops_linear")
 
@@ -1082,8 +1061,8 @@ def test_fused_linear_paths_match_backward_mode_reference(
     in_features = 64
     out_features = 64
 
-    quantized_ref_recipe = _make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = _make_recipe(recipe_name, backward_mode=backward_mode)
+    quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
+    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
 
     model_quantized_ref = _make_fused_model(fused_pattern, in_features, out_features, dtype)
     model_bwd_mode = _make_fused_model(fused_pattern, in_features, out_features, dtype)
@@ -1196,13 +1175,13 @@ def test_fused_linear_paths_match_backward_mode_reference(
     assert len(fused_ops) >= 1
     assert isinstance(fused_ops[0][0], expected_fused_op)
 
-    _assert_forward_matches_quantized_ref(y_bwd_mode, y_quantized_ref, recipe_name)
-    _assert_exact(dx1_bwd_mode, dx1_ref)
-    _assert_exact(dw_bwd_mode, dw_ref)
+    assert_close(y_bwd_mode, y_quantized_ref, check_dtype=True, **_fprop_tolerances(recipe_name))
+    assert_close(dx1_bwd_mode, dx1_ref, rtol=0, atol=0, check_dtype=True)
+    assert_close(dw_bwd_mode, dw_ref, rtol=0, atol=0, check_dtype=True)
     if dx2_bwd_mode is not None and dx2_ref is not None:
-        _assert_exact(dx2_bwd_mode, dx2_ref)
+        assert_close(dx2_bwd_mode, dx2_ref, rtol=0, atol=0, check_dtype=True)
     if db_bwd_mode is not None and db_ref is not None:
-        _assert_exact(db_bwd_mode, db_ref)
+        assert_close(db_bwd_mode, db_ref, rtol=0, atol=0, check_dtype=True)
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -1214,15 +1193,16 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
-    _maybe_skip_recipe_dtype(recipe_name, dtype, backward_mode)
+    _maybe_skip_recipe_dtype(recipe_name, dtype)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
+    _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, "ops_linear")
 
     reset_rng_states()
     in_features = input_shape[-1]
     out_features = 64
 
-    quantized_ref_recipe = _make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = _make_recipe(recipe_name, backward_mode=backward_mode)
+    quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
+    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
 
     model_quantized_ref = _make_fused_model("bias_activation", in_features, out_features, dtype)
     model_bwd_mode = _make_fused_model("bias_activation", in_features, out_features, dtype)
@@ -1332,12 +1312,12 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     quantized_ref_backward_ops = model_quantized_ref._module_groups[0]._backward_ops
     assert any(isinstance(op, BackwardActivationBias) for op, _ in quantized_ref_backward_ops)
 
-    _assert_forward_matches_quantized_ref(y_bwd_mode, y_quantized_ref, recipe_name)
-    _assert_exact(dx1_bwd_mode, dx1_ref)
-    _assert_exact(dw_bwd_mode, dw_ref)
+    assert_close(y_bwd_mode, y_quantized_ref, check_dtype=True, **_fprop_tolerances(recipe_name))
+    assert_close(dx1_bwd_mode, dx1_ref, rtol=0, atol=0, check_dtype=True)
+    assert_close(dw_bwd_mode, dw_ref, rtol=0, atol=0, check_dtype=True)
     assert db_bwd_mode is not None
     assert db_ref is not None
-    _assert_exact(db_bwd_mode, db_ref)
+    assert_close(db_bwd_mode, db_ref, rtol=0, atol=0, check_dtype=True)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -1356,14 +1336,14 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
 
     # Use a mutable recipe holder so we can switch fusion behavior on the same
     # fuser object and verify that the cached fusion plan is refreshed.
-    current_recipe = {"value": _make_recipe(recipe_name, backward_mode="default")}
+    current_recipe = {"value": make_recipe(recipe_name, backward_mode="default")}
     monkeypatch.setattr(FP8GlobalStateManager, "get_fp8_recipe", lambda: current_recipe["value"])
 
     reset_rng_states()
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     fuser, x, extra_inputs = _make_userbuffers_fuser_for_mode_switch_test(dtype=dtype)
 
-    quant_recipe = _make_recipe(recipe_name, backward_mode="default")
+    quant_recipe = make_recipe(recipe_name, backward_mode="default")
     fuser.maybe_fuse_ops(
         is_grad_enabled=True,
         recipe=quant_recipe,
@@ -1372,7 +1352,7 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
     )
     assert _has_userbuffers_forward_linear(fuser)
 
-    non_quant_recipe = _make_recipe(recipe_name, backward_mode=backward_mode)
+    non_quant_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
     current_recipe["value"] = non_quant_recipe
     fuser.maybe_fuse_ops(
         is_grad_enabled=True,
@@ -1390,7 +1370,7 @@ def test_quantize_op_respects_backward_mode(
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
-    _maybe_skip_recipe_dtype(recipe_name, dtype, backward_mode)
+    _maybe_skip_recipe_dtype(recipe_name, dtype)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     reset_rng_states()
 
@@ -1400,13 +1380,13 @@ def test_quantize_op_respects_backward_mode(
     model_override = te_ops.Sequential(te_ops.Quantize(forward=True, backward=True))
     model_ref = te_ops.Sequential(te_ops.Quantize(forward=True, backward=False))
 
-    mode_recipe = _make_recipe(recipe_name, backward_mode=backward_mode)
+    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
 
     y_override, dx_override = _run_quantize_op_single_step(model_override, x, dy, mode_recipe)
     y_ref, dx_ref = _run_quantize_op_single_step(model_ref, x, dy, mode_recipe)
 
-    _assert_exact(y_override, y_ref)
-    _assert_exact(dx_override, dx_ref)
+    assert_close(y_override, y_ref, rtol=0, atol=0, check_dtype=True)
+    assert_close(dx_override, dx_ref, rtol=0, atol=0, check_dtype=True)
 
 
 def test_delayed_scaling_rejects_non_quant_backward_mode(backward_mode: str) -> None:
@@ -1425,7 +1405,7 @@ def test_layernorm_mlp_not_implemented_for_unquantized_backward_mode(
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
-    _maybe_skip_recipe_dtype(recipe_name, dtype, backward_mode)
+    _maybe_skip_recipe_dtype(recipe_name, dtype)
     reset_rng_states()
 
     layer = te.LayerNormMLP(
@@ -1436,7 +1416,7 @@ def test_layernorm_mlp_not_implemented_for_unquantized_backward_mode(
         device="cuda",
     )
     x = torch.randn(32, 64, dtype=dtype, device="cuda", requires_grad=True)
-    mode_recipe = _make_recipe(recipe_name, backward_mode=backward_mode)
+    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
 
     with pytest.raises(
         AssertionError,
