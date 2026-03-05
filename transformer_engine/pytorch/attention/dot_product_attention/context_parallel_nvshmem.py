@@ -1746,11 +1746,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         ctx.dO_quantizer = dout._quantizer
                         dout = dout._data
             dq = torch.empty_like(q)
-            p2p_comm_buffers = [
-                torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
-                torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
-            ]
-            p2p_comm_buffers[0][0].copy_(kv)
+            # p2p_comm_buffers = [
+            #     torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
+            #     torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
+            # ]
+            # p2p_comm_buffers[0][0].copy_(kv)
             if ctx.use_fused_attention:
                 fp8_meta_kwargs = {}
                 fused_attn_dqkv_dtype = TE_DType[dout_dtype]
@@ -1819,32 +1819,88 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
                 if fa_utils.v2_6_0_plus:
                     fa_backward_kwargs["softcap"] = 0.0
-
+        
+        p2p_comm_buffers = [  
+            nvshmem.tensor((2, *kv.shape), dtype=kv.dtype),  
+            nvshmem.tensor((2, *kv.shape), dtype=kv.dtype),  
+        ]  
+        
+        # 复制数据到 NVSHMEM 缓冲区  
+        p2p_comm_buffers[0][0].copy_(kv)  
+        
+        send_tensor = p2p_comm_buffers[i % 2]  
+        recv_tensor = p2p_comm_buffers[(i + 1) % 2]  
+        device = Device()  
+        communicate_stream = device.create_stream()  
+        
+        def flash_attn_p2p_communicate_nvshmem(  
+            rank, send_tensor, send_dst, recv_tensor, recv_src, stream  
+        ):  
+            """NVSHMEM版本的双向P2P通信"""  
+            
+            # 根据rank顺序避免死锁  
+            if rank % 2 == 0:  
+                # 偶数rank：先发送后接收  
+                nvshmem.core.put(  
+                    recv_tensor,  # 目标：远程PE的接收缓冲区  
+                    send_tensor,  # 源：本地发送数据  
+                    remote_pe=send_dst,  
+                    stream=stream  
+                )  
+                
+                # 接收数据  
+                nvshmem.core.get(  
+                    recv_tensor,  # 目标：本地接收缓冲区  
+                    send_tensor,  # 源：远程PE的发送数据  
+                    remote_pe=recv_src,  
+                    stream=stream  
+                )  
+            else:  
+                # 奇数rank：先接收后发送  
+                nvshmem.core.get(  
+                    recv_tensor,  # 目标：本地接收缓冲区  
+                    send_tensor,  # 源：远程PE的发送数据  
+                    remote_pe=recv_src,  
+                    stream=stream  
+                )  
+                
+                # 发送数据  
+                nvshmem.core.put(  
+                    recv_tensor,  # 目标：远程PE的接收缓冲区  
+                    send_tensor,  # 源：本地发送数据  
+                    remote_pe=send_dst,  
+                    stream=stream  
+                )  
+        
         for i in range(cp_size):
             # wait until KV is received
-            for req in send_recv_reqs:
-                req.wait()
+            # for req in send_recv_reqs:
+            #     req.wait()
+            communicate_stream.sync()
 
             send_tensor = p2p_comm_buffers[i % 2]
             recv_tensor = p2p_comm_buffers[(i + 1) % 2]
             if ctx.fp8:
                 if i < cp_size - 1:
-                        if nvshmem_kv is not None:
-                            # owner of the next KV block
-                            owner_idx = (rank - (i + 1)) % cp_size
-                            owner_global = cp_global_ranks[owner_idx * cp_size_a2a + rank_a2a]
-                            tex.nvshmem_get_on_current_stream(recv_tensor[0], nvshmem_kv, int(owner_global))
-                            send_recv_reqs = []
-                        else:
-                            send_recv_reqs = flash_attn_p2p_communicate(
-                                rank,
-                                send_tensor[0],
-                                send_dst,
-                                recv_tensor[0],
-                                recv_src,
-                                ctx.cp_group,
-                                batch_p2p_comm,
-                            )
+                        # if nvshmem_kv is not None:
+                        #     # owner of the next KV block
+                        #     owner_idx = (rank - (i + 1)) % cp_size
+                        #     owner_global = cp_global_ranks[owner_idx * cp_size_a2a + rank_a2a]
+                        #     tex.nvshmem_get_on_current_stream(recv_tensor[0], nvshmem_kv, int(owner_global))
+                        #     send_recv_reqs = []
+                        # else:
+                        #     send_recv_reqs = flash_attn_p2p_communicate(
+                        #         rank,
+                        #         send_tensor[0],
+                        #         send_dst,
+                        #         recv_tensor[0],
+                        #         recv_src,
+                        #         ctx.cp_group,
+                        #         batch_p2p_comm,
+                        #     )
+                    flash_attn_p2p_communicate_nvshmem(  
+                        rank, send_buffer, send_dst, recv_buffer, recv_src, communicate_stream  
+                    )  
                 else:
                     dkv_a2a_req = torch.distributed.all_to_all_single(
                         dkv_fp8,
@@ -1860,15 +1916,18 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i == (cp_size - 1):
                     send_tensor = send_tensor[1]
                     recv_tensor = recv_tensor[1]
-                if nvshmem_kv is not None:
-                    owner_idx = (rank - (i + 1)) % cp_size
-                    owner_global = cp_global_ranks[owner_idx * cp_size_a2a + rank_a2a]
-                    tex.nvshmem_get_on_current_stream(recv_tensor, nvshmem_kv, int(owner_global))
-                    send_recv_reqs = []
-                else:
-                    send_recv_reqs = flash_attn_p2p_communicate(
-                        rank, send_tensor, send_dst, recv_tensor, recv_src, ctx.cp_group, batch_p2p_comm
-                    )
+                # if nvshmem_kv is not None:
+                #     owner_idx = (rank - (i + 1)) % cp_size
+                #     owner_global = cp_global_ranks[owner_idx * cp_size_a2a + rank_a2a]
+                #     tex.nvshmem_get_on_current_stream(recv_tensor, nvshmem_kv, int(owner_global))
+                #     send_recv_reqs = []
+                # else:
+                #     send_recv_reqs = flash_attn_p2p_communicate(
+                #         rank, send_tensor, send_dst, recv_tensor, recv_src, ctx.cp_group, batch_p2p_comm
+                #     )
+                flash_attn_p2p_communicate_nvshmem(  
+                    rank, send_buffer, send_dst, recv_buffer, recv_src, communicate_stream  
+                )
 
             kv = p2p_comm_buffers[i % 2][0]
             q_, kv_, out_, dout_ = None, None, None, None
