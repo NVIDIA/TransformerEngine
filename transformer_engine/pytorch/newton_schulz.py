@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Distributed Newton-Schulz inverse square root via cuSolverMp."""
+"""Distributed Newton-Schulz matrix orthogonalization via cuSolverMp."""
 
 from typing import List, Optional
 
@@ -27,7 +27,7 @@ def newton_schulz(
     num_iterations: int = 5,
     coefficients: Optional[List[float]] = None,
 ) -> None:
-    """Compute Newton-Schulz inverse square root in-place on a distributed matrix.
+    """Compute Newton-Schulz matrix orthogonalization in-place on a distributed matrix.
 
     Parameters
     ----------
