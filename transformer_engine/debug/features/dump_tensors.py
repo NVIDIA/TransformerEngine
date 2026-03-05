@@ -53,7 +53,6 @@ class TensorLogger:
 
         debug_api.log_message(
             f"TensorLogger initialized. Saving tensors to: {self.root_dir}",
-            log_level="info",
         )
 
     def _expected_root_dir(self, root_log_dir: str) -> str:
@@ -173,8 +172,6 @@ class DumpTensors(TEConfigAPIMapper):
         - ``quantized``: quantized tensor object (if quantized_tensor=True)
         - Additional internal components when dump_quantized_internals=True
           (raw data, scales, etc. - format may change between versions)
-        - For NVFP4 internals, unpacked FP4 value tensors are included for
-          easier offline analysis.
     """
 
     @api_method
