@@ -87,6 +87,10 @@ class TensorLogger:
 
         safe_layer_name = self._sanitize_name(layer_name)
         safe_tensor_name = self._sanitize_name(tensor_name)
+        filepath = os.path.join(
+            self.root_dir,
+            f"{safe_layer_name}_{safe_tensor_name}_iter_{iteration:06d}.pt",
+        )
 
         if os.path.exists(filepath):
             debug_api.log_message(f"[TE DumpTensors] Overwriting existing dump file: {filepath}")
