@@ -242,7 +242,13 @@ Caveats
    `PyTorch saved tensors hooks <https://docs.pytorch.org/docs/stable/notes/autograd.html#saved-tensors-hooks-doc>`_.
    PyTorch saves various tensors for backward — not just activations, but also weights and other data.
 
-   Activation detection is heuristic: all CUDA tensors that are not ``torch.nn.Parameter`` are offloaded.
+   Activation detection is heuristic. A CUDA tensor is offloaded if it:
+
+   - has at least 256×1024 elements (~1 MB for float32),
+   - is not a ``torch.nn.Parameter``,
+   - is not marked with ``mark_not_offload()``.
+
+   Additionally, non-contiguous tensors are skipped to avoid memory layout changes (see below).
    For TE layers, tensors that should not be offloaded are manually excluded.
    For non-TE layers, no such exclusions exist, so some tensors may remain pinned in GPU memory
    even after being copied to CPU (e.g., if the layer stores references in ``ctx``),
