@@ -773,12 +773,12 @@ def test_dump_tensors_nvfp4_unpacked_codes(feature_dirs):
         packed = data["rowwise_data"]
         unpacked = data["rowwise_data_unpacked_values"]
         assert unpacked.dtype == torch.float32, "Unpacked values must be float32"
-        assert unpacked.shape[-1] == packed.shape[-1] * 2, (
-            "Unpacked values should double the last packed dimension"
-        )
-        assert unpacked.min().item() >= -6.0 and unpacked.max().item() <= 6.0, (
-            "Decoded FP4 values should be in representable E2M1 range [-6, 6]"
-        )
+        assert (
+            unpacked.shape[-1] == packed.shape[-1] * 2
+        ), "Unpacked values should double the last packed dimension"
+        assert (
+            unpacked.min().item() >= -6.0 and unpacked.max().item() <= 6.0
+        ), "Decoded FP4 values should be in representable E2M1 range [-6, 6]"
 
         # Reconstruct dequantized values from unpacked FP4 values and block scales.
         # For NVFP4 rowwise path, one E4M3 scale corresponds to a block of 16 values.
@@ -793,6 +793,6 @@ def test_dump_tensors_nvfp4_unpacked_codes(feature_dirs):
         reconstructed = values * expanded_scales
 
         expected = quantized_tensor.dequantize(dtype=torch.float32)
-        assert torch.allclose(reconstructed, expected, atol=1e-5, rtol=1e-3), (
-            "Unpacked FP4 values multiplied by block scales should match NVFP4 dequantization"
-        )
+        assert torch.allclose(
+            reconstructed, expected, atol=1e-5, rtol=1e-3
+        ), "Unpacked FP4 values multiplied by block scales should match NVFP4 dequantization"
