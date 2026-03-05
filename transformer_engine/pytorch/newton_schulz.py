@@ -119,12 +119,17 @@ def newton_schulz(
         coefficients = (
             QUINTIC_COEFFICIENTS if num_iterations == 5 else [1.5, -0.5, 0.0] * num_iterations
         )
-    assert (
-        len(coefficients) == num_iterations * 3
-    ), f"Unexpected number of coefficients: {len(coefficients)} for {num_iterations} iterations"
+    if len(coefficients) != num_iterations * 3:
+        raise ValueError(
+            f"Unexpected number of coefficients: {len(coefficients)} for {num_iterations} iterations"
+        )
 
     if x.dim() != 2:
         raise ValueError(f"Expected 2D tensor, got {x.dim()}D")
+    if x.dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError(f"Expected float32 or bfloat16 tensor, got {x.dtype}")
+    if not x.is_contiguous():
+        raise ValueError("Input tensor must be contiguous")
     if not x.is_cuda:
         raise ValueError("Input tensor must be on CUDA device")
 
