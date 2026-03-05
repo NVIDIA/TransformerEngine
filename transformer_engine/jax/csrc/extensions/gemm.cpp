@@ -353,28 +353,29 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    int64_t lhs_axis_boundary, int64_t rhs_axis_boundary, bool lhs_transposed,
                    bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
                    bool use_split_accumulator, JAXX_Collective_Op collective_op) {
-  static bool warned_fuse_bias = false;
-  static bool warned_fuse_gelu_grad = false;
-  static bool warned_api = false;
-  if (fuse_bias && !warned_fuse_bias) {
-    std::cerr << "[GemmFFI] Deprecation: fuse_bias is deprecated; bias fusion is inferred from "
-                 "non-empty bias. This parameter will be removed in future release."
-              << std::endl;
-    warned_fuse_bias = true;
+  static std::once_flag once_fuse_bias;
+  static std::once_flag once_fuse_gelu_grad;
+  static std::once_flag once_api;
+  if (fuse_bias) {
+    std::call_once(once_fuse_bias, [] {
+      std::cerr << "[GemmFFI] Deprecation: fuse_bias is deprecated; bias fusion is inferred from "
+                   "non-empty bias. This parameter will be removed in future release."
+                << std::endl;
+    });
   }
-  if ((fuse_gelu || grad) && !warned_fuse_gelu_grad) {
-    std::cerr << "[GemmFFI] Deprecation: fuse_gelu and grad are deprecated. These options are "
-                 "ignored as there is no support for them in the current implementation. "
-              << std::endl;
-    warned_fuse_gelu_grad = true;
+  if (fuse_gelu || grad) {
+    std::call_once(once_fuse_gelu_grad, [] {
+      std::cerr << "[GemmFFI] Deprecation: fuse_gelu and grad are deprecated. These options are "
+                   "ignored as there is no support for them in the current implementation. "
+                << std::endl;
+    });
   }
-  if (!warned_api) {
+  std::call_once(once_api, [] {
     std::cerr << "[GemmFFI] Deprecation: This API is deprecated in Sep 2026. Use GemmV2FFI instead."
               << std::endl;
-    warned_api = true;
-  }
+  });
 
-  GemmV2FFI(stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output, workspace,
+  return GemmV2FFI(stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output, workspace,
             GemmConfig{scaling_mode, collective_op, lhs_axis_boundary, rhs_axis_boundary,
                        lhs_transposed, rhs_transposed, use_split_accumulator});
 }
