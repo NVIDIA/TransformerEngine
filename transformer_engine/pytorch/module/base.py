@@ -810,7 +810,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             assert (
                 len(roles) == num_fp8_tensors
             ), f"Recipe roles must match number of quantizers ({len(roles)=} vs {num_fp8_tensors=})"
-        recipe_state = RecipeState.create(
+        recipe_state = RecipeState.create(  # pylint: disable=assignment-from-none
             recipe,
             mode=("forward" if fwd else "backward"),
             num_quantizers=num_fp8_tensors,
@@ -823,8 +823,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def get_quantizer_roles(
         self,
         *,
-        fwd: bool,
-        num_quantizers: int,
+        fwd: bool,  # pylint: disable=unused-argument
+        num_quantizers: int,  # pylint: disable=unused-argument
     ) -> Optional[List[QuantizerRole]]:
         """Return an ordered list of :class:`QuantizerRole` for quantizers.
 

@@ -762,7 +762,8 @@ class DotProductAttention(TransformerEngineBaseModule):
     def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
         """Override to allow multiple recipes. Init scales and amaxes for fwd | bwd."""
         if isinstance(recipe, Recipe) and recipe.custom():
-            return TransformerEngineBaseModule.set_meta_tensor(self, fwd, recipe)
+            TransformerEngineBaseModule.set_meta_tensor(self, fwd, recipe)
+            return
         if isinstance(recipe, Recipe):
             recipe = [recipe]
         fp8_recipe_dpa = recipe[-1]

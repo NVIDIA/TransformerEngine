@@ -34,7 +34,7 @@ from transformer_engine.pytorch.quantization import QuantizerRole
 
 
 def delayed_scaling_quantizer_factory(
-    role: Optional[QuantizerRole],
+    role: Optional[QuantizerRole],  # pylint: disable=unused-argument
 ) -> "DelayedScalingRequest":
     """Factory that mirrors :class:`DelayedScaling` recipe defaults.
 
@@ -76,7 +76,7 @@ def current_scaling_quantizer_factory(
 
 
 def mxfp8_quantizer_factory(
-    role: Optional[QuantizerRole],
+    role: Optional[QuantizerRole],  # pylint: disable=unused-argument
 ) -> "MXFP8Quantizer":
     """Factory that mirrors :class:`MXFP8BlockScaling` recipe defaults.
 

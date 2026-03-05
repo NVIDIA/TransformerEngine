@@ -1607,10 +1607,12 @@ class CustomRecipeState(RecipeState):
 
     @property
     def amax_history(self) -> Optional[torch.Tensor]:
+        """Amax history from the composed delayed-scaling state, if any."""
         return self._ds_state.amax_history if self._ds_state else None
 
     @property
     def scale(self) -> Optional[torch.Tensor]:
+        """Current scale from the composed delayed-scaling state, if any."""
         return self._ds_state.scale if self._ds_state else None
 
     @property

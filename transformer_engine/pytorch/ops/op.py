@@ -210,7 +210,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """
         return 0
 
-    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
+    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:  # pylint: disable=unused-argument
         """Return an ordered list of :class:`QuantizerRole` for quantizers.
 
         The returned list must be aligned with the internal quantizer ordering and
@@ -284,7 +284,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                         "Recipe roles must match number of quantizers "
                         f"({len(roles)=} vs {num_quantizers=})"
                     )
-                recipe_state = RecipeState.create(
+                recipe_state = RecipeState.create(  # pylint: disable=assignment-from-none
                     recipe,
                     mode=mode,
                     num_quantizers=num_quantizers,
