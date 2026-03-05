@@ -380,7 +380,8 @@ __device__ void unswizzle_col_scaling_kernel_impl(const void* input, void* outpu
   int linear_id = threadIdx.y * blockDim.x + threadIdx.x;
 #pragma unroll
   for (int i = 0; i < m_tiles_in_tb; i++) {
-    __align__(16) int4* input_v4i = reinterpret_cast<int4*>(const_cast<int32_t*>(input_i32[i]));
+    __align__(16) const int4* input_v4i =
+        reinterpret_cast<const int4*>(input_i32[i]);
     __align__(16) int4* slm_v4i =
         reinterpret_cast<int4*>(slm + i * k_tiles_in_tb * SF_TILE_SIZE_I32);
 #pragma unroll
@@ -1499,7 +1500,7 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
   }
 
   if (columnwise_unswizzle) {
-    NVTE_CHECK(!all_nvfp4, "NVFP4 shouldn't end up here because it only needs rowwise swizzle");
+    NVTE_CHECK(!all_nvfp4, "NVFP4 shouldn't end up here because it only needs rowwise unswizzle");
 
     MultiSwizzleArgs kernel_args;
     kernel_args.num_tensors = 0;

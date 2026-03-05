@@ -155,7 +155,7 @@ void performTestUnswizzle1D(const int num_tiles_M, const int num_tiles_K, bool r
   if (!rowwise && !columnwise) {
     GTEST_SKIP() << "TEST SKIPPED, Either rowwise or columnwise scaling mode must be true.";
   }
-  if ((rowwise && columnwise) || !(rowwise || columnwise)){
+  if (rowwise && columnwise) {
     GTEST_SKIP() << "TEST SKIPPED, The scaling mode " + std::to_string(SF_MODE_X) + "x" +
       std::to_string(SF_MODE_Y) + " is not implemented.";
   }
@@ -299,7 +299,7 @@ void performTestSwizzleUnswizzleRoundtrip(const int num_tiles_M, const int num_t
   if (!rowwise && !columnwise) {
     GTEST_SKIP() << "TEST SKIPPED, Either rowwise or columnwise scaling mode must be true.";
   }
-  if ((rowwise && columnwise) || !(rowwise || columnwise)){
+  if (rowwise && columnwise){
     GTEST_SKIP() << "TEST SKIPPED, The scaling mode " + std::to_string(SF_MODE_X) + "x" +
       std::to_string(SF_MODE_Y) + " is not implemented.";
   }
