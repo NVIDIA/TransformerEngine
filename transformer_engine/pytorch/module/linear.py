@@ -957,13 +957,13 @@ class _Linear(torch.autograd.Function):
                 if getattr(origin_weight_python_object, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
                         list(main_grad.shape),
-                        main_grad.dtype,
+                        origin_weight_python_object.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
                         list(main_grad.shape),
-                        main_grad.dtype,
+                        origin_weight_python_object.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None

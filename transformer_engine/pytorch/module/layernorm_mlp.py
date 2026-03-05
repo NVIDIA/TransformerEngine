@@ -1607,14 +1607,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 if getattr(fc1_weight_python_object, "zero_out_wgrad", False):
                     fc1_wgrad = torch.zeros(
                         fc1_weight_main_grad.shape,
-                        dtype=fc1_weight_main_grad.dtype,
+                        dtype=fc1_weight_python_object.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
                     fc1_wgrad = torch.empty(
                         fc1_weight_main_grad.shape,
-                        dtype=fc1_weight_main_grad.dtype,
+                        dtype=fc1_weight_python_object.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
@@ -1632,14 +1632,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 if getattr(fc2_weight_python_object, "zero_out_wgrad", False):
                     fc2_wgrad = torch.zeros(
                         fc2_weight_main_grad.shape,
-                        dtype=fc2_weight_main_grad.dtype,
+                        dtype=fc2_weight_python_object.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
                     fc2_wgrad = torch.empty(
                         fc2_weight_main_grad.shape,
-                        dtype=fc2_weight_main_grad.dtype,
+                        dtype=fc2_weight_python_object.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
