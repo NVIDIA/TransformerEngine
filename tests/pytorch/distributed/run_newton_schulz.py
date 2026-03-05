@@ -56,10 +56,14 @@ def main():
     x_local = A[rank * local_rows : (rank + 1) * local_rows, :].contiguous()
 
     # Run the distributed Newton-Schulz
-    from transformer_engine.pytorch.newton_schulz import newton_schulz
+    from transformer_engine.pytorch.newton_schulz import cusolvermp_ctx_create, newton_schulz
 
     group = dist.group.WORLD
-    newton_schulz(x_local, group, args.num_iterations)
+    ctx = cusolvermp_ctx_create(group)
+    try:
+        newton_schulz(x_local, ctx, args.num_iterations)
+    finally:
+        ctx.destroy()
 
     # Gather results
     gathered = [torch.empty_like(x_local) for _ in range(world_size)]

@@ -11,19 +11,76 @@ import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
+_CUSOLVERMP_REQUIRED = (
+    "Newton-Schulz requires Transformer Engine to be built with NVTE_WITH_CUSOLVERMP=1"
+)
+
+
+class CusolverMpCtx:
+    """cuSolverMp context for Newton-Schulz matrix orthogonalization.
+
+    Context creation is expensive; create once and reuse across multiple
+    :func:`newton_schulz` calls.  Call :meth:`destroy` when done, or use as a
+    context manager::
+
+        with te.cusolvermp_ctx_create(group) as ctx:
+            te.newton_schulz(x, ctx)
+    """
+
+    def __init__(self, ptr: int, nranks: int) -> None:
+        self._ptr = ptr
+        self.nranks = nranks
+
+    def destroy(self) -> None:
+        """Destroy the underlying cuSolverMp context."""
+        tex.cusolvermp_ctx_destroy(self._ptr)
+
+    def __enter__(self) -> "CusolverMpCtx":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.destroy()
+
 
 def _get_nccl_comm_ptr(group: dist.ProcessGroup) -> int:
     """Extract the raw NCCL communicator pointer from a PyTorch process group."""
     backend = dist.get_backend(group)
     if backend != "nccl":
-        raise RuntimeError(f"newton_schulz requires NCCL backend, got '{backend}'")
+        raise RuntimeError(f"Newton-Schulz requires NCCL backend, got '{backend}'")
     nccl_backend = group._get_backend(torch.device("cuda"))
     return nccl_backend._comm_ptr()
 
 
+def cusolvermp_ctx_create(group: dist.ProcessGroup) -> CusolverMpCtx:
+    """Create a cuSolverMp context for Newton-Schulz matrix orthogonalization.
+
+    Context creation is expensive; callers should create the context once and
+    reuse it across multiple :func:`newton_schulz` calls.  The context must be
+    destroyed with :meth:`CusolverMpCtx.destroy` (or used as a context manager)
+    when it is no longer needed.
+
+    Parameters
+    ----------
+    group : torch.distributed.ProcessGroup
+        Process group with NCCL backend for distributed communication.
+
+    Returns
+    -------
+    CusolverMpCtx
+        Context to be passed to :func:`newton_schulz`.
+    """
+    if not hasattr(tex, "cusolvermp_ctx_create"):
+        raise RuntimeError(_CUSOLVERMP_REQUIRED)
+    nccl_comm_ptr = _get_nccl_comm_ptr(group)
+    nranks = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    ptr = tex.cusolvermp_ctx_create(nccl_comm_ptr, nranks, rank)
+    return CusolverMpCtx(ptr, nranks)
+
+
 def newton_schulz(
     x: torch.Tensor,
-    group: dist.ProcessGroup,
+    ctx: CusolverMpCtx,
     num_iterations: int = 5,
     coefficients: Optional[List[float]] = None,
 ) -> None:
@@ -34,8 +91,8 @@ def newton_schulz(
     x : torch.Tensor
         Local part of the distributed matrix (modified in-place).
         Must be a 2D CUDA tensor of type float32 or bfloat16.
-    group : torch.distributed.ProcessGroup
-        Process group with NCCL backend for distributed communication.
+    ctx : CusolverMpCtx
+        cuSolverMp context created by :func:`cusolvermp_ctx_create`.
     num_iterations : int, optional
         Number of Newton-Schulz iterations. Default: 5.
     coefficients : list of float, optional
@@ -72,20 +129,10 @@ def newton_schulz(
         raise ValueError("Input tensor must be on CUDA device")
 
     if not hasattr(tex, "newton_schulz"):
-        raise RuntimeError(
-            "newton_schulz requires Transformer Engine to be built with NVTE_WITH_CUSOLVERMP=1"
-        )
+        raise RuntimeError(_CUSOLVERMP_REQUIRED)
 
-    nccl_comm_ptr = _get_nccl_comm_ptr(group)
-    nranks = dist.get_world_size(group)
-    rank = dist.get_rank(group)
-
-    # Global matrix dimensions
-    m = x.size(0) * nranks  # rows are distributed across ranks
+    # Global matrix dimensions; rows are distributed across ranks
+    m = x.size(0) * ctx.nranks
     n = x.size(1)
 
-    ctx_ptr = tex.cusolvermp_ctx_create(nccl_comm_ptr, nranks, rank)
-    try:
-        tex.newton_schulz(ctx_ptr, m, n, x, num_iterations, coefficients)
-    finally:
-        tex.cusolvermp_ctx_destroy(ctx_ptr)
+    tex.newton_schulz(ctx._ptr, m, n, x, num_iterations, coefficients)
