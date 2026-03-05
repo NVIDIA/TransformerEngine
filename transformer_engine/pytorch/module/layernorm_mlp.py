@@ -61,6 +61,7 @@ from ..distributed import (
     _get_cuda_rng_state,
     _set_cuda_rng_state,
     _convert_param_to_dtensor_param,
+    _extract_trainable_tensor_from_dtensor,
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, dist_group_type
 from ..jit import no_torch_dynamo
@@ -2568,30 +2569,36 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """Get the weight tensors of the module."""
         fc1_weight = self.fc1_weight
         if isinstance(fc1_weight, DTensor):
-            fc1_weight = fc1_weight.to_local()
+            # Extract the trainable compute Tensor.
+            fc1_weight = _extract_trainable_tensor_from_dtensor(fc1_weight)
         fc2_weight = self.fc2_weight
         if isinstance(fc2_weight, DTensor):
-            fc2_weight = fc2_weight.to_local()
+            # Extract the trainable compute Tensor.
+            fc2_weight = _extract_trainable_tensor_from_dtensor(fc2_weight)
         return [fc1_weight, fc2_weight]
 
     def _get_bias_tensors(self) -> List[torch.Tensor]:
         """Get the bias tensors of the module."""
         fc1_bias = self.fc1_bias if self.use_bias else None
         if isinstance(fc1_bias, DTensor):
-            fc1_bias = fc1_bias.to_local()
+            # Extract the trainable compute Tensor.
+            fc1_bias = _extract_trainable_tensor_from_dtensor(fc1_bias)
         fc2_bias = self.fc2_bias if self.use_bias else None
         if isinstance(fc2_bias, DTensor):
-            fc2_bias = fc2_bias.to_local()
+            # Extract the trainable compute Tensor.
+            fc2_bias = _extract_trainable_tensor_from_dtensor(fc2_bias)
         return [fc1_bias, fc2_bias]
 
     def _get_layernorm_weight_and_bias(self) -> List[Optional[torch.Tensor]]:
         """Get the weight and bias of the layer norm."""
         ln_weight = self.layer_norm_weight
         if isinstance(ln_weight, DTensor):
-            ln_weight = ln_weight.to_local()
+            # Extract the trainable compute Tensor.
+            ln_weight = _extract_trainable_tensor_from_dtensor(ln_weight)
         ln_bias = self.layer_norm_bias
         if isinstance(ln_bias, DTensor):
-            ln_bias = ln_bias.to_local()
+            # Extract the trainable compute Tensor.
+            ln_bias = _extract_trainable_tensor_from_dtensor(ln_bias)
         return [ln_weight, ln_bias]
 
     def _get_weight_quantizers(self) -> List[Quantizer]:

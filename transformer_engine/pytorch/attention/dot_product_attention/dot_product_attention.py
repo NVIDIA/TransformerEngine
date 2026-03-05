@@ -47,6 +47,7 @@ from transformer_engine.pytorch.distributed import (
     CudaRNGStatesTracker,
     graph_safe_rng_available,
     _convert_param_to_dtensor_param,
+    _extract_trainable_tensor_from_dtensor,
 )
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
@@ -575,7 +576,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         weight_mesh : Optional[DeviceMesh]
             Not used for DotProductAttention as there are no quantized weights.
         """
-        warnings.warn(f"weight_mesh not necessary for {self.__class__.__name__}: {weight_mesh}")
+        if weight_mesh is not None:
+            warnings.warn(f"weight_mesh not necessary for {self.__class__.__name__}: {weight_mesh}")
         if tp_mesh is not None:
             # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
             assert tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(), (
@@ -864,13 +866,16 @@ class DotProductAttention(TransformerEngineBaseModule):
 
     def _get_softmax_offset(self) -> torch.Tensor:
         """Get the softmax offset."""
+        softmax_offset = self.softmax_offset
+        if isinstance(softmax_offset, DTensor):
+            # Extract the trainable compute Tensor.
+            softmax_offset = _extract_trainable_tensor_from_dtensor(softmax_offset)
+        # Reshape softmax offset.
         softmax_offset = (
-            self.softmax_offset.reshape(1, -1, 1, 1).to(torch.float32)
-            if self.softmax_offset is not None
+            softmax_offset.reshape(1, -1, 1, 1).to(torch.float32)
+            if softmax_offset is not None
             else None
         )
-        if isinstance(softmax_offset, DTensor):
-            softmax_offset = softmax_offset.to_local()
         return softmax_offset
 
     @no_torch_dynamo(recursive=False)

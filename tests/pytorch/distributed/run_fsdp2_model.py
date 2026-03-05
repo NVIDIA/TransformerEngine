@@ -4,14 +4,18 @@
 #
 # See LICENSE for license information.
 
+import argparse
 import os
 import sys
-import argparse
+import shutil
+from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 
 import transformer_engine.pytorch as te
 import transformer_engine.common.recipe
-
+from transformer_engine.pytorch import QuantizedTensor
 import torch
 import torch.distributed as dist
 from torch.distributed.checkpoint import save, load
@@ -27,10 +31,12 @@ from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
-from transformer_engine.pytorch import QuantizedTensor
-from contextlib import nullcontext
 
 LOCAL_RANK = None
+
+# Needed for `torch.distributed.checkpoint.{save,load}` because
+# multiple processes need to write to the same directory.
+SHARED_TMP_DIR = "/tmp/pytest-shared-tmp"
 
 
 @dataclass
@@ -63,7 +69,7 @@ class AppState(Stateful):
                 # yet get_state_dict / _init_optim_state produce empty Tensors.
                 # TransformerEngine uses empty Tensors for dummy Parameters.
                 optimizer_state_dict["state"][fqn] = {}
-            if fqn.endswith("._extra_state"):
+            if fqn.endswith("_extra_state"):
                 # Evict `_extra_state` quantization data from model checkpoint.
                 model_state_dict.pop(fqn)
         return {
@@ -203,6 +209,23 @@ def init_te_model(config):
     kwargs["device"] = config.device
     kwargs["tp_size"] = config.tp_size
 
+    # DeviceMesh / DTensor-related model parameter operations!
+    # NOTE(@cspades): `set_device_mesh` works, but needs to be called before reset_parameters.
+    # If not using meta device initialization, reset_parameters is called during __init__.
+    if config.tp_size > 1:  # (H/F)SDP-TP
+        assert "dp_shard" in config.mesh.mesh_dim_names
+        assert "tp" in config.mesh.mesh_dim_names
+        dist_print(f"Tensor parallelism activated with size: {config.tp_size}")
+        # For TP shards as DTensors.
+        kwargs["tp_mesh"] = config.mesh["tp"]
+        # For per-tensor quantization recipes with TP.
+        kwargs["weight_mesh"] = config.mesh["dp_shard", "tp"]._flatten("weight_mesh")
+    elif len(config.mesh.mesh_dim_names) > 1:  # HSDP
+        assert "dp_shard" in config.mesh.mesh_dim_names
+        # HSDP (DP-Repl, DP-Shard) requires a call to `set_device_mesh(weight_mesh)`.
+        # Used for per-tensor quantization recipes like Float8CurrentScaling.
+        kwargs["weight_mesh"] = config.mesh["dp_shard"]  # Only sharding with FSDP.
+
     layer_type = get_te_layer_from_string(config.layer_type)
     # We are creating model in a way so that we can test both reshard_after_forward=True/False cases.
     # more details below.
@@ -210,7 +233,6 @@ def init_te_model(config):
         te.TransformerLayer,
         te.MultiheadAttention,
         te.LayerNormMLP,
-        # TODO(@cspades): GroupedLinear testing.
     ]:
         # For this case, we are creating a model that resemebles production use-cases
         # wherein there are mltiple TransformerLayers in the model. And we would need
@@ -221,24 +243,9 @@ def init_te_model(config):
         kwargs["fuse_qkv_params"] = True
         if layer_type is te.MultiheadAttention:
             kwargs["input_layernorm"] = True
-        # DeviceMesh / DTensor-related model parameter operations!
-        # NOTE(@cspades): `set_device_mesh` works, but needs to be called before reset_parameters.
-        # If not using meta device initialization, reset_parameters is called during __init__.
         if config.tp_size > 1:
-            assert "dp_shard" in config.mesh.mesh_dim_names
-            assert "tp" in config.mesh.mesh_dim_names
-            dist_print(f"Tensor parallelism activated with size: {config.tp_size}")
             # Activate TP in TE.
             kwargs["set_parallel_mode"] = True
-            # For TP shards as DTensors.
-            kwargs["tp_mesh"] = config.mesh["tp"]
-            # For per-tensor quantization recipes with TP.
-            kwargs["weight_mesh"] = config.mesh["dp_shard", "tp"]._flatten("weight_mesh")
-        elif len(config.mesh.mesh_dim_names) > 1:
-            assert "dp_shard" in config.mesh.mesh_dim_names
-            # HSDP (DP-Repl, DP-Shard) requires a call to `set_device_mesh(weight_mesh)`.
-            # Used for per-tensor quantization recipes like Float8CurrentScaling.
-            kwargs["weight_mesh"] = config.mesh["dp_shard"]  # Only sharding with FSDP.
         # Initialize model.
         model = nn.Sequential(*[layer_type(*args, **kwargs) for _ in range(config.num_layers)])
     elif layer_type in [te.LayerNormLinear, te.Linear]:
@@ -247,26 +254,11 @@ def init_te_model(config):
         # reshard_after_forward=True for the parameters of these model.
         args[1] *= 3  # QKV projection
         out_shape[-1] *= 3
-        # DeviceMesh / DTensor-related model parameter operations!
-        # NOTE(@cspades): `set_device_mesh` works, but needs to be called before reset_parameters.
-        # If not using meta device initialization, reset_parameters is called during __init__.
         if config.tp_size > 1:
-            assert "dp_shard" in config.mesh.mesh_dim_names
-            assert "tp" in config.mesh.mesh_dim_names
-            dist_print(f"Tensor parallelism activated with size: {config.tp_size}")
             # Activate TP in TE.
             kwargs["parallel_mode"] = "column"
-            # For TP shards as DTensors.
-            kwargs["tp_mesh"] = config.mesh["tp"]
-            # For per-tensor quantization recipes with TP.
-            kwargs["weight_mesh"] = config.mesh["dp_shard", "tp"]._flatten("weight_mesh")
             # Modify output shape for column-parallel Linear.
             out_shape[-1] //= config.tp_size
-        elif len(config.mesh.mesh_dim_names) > 1:
-            assert "dp_shard" in config.mesh.mesh_dim_names
-            # HSDP (DP-Repl, DP-Shard) requires a call to `set_device_mesh(weight_mesh)`.
-            # Used for per-tensor quantization recipes like Float8CurrentScaling.
-            kwargs["weight_mesh"] = config.mesh["dp_shard"]  # Only sharding with FSDP.
         # Initialize model.
         model = layer_type(*args, **kwargs)
     else:
@@ -352,7 +344,9 @@ def test_fp8_fsdp2_allgather(model):
     # FP32 manual weight allgather
     fp32_allgathered_params = {}
     for name, param in model.named_parameters():
-        assert isinstance(param, DTensor)
+        assert isinstance(
+            param, DTensor
+        ), f"[test_fp8_fsdp2_allgather] {param} should be a DTensor."
         local_tensor = param._local_tensor
         device_mesh = param.device_mesh
         dist_group = (
@@ -471,7 +465,7 @@ def _train(args):
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     """
-    Pre-Save Training
+    FSDP2 Training
     """
     for iteration in range(args.iter):
         # Zero the parameter gradients
@@ -498,6 +492,153 @@ def _train(args):
     # so testing fp8 allgather at the end of the training loop.
     if args.fp8_init:
         test_fp8_fsdp2_allgather(model)
+
+    """
+    DCP Checkpoint Testing
+    """
+    # Compute the pre-save model loss to the last random input
+    # with respect to the last random target.
+    model.eval()
+    with (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if args.recipe == "NVFP4BlockScaling"
+        else nullcontext()
+    ):
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            output = model(input_data)
+            pre_save_loss = F.mse_loss(output, target)
+
+    # Save deep copy of the model and optimizer state before checkpointing.
+    # NOTE(@cspades): deepcopy has issues with DTensors. Just clone().
+    s1 = {}
+    for key, val in model.state_dict().items():
+        s1[key] = val.clone()
+    optim_state_dict = optimizer.state_dict()
+    o1 = {"state": {}}
+    for idx, state in optim_state_dict["state"].items():
+        o1_state = o1["state"].setdefault(idx, {})
+        for key, val in state.items():
+            o1_state[key] = val.clone()
+    o1["param_groups"] = deepcopy(optim_state_dict["param_groups"])
+
+    # Write model to checkpoint.
+    CKPT_DIR = (
+        Path(SHARED_TMP_DIR)
+        / "run_fsdp2_model"
+        / f"dcp-{'_'.join(str(x) for x in args.sharding_dims)}-{args.layer_type}-{args.recipe}-fp8_init_{args.fp8_init}"
+    )
+    CKPT_DIR.mkdir(parents=True, exist_ok=True, mode=0o777)
+    state_dict = {"app": AppState(model=model, optimizer=optimizer)}
+    torch.distributed.checkpoint.save(state_dict, checkpoint_id=str(CKPT_DIR))
+
+    # Perform an extra training step to change the weights such that
+    # state parity tests will fail unless the checkpoint is loaded
+    # without any errors or incongruities vs. the saved model state.
+    model.train()
+    for iteration in range(args.iter):
+        optimizer.zero_grad()
+        with (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if args.recipe == "NVFP4BlockScaling"
+            else nullcontext()
+        ):
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                output = model(torch.randn(inp_shape).to(device))
+                loss = F.mse_loss(output, torch.randn(out_shape).to(device))
+        loss.backward()
+        optimizer.step()
+
+    # Load the checkpoint.
+    state_dict = {"app": AppState(model=model, optimizer=optimizer)}
+    torch.distributed.checkpoint.load(state_dict=state_dict, checkpoint_id=str(CKPT_DIR))
+
+    # FIXME(@cspades): DelayedScaling checkpointing has tiny uint8 parity issues
+    # that affects the dequantized model state. Only test loss parity.
+    if args.recipe != "DelayedScaling" and args.fp8_init:
+        # Validate checkpoint parity with pre-save state dictionaries.
+        # Compare pre-save and post-load model state dictionaries.
+        s2 = model.state_dict()
+        nonempty_model_state = False
+        for key in s1.keys() | s2.keys():
+            if key.endswith("_extra_state"):
+                # Don't parity test _extra_state. Shape can change after reset_parameters().
+                continue
+            v1 = s1.get(key, None)
+            if isinstance(v1, DTensor):
+                v1 = v1.to_local()
+            v2 = s2.get(key, None)
+            if isinstance(v2, DTensor):
+                v2 = v2.to_local()
+            assert (
+                v1 is not None and v2 is not None
+            ), f"[{key} Not Found] Original Param: {v1} | Checkpoint Param: {v2}"
+            assert (
+                v1.shape == v2.shape
+            ), f"[Checkpoint Param {key} Shape Mismatch] {v1.shape} != {v2.shape}"
+            assert torch.allclose(v1, v2), f"[Checkpoint Param {key} Value Mismatch] {v1} != {v2}"
+            nonempty_model_state = True
+        assert nonempty_model_state, "Model state should not be empty for evenly-sharded DTensors!"
+
+        # Compare pre-save and post-load optimizer state dictionaries.
+        o2 = optimizer.state_dict()
+        nonempty_optim_state = False
+        for param_id in o1["state"].keys() | o2["state"].keys():
+            param_state_1 = o1["state"].get(param_id, None)
+            param_state_2 = o2["state"].get(param_id, None)
+            assert param_state_1 is not None and param_state_2 is not None, (
+                f"[{param_id} Not Found] Original Optim State: {param_state_1} | Checkpoint Optim"
+                f" State: {param_state_2}"
+            )
+            for key in param_state_1.keys() | param_state_2.keys():
+                v1 = param_state_1.get(key, None)
+                if isinstance(v1, DTensor):
+                    v1 = v1.to_local()
+                v2 = param_state_2.get(key, None)
+                if isinstance(v2, DTensor):
+                    v2 = v2.to_local()
+                assert v1 is not None and v2 is not None, (
+                    f"[{param_id} {key} Not Found] Original Optim State: {v1} | Checkpoint Optim"
+                    f" State: {v2}"
+                )
+                assert (
+                    v1.shape == v2.shape
+                ), f"[Optim State {param_id} {key} Shape Mismatch] {v1.shape} != {v2.shape}"
+                assert torch.allclose(
+                    v1, v2
+                ), f"[Optim State {param_id} {key} Value Mismatch] {v1} != {v2}"
+                nonempty_optim_state = True  # Optimizer state depends on wgrad, verify this!
+        assert (
+            nonempty_optim_state
+        ), "Optimizer state should not be empty for evenly-sharded DTensors!"
+        assert len(o1["param_groups"]) == len(o2["param_groups"]), (
+            f"[Optim State Param Groups Length Mismatch] {o1['param_groups']} !="
+            f" {o2['param_groups']}"
+        )
+        for i in range(len(o2["param_groups"])):
+            for key in o1["param_groups"][i].keys():
+                v1 = o1["param_groups"][i][key]
+                v2 = o2["param_groups"][i][key]
+                assert v1 == v2, f"[Optim State Param Group {i} {key} Value Mismatch] {v1} != {v2}"
+
+    # Validate post-load model loss.
+    model.eval()
+    with (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if args.recipe == "NVFP4BlockScaling"
+        else nullcontext()
+    ):
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            output = model(input_data)
+            post_load_loss = F.mse_loss(output, target)
+    # Allow for 1% disparity due to _extra_state disparity.
+    assert torch.allclose(
+        pre_save_loss, post_load_loss, rtol=1e-2
+    ), f"Pre-Save Loss: {pre_save_loss} != Post-Load Loss: {post_load_loss}"
+
+    # Clean up temporary checkpoint directory.
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        shutil.rmtree(CKPT_DIR)
+    torch.distributed.barrier()
 
     dist.destroy_process_group()
     return 0

@@ -729,10 +729,6 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     columnwise_scale_inv, (0, 0, 0, pad_dim0)
                 )
 
-        # If out is a DTensor from a previously un-sharded
-        # AG buffer, convert to local Tensor.
-        # FIXME(@cspades): FP8 parameters currently are not
-        # compatible with DCP checkpointing.
         if isinstance(out, DTensor):
             # out.to_local() is not supported with Torch Dispatch,
             # for quantized tensors with _transpose usage.
