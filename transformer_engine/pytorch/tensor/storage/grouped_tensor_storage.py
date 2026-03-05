@@ -93,8 +93,11 @@ class GroupedTensorStorage:
             tensor_offsets: Device tensor of int64 array of length num_tensors (or None if uniform)
             offsets: Vector of integer offsets for each tensor.
         """
-        del requires_grad
-        del stride
+# `requires_grad` and `stride` are accepted for API symmetry with
+# GroupedTensor.__new__ but are not relevant for storage-only
+# initialization; they are intentionally ignored here.
+del requires_grad
+del stride
         instance.num_tensors = num_tensors
         instance.quantizer = quantizer
         instance.tensor_shapes = shapes
