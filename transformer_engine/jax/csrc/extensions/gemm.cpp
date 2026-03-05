@@ -99,7 +99,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 }
 
 
-Error_Type GemmInitFFI_v2(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
+Error_Type GemmInitV2FFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                                  Buffer_Type rhs_scale_inv, Buffer_Type bias,
                                  Buffer_Type alpha, Buffer_Type beta,
                                  Result_Type output, Result_Type workspace,
@@ -135,7 +135,7 @@ Error_Type GemmInitFFI_v2(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Typ
   return ffi_with_cuda_error_check();
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmInitHandler_v2, GemmInitFFI_v2,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmInitV2Handler, GemmInitV2FFI,
                               FFI::Bind<FFI_Prepare>()
                                   .Arg<Buffer_Type>()  // lhs
                                   .Arg<Buffer_Type>()  // lhs_scale_inv
@@ -161,10 +161,10 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
                                  bool use_split_accumulator, JAXX_Collective_Op collective_op) {
   static std::once_flag gemm_init_warned;
   std::call_once(gemm_init_warned, []() {
-    std::cerr << "[CollectiveGemmInitFFI] Deprecation: This API is deprecated and will be removed in September 2026. Use GemmInitFFI_v2 instead."
+    std::cerr << "[CollectiveGemmInitFFI] Deprecation: This API is deprecated and will be removed in September 2026. Use GemmInitV2FFI instead."
               << std::endl;
   });
-  return GemmInitFFI_v2(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output, workspace,
+  return GemmInitV2FFI(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output, workspace,
      GemmConfig{scaling_mode, collective_op, lhs_axis_boundary, rhs_axis_boundary, lhs_transposed, rhs_transposed, use_split_accumulator});
 }
 
@@ -194,7 +194,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<JAXX_Collective_Op>("collective_op"),
                               FFI_CudaGraph_Traits);
 
-Error_Type GemmFFI_v2(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
+Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias,
                    Buffer_Type alpha, Buffer_Type beta, Result_Type output, Result_Type workspace,
                    GemmConfig config) {
@@ -330,7 +330,7 @@ Error_Type GemmFFI_v2(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scal
   return ffi_with_cuda_error_check();
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler_v2, GemmFFI_v2,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmV2Handler, GemmV2FFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // lhs
@@ -368,12 +368,12 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
     warned_fuse_gelu_grad = true;
   }
   if (!warned_api) {
-    std::cerr << "[GemmFFI] Deprecation: This API is deprecated in Sep 2026. Use GemmFFI_v2 instead."
+    std::cerr << "[GemmFFI] Deprecation: This API is deprecated in Sep 2026. Use GemmV2FFI instead."
               << std::endl;
     warned_api = true;
   }
 
-    GemmFFI_v2(stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output, workspace,
+    GemmV2FFI(stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output, workspace,
     GemmConfig{scaling_mode, collective_op, lhs_axis_boundary, rhs_axis_boundary, lhs_transposed, rhs_transposed, use_split_accumulator});
 }
 
