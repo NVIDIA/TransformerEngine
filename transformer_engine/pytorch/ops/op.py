@@ -210,7 +210,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """
         return 0
 
-    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:  # pylint: disable=unused-argument
+    def get_quantizer_roles(
+        self, mode: str
+    ) -> Optional[list[QuantizerRole]]:  # pylint: disable=unused-argument
         """Return an ordered list of :class:`QuantizerRole` for quantizers.
 
         The returned list must be aligned with the internal quantizer ordering and

@@ -1606,7 +1606,7 @@ class CustomRecipeState(RecipeState):
                 raise ValueError(
                     f"CustomRecipe qfactory returned None for slot {i} "
                     f"(role={roles[i]}). Every slot must return a Quantizer "
-                    f"instance or a QuantizerRequest."
+                    "instance or a QuantizerRequest."
                 )
         self._ds_state = _handle_delayed_scaling_requests(raw, self.device, self.mode)
         return raw
