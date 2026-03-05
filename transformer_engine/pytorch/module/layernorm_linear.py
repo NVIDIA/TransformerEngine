@@ -53,6 +53,7 @@ from ..distributed import (
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
     _convert_param_to_dtensor_param,
+    _extract_trainable_tensor_from_dtensor,
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
@@ -1892,7 +1893,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         for name in self.weight_names:
             weight = getattr(self, name)
             if isinstance(weight, DTensor):
-                weight = weight.to_local()
+                # Extract the trainable compute Tensor.
+                weight = _extract_trainable_tensor_from_dtensor(weight)
             unfused_weights.append(weight)
         if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
             if self.fp8:
@@ -1914,7 +1916,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         for name in self.bias_names:
             bias = getattr(self, name)
             if isinstance(bias, DTensor):
-                bias = bias.to_local()
+                # Extract the trainable compute Tensor.
+                bias = _extract_trainable_tensor_from_dtensor(bias)
             unfused_biases.append(bias)
         return unfused_biases
 
@@ -1922,10 +1925,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         """Get the weight and bias of the layer norm."""
         ln_weight = self.layer_norm_weight
         if isinstance(ln_weight, DTensor):
-            ln_weight = ln_weight.to_local()
+            # Extract the trainable compute Tensor.
+            ln_weight = _extract_trainable_tensor_from_dtensor(ln_weight)
         ln_bias = self.layer_norm_bias
         if isinstance(ln_bias, DTensor):
-            ln_bias = ln_bias.to_local()
+            # Extract the trainable compute Tensor.
+            ln_bias = _extract_trainable_tensor_from_dtensor(ln_bias)
         return [ln_weight, ln_bias]
 
     def _get_weight_quantizers(self) -> List[Quantizer]:

@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -74,7 +75,7 @@ def _run_test(fp_init, sharding_dims, recipe, layer_type):
     subprocess.run(test_cmd, env=os.environ, check=True)
 
 
-@pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
+@pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs.")
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
 @pytest.mark.parametrize(
     "sharding_dims",
@@ -83,15 +84,19 @@ def _run_test(fp_init, sharding_dims, recipe, layer_type):
         [NUM_PROCS],
         # HSDP
         [2, NUM_PROCS // 2],
-        # FSDP-TP
-        [1, 2, NUM_PROCS // 2],
-        # HSDP-TP
+        # (H/F)SDP-TP
         [NUM_PROCS // 4, 2, 2],
     ),
 )
 @pytest.mark.parametrize("fp8_init", (False, True))
 @pytest.mark.parametrize("layer_type", ("LayerNormLinear", "TransformerLayer"))
 def test_distributed(fp8_init, sharding_dims, fp_recipe, layer_type):
+
+    parallel_size = math.prod(x for x in sharding_dims if x != 0)
+    if NUM_PROCS < parallel_size:
+        pytest.skip(
+            f"Insufficient devices ({NUM_PROCS}) to test sharding configuration: {sharding_dims}"
+        )
 
     if fp_recipe in ("Float8BlockScaling", "NVFP4BlockScaling") and fp8_init:
         pytest.xfail(f"{fp_recipe} + fp8_init: test_fp8_fsdp2_allgather is currently failing.")

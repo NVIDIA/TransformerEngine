@@ -16,6 +16,7 @@ import warnings
 import torch
 from torch.cuda import _lazy_call, _lazy_init
 from torch.utils.checkpoint import detach_variable, noop_context_fn
+from torch.distributed.tensor import DTensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
@@ -2000,8 +2001,6 @@ def _convert_param_to_dtensor_param(
     stride: Optional[Tuple[int]] = None,
 ):
     """Convert the parameter into a DTensor."""
-    from torch.distributed.tensor import DTensor
-
     # If the parameter is already a DTensor, extract local Tensor.
     # We overwrite the original DTensor's distributed configuration.
     param_tensor = param
@@ -2024,6 +2023,23 @@ def _convert_param_to_dtensor_param(
             # Set the original attribute.
             setattr(new_param, key, val)
     return new_param
+
+
+def _extract_trainable_tensor_from_dtensor(dtensor_param: DTensor) -> torch.Tensor:
+    """
+    Retrieves the local Tensor from a trainable DTensor Parameter.
+
+    Calls DTensor.to_local() and sets `requires_grad_(DTensor.requires_grad)`,
+    to inherit `requires_grad` from the DTensor parameter. This is necessary
+    because DTensor.from_local(Tensor) (in `_convert_param_to_dtensor_param`)
+    resets the `requires_grad` attribute in the local Tensor, and consequently
+    deactivates gradient computation / differentiation in TransformerEngine.
+    """
+    # Extract the local compute Tensor.
+    compute_param = dtensor_param.to_local()
+    # Set requires_grad on local Tensor based on DTensor.
+    compute_param.requires_grad_(dtensor_param.requires_grad)
+    return compute_param
 
 
 def _fsdp_scatter_tensors(

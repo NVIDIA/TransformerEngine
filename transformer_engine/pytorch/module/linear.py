@@ -52,6 +52,7 @@ from ..distributed import (
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
     _convert_param_to_dtensor_param,
+    _extract_trainable_tensor_from_dtensor,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -1607,7 +1608,8 @@ class Linear(TransformerEngineBaseModule):
         for name in self.weight_names:
             weight = getattr(self, name)
             if isinstance(weight, DTensor):
-                weight = weight.to_local()
+                # Extract the trainable compute Tensor.
+                weight = _extract_trainable_tensor_from_dtensor(weight)
             unfused_weights.append(weight)
         if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
             if self.fp8:
@@ -1629,7 +1631,8 @@ class Linear(TransformerEngineBaseModule):
         for name in self.bias_names:
             bias = getattr(self, name)
             if isinstance(bias, DTensor):
-                bias = bias.to_local()
+                # Extract the trainable compute Tensor.
+                bias = _extract_trainable_tensor_from_dtensor(bias)
             unfused_biases.append(bias)
         return unfused_biases
 
