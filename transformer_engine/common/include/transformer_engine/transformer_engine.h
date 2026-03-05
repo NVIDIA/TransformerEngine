@@ -449,6 +449,8 @@ enum NVTEGroupedTensorParam {
   kNVTEGroupedLastDims = 8,  /*!< Last dimension sizes (device pointer to int64_t array) */
   kNVTEGroupedTensorOffsets =
       9, /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
+  kNVTEGroupedWithGEMMSwizzledScales =
+      10, /*!< Whether scaling factors are in format expected by GEMM */
   kNVTENumGroupedTensorParams
 };
 
@@ -479,25 +481,30 @@ NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_
 void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
 
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
-/*! \brief Set a parameter of the grouped tensor.
+/*! \brief Set a grouped tensor parameter.
  *
- *  \param[in/out] tensor Grouped tensor.
- *  \param[in] param_name The parameter to be set.
- *  \param[in] param The value to be set (NVTEBasicTensor).
+ *  \param[in/out] tensor        Grouped tensor.
+ *  \param[in]     param         Grouped tensor parameter type.
+ *  \param[in]     buf           Memory address to read parameter value.
+ *  \param[in]     size_in_bytes Size of buf.
  */
-void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
-                                   const NVTEBasicTensor *param);
+void nvte_set_grouped_tensor_param(NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                   const void *buf, size_t size_in_bytes);
 
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
-/*! \brief Get a value of the parameter of the grouped tensor.
+/*! \brief Query a grouped tensor parameter.
  *
- *  \param[in] tensor Grouped tensor.
- *  \param[in] param_name The parameter to be queried.
- *
- *  \return NVTEBasicTensor containing the parameter data.
+ *  \param[in]  tensor        Grouped tensor.
+ *  \param[in]  param         Grouped tensor parameter type.
+ *  \param[out] buf           Memory address to write parameter value.
+ *                            Ignored if NULL.
+ *  \param[in]  size_in_bytes Size of buf.
+ *  \param[out] size_written  Number of bytes that have been written to
+ *                            buf. If buf is NULL, then the number of
+ *                            bytes that would have been written.
  */
-NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
-                                              NVTEGroupedTensorParam param_name);
+void nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                   void *buf, size_t size_in_bytes, size_t *size_written);
 
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Get the number of tensors in a grouped tensor.
@@ -957,8 +964,235 @@ class TensorWrapper {
   NVTETensor tensor_ = nullptr;
 };
 
-/*! \warning Deprecated */
-enum class Float8BlockScaleTensorFormat { GEMM_READY = 0, COMPACT = 1, INVALID };
+/*! \struct GroupedTensorWrapper
+ *  \brief C++ wrapper for the NVTEGroupedTensor class.
+ */
+
+class GroupedTensorWrapper {
+ public:
+  /*! \brief Constructs new GroupedTensorWrapper.
+   *
+   * Create a new TE grouped tensor with a given logical shape.
+   * TE grouped tensors are just wrappers on top of raw data and do not
+   * own memory.
+   *
+   *  \param[in] num_tensors   Number of tensors in the group (must be > 0).
+   *  \param[in] logical_shape Logical 2D shape of the grouped data.
+   *  \param[in] scaling_mode  Tensor data format.
+   */
+  GroupedTensorWrapper(const size_t num_tensors, const NVTEShape &logical_shape,
+                       const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
+      : tensor_(nvte_create_grouped_tensor(scaling_mode, num_tensors, logical_shape)) {}
+
+  /*! \brief Constructs new GroupedTensorWrapper.
+   *
+   * Create a new TE grouped tensor with a given logical shape.
+   *
+   *  \param[in] num_tensors   Number of tensors in the group (must be > 0).
+   *  \param[in] logical_shape Logical 2D shape of the grouped data.
+   *  \param[in] scaling_mode  Tensor data format.
+   */
+  GroupedTensorWrapper(const size_t num_tensors, const std::vector<size_t> &logical_shape,
+                       const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
+      : GroupedTensorWrapper(num_tensors,
+                             nvte_make_shape(logical_shape.data(), logical_shape.size()),
+                             scaling_mode) {}
+
+  /*! \brief GroupedTensorWrapper destructor. */
+  ~GroupedTensorWrapper() { nvte_destroy_grouped_tensor(tensor_); }
+
+  GroupedTensorWrapper &operator=(const GroupedTensorWrapper &other) = delete;
+  GroupedTensorWrapper(const GroupedTensorWrapper &other) = delete;
+
+  /*! \brief Constructs new GroupedTensorWrapper from existing GroupedTensorWrapper. */
+  GroupedTensorWrapper(GroupedTensorWrapper &&other) {
+    tensor_ = other.tensor_;
+    other.tensor_ = nullptr;
+  }
+
+  /*! \brief Assign the data from existing GroupedTensorWrapper. */
+  GroupedTensorWrapper &operator=(GroupedTensorWrapper &&other) {
+    if (this == &other) return *this;
+    nvte_destroy_grouped_tensor(tensor_);
+    tensor_ = other.tensor_;
+    other.tensor_ = nullptr;
+    return *this;
+  }
+
+  // Parameter setters
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_parameter(const NVTEGroupedTensorParam param, void *dptr, DType type,
+                                      const ShapeType &shape) noexcept {
+    NVTEShape nvte_shape = this->convertShape(shape);
+    NVTEBasicTensor data = {dptr, static_cast<NVTEDType>(type), nvte_shape};
+    nvte_set_grouped_tensor_param(tensor_, param, &data, sizeof(data));
+    return *this;
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_rowwise_data(void *dptr, DType type, const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedRowwiseData, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_columnwise_data(void *dptr, DType type,
+                                            const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedColumnwiseData, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_scale(void *dptr, DType type, const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedScale, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_amax(void *dptr, DType type, const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedAmax, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_rowwise_scale_inv(void *dptr, DType type,
+                                              const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedRowwiseScaleInv, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_columnwise_scale_inv(void *dptr, DType type,
+                                                 const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedColumnwiseScaleInv, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_columnwise_amax(void *dptr, DType type,
+                                            const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedColumnwiseAmax, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_first_dims(void *dptr, DType type, const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedFirstDims, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_last_dims(void *dptr, DType type, const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedLastDims, dptr, type, shape);
+  }
+
+  template <typename ShapeType>
+  GroupedTensorWrapper &set_tensor_offsets(void *dptr, DType type,
+                                           const ShapeType &shape) noexcept {
+    return set_parameter(kNVTEGroupedTensorOffsets, dptr, type, shape);
+  }
+
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
+    const auto val = static_cast<uint8_t>(with_gemm_swizzled_scales);
+    nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedWithGEMMSwizzledScales, &val, sizeof(val));
+  }
+
+  // Parameter getters
+  NVTEBasicTensor get_parameter(const NVTEGroupedTensorParam param) const noexcept {
+    NVTEBasicTensor ret;
+    nvte_get_grouped_tensor_param(tensor_, param, &ret, sizeof(ret), nullptr);
+    return ret;
+  }
+
+  NVTEBasicTensor get_rowwise_data() const noexcept {
+    return get_parameter(kNVTEGroupedRowwiseData);
+  }
+
+  NVTEBasicTensor get_columnwise_data() const noexcept {
+    return get_parameter(kNVTEGroupedColumnwiseData);
+  }
+
+  NVTEBasicTensor get_scale() const noexcept { return get_parameter(kNVTEGroupedScale); }
+
+  NVTEBasicTensor get_amax() const noexcept { return get_parameter(kNVTEGroupedAmax); }
+
+  NVTEBasicTensor get_rowwise_scale_inv() const noexcept {
+    return get_parameter(kNVTEGroupedRowwiseScaleInv);
+  }
+
+  NVTEBasicTensor get_columnwise_scale_inv() const noexcept {
+    return get_parameter(kNVTEGroupedColumnwiseScaleInv);
+  }
+
+  NVTEBasicTensor get_columnwise_amax() const noexcept {
+    return get_parameter(kNVTEGroupedColumnwiseAmax);
+  }
+
+  NVTEBasicTensor get_first_dims() const noexcept { return get_parameter(kNVTEGroupedFirstDims); }
+
+  NVTEBasicTensor get_last_dims() const noexcept { return get_parameter(kNVTEGroupedLastDims); }
+
+  NVTEBasicTensor get_tensor_offsets() const noexcept {
+    return get_parameter(kNVTEGroupedTensorOffsets);
+  }
+
+  bool get_with_gemm_swizzled_scales() const {
+    uint8_t val = 0;
+    nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedWithGEMMSwizzledScales, &val, sizeof(val),
+                                  nullptr);
+    return static_cast<bool>(val);
+  }
+
+  /*! \brief Get an underlying NVTEGroupedTensor.
+   *
+   *  \return NVTEGroupedTensor held by this GroupedTensorWrapper.
+   */
+  NVTEGroupedTensor data() const noexcept { return tensor_; }
+
+  /*! \brief Get the number of tensors in this GroupedTensorWrapper. */
+  size_t num_tensors() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_grouped_tensor_num_tensors(tensor_);
+  }
+
+  /*! \brief Get the data type of this GroupedTensorWrapper. */
+  DType dtype() const noexcept {
+    if (tensor_ == nullptr) return DType::kNumTypes;
+    return static_cast<DType>(nvte_grouped_tensor_type(tensor_));
+  }
+
+  /*! \brief Get a scaling mode of the grouped tensor. */
+  NVTEScalingMode scaling_mode() const noexcept {
+    if (tensor_ == nullptr) return NVTE_DELAYED_TENSOR_SCALING;
+    return nvte_grouped_tensor_scaling_mode(tensor_);
+  }
+
+  /*! \brief Get the logical shape of this GroupedTensorWrapper. */
+  const NVTEShape logical_shape() const noexcept {
+    if (tensor_ == nullptr) {
+      return emptyShape;
+    }
+    return nvte_get_grouped_tensor_logical_shape(tensor_);
+  }
+
+  static constexpr size_t defaultData = 1;
+  static constexpr NVTEShape defaultShape = {
+      {defaultData, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
+  static constexpr NVTEShape emptyShape = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
+
+ private:
+  NVTEShape convertShape(const NVTEShape &s) { return s; }
+
+  NVTEShape convertShape(const std::vector<size_t> &s) {
+    return nvte_make_shape(s.data(), s.size());
+  }
+
+  /*! \brief Wrapped NVTEGroupedTensor. */
+  NVTEGroupedTensor tensor_ = nullptr;
+};
+
+/*! \enum Float8BlockScaleTensorFormat
+ *  \brief Data format for an FP8 block-scaled tensor
+ */
+enum class Float8BlockScaleTensorFormat {
+  /*! FP8 data is transposed if needed and scales are swizzled */
+  GEMM_READY = 0,
+  /*! FP8 data is untransposed and scales are not swizzled or padded */
+  COMPACT = 1,
+  INVALID
+};
 
 /*! \struct QuantizationConfigWrapper
  *  \brief C++ wrapper for NVTEQuantizationConfigWrapper.

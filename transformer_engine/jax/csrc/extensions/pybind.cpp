@@ -81,6 +81,17 @@ pybind11::dict Registrations() {
       pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
       pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
 
+  dict["te_inspect_ffi"] =
+      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
+
+  // Router
+  dict["te_fused_topk_with_score_function_forward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionForwardHandler);
+  dict["te_fused_topk_with_score_function_backward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionBackwardHandler);
+  dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
+  dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
+
   return dict;
 }
 
@@ -150,6 +161,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
       .value("GELU", NVTE_Activation_Type::GELU)
       .value("GEGLU", NVTE_Activation_Type::GEGLU)
+      .value("GLU", NVTE_Activation_Type::GLU)
       .value("SILU", NVTE_Activation_Type::SILU)
       .value("SWIGLU", NVTE_Activation_Type::SWIGLU)
       .value("RELU", NVTE_Activation_Type::RELU)
@@ -185,6 +197,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("ROWWISE", JAXX_Quantize_Layout::ROWWISE)
       .value("COLWISE", JAXX_Quantize_Layout::COLWISE)
       .value("ROWWISE_COLWISE", JAXX_Quantize_Layout::ROWWISE_COLWISE)
+      .export_values();
+
+  pybind11::enum_<JAXX_Score_Function>(m, "JAXX_Score_Function", pybind11::module_local())
+      .value("SIGMOID", JAXX_Score_Function::SIGMOID)
+      .value("SOFTMAX", JAXX_Score_Function::SOFTMAX)
       .export_values();
 
   pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
