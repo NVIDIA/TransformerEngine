@@ -44,6 +44,7 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
+from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
@@ -162,7 +163,16 @@ def test_dot_product_attention(
         )
 
     # Get backends
+    # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
+    # For all other shapes test fwd+bwd
     is_training = True
+    # TODO(KshitijLakhani): Set is_training to True for all cases once cuDNN supports dbias for 111s.
+    if config.bias_shape == "111s":
+        is_training = False
+        logging.info(
+            "Setting is_training to False as cuDNN does not support dbias for"
+            f" {config.bias_shape=} "
+        )
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -636,7 +646,8 @@ model_configs_bias_shapes = {
     "bias_1_1": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="1hss"),
     "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="b1ss"),
     "bias_1_3": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"),
-    "bias_1_4": ModelConfig(
+    "bias_1_4": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="111s"),
+    "bias_1_5": ModelConfig(
         4,
         2048,
         24,
@@ -646,7 +657,7 @@ model_configs_bias_shapes = {
         bias_shape="1hss",
         alibi_type="custom",
     ),
-    "bias_1_5": ModelConfig(
+    "bias_1_6": ModelConfig(
         2,
         2048,
         24,
@@ -1143,10 +1154,16 @@ def _run_dot_product_attention(
         bias = None
     if config.attn_bias_type == "post_scale_bias":
         shape = "_".join(config.bias_shape)
+        # For 1hss, 11ss, b1ss, bhss
+        shape_cache = shape
         shape = shape.replace("_s_s", "_sq_skv")
+        # For 111s
+        if shape == shape_cache:
+            shape = shape.replace("_1_s", "_1_skv")
         tensor_shape = [dim_to_num[j] for j in shape.split("_")]
         bias = torch.randn(tensor_shape, dtype=dtype, device="cuda")
-        if config.bias_shape != "1hss":
+        # For 111s, dbias calculation is not supported as of cuDNN 9.18
+        if config.bias_shape == "111s":
             bias.requires_grad = False
 
     # Create RNG
@@ -1818,10 +1835,16 @@ qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 @pytest.mark.parametrize("is_training", [True, False])
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
 def test_mha_fp8_vs_f16(
-    dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, RoPE, is_training, scaling_mode
+    dtype,
+    model,
+    qkv_format,
+    input_layernorm,
+    fp8_dpa_bwd,
+    RoPE,
+    is_training,
+    scaling_mode,
 ):
     """Test MultiHeadAttention module in FP8"""
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
@@ -1843,7 +1866,7 @@ def test_mha_fp8_vs_f16(
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout=qkv_format.replace("hd", "h3d"),
@@ -1853,20 +1876,18 @@ def test_mha_fp8_vs_f16(
         deterministic=_deterministic,
     )
     flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_format.replace("hd", "h3d"),
+        is_training=is_training,
+        deterministic=_deterministic,
+    )
+    _, fused_attn_supported_f16, _ = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
-    fused_attn_supported_f16 = False
-    if not fp8_dpa_bwd:
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config,
-            qkv_dtype=dtype,
-            qkv_layout=qkv_format.replace("hd", "h3d"),
-            is_training=is_training,
-            deterministic=_deterministic,
-        )
-        _, fused_attn_supported_f16, _ = available_backends
-        if not fused_attn_supported_f16:
-            pytest.skip("No attention backend available.")
+    if not fused_attn_supported_f16:
+        pytest.skip("No reference backend available.")
 
     if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -2078,7 +2099,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     #        config.dropout_p = 0.1
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "1"
 
     # Test backend availability
@@ -2097,7 +2117,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout=qkv_layout,
@@ -2106,20 +2126,19 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         is_training=is_training,
         deterministic=_deterministic,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    if flash_attn_supported + fused_attn_supported < 1:
+    flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        is_training=is_training,
+        deterministic=_deterministic,
+    )
+    _, fused_attn_supported_f16, _ = available_backends
+    if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
-    if not fp8_dpa_bwd:
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config,
-            qkv_dtype=dtype,
-            qkv_layout=qkv_layout,
-            is_training=is_training,
-            deterministic=_deterministic,
-        )
-        _, fused_attn_supported, _ = available_backends
-        if not fused_attn_supported:
-            pytest.skip("No attention backend available.")
+    if not fused_attn_supported_f16:
+        pytest.skip("No reference backend available.")
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
 
@@ -2143,30 +2162,32 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
             dtype, config, True, qkv_layout, is_training, fp8_recipe
         )
 
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    _attention_backends["backend_selection_requires_update"] = True
-    logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (FusedAttention)")
-    fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
-        dtype, config, True, qkv_layout, is_training, fp8_recipe
-    )
-
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    if config.dropout_p == 0.0:
-        # test cuDNN FP8 dropout: need a FP16/BF16 reference on Blackwell
-        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False (FusedAttention)")
-        fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
-            dtype, config, False, qkv_layout, is_training, fp8_recipe
+    if fused_attn_supported_fp8:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (FusedAttention)")
+        fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
+            dtype, config, True, qkv_layout, is_training, fp8_recipe
         )
+
+    if fused_attn_supported_f16:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+        if config.dropout_p == 0.0:
+            # test cuDNN FP8 dropout: need a FP16/BF16 reference on Blackwell
+            logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False (FusedAttention)")
+            fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
+                dtype, config, False, qkv_layout, is_training, fp8_recipe
+            )
 
     atol = 5e-1
     rtol = 5e-2
     rmse_tol = 0.11
     bwd_names = ["dq", "dk", "dv"]
-    if flash_attn_supported:
+    if flash_attn_supported and fused_attn_supported_f16:
         logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
         logging.debug("========== {:^25s} ==========".format("forward output"))
         compare_and_assert(
@@ -2179,7 +2200,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
             rmse_tol,
             True,
         )
-    if unfused_attn_supported:
+    if unfused_attn_supported and fused_attn_supported_f16:
         logging.debug("========== {:^25s} ==========".format("unfused fp8 vs fused f16:"))
         logging.debug("========== {:^25s} ==========".format("forward output"))
         compare_and_assert(
@@ -2205,37 +2226,38 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
                     rmse_tol,
                     True,
                 )
-    if config.dropout_p != 0.0:
-        # test cuDNN FP8 dropout
-        assert torch.all(
-            fused_attn_fwd_fp8 == 1
-        ), "fused_attn_fwd_fp8 must be all 1s when Q/K/V are all 1s."
-    else:
-        logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
-        logging.debug("========== {:^25s} ==========".format("forward output"))
-        compare_and_assert(
-            fused_attn_fwd_fp8,
-            fused_attn_fwd_f16,
-            "fused_attn_fwd_fp8",
-            "fused_attn_fwd_f16",
-            atol,
-            rtol,
-            rmse_tol,
-            True,
-        )
-        if is_training:
-            for i, _ in enumerate(fused_attn_bwd_f16):
-                logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
-                compare_and_assert(
-                    fused_attn_bwd_fp8[i],
-                    fused_attn_bwd_f16[i],
-                    f"fused_attn_bwd_fp8[{i}]",
-                    f"fused_attn_bwd_f16[{i}]",
-                    atol,
-                    rtol,
-                    rmse_tol,
-                    True,
-                )
+    if fused_attn_supported_fp8 and fused_attn_supported_f16:
+        if config.dropout_p != 0.0:
+            # test cuDNN FP8 dropout
+            assert torch.all(
+                fused_attn_fwd_fp8 == 1
+            ), "fused_attn_fwd_fp8 must be all 1s when Q/K/V are all 1s."
+        else:
+            logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
+            logging.debug("========== {:^25s} ==========".format("forward output"))
+            compare_and_assert(
+                fused_attn_fwd_fp8,
+                fused_attn_fwd_f16,
+                "fused_attn_fwd_fp8",
+                "fused_attn_fwd_f16",
+                atol,
+                rtol,
+                rmse_tol,
+                True,
+            )
+            if is_training:
+                for i, _ in enumerate(fused_attn_bwd_f16):
+                    logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
+                    compare_and_assert(
+                        fused_attn_bwd_fp8[i],
+                        fused_attn_bwd_f16[i],
+                        f"fused_attn_bwd_fp8[{i}]",
+                        f"fused_attn_bwd_f16[{i}]",
+                        atol,
+                        rtol,
+                        rmse_tol,
+                        True,
+                    )
     os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "0"
 
 
@@ -2560,12 +2582,12 @@ _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = False
 _2X_ACC_WGRAD = False
 
-META_QKV = tex.FP8FwdTensors.GEMM1_OUTPUT
-META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
-META_O = tex.FP8FwdTensors.GEMM2_INPUT
-META_DO = tex.FP8BwdTensors.GRAD_INPUT2
-META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
-META_DP = tex.FP8BwdTensors.GRAD_INPUT3
+META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
+META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
+META_O = FP8FwdTensorIdx.GEMM2_INPUT
+META_DO = FP8BwdTensorIdx.GRAD_INPUT2
+META_S = FP8FwdTensorIdx.GEMM3_OUTPUT
+META_DP = FP8BwdTensorIdx.GRAD_INPUT3
 
 
 class _custom_mha_fp8(torch.autograd.Function):
@@ -2593,14 +2615,14 @@ class _custom_mha_fp8(torch.autograd.Function):
         d = in_features // h
         b = cu_seqlens.numel() - 1
 
-        input_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-        qkv_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
-        qkv_weight_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        o_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
-        dO_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
-        dQKV_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
-        s_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT2]
-        dP_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT3]
+        input_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
+        qkv_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_INPUT]
+        qkv_weight_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
+        o_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_OUTPUT]
+        dO_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT1]
+        dQKV_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
+        s_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT2]
+        dP_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT3]
 
         inp_fp8 = input_quantizer(inp)
 
