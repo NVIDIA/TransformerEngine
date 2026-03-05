@@ -206,13 +206,23 @@ class DumpTensors(TEConfigAPIMapper):
 
         Supports dumping both high-precision tensors and quantized tensors based on config.
         """
-        # Assert that rowwise and columnwise are the same (or one is None)
-        assert rowwise_quantized_tensor is columnwise_quantized_tensor, (
-            "[NVTORCH INSPECT ERROR] DumpTensors expects rowwise_quantized_tensor and "
-            "columnwise_quantized_tensor to be the same object or both None."
-        )
+        # We support one-sided availability (only rowwise or only columnwise tensor).
+        # If both are present, require them to be the same object to avoid ambiguity.
+        if (
+            rowwise_quantized_tensor is not None
+            and columnwise_quantized_tensor is not None
+            and rowwise_quantized_tensor is not columnwise_quantized_tensor
+        ):
+            raise AssertionError(
+                "[NVTORCH INSPECT ERROR] DumpTensors expects rowwise_quantized_tensor and "
+                "columnwise_quantized_tensor to be the same object when both are provided."
+            )
 
-        quantized_tensor = rowwise_quantized_tensor
+        quantized_tensor = (
+            rowwise_quantized_tensor
+            if rowwise_quantized_tensor is not None
+            else columnwise_quantized_tensor
+        )
 
         dump_hp = config.get("high_precision_tensor", False)
         dump_quant = config.get("quantized_tensor", False)
