@@ -197,7 +197,7 @@ class DumpTensors(TEConfigAPIMapper):
         tensor_name: str,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
-        tensor: torch.Tensor,
+        tensor: Optional[torch.Tensor],
         rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
