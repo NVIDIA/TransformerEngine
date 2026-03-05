@@ -145,6 +145,7 @@ class GroupedTensorStorage:
         cls,
         shape: Tuple[int, int],
         dtype: torch.dtype,
+        *,
         num_tensors: int,
         shapes: Optional[List[Tuple[int, int]]] = None,
         quantizer: Optional[Quantizer] = None,
@@ -161,7 +162,6 @@ class GroupedTensorStorage:
         offsets: Optional[List[int]] = None,
         scale_inv_offsets: Optional[List[int]] = None,
         columnwise_scale_inv_offsets: Optional[List[int]] = None,
-        *,
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
     ):

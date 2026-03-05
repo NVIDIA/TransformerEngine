@@ -244,7 +244,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             src = args[0]
             assert isinstance(src, GroupedTensor)
             target_shape = tuple(args[1])
-            if target_shape == (-1,) or target_shape == (src.numel(),):
+            if target_shape in ((-1,), (src.numel(),)):
                 if src.rowwise_data is not None:
                     return src.rowwise_data.view(-1)
                 raise RuntimeError(
