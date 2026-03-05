@@ -77,6 +77,8 @@ PARAMS_KEY = "params"
 import argparse
 import jax
 from jax.experimental import mesh_utils
+from transformer_engine.common import recipe as te_recipe
+from transformer_engine.jax.quantize import ScalingMode
 from transformer_engine.jax.cpp_extensions.gemm import collective_gemm_bootstrap
 
 # Global flag to track if distributed has been initialized
@@ -183,6 +185,36 @@ def _create_mesh(args):
     return mesh
 
 
+def get_scaling_mode_from_recipe_name(name: str) -> ScalingMode:
+    """Get ScalingMode from a recipe name string."""
+    match name:
+        case "DelayedScaling":
+            return ScalingMode.DELAYED_TENSOR_SCALING
+        case "Float8CurrentScaling":
+            return ScalingMode.CURRENT_TENSOR_SCALING
+        case "MXFP8BlockScaling":
+            return ScalingMode.MXFP8_1D_SCALING
+        case "NVFP4BlockScaling":
+            return ScalingMode.NVFP4_1D_SCALING
+        case _:
+            raise ValueError(f"Invalid recipe name, got {name}")
+
+
+def get_quantization_recipe_from_name_string(name: str):
+    """Query recipe from a given name string"""
+    match name:
+        case "DelayedScaling":
+            return te_recipe.DelayedScaling()
+        case "MXFP8BlockScaling":
+            return te_recipe.MXFP8BlockScaling()
+        case "Float8CurrentScaling":
+            return te_recipe.Float8CurrentScaling()
+        case "NVFP4BlockScaling":
+            return te_recipe.NVFP4BlockScaling()
+        case _:
+            raise ValueError(f"Invalid quantization_recipe, got {name}")
+
+
 def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor parallelism"):
     """Create common argument parser for all collective GEMM tests."""
     parser = argparse.ArgumentParser(description=description)
@@ -229,13 +261,19 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
         help="Type of collective operation",
     )
     parser.add_argument(
-        "--fp8-recipe", type=str, default="DelayedScaling", help="FP8 recipe to use"
+        "--quantize-recipe", type=str, default="DelayedScaling", help="Quantization recipe to use"
     )
     parser.add_argument(
         "--enable-data-parallel", action="store_true", help="Enable data parallelism"
     )
     parser.add_argument(
         "--enable-result-check", action="store_true", default=True, help="Enable result checking"
+    )
+    parser.add_argument(
+        "--use-fp8",
+        action="store_true",
+        default=False,
+        help="Enable FP8 quantization",
     )
 
     return parser
