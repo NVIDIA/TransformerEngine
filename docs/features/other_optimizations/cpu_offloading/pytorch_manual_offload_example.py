@@ -26,8 +26,7 @@ for i in range(num_layers):
     x = sync_function(x)
     manual_controller.start_offload_layer(i)
 
-# Wait for offloads, then release GPU memory
-offload_stream.synchronize()
+# Release GPU memory (each call waits for its layer's offload to complete)
 for i in range(num_layers):
     manual_controller.release_activation_forward_gpu_memory(i)
 

@@ -154,14 +154,14 @@ and offload/reload. The following two scenarios illustrate this — one with ful
 .. raw:: html
    :file: img/scheduling.svg
 
-*Figure 3. With* ``num_layers=2`` *and* ``model_layers=5`` *, at most 3 sets of activations are on GPU. Layer 1 offloading starts during its forward pass (when the first tensor is saved for backward). Offloading fully overlaps with forward, reloading fully overlaps with backward.*
+*Figure 3. With* ``num_layers=2`` *and* ``model_layers=5``\ *, at most 3 sets of activations are on GPU. Layer 1 offloading starts during its forward pass (when the first tensor is saved for backward). Offloading fully overlaps with forward, reloading fully overlaps with backward.*
 
 When ``num_layers`` is too high, the GPU memory limit forces stalls:
 
 .. raw:: html
    :file: img/scheduling_stall.svg
 
-*Figure 4. With* ``num_layers=3`` *and* ``model_layers=5`` *, at most 2 sets of activations can be on GPU (5-3=2), which causes stalls. In forward, Layer 4 cannot start until Layer 2 is offloaded, otherwise there would be 3 sets of activations on GPU (Layers 2, 3, 4). In backward, Layer 3 cannot start immediately — its activations are still on CPU and must be reloaded first. Some tensors may finish reloading earlier, allowing parts of the layer (e.g., a sublayer) to run while the rest waits. The same applies to Layers 2 and 1.*
+*Figure 4. With* ``num_layers=3`` *and* ``model_layers=5``\ *, at most 2 sets of activations can be on GPU (5-3=2), which causes stalls. In forward, Layer 4 cannot start until Layer 2 is offloaded, otherwise there would be 3 sets of activations on GPU (Layers 2, 3, 4). In backward, Layer 3 cannot start immediately — its activations are still on CPU and must be reloaded first. Some tensors may finish reloading earlier, allowing parts of the layer (e.g., a sublayer) to run while the rest waits. The same applies to Layers 2 and 1.*
 
 
 Manual Synchronization
@@ -180,8 +180,8 @@ The ``ManualOffloadSynchronizer`` object provides the following methods:
 - ``start_offload_layer(layer_id)`` — queue async GPU→CPU copies on the offload stream.
   Before each copy, the offload stream waits for an event recorded when that tensor
   was saved for backward.
-- ``release_activation_forward_gpu_memory(layer_id)`` — wait for the offload to complete
-  and release GPU memory.
+- ``release_activation_forward_gpu_memory(layer_id)`` — make the current stream wait for
+  this layer's offload to complete, then release GPU memory.
 - ``start_reload_layer(layer_id)`` — queue async CPU→GPU copies on the offload stream.
   When tensors are accessed in backward, compute stream waits for each tensor's reload
   to complete.
@@ -196,9 +196,8 @@ To skip offloading for a specific layer, simply do not call any of these methods
 
       1. **Forward pass**: After each layer, call ``start_offload_layer(i)`` to begin
          async copy of layer ``i``'s activations to CPU.
-      2. **Release GPU memory**: Call ``offload_stream.synchronize()`` to wait for all
-         offloads to finish, then ``release_activation_forward_gpu_memory(i)`` to free
-         the GPU tensors.
+      2. **Release GPU memory**: Call ``release_activation_forward_gpu_memory(i)`` to free
+         the GPU tensors. Each call waits internally for that layer's offload to complete.
       3. **Before backward**: Call ``start_reload_layer(i)`` to begin async reload.
          The compute stream will automatically wait for each tensor to be reloaded
          before it's accessed in backward.
