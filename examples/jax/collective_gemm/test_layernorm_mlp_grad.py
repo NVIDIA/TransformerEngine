@@ -265,7 +265,9 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
     def test_te_delayed_scaling_fp8_layernorm_mlp_grad(self):
         """Test Collective LayerNorm MLP Gradient with FP8 DelayedScaling"""
         self.args.quantize_recipe = "DelayedScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True
@@ -274,7 +276,9 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
     def test_te_current_scaling_fp8_layernorm_mlp_grad(self):
         """Test Collective LayerNorm MLP Gradient with FP8 Float8CurrentScaling"""
         self.args.quantize_recipe = "Float8CurrentScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True

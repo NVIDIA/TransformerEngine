@@ -63,7 +63,9 @@ def _get_operand_sharding(mesh, collective_op):
     return x_sharding, weight_sharding, bias_sharding
 
 
-def _mean_dense(x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set, quantizer_set):
+def _mean_dense(
+    x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set, quantizer_set
+):
     output = dense(
         x,
         weight,
@@ -78,7 +80,9 @@ def _mean_dense(x, weight, bias, input_axes, weight_axes, output_axes, collectiv
     return jnp.mean(output.astype(jnp.float32))
 
 
-def _value_and_grad_dense(x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set, quantizer_set):
+def _value_and_grad_dense(
+    x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set, quantizer_set
+):
     return jax.jit(jax.value_and_grad(_mean_dense, (0, 1, 2)), static_argnums=(3, 4, 5, 6))(
         x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set, quantizer_set
     )
@@ -205,7 +209,9 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def test_te_delayed_scaling_fp8_all_gather(self):
         """Test Collective Dense Gradient with FP8 DelayedScaling + AllGather"""
         self.args.quantize_recipe = "DelayedScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True
@@ -215,7 +221,9 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def test_te_delayed_scaling_fp8_reduce_scatter(self):
         """Test Collective Dense Gradient with FP8 DelayedScaling + ReduceScatter"""
         self.args.quantize_recipe = "DelayedScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True
@@ -225,7 +233,9 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def test_te_current_scaling_fp8_all_gather(self):
         """Test Collective Dense Gradient with FP8 Float8CurrentScaling + AllGather"""
         self.args.quantize_recipe = "Float8CurrentScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True
@@ -235,7 +245,9 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def test_te_current_scaling_fp8_reduce_scatter(self):
         """Test Collective Dense Gradient with FP8 Float8CurrentScaling + ReduceScatter"""
         self.args.quantize_recipe = "Float8CurrentScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True
