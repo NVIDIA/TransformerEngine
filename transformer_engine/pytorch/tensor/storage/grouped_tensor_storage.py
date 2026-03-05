@@ -48,8 +48,9 @@ class GroupedTensorStorage:
     Note: This structure is used only for combined storage of multiple tensors with the same dtype and scaling mode.
     """
 
-    def __init__(
-        self,
+    @staticmethod
+    def _initialize_storage_fields(
+        instance: "GroupedTensorStorage",
         shape: Tuple[int, int],
         dtype: torch.dtype,
         num_tensors: int,
@@ -68,6 +69,8 @@ class GroupedTensorStorage:
         offsets: Optional[List[int]] = None,
         scale_inv_offsets: Optional[List[int]] = None,
         columnwise_scale_inv_offsets: Optional[List[int]] = None,
+        requires_grad: bool = False,
+        stride: Optional[List[int]] = None,
     ) -> None:
         """
         Initialize a GroupedTensor.
@@ -90,31 +93,33 @@ class GroupedTensorStorage:
             tensor_offsets: Device tensor of int64 array of length num_tensors (or None if uniform)
             offsets: Vector of integer offsets for each tensor.
         """
-        self.num_tensors = num_tensors
-        self.quantizer = quantizer
-        self.tensor_shapes = shapes
-        self.fake_dtype = dtype
+        del requires_grad
+        del stride
+        instance.num_tensors = num_tensors
+        instance.quantizer = quantizer
+        instance.tensor_shapes = shapes
+        instance.fake_dtype = dtype
 
         # Data buffers
-        self.rowwise_data = data
-        self.columnwise_data = columnwise_data
-        self.scale_inv = scale_inv
-        self.columnwise_scale_inv = columnwise_scale_inv
-        self.amax = amax
-        self.columnwise_amax = columnwise_amax
-        self.scale = scale
+        instance.rowwise_data = data
+        instance.columnwise_data = columnwise_data
+        instance.scale_inv = scale_inv
+        instance.columnwise_scale_inv = columnwise_scale_inv
+        instance.amax = amax
+        instance.columnwise_amax = columnwise_amax
+        instance.scale = scale
 
         # For convenient indexing for python GroupedTensor API.
-        self.scale_inv_offsets = scale_inv_offsets
-        self.columnwise_scale_inv_offsets = columnwise_scale_inv_offsets
+        instance.scale_inv_offsets = scale_inv_offsets
+        instance.columnwise_scale_inv_offsets = columnwise_scale_inv_offsets
 
         # Shape information (OPTIONAL - None if dimension is uniform across all tensors)
         # first_dims[i] = first dimension of tensor i (None if all tensors have same first dim)
         # last_dims[i] = last dimension of tensor i (None if all tensors have same last dim)
-        self.first_dims = (
+        instance.first_dims = (
             first_dims  # Device pointer to int64_t array of length num_tensors (or None)
         )
-        self.last_dims = (
+        instance.last_dims = (
             last_dims  # Device pointer to int64_t array of length num_tensors (or None)
         )
 
@@ -122,19 +127,69 @@ class GroupedTensorStorage:
         # tensor_offsets[i] = element offset to start of tensor i (cumulative sum of numel for tensors 0..i-1)
         # Usage: tensor_i_ptr = data.data_ptr() + tensor_offsets[i] * element_size
         # If None and all_same_shape(): offset[i] = i * M * N (where M, N are common dimensions)
-        self.tensor_offsets = (
+        instance.tensor_offsets = (
             tensor_offsets  # Device pointer to int64_t array of length num_tensors (or None)
         )
-        self.offsets = offsets  # Vector of integer offsets for each tensor.
+        instance.offsets = offsets  # Vector of integer offsets for each tensor.
 
         # Logical shape: conceptual 2D shape of the grouped data (REQUIRED)
         # Represents how the 1D flattened data should be interpreted as 2D
         # Always 2D with positive dimensions
-        self.logical_shape = shape
+        instance.logical_shape = shape
 
         # Hold a reference to the quantized tensors that occupy same storage as the GroupedTensor.
         # Used as a convenience.
-        self.quantized_tensors = None
+        instance.quantized_tensors = None
+
+    def __new__(
+        cls,
+        shape: Tuple[int, int],
+        dtype: torch.dtype,
+        num_tensors: int,
+        shapes: Optional[List[Tuple[int, int]]] = None,
+        quantizer: Optional[Quantizer] = None,
+        data: Optional[torch.Tensor] = None,
+        columnwise_data: Optional[torch.Tensor] = None,
+        scale_inv: Optional[torch.Tensor] = None,
+        columnwise_scale_inv: Optional[torch.Tensor] = None,
+        amax: Optional[torch.Tensor] = None,
+        columnwise_amax: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
+        first_dims: Optional[torch.Tensor] = None,
+        last_dims: Optional[torch.Tensor] = None,
+        tensor_offsets: Optional[torch.Tensor] = None,
+        offsets: Optional[List[int]] = None,
+        scale_inv_offsets: Optional[List[int]] = None,
+        columnwise_scale_inv_offsets: Optional[List[int]] = None,
+        *,
+        requires_grad: bool = False,
+        stride: Optional[List[int]] = None,
+    ):
+        instance = object.__new__(cls)
+        cls._initialize_storage_fields(
+            instance=instance,
+            shape=shape,
+            dtype=dtype,
+            num_tensors=num_tensors,
+            shapes=shapes,
+            quantizer=quantizer,
+            data=data,
+            columnwise_data=columnwise_data,
+            scale_inv=scale_inv,
+            columnwise_scale_inv=columnwise_scale_inv,
+            amax=amax,
+            columnwise_amax=columnwise_amax,
+            scale=scale,
+            first_dims=first_dims,
+            last_dims=last_dims,
+            tensor_offsets=tensor_offsets,
+            offsets=offsets,
+            scale_inv_offsets=scale_inv_offsets,
+            columnwise_scale_inv_offsets=columnwise_scale_inv_offsets,
+            requires_grad=requires_grad,
+            stride=stride,
+        )
+        return instance
 
     def has_data(self) -> bool:
         """
