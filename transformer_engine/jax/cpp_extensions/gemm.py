@@ -1756,17 +1756,17 @@ def gemm(
             lhs_quantizer = quantizer_set.x
             rhs_quantizer = quantizer_set.kernel
 
-    # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
-    if not GemmPrimitive.enabled():
-        assert collective_op.is_none, "JAX GEMM does not support collective GEMM"
-        output = _jax_gemm(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer)
-        if bias is not None:
-            output += bias  # Unfused
-        return output
-
     # This option enable promoting some intermediate sums to higher precision when accumulating the result in
     # the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
     use_split_accumulator = _get_high_precision_accumulation_from_env()
+
+    # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
+    if not GemmPrimitive.enabled():
+        assert collective_op.is_none, "JAX GEMM does not support collective GEMM"
+        output = _jax_gemm(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer, use_split_accumulator)
+        if bias is not None:
+            output += bias  # Unfused
+        return output
 
     output = _te_gemm(
         lhs,
