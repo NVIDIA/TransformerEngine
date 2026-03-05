@@ -7,7 +7,11 @@ import os
 from typing import List, Union
 import torch
 import transformer_engine_torch as tex
-
+import nvshmem.core as nvshmem  
+import torch.distributed as dist
+from cuda.core.experimental import Device
+from cuda.core.experimental import Stream
+from nvshmem.core.interop.torch import tensor_get_buffer 
 from transformer_engine.pytorch.utils import (
     combine_tensors,
     get_cudnn_version,
@@ -415,6 +419,50 @@ def get_fa_args(
         dv,
     ]
 
+def nvshmem_get_on_stream(dst_tensor: torch.Tensor, src_tensor: torch.Tensor,   
+                    peer: int, stream: Stream = None) -> None:  
+    if stream is None:  
+        stream = Stream.from_handle(torch.cuda.current_stream().cuda_stream)  
+    
+    nvshmem.get(dst_tensor, src_tensor, remote_pe=peer, stream=stream)  
+
+def torchrun_uid_init_bcast_object_no_reinit(cp_group=None):
+    local_rank = torch.cuda.current_device()
+    dev = Device(local_rank)
+    dev.set_current()
+
+    if cp_group is None:
+        rank_id = dist.get_rank()
+        num_ranks = dist.get_world_size()
+    else:
+        rank_id = dist.get_rank(group=cp_group)
+        num_ranks = dist.get_world_size(group=cp_group)
+
+    uniqueid = nvshmem.get_unique_id(empty=True)
+
+    if rank_id == 0:
+        uniqueid = nvshmem.get_unique_id()
+        broadcast_objects = [uniqueid]
+    else:
+        broadcast_objects = [None]
+
+    dist.broadcast_object_list(
+        broadcast_objects,
+        src=0,
+        group=cp_group
+    )
+
+    dist.barrier(group=cp_group)
+
+    nvshmem.init(
+        device=dev,
+        uid=broadcast_objects[0],
+        rank=rank_id,
+        nranks=num_ranks,
+        initializer_method="uid"
+    )
+
+    return True
 
 class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     """
@@ -678,6 +726,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # synchronize fwd results correction across steps
         fwd_results_correction_done = torch.cuda.Event()
 
+
+        init_ok = torchrun_uid_init_bcast_object_no_reinit(cp_group)
         p2p_comm_buffers = [None for _ in range(cp_size)]
         if enable_mla:
             # If MLA, the shape of k and v does not match, so we flatten them
@@ -685,26 +735,42 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             k_shape = k.shape
             k_numel = k.numel()
             v_shape = v.shape
-            p2p_comm_buffers[0] = torch.cat((k.view(-1), v.view(-1)), dim=-1)
+            buffer = torch.cat((k.view(-1), v.view(-1)), dim=-1)
+            p2p_comm_buffers[0] = nvshmem.tensor(list(buffer.shape), dtype=buffer.dtype)
+            p2p_comm_buffers[0].copy_(buffer)
         elif qkv_format in ["bshd", "sbhd"]:
-            p2p_comm_buffers[0] = torch.cat((k.unsqueeze(-3), v.unsqueeze(-3)), dim=-3)
+            # p2p_comm_buffers[0] = torch.cat((k.unsqueeze(-3), v.unsqueeze(-3)), dim=-3)
+            buffer = torch.cat((k.unsqueeze(-3), v.unsqueeze(-3)), dim=-3)
+            p2p_comm_buffers[0] = nvshmem.tensor(list(buffer.shape), dtype=buffer.dtype)
+            p2p_comm_buffers[0].copy_(buffer)
         else:  # qkv_format == "thd"
-            p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
+            # p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
+            buffer = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
+            p2p_comm_buffers[0] = nvshmem.tensor(list(buffer.shape), dtype=buffer.dtype)
+            p2p_comm_buffers[0].copy_(buffer)
         send_recv_reqs = [[], []]
 
         # Initialize NVSHMEM backend and allocate symmetric KV storage and signal.
         # try:
-        tex.init_nvshmem_backend(cp_group)
+        # tex.init_nvshmem_backend(cp_group)
         # Create a symmetric NVSHMEM tensor to hold this rank's KV chunk.
-        nvshmem_kv = tex.create_nvshmem_tensor(list(p2p_comm_buffers[0].shape), p2p_comm_buffers[0].dtype)
-        # copy local KV into symmetric heap so remote ranks can fetch it
-        nvshmem_kv.copy_(p2p_comm_buffers[0])
+        # nvshmem_kv = tex.create_nvshmem_tensor(list(p2p_comm_buffers[0].shape), p2p_comm_buffers[0].dtype)
+
+
         # except Exception:
         #     print("nvshmem init failed, fallback to p2p")
         #     # If NVSHMEM is not enabled or initialization fails, fall back to P2P comm
         #     nvshmem_kv = None
         #     nvshmem_signal = None
-
+        nvshmem_kv = nvshmem.tensor(list(p2p_comm_buffers[0].shape), dtype=p2p_comm_buffers[0].dtype)
+        
+        # copy local KV into symmetric heap so remote ranks can fetch it
+        nvshmem_kv.copy_(p2p_comm_buffers[0])
+        # p2p_comm_buffers[0] = nvshmem.tensor(list(p2p_comm_buffers[0].shape), dtype=p2p_comm_buffers[0].dtype)
+        # p2p_comm_buffers[0].copy_(p2p_comm_buffers[0])
+        # p2p_comm_buffers[1] = nvshmem.tensor(list(p2p_comm_buffers[0].shape), dtype=p2p_comm_buffers[0].dtype)
+        device = Device()
+        stream = device.create_stream()
         out = None
         for i in range(cp_size + 1):
             if i < cp_size:
@@ -713,15 +779,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     for req in send_recv_reqs[(i + 1) % 2]:
                         req.wait()
 
-                    if i < (cp_size - 1):
-                        p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
+                    if i < (cp_size - 1):                 
+                        p2p_comm_buffers[i + 1] = nvshmem.tensor(list(p2p_comm_buffers[i].shape), dtype=p2p_comm_buffers[i].dtype)                      
                         if nvshmem_kv is not None:
                             # Use NVSHMEM get: compute owner of the (i+1)-th step KV block
                             owner_idx = (rank - (i + 1)) % cp_size
                             # Map owner idx to global rank (accounting for a2a groups)
                             owner_global = cp_global_ranks[owner_idx * cp_size_a2a + rank_a2a]
                             # nvshmem_get: dst (local buffer), src (symmetric address), peer=owner_global
-                            tex.nvshmem_get_on_current_stream(p2p_comm_buffers[i + 1], nvshmem_kv, int(owner_global))
+                            nvshmem_get_on_stream(p2p_comm_buffers[i + 1], nvshmem_kv, owner_global, stream=stream)
                         else:
                             # fallback to P2P if NVSHMEM not available
                             send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
@@ -1539,6 +1605,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVP2P.forward")
+
+        # free up some nvshmem buffers
+        nvshmem.free_tensor(nvshmem_kv)
+        for i in  range(cp_size):
+            nvshmem.free_tensor(p2p_comm_buffers[i])
 
         return out_ret
 
