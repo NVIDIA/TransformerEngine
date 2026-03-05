@@ -9,8 +9,6 @@ import warnings
 
 import functools
 import torch
-from torch.distributed import DeviceMesh
-from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 
@@ -38,7 +36,6 @@ from ..distributed import (
     get_distributed_world_size,
     is_fp8_activation_recompute_enabled,
     in_fp8_activation_recompute_phase,
-    _convert_param_to_dtensor_param,
 )
 from ..cpp_extensions import (
     general_grouped_gemm,
@@ -605,8 +602,7 @@ class GroupedLinear(TransformerEngineBaseModule):
     Notes
     -----
     GroupedLinear doesn't really handle the TP communications inside. The ``tp_size`` and
-    ``parallel_mode`` are used to determine the shapes of weights and biases, while ``tp_mesh``
-    and ``weight_mesh`` support DTensor compatibility with FSDP2 and DCP.
+    ``parallel_mode`` are used to determine the shapes of weights and biases.
     The TP communication should be handled in the dispatch and combine stages of MoE models.
     """
 
@@ -634,8 +630,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         save_original_input: bool = False,
         single_grouped_parameter: bool = False,
         name: Optional[str] = None,
-        tp_mesh: Optional[DeviceMesh] = None,
-        weight_mesh: Optional[DeviceMesh] = None,
     ) -> None:
         super().__init__(name)
 
@@ -739,9 +733,6 @@ class GroupedLinear(TransformerEngineBaseModule):
             self.init_fp8_metadata(num_gemms=self.num_gemms)
 
         is_meta = torch.device(device).type == "meta"
-        if tp_mesh is not None or weight_mesh is not None:
-            # Apply DeviceMesh and DTensor-related modifications.
-            self.set_device_mesh(tp_mesh=tp_mesh, weight_mesh=weight_mesh)
         self.reset_parameters(defer_init=is_meta)
 
         if self.wgrad_store.delay_wgrad_compute():
@@ -774,7 +765,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             else None
         )
         if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
-            self._set_tensor_parallel_attributes(defer_init=defer_init)
+            self.set_tensor_parallel_attributes(defer_init=defer_init)
             return
 
         weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
@@ -797,34 +788,21 @@ class GroupedLinear(TransformerEngineBaseModule):
                     grouped_weights.quantized_tensors[i].copy_(weights[i])
 
         # Re-register as a single grouped weight parameter.
+        # Re-register as a single grouped weight parameter.
         assert isinstance(grouped_weights, torch.Tensor) and (
             weight_quantizers[0] is None or not weight_quantizers[0].internal
         ), "Found internal quantizer with `single_grouped_parameter=True`."
-        grouped_param = torch.nn.Parameter(grouped_weights)
-        if isinstance(getattr(self, f"weight0", None), DTensor):
-            # Convert to DTensor with properties equivalent to the original DTensor.
-            dtensor_member_param = getattr(self, f"weight0")
-            grouped_param = _convert_param_to_dtensor_param(
-                grouped_param,
-                device_mesh=dtensor_member_param.device_mesh,
-                placements=dtensor_member_param.placements,
-                # DTensor / DCP will view this as a TP-sharded 3-D Tensor.
-                shape=(self.num_gemms, self.out_features, self.in_features),
-                # Default Stride: (out*in, in, 1)
-                stride=None,
-            )
         self.register_parameter(
             "weight",
-            grouped_param,
+            torch.nn.Parameter(grouped_weights),
             init_fn=self.init_method,
             get_rng_state_tracker=self.get_rng_state_tracker,
             fp8_meta_index=self._offsets["weight"],
         )
         for i in range(self.num_gemms):
-            # De-register un-grouped parameters.
             self.register_parameter(f"weight{i}", None)
 
-        self._set_tensor_parallel_attributes(defer_init=defer_init)
+        self.set_tensor_parallel_attributes(defer_init=defer_init)
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
@@ -832,93 +810,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.single_grouped_parameter:
             self.make_grouped_weights(defer_init=defer_init)
 
-    def set_device_mesh(
-        self,
-        tp_mesh: Optional[DeviceMesh] = None,
-        weight_mesh: Optional[DeviceMesh] = None,
-    ) -> None:
-        """
-        Set DeviceMesh(s) used for sharding weights and convert main weights into DTensor
-        depending on the TransformerEngine class to support FSDP-TP sharding with FSDP2.
-
-        TransformerEngine manages tensor parallel mechanics, while DTensor offers seamless
-        integration with Torch DCP checkpointing. This method should only be invoked when
-        using DTensor parameters, e.g. when using FSDP2 or DCP.
-
-        When FSDP2 fully_shard() encounters any DTensor Shard(s), it will automatically
-        convert them into FSDP-TP strided or non-strided shards depending on the current
-        sharding dimension and factor of the DTensor. When the sharding dimension of FSDP
-        matches that of TP, FSDP uses a _StridedShard placement type instead of Shard.
-        This experimental FSDP-TP logic presides in this FSDP2 initialization function:
-        ``torch.distributed.fsdp._fully_shard._fsdp_param._init_sharded_param``
-
-        Parameters
-        ----------
-        tp_mesh : Optional[DeviceMesh]
-            A 1-D DeviceMesh containing a TP mesh dimension, e.g. device_mesh["tp"].
-            Only required when using TP with DTensor parameters, e.g. for FSDP2 or DCP.
-        weight_mesh : Optional[DeviceMesh]
-            A 1-D DeviceMesh containing a weight-sharding mesh dimension. Only required
-            when using the FP8 Current (per-tensor) Scaling recipe on sharded DTensor
-            parameters and if the DTensor DeviceMesh includes dimensions that do not
-            shard weights, such as in the case of HSDP (DP-Replicate x DP-Shard).
-            For example:
-                - device_mesh["dp"] for FSDP.
-                - device_mesh["dp_cp"] if using CP ranks in FSDP.
-                - device_mesh["dp_shard"] if using HSDP ("dp_replicate", "dp_shard").
-                - device_mesh["tp"] if using TP.
-                - device_mesh["dp_cp_tp"] if strided-sharding with FSDP-TP.
-        """
-        if tp_mesh is not None:
-            # Validate TP DeviceMesh / Group. Must be consistent with tp_size.
-            assert tp_mesh.ndim == 1 and self.tp_size == tp_mesh.size(), (
-                f"TransformerEngine {self.__class__.__name__} TP init size ({self.tp_size}) "
-                f"does not match the size of the provided TP DeviceMesh ({tp_mesh.size()})."
-            )
-            # Set the tensor parallel group from the mesh.
-            self.set_tensor_parallel_group(tp_mesh.get_group())
-
-            # Construct TP-sharded DTensors.
-            from torch.distributed.tensor.placement_types import Replicate, Shard
-
-            for weight in self.weight_names:
-                param = getattr(self, weight)
-                placements = (Replicate(),)
-                if self.parallel_mode == "column":
-                    placements = (Shard(dim=0),)
-                elif self.parallel_mode == "row":
-                    placements = (Shard(dim=1),)
-                setattr(
-                    self,
-                    weight,
-                    _convert_param_to_dtensor_param(param, tp_mesh, placements=placements),
-                )
-            for bias in self.bias_names:
-                param = getattr(self, bias)
-                placements = (Replicate(),)
-                if self.parallel_mode == "column":
-                    placements = (Shard(dim=0),)
-                setattr(
-                    self,
-                    bias,
-                    _convert_param_to_dtensor_param(param, tp_mesh, placements=placements),
-                )
-
-        # Set amax_reduction_group to the FSDP and/or TP sharding mesh
-        # for per-tensor scaling recipes. Parameters must be registered.
-        if weight_mesh is not None and self.quantizers["scaling_fwd"]:
-            for weight in self.weight_names:
-                # Get fp8_meta_index and associated quantizer.
-                fp8_meta_index = self.param_init_meta[weight].fp8_meta_index
-                quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
-                if isinstance(quantizer, Float8CurrentScalingQuantizer):
-                    # If not set, will default to DTensor.device_mesh.get_group()!
-                    # MUST be provided when using HSDP (DP-Replicate) or when the
-                    # DeviceMesh includes dimensions that do not shard weights!
-                    quantizer.amax_reduction_group = weight_mesh.get_group()
-                    quantizer.with_amax_reduction = True
-
-    def _set_tensor_parallel_attributes(self, defer_init=False) -> None:
+    def set_tensor_parallel_attributes(self, defer_init=False) -> None:
         """Set attributes needed for TP"""
 
         if not defer_init:
@@ -997,7 +889,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         inp = self.prepare_forward(inp, num_gemms=self.num_gemms)
         try:
             weight_tensors = self._get_weight_tensors()
-            bias_tensors = self._get_bias_tensors()
+            bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
             quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
 
@@ -1117,20 +1009,12 @@ class GroupedLinear(TransformerEngineBaseModule):
         """Get the weight tensors of the module."""
         grouped_weight = getattr(self, "weight", None)
         if grouped_weight is not None:
-            if isinstance(grouped_weight, DTensor):
-                grouped_weight = grouped_weight.to_local()
             weight_tensors = grouped_weight.quantized_tensors
             if weight_tensors is None:
                 # TODO(ksivaman): Remove this after GEMM integration.
                 weight_tensors = grouped_weight.split_into_quantized_tensors()
         else:
-            weight_tensors = []
-            for i in range(self.num_gemms):
-                weight = getattr(self, f"weight{i}")
-                if isinstance(weight, DTensor):
-                    weight = weight.to_local()
-                weight_tensors.append(weight)
-
+            weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
         if not self.fp8 and any(isinstance(w, QuantizedTensorStorage) for w in weight_tensors):
             warnings.warn(
                 "You are using quantized weights without quantized compute. "
@@ -1141,16 +1025,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 for w in weight_tensors
             ]
         return weight_tensors
-
-    def _get_bias_tensors(self) -> List[torch.Tensor]:
-        """Get the bias tensors of the module."""
-        bias_tensors = []
-        for i in range(self.num_gemms):
-            bias = getattr(self, f"bias{i}")
-            if isinstance(bias, DTensor):
-                bias = bias.to_local()
-            bias_tensors.append(bias)
-        return bias_tensors
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
