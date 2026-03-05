@@ -435,9 +435,6 @@ class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
         }
         self.AMAX_COMPUTE_ALGO = string_to_amax_compute_algo[fp8_recipe.amax_compute_algo]
 
-        self.FP8_2X_ACC_DGRAD = True
-        self.FP8_2X_ACC_WGRAD = True
-
     def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""
         return ScalingMode.DELAYED_TENSOR_SCALING
