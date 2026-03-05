@@ -295,7 +295,7 @@ void performTestSwizzleUnswizzleRoundtrip(const int num_tiles_M, const int num_t
     SF_MODE_X = 32;
     SF_MODE_Y = 1;
   }
-  
+
   if (!rowwise && !columnwise) {
     GTEST_SKIP() << "TEST SKIPPED, Either rowwise or columnwise scaling mode must be true.";
   }
