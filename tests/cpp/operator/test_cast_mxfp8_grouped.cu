@@ -623,15 +623,15 @@ void performTest(const ProcessingMethod processing_method,
 
 std::vector<ProcessingMethod> processing_methods = {
     ProcessingMethod::CAST_ONLY,
-    // ProcessingMethod::CAST_DBIAS,
-    // ProcessingMethod::CAST_DBIAS_DACT,
-    // ProcessingMethod::CAST_DACT,
-    // ProcessingMethod::CAST_ACT,
+    ProcessingMethod::CAST_DBIAS,
+    ProcessingMethod::CAST_DBIAS_DACT,
+    ProcessingMethod::CAST_DACT,
+    ProcessingMethod::CAST_ACT,
 };
 
 std::vector<ActivationKind> activation_kinds = {
     ActivationKind::Identity,
-    // ActivationKind::GeLU,
+    ActivationKind::GeLU,
     // ActivationKind::SiLU,
     // ActivationKind::ReLU,
     // ActivationKind::QGeLU,
@@ -646,23 +646,22 @@ enum ScalingDirection {
 
 std::vector<ScalingDirection> scaling_directions = {
     ScalingDirection::ROWWISE,
-    // ScalingDirection::COLWISE,
-    // ScalingDirection::BOTH,
+    ScalingDirection::COLWISE,
+    ScalingDirection::BOTH,
 };
 
 // {shape_representation, num_tensors, [logical_shape_M, logical_shape_K], [M_i], [K_i]}
 std::vector<std::vector<size_t>> input_config = {
-    // {SAME_BOTH_DIMS,        1,      128,128},
-    // {SAME_BOTH_DIMS,        2,      256,128},
-    // {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
-    // {VARYING_FIRST_DIM,     3,      1024,144,                   128,384,512},
-    // {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
-    // {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
-    {VARYING_FIRST_DIM,     5,      4096,4096,                   128,256,384,1024,2304},
-    {VARYING_FIRST_DIM,     5,      16 * 4096,4096,                   128,256,384,1024,2304},
-    // {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
-    // {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
-    // {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
+    {SAME_BOTH_DIMS,        1,      128,128},
+    {SAME_BOTH_DIMS,        2,      256,128},
+    {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
+    {VARYING_FIRST_DIM,     3,      1024,144,                   128,384,512},
+    {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
+    {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
+    {VARYING_FIRST_DIM,     5,      16 * 4096,512,              128,256,384,1024,2304},
+    {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
+    {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
+    {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
 };
 
 }  // namespace
@@ -824,10 +823,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(activation_kinds),
         ::testing::ValuesIn(scaling_directions),
         ::testing::ValuesIn(input_config),
-        ::testing::Values(DType::kBFloat16),
-        ::testing::Values(DType::kFloat8E4M3)),
-        // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
     [](const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
         const ProcessingMethod method = std::get<0>(info.param);
         std::string name = to_string(method);
