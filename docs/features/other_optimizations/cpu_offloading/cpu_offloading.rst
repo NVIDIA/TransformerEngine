@@ -56,7 +56,7 @@ consumes the output of the previous one — which is the case for most LLM archi
 .. raw:: html
    :file: img/layer_sequence.svg
 
-*Figure 2. CPU offloading supports sequential layer pipelines (top), but not graphs with branching or merging (bottom). Note that inside the layer, arbitrary control flow is allowed.*
+*Figure 2. Sequential model: each layer consumes the output of the previous one (x₀ → Layer 1 → x₁ → Layer 2 → ...).*
 
 The example below shows how to offload activations for a sequence of ``torch.nn.Linear`` layers using the default scheduling algorithm:
 
@@ -98,10 +98,15 @@ There are two modes of operation:
 2. **Manual synchronization** — set ``manual_synchronization=True`` (``num_layers`` is ignored in this mode).
    This mode provides explicit control over when to start offload/reload using the returned ``ManualOffloadSynchronizer``.
 
-The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns:
+The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns two objects
+that must be used together during the forward pass:
 
-- **context manager** — wrap each layer's forward pass with it to enable activation capture.
-- **sync function** — call on the output tensor after each layer, as shown in the example below.
+- **context manager** — wraps each layer's forward pass to intercept tensors saved for backward.
+- **sync function** — called on the layer's output tensor to register a backward hook that
+  triggers activation reload before each layer's backward pass.
+
+Both are required: the context manager captures activations, and the sync function ensures
+they are reloaded at the right time during backward.
 
 
 Default Offloading Scheduling
