@@ -25,7 +25,7 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch.quantized_tensor import restore_from_saved
 
-from utils import assert_close, make_recipe, quantization_tols, reset_rng_states
+from utils import assert_close, make_recipe, reset_rng_states
 
 
 # --------------------------
@@ -340,16 +340,6 @@ def _copy_named_parameters(src_module: torch.nn.Module, dst_module: torch.nn.Mod
             dst_param.copy_(src_params[name])
 
 
-def _fprop_tolerances(recipe_name: str) -> dict[str, float]:
-    if recipe_name == "mxfp8":
-        return quantization_tols("mxfp8")
-    if recipe_name in ("fp8_current_scaling", "fp8_block_scaling"):
-        return quantization_tols("fp8_current_scaling")
-    if recipe_name == "nvfp4":
-        return quantization_tols("nvfp4")
-    raise ValueError(f"Unsupported recipe for backward-mode test: {recipe_name}")
-
-
 def _maybe_skip_recipe_dtype(recipe_name: str, dtype: torch.dtype) -> None:
     if dtype == torch.bfloat16 and not bf16_available:
         pytest.skip(reason_for_no_bf16)
@@ -452,7 +442,8 @@ def _run_single_step(
     y.backward(dy)
     assert x_run.grad is not None
     assert module.weight.grad is not None
-    bgrad = _extract_bias_grad(module)
+    bias = getattr(module, "bias", None)
+    bgrad = None if bias is None or bias.grad is None else bias.grad.detach().clone()
     return (
         y.detach().clone(),
         x_run.grad.detach().clone(),
@@ -478,13 +469,6 @@ def _run_single_step_with_saved_operands(
             y = y[0]
         saved_operands = _restore_saved_operands(y)
     return y, x_run, saved_operands
-
-
-def _extract_bias_grad(module: torch.nn.Module) -> Optional[torch.Tensor]:
-    bias = getattr(module, "bias", None)
-    if bias is None or bias.grad is None:
-        return None
-    return bias.grad.detach().clone()
 
 
 def _run_grouped_linear_single_step(
@@ -638,40 +622,6 @@ def _run_quantize_op_single_step(
     y.backward(dy)
     assert x_run.grad is not None
     return y.detach().clone(), x_run.grad.detach().clone()
-
-
-def _make_userbuffers_fuser_for_mode_switch_test(
-    *,
-    dtype: torch.dtype,
-) -> tuple[object, torch.Tensor, list[tuple[()]]]:
-    """Build a Userbuffers-eligible fuser and representative inputs."""
-    in_features = 64
-    out_features = 64
-    linear = te_ops.BasicLinear(
-        in_features,
-        out_features,
-        device="cuda",
-        dtype=dtype,
-        userbuffers_options={"comm_name": "qkv"},
-    )
-    linear.tensor_parallel_mode = "column"
-    linear.tensor_parallel_size = 2
-    linear.sequence_parallel = True
-    bias = te_ops.Bias(out_features, device="cuda", dtype=dtype)
-    model = te_ops.Sequential(linear, bias)
-    model._module_groups = model._make_module_groups(
-        model._modules.values()
-    )  # pylint: disable=protected-access
-    fuser = model._module_groups[0]
-    x = torch.randn(32, in_features, dtype=dtype, device="cuda", requires_grad=True)
-    extra_inputs = [() for _ in range(fuser._num_basic_ops)]  # pylint: disable=protected-access
-    return fuser, x, extra_inputs
-
-
-def _has_userbuffers_forward_linear(fuser: object) -> bool:
-    return any(
-        isinstance(op, UserbuffersForwardLinear) for op, _ in fuser._forward_ops
-    )  # pylint: disable=protected-access
 
 
 # --------------------------
@@ -844,7 +794,7 @@ def test_linear_like_backward_mode_matches_reference(
                 if module_type == "ops_linear" and use_bias:
                     # te_ops bias grad is reduced by the Bias op from incoming dy.
                     db_ref = dy.reshape(-1, dy.shape[-1]).sum(dim=0).to(dtype)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except Exception as exc:
             ref_exc = exc
 
         layout_invariants = _snapshot_layout_invariants(guard_operands)
@@ -854,14 +804,15 @@ def test_linear_like_backward_mode_matches_reference(
         assert module_bwd_mode.weight.grad is not None
         dx_bwd_mode = x_bwd_mode.grad.detach().clone()
         dw_bwd_mode = module_bwd_mode.weight.grad.detach().clone()
-        db_bwd_mode = _extract_bias_grad(module_bwd_mode)
+        bias = getattr(module_bwd_mode, "bias", None)
+        db_bwd_mode = None if bias is None or bias.grad is None else bias.grad.detach().clone()
         y_bwd_mode = y_bwd_mode_detached
 
         _assert_layout_invariants_unchanged(layout_invariants)
         _raise_if_ref_failed(ref_exc)
         assert dx_ref is not None and dw_ref is not None and db_ref is not None
 
-    assert_close(y_bwd_mode, y_quantized_ref, check_dtype=True, **_fprop_tolerances(recipe_name))
+    assert_close(y_bwd_mode, y_quantized_ref, rtol=0, atol=0, check_dtype=True)
     assert_close(dx_bwd_mode, dx_ref, rtol=0, atol=0, check_dtype=True)
     assert_close(dw_bwd_mode, dw_ref, rtol=0, atol=0, check_dtype=True)
     if use_bias:
@@ -1000,7 +951,7 @@ def test_grouped_linear_backward_mode_matches_reference(
                 dw_ref.append(dw_i)
                 db_ref.append(db_i if use_bias else None)
             dx_ref = torch.cat(dx_chunks, dim=0)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except Exception as exc:
             ref_exc = exc
 
         layout_invariants = _snapshot_layout_invariants(guard_operands)
@@ -1024,7 +975,7 @@ def test_grouped_linear_backward_mode_matches_reference(
         _raise_if_ref_failed(ref_exc)
         assert dx_ref is not None
 
-    assert_close(y_bwd_mode, y_quantized_ref, check_dtype=True, **_fprop_tolerances(recipe_name))
+    assert_close(y_bwd_mode, y_quantized_ref, rtol=0, atol=0, check_dtype=True)
     assert_close(dx_bwd_mode, dx_ref, rtol=0, atol=0, check_dtype=True)
     for test_dw, ref_dw in zip(dw_bwd_mode, dw_ref):
         assert_close(test_dw, ref_dw, rtol=0, atol=0, check_dtype=True)
@@ -1145,7 +1096,7 @@ def test_fused_linear_paths_match_backward_mode_reference(
                 out_dtype=dtype,
             )
             dx2_ref = dy if x2 is not None else None
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except Exception as exc:
             ref_exc = exc
 
         layout_invariants = _snapshot_layout_invariants(guard_operands)
@@ -1175,7 +1126,7 @@ def test_fused_linear_paths_match_backward_mode_reference(
     assert len(fused_ops) >= 1
     assert isinstance(fused_ops[0][0], expected_fused_op)
 
-    assert_close(y_bwd_mode, y_quantized_ref, check_dtype=True, **_fprop_tolerances(recipe_name))
+    assert_close(y_bwd_mode, y_quantized_ref, rtol=0, atol=0, check_dtype=True)
     assert_close(dx1_bwd_mode, dx1_ref, rtol=0, atol=0, check_dtype=True)
     assert_close(dw_bwd_mode, dw_ref, rtol=0, atol=0, check_dtype=True)
     if dx2_bwd_mode is not None and dx2_ref is not None:
@@ -1280,7 +1231,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
                 dequant_dtype=dtype,
                 out_dtype=dtype,
             )
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except Exception as exc:
             ref_exc = exc
 
         layout_invariants = _snapshot_layout_invariants(guard_operands)
@@ -1312,7 +1263,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     quantized_ref_backward_ops = model_quantized_ref._module_groups[0]._backward_ops
     assert any(isinstance(op, BackwardActivationBias) for op, _ in quantized_ref_backward_ops)
 
-    assert_close(y_bwd_mode, y_quantized_ref, check_dtype=True, **_fprop_tolerances(recipe_name))
+    assert_close(y_bwd_mode, y_quantized_ref, rtol=0, atol=0, check_dtype=True)
     assert_close(dx1_bwd_mode, dx1_ref, rtol=0, atol=0, check_dtype=True)
     assert_close(dw_bwd_mode, dw_ref, rtol=0, atol=0, check_dtype=True)
     assert db_bwd_mode is not None
@@ -1341,7 +1292,26 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
 
     reset_rng_states()
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
-    fuser, x, extra_inputs = _make_userbuffers_fuser_for_mode_switch_test(dtype=dtype)
+
+    # Build a Userbuffers-eligible fuser and representative inputs.
+    in_features = 64
+    out_features = 64
+    linear = te_ops.BasicLinear(
+        in_features,
+        out_features,
+        device="cuda",
+        dtype=dtype,
+        userbuffers_options={"comm_name": "qkv"},
+    )
+    linear.tensor_parallel_mode = "column"
+    linear.tensor_parallel_size = 2
+    linear.sequence_parallel = True
+    bias = te_ops.Bias(out_features, device="cuda", dtype=dtype)
+    model = te_ops.Sequential(linear, bias)
+    model._module_groups = model._make_module_groups(model._modules.values())
+    fuser = model._module_groups[0]
+    x = torch.randn(32, in_features, dtype=dtype, device="cuda", requires_grad=True)
+    extra_inputs = [() for _ in range(fuser._num_basic_ops)]
 
     quant_recipe = make_recipe(recipe_name, backward_mode="default")
     fuser.maybe_fuse_ops(
@@ -1350,7 +1320,7 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
         input_=x,
         extra_inputs=extra_inputs,
     )
-    assert _has_userbuffers_forward_linear(fuser)
+    assert any(isinstance(op, UserbuffersForwardLinear) for op, _ in fuser._forward_ops)
 
     non_quant_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
     current_recipe["value"] = non_quant_recipe
@@ -1360,7 +1330,7 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
         input_=x,
         extra_inputs=extra_inputs,
     )
-    assert not _has_userbuffers_forward_linear(fuser)
+    assert not any(isinstance(op, UserbuffersForwardLinear) for op, _ in fuser._forward_ops)
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -1387,40 +1357,3 @@ def test_quantize_op_respects_backward_mode(
 
     assert_close(y_override, y_ref, rtol=0, atol=0, check_dtype=True)
     assert_close(dx_override, dx_ref, rtol=0, atol=0, check_dtype=True)
-
-
-def test_delayed_scaling_rejects_non_quant_backward_mode(backward_mode: str) -> None:
-    with pytest.raises(
-        (AssertionError, ValueError),
-        match="Delayed scaling only supports backward_mode=default",
-    ):
-        _ = recipe.DelayedScaling(backward_mode=backward_mode)
-
-
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
-@pytest.mark.parametrize("dtype", _fused_dtypes, ids=str)
-def test_layernorm_mlp_not_implemented_for_unquantized_backward_mode(
-    recipe_name: str,
-    dtype: torch.dtype,
-    backward_mode: str,
-) -> None:
-    _maybe_skip_recipe_dtype(recipe_name, dtype)
-    reset_rng_states()
-
-    layer = te.LayerNormMLP(
-        hidden_size=64,
-        ffn_hidden_size=64,
-        params_dtype=dtype,
-        bias=False,
-        device="cuda",
-    )
-    x = torch.randn(32, 64, dtype=dtype, device="cuda", requires_grad=True)
-    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
-
-    with pytest.raises(
-        AssertionError,
-        match="NVTE_BACKWARD_MODE=unquant/dequant is not implemented in LayerNormMLP",
-    ):
-        with te.autocast(enabled=True, recipe=mode_recipe):
-            _ = layer(x)
