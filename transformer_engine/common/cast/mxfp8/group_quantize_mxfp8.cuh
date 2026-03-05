@@ -37,26 +37,21 @@ __device__ alignas(128) CUtensorMap g_tensor_maps_act_input[MAX_SUPPORTED_TENSOR
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_rowwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 
-enum class PersistentStrategy : int {
-  NONE = 0,
-  DYNAMIC_WORK_STEALING = 1,
-  STATIC_GRID_STRIDE = 2,
-};
-
 struct TunableConfig {
   static constexpr size_t CHUNK_DIM_Y = 128;
   static constexpr size_t CHUNK_DIM_X = 128;
   static constexpr size_t THREADS_PER_CHUNK = 128;
   static constexpr size_t PREFETCH_STAGES = 1;
-  static constexpr PersistentStrategy PERSISTENT_STRATEGY = PersistentStrategy::STATIC_GRID_STRIDE;
+  // true  -> static persistent grid-stride scheduler
+  // false -> non-persistent one-job-per-CTA execution
+  static constexpr bool PERSISTENT = true;
   // Launch static persistent grid as (SM_count * STATIC_PERSISTENT_BLOCKS_PER_SM, 1, 1).
   static constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = 4;
 };
 
-constexpr bool DYNAMIC_PERSISTENT = TunableConfig::PERSISTENT_STRATEGY == PersistentStrategy::DYNAMIC_WORK_STEALING;
-constexpr bool STATIC_PERSISTENT = TunableConfig::PERSISTENT_STRATEGY == PersistentStrategy::STATIC_GRID_STRIDE;
-static_assert(TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM > 0,
-              "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero.");
+constexpr bool PERSISTENT = TunableConfig::PERSISTENT;
+static_assert(!PERSISTENT || (TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM > 0),
+              "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero in persistent mode.");
 
 constexpr size_t SCALE_DIM_Y = 32;
 constexpr size_t SCALE_DIM_X = 32;
@@ -177,11 +172,10 @@ __device__ __forceinline__ JobDescriptor decode_job(
     const int32_t ctaid_X, const int32_t ctaid_Y, const int64_t *const __restrict__ offsets_ptr,
     const int64_t *const __restrict__ first_dims_ptr, const int64_t *const __restrict__ last_dims_ptr) {
   JobDescriptor job{};
-  job.block_id = static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
-  job.block_global_offset =
-      is_single_tensor ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
-                          static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
-                       : (job.block_id * ELTS_PER_CHUNK);
+  job.block_id = ctaid_Y * work_blocks_X + ctaid_X;
+  job.block_global_offset = is_single_tensor
+                            ? (ctaid_Y * CHUNK_DIM_Y * last_logical_dim + ctaid_X * CHUNK_DIM_X)
+                            : (job.block_id * ELTS_PER_CHUNK);
   job.tensor_id = get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset, ctaid_Y,
                                         first_logical_dim, last_logical_dim, offsets_ptr);
   job.rows =
@@ -386,19 +380,6 @@ __device__ __forceinline__ float process_colwise_stage(
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING;
-  if constexpr (!IS_CACHED_ACT_OP) {
-    (void)cached_act_sh;
-  }
-  if constexpr (!IS_DACT) {
-    (void)act_in_sh;
-  }
-  if constexpr (!IS_DBIAS) {
-    (void)partial_dbias_colwise;
-  }
-  if constexpr (!WITH_GEMM_SWIZZLED_SCALES) {
-    (void)tensor_base_for_scales;
-    (void)rows;
-  }
 
   const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
   float thread_amax = 0.0f;
@@ -496,18 +477,6 @@ __device__ __forceinline__ float process_rowwise_stage(
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && COLWISE_SCALING;
-  if constexpr (!IS_DACT) {
-    (void)act_in_sh;
-  }
-  if constexpr (!IS_CACHED_ACT_OP) {
-    (void)cached_act_sh;
-  }
-  if constexpr (!(IS_DBIAS && (!COLWISE_SCALING))) {
-    (void)thread_dbias_rowwise;
-  }
-  if constexpr (!WITH_GEMM_SWIZZLED_SCALES) {
-    (void)cols;
-  }
 
   const size_t shmem_offset_base_rowwise = buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
   float thread_amax = 0.0f;
@@ -709,44 +678,35 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
   float block_amax = 0.0f;
 
-  __shared__ uint64_t workID_mbar;
-  [[maybe_unused]] __shared__ __uint128_t workID_response;
-  [[maybe_unused]] constexpr uint32_t workID_response_size = sizeof(workID_response);
-  static_assert(workID_response_size == 16);
-
   __shared__ uint64_t IN_buff_readable_mbar[BUFFS_NUM];
 
   // Initialize barriers shared by the entire CTA:
   // - IN_buff_readable_mbar tracks per-buffer TMA global->shared completion.
-  // - workID_mbar synchronizes WorkID query response in dynamic persistent mode.
   if (leading_thread) {
 #pragma unroll
     for (int buff = 0; buff < BUFFS_NUM; ++buff) {
       ptx::mbarrier_init(&IN_buff_readable_mbar[buff], 1);
     }
-    ptx::mbarrier_init(&workID_mbar, 1);
     ptx::fence_proxy_async_shared_cta();
   }
   __syncthreads();
 
   const size_t total_work_blocks = work_blocks_X * work_blocks_Y;
-  const size_t launch_block_id =
-      static_cast<size_t>(blockIdx.y) * static_cast<size_t>(gridDim.x) + static_cast<size_t>(blockIdx.x);
+  const size_t launch_block_id = blockIdx.y * gridDim.x + blockIdx.x;
 
   int IN_buff_readable_parity[BUFFS_NUM] = {0};
-  [[maybe_unused]] int ctaid_parity = 0;
   int32_t ctaid_X = static_cast<int32_t>(blockIdx.x);
   int32_t ctaid_Y = static_cast<int32_t>(blockIdx.y);
-  [[maybe_unused]] size_t static_next_block_id = 0;
-  [[maybe_unused]] size_t static_block_stride = 0;
-  // In STATIC_PERSISTENT mode physical CTAs iterate over a virtual work grid via grid-stride.
-  if constexpr (STATIC_PERSISTENT) {
+  size_t static_next_block_id = 0;
+  size_t static_block_stride = 0;
+  // In persistent mode, physical CTAs iterate over a virtual work grid via grid-stride.
+  if constexpr (PERSISTENT) {
     if (launch_block_id >= total_work_blocks) {
       return;
     }
     ctaid_X = static_cast<int32_t>(launch_block_id % work_blocks_X);
     ctaid_Y = static_cast<int32_t>(launch_block_id / work_blocks_X);
-    static_block_stride = static_cast<size_t>(gridDim.x) * static_cast<size_t>(gridDim.y);
+    static_block_stride = gridDim.x * gridDim.y;
     static_next_block_id = launch_block_id + static_block_stride;
   }
   bool job_finished = false;
@@ -789,7 +749,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
   }
 
-  // Main persistent loop: decode current job, run all 32-row stages, schedule/prefetch next job.
+  // Main work loop: decode current job, run all 32-row stages, schedule/prefetch next job.
   while (!job_finished) {
     // Decode CTA assignment into logical tensor coordinates and validate bounds.
     const JobDescriptor current_job =
@@ -876,13 +836,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
     }
 
-    if constexpr (DYNAMIC_PERSISTENT) {
-      if (leading_thread) {
-        ptx::mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(&workID_mbar, workID_response_size);
-        ptx::try_cancel_cta(&workID_mbar, &workID_response);
-      }
-    }
-
     bool prefetched_next_job = false;
     // Process one [CHUNK_DIM_Y x CHUNK_DIM_X] block in STAGES slices (32 rows each).
 #pragma unroll
@@ -893,11 +846,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       BlockDescriptor prefetch_block = current_block;
 
       if (stage == STAGES - PREFETCH_STAGES) {
-        if constexpr (DYNAMIC_PERSISTENT) {
-          ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&workID_mbar, ctaid_parity);
-          ptx::get_cancelled_cta_id_2D(&workID_response, ctaid_X, ctaid_Y);
-          ctaid_parity ^= 1;
-        } else if constexpr (STATIC_PERSISTENT) {
+        if constexpr (PERSISTENT) {
           if (static_next_block_id < total_work_blocks) {
             ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
             ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
@@ -912,7 +861,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
           ctaid_X = -1;
           ctaid_Y = -1;
         }
-        if constexpr (!STATIC_PERSISTENT) {
+        if constexpr (!PERSISTENT) {
           if (ctaid_X == -1 && ctaid_Y == -1) {
             job_finished = true;
           }
@@ -1062,7 +1011,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     for (int buff = 0; buff < BUFFS_NUM; ++buff) {
       ptx::mbarrier_invalid(&IN_buff_readable_mbar[buff]);
     }
-    ptx::mbarrier_invalid(&workID_mbar);
   }
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
@@ -1139,7 +1087,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
   size_t launch_blocks_X = work_blocks_X;
   size_t launch_blocks_Y = work_blocks_Y;
-  if constexpr (STATIC_PERSISTENT) {
+  if constexpr (PERSISTENT) {
     const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
     const size_t static_grid_size = sm_num * TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM;
     NVTE_CHECK(static_grid_size > 0, "Static persistent grid size must be greater than zero.");
