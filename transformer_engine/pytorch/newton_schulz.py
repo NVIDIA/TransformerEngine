@@ -121,7 +121,8 @@ def newton_schulz(
         )
     if len(coefficients) != num_iterations * 3:
         raise ValueError(
-            f"Unexpected number of coefficients: {len(coefficients)} for {num_iterations} iterations"
+            f"Unexpected number of coefficients: {len(coefficients)} for"
+            f" {num_iterations} iterations"
         )
 
     if x.dim() != 2:
