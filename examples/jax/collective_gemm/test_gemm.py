@@ -208,7 +208,9 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_delayed_scaling_fp8_all_gather_with_dp(self):
         """Test Collective GEMM with FP8 DelayedScaling + AllGather"""
         self.args.quantize_recipe = "DelayedScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True
@@ -218,7 +220,9 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_delayed_scaling_fp8_reduce_scatter_with_dp(self):
         """Test Collective GEMM with FP8 DelayedScaling + ReduceScatter"""
         self.args.quantize_recipe = "DelayedScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True
@@ -228,7 +232,9 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_current_scaling_fp8_all_gather_with_dp(self):
         """Test Collective GEMM with FP8 Float8CurrentScaling + AllGather"""
         self.args.quantize_recipe = "Float8CurrentScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True
@@ -238,7 +244,9 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_current_scaling_fp8_reduce_scatter_with_dp(self):
         """Test Collective GEMM with FP8 Float8CurrentScaling + ReduceScatter"""
         self.args.quantize_recipe = "Float8CurrentScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.use_fp8 = True
