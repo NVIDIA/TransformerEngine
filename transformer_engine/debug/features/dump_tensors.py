@@ -48,13 +48,23 @@ class TensorLogger:
         if dist.is_initialized():
             self.rank = dist.get_rank()
 
-        self.root_dir = os.path.join(root_log_dir, "tensor_dumps", f"rank_{self.rank}")
+        self.root_dir = self._expected_root_dir(root_log_dir)
         os.makedirs(self.root_dir, exist_ok=True)
 
         debug_api.log_message(
             f"TensorLogger initialized. Saving tensors to: {self.root_dir}",
             log_level="info",
         )
+
+    def _expected_root_dir(self, root_log_dir: str) -> str:
+        """Return the rank-specific dump directory for the provided root log path."""
+        return os.path.join(root_log_dir, "tensor_dumps", f"rank_{self.rank}")
+
+    def ensure_initialized(self, root_log_dir: str) -> None:
+        """Reinitialize logger if debug session log directory changed."""
+        expected_root_dir = self._expected_root_dir(root_log_dir)
+        if self.root_dir != expected_root_dir or not os.path.isdir(expected_root_dir):
+            self.initialize(root_log_dir)
 
     @staticmethod
     def _sanitize_name(name: str) -> str:
@@ -163,6 +173,8 @@ class DumpTensors(TEConfigAPIMapper):
         - ``quantized``: quantized tensor object (if quantized_tensor=True)
         - Additional internal components when dump_quantized_internals=True
           (raw data, scales, etc. - format may change between versions)
+        - For NVFP4 internals, unpacked FP4 value tensors are included for
+          easier offline analysis.
     """
 
     @api_method
@@ -217,8 +229,7 @@ class DumpTensors(TEConfigAPIMapper):
             return
 
         tensor_logger = _get_tensor_logger()
-        if tensor_logger.root_dir is None:
-            tensor_logger.initialize(get_logger().root_log_dir)
+        tensor_logger.ensure_initialized(get_logger().root_log_dir)
 
         # Build dictionary with all tensors to dump
         dump_dict: Dict[str, torch.Tensor] = {}
@@ -328,6 +339,45 @@ def _get_extended_tensors_mxfp8(tensor: MXFP8Tensor) -> Dict[str, Optional[torch
     return result
 
 
+def _unpack_uint4_codes(packed_data: torch.Tensor) -> torch.Tensor:
+    """Unpack packed uint4 values stored in uint8 into uint8 tensor with values 0..15."""
+    packed_uint8 = packed_data.view(torch.uint8).contiguous().view(-1)
+    unpacked = torch.empty(packed_uint8.numel() * 2, dtype=torch.uint8, device=packed_data.device)
+    unpacked[::2] = packed_uint8 & 0x0F
+    unpacked[1::2] = (packed_uint8 >> 4) & 0x0F
+    unpacked_shape = (*packed_data.shape[:-1], packed_data.shape[-1] * 2)
+    return unpacked.view(unpacked_shape)
+
+
+def _decode_uint4_e2m1_to_float(unpacked_codes: torch.Tensor) -> torch.Tensor:
+    """Decode uint4 FP4 E2M1 codes (0..15) into float32 values."""
+    # Bit layout: [sign:1][exp:2][mantissa:1], exponent bias = 1.
+    # Positive representable magnitudes are: 0, 0.5, 1, 1.5, 2, 3, 4, 6.
+    fp4_e2m1_lut = torch.tensor(
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        device=unpacked_codes.device,
+        dtype=torch.float32,
+    )
+    return fp4_e2m1_lut[unpacked_codes.long()]
+
+
 def _get_extended_tensors_nvfp4(tensor: NVFP4Tensor) -> Dict[str, Optional[torch.Tensor]]:
     """Get extended tensors for NVFP4Tensor: raw packed FP4 data, block scales, and amax."""
     result: Dict[str, Optional[torch.Tensor]] = {}
@@ -335,8 +385,12 @@ def _get_extended_tensors_nvfp4(tensor: NVFP4Tensor) -> Dict[str, Optional[torch
     # Raw data (packed FP4, 2 values per byte)
     if tensor._rowwise_data is not None:
         result["rowwise_data"] = tensor._rowwise_data
+        rowwise_codes = _unpack_uint4_codes(tensor._rowwise_data)
+        result["rowwise_data_unpacked_values"] = _decode_uint4_e2m1_to_float(rowwise_codes)
     if tensor._columnwise_data is not None:
         result["columnwise_data"] = tensor._columnwise_data
+        columnwise_codes = _unpack_uint4_codes(tensor._columnwise_data)
+        result["columnwise_data_unpacked_values"] = _decode_uint4_e2m1_to_float(columnwise_codes)
 
     # Block scaling factors (E4M3 format)
     if tensor._rowwise_scale_inv is not None:
