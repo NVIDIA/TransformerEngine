@@ -1036,7 +1036,7 @@ class GemmPrimitive(BasePrimitive):
                 if has_bias:
                     output += bias
 
-            return output
+            return (output,)
 
         return mesh, _sharded_impl, out_sharding, arg_shardings
 
