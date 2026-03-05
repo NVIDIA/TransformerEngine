@@ -1101,10 +1101,6 @@ def _test_nvfp4_partial_cast_matches_full(dp_group) -> None:
     WORLD_RANK = dist.get_rank(dp_group)
     WORLD_SIZE = dist.get_world_size(dp_group)
 
-    available, reason = is_nvfp4_available(return_reason=True)
-    if not available:
-        pytest.skip(reason)
-
     torch.manual_seed(1234)
     device = torch.device("cuda")
     # Shape must be divisible by WORLD_SIZE for even splitting
@@ -1196,6 +1192,11 @@ def _test_nvfp4_partial_cast_matches_full(dp_group) -> None:
 @pytest.mark.parametrize("world_size", [2])
 def test_nvfp4_partial_cast_matches_full(world_size: int) -> None:
     """Launch a distributed job for NVFP4 partial-cast equivalence test."""
+
+    available, reason = is_nvfp4_available(return_reason=True)
+    if not available:
+        pytest.skip(reason)
+
     python_exe = pathlib.Path(sys.executable).resolve()
     current_file = pathlib.Path(__file__).resolve()
     command = [
