@@ -42,10 +42,8 @@ class _GroupedIdentityFunc(torch.autograd.Function):
         return grad_input
 
 
-# For now, conservatively ban all shape manipulating ops.
+# For now, conservatively ban 'most' shape manipulating ops.
 BANNED_SHAPE_OPS = {
-    torch.ops.aten.view.default,
-    torch.ops.aten._unsafe_view.default,
     torch.ops.aten.reshape.default,
     torch.ops.aten._reshape_alias.default,
     torch.ops.aten.flatten.using_ints,
