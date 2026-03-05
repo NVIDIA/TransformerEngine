@@ -686,8 +686,6 @@ def test_dump_tensors_sanity(feature_dirs):
 
     with debug_session(DUMP_TENSORS_CONFIG, feature_dirs) as log_dir:
         recipe_state = RecipeState.create(
-
-        recipe_state = RecipeState.create(
             recipe.DelayedScaling(),
             mode="forward",
             num_quantizers=3,
