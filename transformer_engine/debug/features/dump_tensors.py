@@ -89,9 +89,7 @@ class TensorLogger:
         safe_tensor_name = self._sanitize_name(tensor_name)
 
         if os.path.exists(filepath):
-            debug_api.log_message(
-                f"[TE DumpTensors] Overwriting existing dump file: {filepath}"
-            )
+            debug_api.log_message(f"[TE DumpTensors] Overwriting existing dump file: {filepath}")
         torch.save(tensor, filepath)
 
 
