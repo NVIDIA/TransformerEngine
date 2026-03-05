@@ -44,8 +44,6 @@ from ..quantize import (
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
-    get_quantize_config_with_recipe,
-    get_global_quantize_recipe,
     QuantizeLayout,
 )
 from .misc import get_padded_spec, is_all_reduce_in_float32
@@ -544,7 +542,7 @@ class GemmPrimitive(BasePrimitive):
     @staticmethod
     def outer_abstract(*args, **kwargs):
         output, _ = GemmPrimitive.abstract(*args, **kwargs)
-        return (output, )
+        return (output,)
 
     @staticmethod
     def lowering(
@@ -567,7 +565,6 @@ class GemmPrimitive(BasePrimitive):
     ):
         del out_dtype, transpose_batch_sequence, sequence_dim, is_outer
 
-        fuse_bias = ctx.avals_in[4].size > 0  # bias is operand index 4
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
         lhs_transposed, rhs_transposed = _get_gemm_layout(
@@ -696,7 +693,7 @@ class GemmPrimitive(BasePrimitive):
             reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
             output = reordered.reshape(original_shape)
 
-        return (output, )
+        return (output,)
 
     @staticmethod
     def outer_impl(
@@ -912,7 +909,9 @@ class GemmPrimitive(BasePrimitive):
         )
 
         # Bias sharding is based on GEMM output before any scatter
-        bias_specs = tuple(list(rhs_non_cspecs).copy()) if arg_infos[4].size > 0 else (None,) # bias is operand index 4
+        bias_specs = (
+            tuple(list(rhs_non_cspecs).copy()) if arg_infos[4].size > 0 else (None,)
+        )  # bias is operand index 4
 
         if not collective_op.is_none:
             assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
@@ -947,10 +946,8 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim,
         )
 
-        (_, out_specs, *_) = (
-            GemmPrimitive._parse_operand_output_specs(
-                arg_infos, contracting_dims, transpose_batch_sequence, collective_op
-            )
+        (_, out_specs, *_) = GemmPrimitive._parse_operand_output_specs(
+            arg_infos, contracting_dims, transpose_batch_sequence, collective_op
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -1009,7 +1006,7 @@ class GemmPrimitive(BasePrimitive):
             has_bias = bias.size > 0
             fuse_bias = has_bias and reduce_spec is None
             bias_for_impl = bias if fuse_bias else jnp.empty(0, dtype=bias.dtype)
-            (output, ) = GemmPrimitive.impl(
+            (output,) = GemmPrimitive.impl(
                 lhs,
                 lhs_scale_inv,
                 rhs,
@@ -1030,9 +1027,9 @@ class GemmPrimitive(BasePrimitive):
             if reduce_spec is not None:
                 if not collective_op.is_reduce_scatter:
                     if is_all_reduce_in_float32():  # For unittest only
-                        output = jax.lax.psum(
-                            output.astype(jnp.float32), reduce_spec
-                        ).astype(out_dtype)
+                        output = jax.lax.psum(output.astype(jnp.float32), reduce_spec).astype(
+                            out_dtype
+                        )
                     else:
                         output = jax.lax.psum(output, reduce_spec)
 
@@ -1122,9 +1119,7 @@ class GemmPrimitive(BasePrimitive):
                 alpha_spec,
                 beta_spec,
             ),
-            result_mappings=(
-                out_spec,
-            ),
+            result_mappings=(out_spec,),
         )
 
 
@@ -1227,7 +1222,6 @@ def _te_gemm(
         collective_op=collective_op,
     )
     return output
-
 
 
 class GroupedGemmCopySizesPrimitive(BasePrimitive):

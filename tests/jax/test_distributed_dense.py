@@ -161,7 +161,6 @@ class TestDistributedDense:
             # Compare results
             assert_allclose(gathered_te, gathered_jax, dtype=dtype)
 
-
     def _te_sum_dense(self, x, weight, bias, contracting_dims, output_sharding):
         """TE GEMM function for gradient testing"""
         output = dense(x, weight, bias=bias, contracting_dims=contracting_dims)

@@ -225,7 +225,7 @@ def _layernorm_dense_fwd_rule(
         casted_kernel.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
         transpose_batch_sequence=transpose_batch_sequence,
-        bias=bias 
+        bias=bias,
     )
 
     has_bias = bias is not None
