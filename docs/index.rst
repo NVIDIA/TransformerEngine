@@ -39,6 +39,14 @@ Transformer Engine documentation
    api/common
    api/framework
 
+
+.. toctree::
+   :hidden:
+   :caption: Features
+
+   features/low_precision_training/index.rst
+
+
 .. toctree::
    :hidden:
    :caption: Examples and Tutorials
@@ -49,6 +57,7 @@ Transformer Engine documentation
    examples/te_gemma/tutorial_generation_gemma_with_te.ipynb
    examples/onnx/onnx_export.ipynb
    examples/te_jax_integration.ipynb
+   examples/op_fuser/op_fuser.rst
 
 .. toctree::
    :hidden:

@@ -53,7 +53,7 @@ from ..distributed import (
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
-from ..constants import GemmParallelModes, dist_group_type
+from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import apply_normalization, noop_cat, WeightGradStore
@@ -65,7 +65,6 @@ from ..quantized_tensor import (
     restore_from_saved,
 )
 from ...debug.pytorch.debug_state import TEDebugState
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..cpu_offload import (
     is_cpu_offload_enabled,
@@ -254,8 +253,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 if fp8 or debug:
                     ln_out = input_quantizer(ln_out)
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
-                    if isinstance(input_quantizer, Float8BlockQuantizer):
-                        input_quantizer.all_gather_usage = False
                     ln_out_total = input_quantizer(ln_out_total)
             else:
                 quantizer = None
@@ -297,7 +294,8 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Configure quantizer
             # If weight is already quantized, no need to set quantizer states
-            if is_weight_param_quantized:
+            # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
+            if is_weight_param_quantized and not debug:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
@@ -1164,9 +1162,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
-        name: str = None,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features
@@ -1185,7 +1183,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.symmetric_ar_type = symmetric_ar_type
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
-        self.name = name
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1363,7 +1360,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 torch.nn.Parameter(weight_tensor[split_start:split_end]),
                 init_fn=init_method,
                 get_rng_state_tracker=get_rng_state_tracker,
-                fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                fp8_meta_index=FP8FwdTensorIdx.GEMM1_WEIGHT,
             )
 
         # Construct bias parameters if needed
@@ -1412,15 +1409,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
 
-        # customize quantizers based on each recipe & layer configs
+        # Recipe-specific quantizer configuration
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
-        elif recipe.float8_block_scaling():
-            self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
         elif recipe.nvfp4():
             self._customize_quantizers_nvfp4(fwd, recipe)
-        # elif other recipes (mxfp8, etc)
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
@@ -1517,10 +1511,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             ).is_fp8_ubuf():
                 fp8_grad = True
 
-        with self.prepare_forward(
+        inp = self.prepare_forward(
             inp, allow_non_contiguous=False  # removed .contiguous from inside the layer
-        ) as inp:
+        )
 
+        try:
             # Get concatenated weight and bias tensors
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
@@ -1599,6 +1594,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 non_tensor_args,
             )
 
+        finally:
+            self.end_forward()
+
         if self.return_layernorm_output:
             out, ln_out = out
 
@@ -1620,16 +1618,20 @@ class LayerNormLinear(TransformerEngineBaseModule):
         grad_weight_quantizer = None
         grad_output_quantizer = None
         output_quantizer = None
-        input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
+        input_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
         input_quantizer.internal = True
+        if not (self.parallel_mode == "column" and self.sequence_parallel):
+            input_quantizer.optimize_for_gemm = True
         (weight_quantizer,) = self._get_weight_quantizers()
         if fp8_output:
-            output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
+            output_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_OUTPUT]
         if is_grad_enabled:
-            grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
+            grad_output_quantizer = self.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT1]
             grad_output_quantizer.internal = True
+            if not (self.parallel_mode == "row" and self.sequence_parallel):
+                grad_output_quantizer.optimize_for_gemm = True
             if fp8_grad:
-                grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+                grad_input_quantizer = self.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
 
         return (
             input_quantizer,
@@ -1726,43 +1728,43 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if fwd:
             # set configs about amax epsilon and power_2_scale
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM1_INPUT
+                FP8FwdTensorIdx.GEMM1_INPUT
             ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM1_INPUT
+                FP8FwdTensorIdx.GEMM1_INPUT
             ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
             # also set weight quantizer with same amax_epsilon & power_2_scale
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM1_WEIGHT
+                FP8FwdTensorIdx.GEMM1_WEIGHT
             ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM1_WEIGHT
+                FP8FwdTensorIdx.GEMM1_WEIGHT
             ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
             # parallel related
             if self.sequence_parallel and self.parallel_mode == "column":
                 # set input_quantizer with amax reduction TP group
                 self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
+                    FP8FwdTensorIdx.GEMM1_INPUT
                 ].with_amax_reduction = True
                 self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
+                    FP8FwdTensorIdx.GEMM1_INPUT
                 ].amax_reduction_group = self.tp_group
         else:
             # set grad_output_quantizer with amax epsilon and power_2_scale (no amax reduction here)
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_OUTPUT1
+                FP8BwdTensorIdx.GRAD_OUTPUT1
             ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_OUTPUT1
+                FP8BwdTensorIdx.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
             # parallel related
             if self.sequence_parallel and self.parallel_mode == "row":
                 # customize grad_output_quantizer with amax reduction TP group
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                    FP8BwdTensorIdx.GRAD_OUTPUT1
                 ].with_amax_reduction = True
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                    FP8BwdTensorIdx.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
 
     def _customize_quantizers_nvfp4(self, fwd: bool, recipe: Recipe) -> None:
@@ -1772,19 +1774,19 @@ class LayerNormLinear(TransformerEngineBaseModule):
             if self.sequence_parallel and self.parallel_mode == "column":
                 # set input_quantizer with amax reduction TP group
                 self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
+                    FP8FwdTensorIdx.GEMM1_INPUT
                 ].with_amax_reduction = True
                 self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
+                    FP8FwdTensorIdx.GEMM1_INPUT
                 ].amax_reduction_group = self.tp_group
         else:
             if self.sequence_parallel and self.parallel_mode == "row":
                 # customize grad_output_quantizer with amax reduction TP group
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                    FP8BwdTensorIdx.GRAD_OUTPUT1
                 ].with_amax_reduction = True
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                    FP8BwdTensorIdx.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
 
     def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
@@ -1808,17 +1810,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         """Get the weight quantizers of the module."""
         if not self.fp8 and not self.fp8_calibration:
             return [None]
-        weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
+        weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         return [weight_quantizer]
-
-    def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on blockwise scaling recipe + layernorm_linear."""
-        assert (
-            recipe.float8_block_scaling()
-        ), "blockwise scaling recipe quantizer customization here"
-        if fwd:
-            if self.sequence_parallel and self.parallel_mode == "column":
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].all_gather_usage = True

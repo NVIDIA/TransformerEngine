@@ -52,7 +52,7 @@ def token_dispatch(
     Optional[jnp.ndarray],
     jnp.ndarray,
     Optional[jnp.ndarray],
-    Optional[jnp.ndarray],
+    jnp.ndarray,
 ]:
     """
     Dispatch tokens to experts based on routing map.
@@ -101,9 +101,11 @@ def token_dispatch(
     pad_offsets : Optional[jnp.ndarray]
         Per-expert cumulative padding offsets of shape [num_experts] when using padding,
         None otherwise. Pass this to token_combine when unpadding is needed.
-    target_tokens_per_expert : Optional[jnp.ndarray]
-        Aligned token counts per expert of shape [num_experts] when using padding,
-        None otherwise.
+    tokens_per_expert : jnp.ndarray
+        Token counts per expert of shape [num_experts]:
+        - Without padding: actual token counts (sum of routing_map columns)
+        - With padding: aligned token counts (ceil(actual / align_size) * align_size)
+        This gives the effective number of tokens per expert in the output buffer.
 
     Note
     ----
@@ -137,7 +139,7 @@ def token_dispatch(
     )
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1, 3, 4, 5, 6))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
 def _token_dispatch(
     inp: jnp.ndarray,
     routing_map: jnp.ndarray,
@@ -151,10 +153,10 @@ def _token_dispatch(
     Optional[jnp.ndarray],
     jnp.ndarray,
     Optional[jnp.ndarray],
-    Optional[jnp.ndarray],
+    jnp.ndarray,
 ]:
     """Internal token_dispatch with custom VJP."""
-    (output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert), _ = (
+    (output, permuted_probs, row_id_map, pad_offsets, tokens_per_expert), _ = (
         _token_dispatch_fwd_rule(
             inp,
             routing_map,
@@ -165,7 +167,7 @@ def _token_dispatch(
             use_padding,
         )
     )
-    return output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert
+    return output, permuted_probs, row_id_map, pad_offsets, tokens_per_expert
 
 
 def _token_dispatch_fwd_rule(
@@ -182,7 +184,7 @@ def _token_dispatch_fwd_rule(
         Optional[jnp.ndarray],
         jnp.ndarray,
         Optional[jnp.ndarray],
-        Optional[jnp.ndarray],
+        jnp.ndarray,
     ],
     Tuple[jnp.ndarray, Optional[jnp.ndarray], int, int, int, bool],
 ]:
@@ -212,11 +214,11 @@ def _token_dispatch_fwd_rule(
 
     with_probs = probs is not None
 
-    if use_padding:
-        # Compute tokens_per_expert internally from routing_map
-        # This can be a traced value since output shape uses worst_case_out_tokens
-        tokens_per_expert = jnp.sum(routing_map, axis=0).astype(jnp.int32)
+    # Compute tokens_per_expert from routing_map (actual counts)
+    # This is well-optimized by XLA as a simple column-wise reduction
+    tokens_per_expert = jnp.sum(routing_map, axis=0).astype(jnp.int32)
 
+    if use_padding:
         # Calculate aligned token counts per expert
         target_tokens_per_expert = (jnp.ceil(tokens_per_expert / align_size) * align_size).astype(
             jnp.int32
@@ -240,11 +242,14 @@ def _token_dispatch_fwd_rule(
             num_experts,
             worst_case_out_tokens,
             hidden_size,
+            align_size=align_size,
         )
+
+        # Return aligned counts when using padding
+        out_tokens_per_expert = target_tokens_per_expert
     else:
         # No padding
         pad_offsets = None
-        target_tokens_per_expert = None
 
         output, permuted_probs = permute_with_mask_map(
             inp,
@@ -256,19 +261,24 @@ def _token_dispatch_fwd_rule(
             hidden_size,
         )
 
+        # Return actual counts when not using padding
+        out_tokens_per_expert = tokens_per_expert
+
     # Return (primals, residuals)
+    # out_tokens_per_expert is:
+    #   - target_tokens_per_expert (aligned) when using padding
+    #   - tokens_per_expert (actual) when not using padding
     residuals = (row_id_map, pad_offsets, num_tokens, num_experts, hidden_size, with_probs)
     return (
         output,
         permuted_probs,
         row_id_map,
         pad_offsets,
-        target_tokens_per_expert,
+        out_tokens_per_expert,
     ), residuals
 
 
 def _token_dispatch_bwd_rule(
-    _routing_map: jnp.ndarray,
     _num_out_tokens: int,
     _worst_case_out_tokens: int,
     _align_size: Optional[int],
@@ -281,8 +291,12 @@ def _token_dispatch_bwd_rule(
         Optional[jnp.ndarray],
         Optional[jnp.ndarray],
     ],
-) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-    """Backward pass rule for token_dispatch."""
+) -> Tuple[jnp.ndarray, None, Optional[jnp.ndarray]]:
+    """Backward pass rule for token_dispatch.
+
+    Returns gradients for (inp, routing_map, probs).
+    routing_map gradient is None since it's a discrete routing decision.
+    """
     row_id_map, pad_offsets, num_tokens, num_experts, hidden_size, with_probs = residuals
     output_grad, permuted_probs_grad, _, _, _ = g  # Ignore row_id_map, pad_offsets, target grads
 
@@ -309,7 +323,9 @@ def _token_dispatch_bwd_rule(
             hidden_size,
         )
 
-    return inp_grad, probs_grad if with_probs else None
+    # Return gradients for (inp, routing_map, probs)
+    # routing_map is non-differentiable (discrete routing), so return None
+    return inp_grad, None, probs_grad if with_probs else None
 
 
 _token_dispatch.defvjp(_token_dispatch_fwd_rule, _token_dispatch_bwd_rule)
@@ -497,6 +513,8 @@ def _token_combine_bwd_rule(
     else:
         # Simple case: just permute gradients back
         if pad_offsets is not None:
+            # Note: align_size uses default (128) since buffer sizes are already
+            # determined from forward pass (stored in residuals as num_out_tokens)
             inp_grad, _ = permute_with_mask_map_and_pad(
                 output_grad,
                 row_id_map,
@@ -506,6 +524,7 @@ def _token_combine_bwd_rule(
                 num_experts,
                 num_out_tokens,
                 hidden_size,
+                align_size=128,  # Default, sizes already computed in forward
             )
             # The permute kernel only writes to positions that tokens map to.
             # Padded positions may contain uninitialized (NaN) values - replace with zeros.
@@ -562,7 +581,7 @@ def sort_chunks_by_index(
     return _sort_chunks_by_index(inp, split_sizes, sorted_indices)
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+@jax.custom_vjp
 def _sort_chunks_by_index(
     inp: jnp.ndarray,
     split_sizes: jnp.ndarray,
@@ -577,7 +596,7 @@ def _sort_chunks_by_index_fwd_rule(
     inp: jnp.ndarray,
     split_sizes: jnp.ndarray,
     sorted_indices: jnp.ndarray,
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], Tuple[jnp.ndarray, int, int]]:
+) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int, int]]:
     """Forward pass rule for sort_chunks_by_index."""
     # Validate input dimensions
     assert inp.ndim in [2, 3], f"inp must be 2D or 3D, got {inp.ndim}D"
@@ -599,18 +618,17 @@ def _sort_chunks_by_index_fwd_rule(
     )
 
     # Return (primals, residuals)
-    residuals = (row_id_map, num_tokens, hidden_size)
+    # Include split_sizes and sorted_indices in residuals since we removed nondiff_argnums
+    residuals = (row_id_map, split_sizes, sorted_indices, num_tokens, hidden_size)
     return (output, row_id_map), residuals
 
 
 def _sort_chunks_by_index_bwd_rule(
-    _split_sizes: jnp.ndarray,
-    _sorted_indices: jnp.ndarray,
-    residuals: Tuple[jnp.ndarray, int, int],
+    residuals: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int, int],
     g: Tuple[jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Backward pass rule for sort_chunks_by_index."""
-    row_id_map, num_tokens, hidden_size = residuals
+    row_id_map, split_sizes, sorted_indices, num_tokens, hidden_size = residuals
     output_grad, _ = g
 
     # Backward: reverse the sort
@@ -623,7 +641,12 @@ def _sort_chunks_by_index_bwd_rule(
         is_forward=False,
     )
 
-    return (inp_grad,)
+    # Return gradients for all inputs: (inp, split_sizes, sorted_indices)
+    # split_sizes and sorted_indices are integer arrays, so their gradients are zeros
+    split_sizes_grad = jnp.zeros_like(split_sizes, dtype=split_sizes.dtype)
+    sorted_indices_grad = jnp.zeros_like(sorted_indices, dtype=sorted_indices.dtype)
+
+    return (inp_grad, split_sizes_grad, sorted_indices_grad)
 
 
 _sort_chunks_by_index.defvjp(_sort_chunks_by_index_fwd_rule, _sort_chunks_by_index_bwd_rule)

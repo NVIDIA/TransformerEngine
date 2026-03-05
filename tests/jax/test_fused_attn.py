@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
+import os
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
@@ -48,6 +49,9 @@ from transformer_engine_jax import (
 
 from distributed_test_base import assert_equal_collectives
 from utils import assert_allclose, print_debug_tensor_stats
+
+# Get determinism
+_deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -413,15 +417,25 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
-        # TODO(KshitijLakhani): Set the upper limit for skipping this test when cuDNN adds support
-        if (
-            get_device_compute_capability(0) >= 100
-            and self.dropout_prob == 0.1
-            and self.attn_bias_type is not AttnBiasType.NO_BIAS
-        ):
-            pytest.skip(
-                "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
-            )
+
+        if get_device_compute_capability(0) >= 100 and self.is_training:
+            if FusedAttnHelper.is_non_deterministic_allowed() and (
+                (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
+                or get_cudnn_version() < 90700
+            ):
+                pytest.skip(
+                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
+                    " dropout"
+                )
+            if not FusedAttnHelper.is_non_deterministic_allowed() and (
+                self.dropout_prob != 0.0
+                or self.attn_bias_type != AttnBiasType.NO_BIAS
+                or get_cudnn_version() < 91801
+            ):
+                pytest.skip(
+                    "For sm100+, deterministic bprop (cuDNN 9.18.1+) does not support bias or"
+                    " dropout"
+                )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
@@ -1269,6 +1283,7 @@ class FusedAttnRunner:
         pytest.param(SeqDescFormat.SegmentIDs, id="SegmentIDs"),
     ],
 )
+@pytest.mark.skipif(_deterministic, reason="Test non-determinism only")
 class TestFusedAttn:
     """
     Fused attention tester
@@ -1392,3 +1407,182 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
+
+
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "softmax_type",
+    [
+        pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
+    [
+        # large data size + fp16 + cross attn + gqa + diff hidden v dim + qkv separate
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-SEPARATE",
+        ),
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.bfloat16,
+            QKVLayout.THD_THD_THD,
+            id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-RAGGED_SEPARATE",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "dropout_prob",
+    [
+        pytest.param(0.0, id="DROP_0.0"),
+    ],
+)
+@pytest.mark.parametrize(
+    "swa",
+    [
+        pytest.param(False, id="NO_SWA"),
+    ],
+)
+@pytest.mark.parametrize(
+    "seq_desc_format",
+    [
+        pytest.param(SeqDescFormat.Seqlens, id="Seqlens"),
+    ],
+)
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
+class TestFusedAttnWithDeterminism:
+    """
+    Fused attention tester with determinism
+    """
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "is_training",
+        [
+            pytest.param(True, id="TRAINING"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
+        ],
+    )
+    def _test_forward(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        softmax_type,
+        dropout_prob,
+        dtype,
+        is_training,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        """
+        Test forward with parameterized configs
+        This test is not intended to run automatically during CI as it is time-consuming
+        It is kept for development and debugging
+        """
+        TestFusedAttn._test_forward(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            dropout_prob,
+            dtype,
+            is_training,
+            qkv_layout,
+            bias_shape,
+            swa,
+            seq_desc_format,
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
+        ],
+    )
+    def test_backward(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        softmax_type,
+        dropout_prob,
+        dtype,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        """
+        Test backward with parameterized configs
+        """
+        TestFusedAttn.test_backward(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            dropout_prob,
+            dtype,
+            qkv_layout,
+            bias_shape,
+            swa,
+            seq_desc_format,
+        )

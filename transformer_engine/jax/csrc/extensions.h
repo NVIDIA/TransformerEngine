@@ -113,7 +113,7 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen,
     size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
-    int64_t window_size_right);
+    int64_t window_size_right, bool deterministic);
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
@@ -121,7 +121,7 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
     DType dtype, bool is_training, size_t max_segments_per_seq, int64_t window_size_left,
-    int64_t window_size_right);
+    int64_t window_size_right, bool bottom_right_diagonal);
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
@@ -129,7 +129,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
     DType dtype, bool is_training, bool deterministic, size_t max_segments_per_seq,
-    int64_t window_size_left, int64_t window_size_right);
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal);
 
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
@@ -143,11 +143,20 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationHandler);
 
+// Inspect
+XLA_FFI_DECLARE_HANDLER_SYMBOL(InspectHandler);
+
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 
 // CuBLAS helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
+
+// Router
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine
@@ -162,6 +171,7 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Score_Function);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Quantize_Layout);
 

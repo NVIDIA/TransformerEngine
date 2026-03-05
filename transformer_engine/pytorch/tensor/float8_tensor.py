@@ -11,7 +11,11 @@ from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Recipe
+from transformer_engine.common.recipe import (
+    DelayedScaling,
+    Float8CurrentScaling,
+    Recipe,
+)
 from ..utils import canonicalize_process_group, devices_match
 from .storage.float8_tensor_storage import Float8TensorStorage, _FromFloat8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
@@ -154,6 +158,10 @@ class Float8Quantizer(Quantizer):
         amin, amax = tensor.aminmax()
         self.amax.copy_(torch.max(-amin, amax))
 
+    def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
+        """Calculate the shape of the columnwise data for Float8 1D blockwise quantization."""
+        return [rowwise_data_shape[-1]] + list(rowwise_data_shape[:-1])
+
     def create_tensor_from_data(
         self,
         data: torch.Tensor,
@@ -276,6 +284,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
 
+    def __getstate__(self):
+        """Exclude unpicklable process group from serialized state."""
+        state = self.__dict__.copy()
+        state["amax_reduction_group"] = None
+        return state
+
     def copy(self) -> Float8CurrentScalingQuantizer:
         """Create shallow copy"""
 
@@ -293,6 +307,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             amax=self.amax,
         )
         quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
 
         return quantizer
 
@@ -406,6 +421,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
             data_transpose=None,
             quantizer=self,
         )
+
+    def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
+        """Calculate the shape of the columnwise data for Float8 1D blockwise quantization."""
+        return [rowwise_data_shape[-1]] + list(rowwise_data_shape[:-1])
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Function using primitives with ONNX defined translations."""
@@ -768,7 +787,10 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     kwargs,
                 )
             return Float8Tensor.make_like(
-                tensor, data=func_out, data_transpose=func_transposed_out, shape=func_out.shape
+                tensor,
+                data=func_out,
+                data_transpose=func_transposed_out,
+                shape=func_out.shape,
             )
 
         if func == torch.ops.aten.detach.default:
@@ -909,6 +931,25 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             columnwise_usage=columnwise_usage,
         )
         return out, all_gather_outputs
+
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._data is not None:
+            return self._data.shape
+        if self._transpose is not None:
+            transpose_shape = self._transpose.shape
+            return torch.Size(tuple(transpose_shape[1:]) + (transpose_shape[0],))
+        raise RuntimeError("Both data and transpose are None")
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        if self._data is not None:
+            return self._data.is_cuda
+        if self._transpose is not None:
+            return self._transpose.is_cuda
+        raise RuntimeError("Both data and transpose are None")
 
     @classmethod
     def _make_in_reduce_ex(

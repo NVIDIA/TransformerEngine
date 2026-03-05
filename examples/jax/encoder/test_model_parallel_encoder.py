@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Encoder training on multi-GPU with tesnor parallelism"""
 import argparse
+import os
 import unittest
 from functools import partial
 
@@ -218,11 +219,11 @@ def get_datasets(max_seq_len):
     vocab = {}
     word_id = 0
 
-    train_ds = load_dataset("glue", "cola", split="train")
+    train_ds = load_dataset("nyu-mll/glue", "cola", split="train")
     train_ds.set_format(type="np")
     train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
 
-    test_ds = load_dataset("glue", "cola", split="validation")
+    test_ds = load_dataset("nyu-mll/glue", "cola", split="validation")
     test_ds.set_format(type="np")
     test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
     return train_ds, test_ds, word_id
@@ -238,7 +239,6 @@ def check_fp8(state, var_collect, inputs, masks, labels):
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
     print(args)
-    jax.config.update("jax_use_shardy_partitioner", args.enable_shardy)
 
     train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
 
@@ -473,9 +473,6 @@ def encoder_parser(args):
     parser.add_argument(
         "--enable-sp", action="store_true", default=False, help="Enable sequence parallelism."
     )
-    parser.add_argument(
-        "--enable-shardy", action="store_true", default=False, help="Enable Shardy (experimental)."
-    )
 
     return parser.parse_args(args)
 
@@ -489,6 +486,9 @@ class TestEncoder(unittest.TestCase):
 
     def setUp(self):
         """Run 5 epochs for testing"""
+        # TODO(jberchtold): Remove once fused attention from cuDNN supports determinism on Blackwell
+        if "NVTE_FUSED_ATTN" not in os.environ:
+            os.environ["NVTE_FUSED_ATTN"] = "0"
         self.args = encoder_parser(["--epochs", "5"])
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
@@ -549,70 +549,6 @@ class TestEncoder(unittest.TestCase):
     @unittest.skipIf(not is_nvfp4_supported, nvfp4_reason)
     def test_te_nvfp4_with_sp(self):
         """Test Transformer Engine with NVFP4"""
-        self.args.enable_sp = True
-        self.args.use_fp8 = True
-        self.args.fp8_recipe = "NVFP4BlockScaling"
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.40 and actual[1] > 0.82
-
-    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
-    def test_te_bf16_shardy(self):
-        """Test Transformer Engine with BF16"""
-        self.args.enable_shardy = True
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.36 and actual[1] > 0.84
-
-    @unittest.skipIf(not is_fp8_supported, fp8_reason)
-    def test_te_delayed_scaling_fp8_shardy(self):
-        """Test Transformer Engine with DelayedScaling FP8"""
-        self.args.enable_shardy = True
-        self.args.use_fp8 = True
-        self.args.fp8_recipe = "DelayedScaling"
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.362 and actual[1] > 0.84
-
-    @unittest.skipIf(not is_fp8_supported, fp8_reason)
-    def test_te_delayed_scaling_fp8_with_sp_shardy(self):
-        """Test Transformer Engine with DelayedScaling FP8 + SP"""
-        self.args.enable_shardy = True
-        self.args.enable_sp = True
-        self.args.use_fp8 = True
-        self.args.fp8_recipe = "DelayedScaling"
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.362 and actual[1] > 0.84
-
-    @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
-    def test_te_mxfp8_shardy(self):
-        """Test Transformer Engine with MXFP8"""
-        self.args.enable_shardy = True
-        self.args.use_fp8 = True
-        self.args.fp8_recipe = "MXFP8BlockScaling"
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.36 and actual[1] > 0.84
-
-    @unittest.skipIf(not is_nvfp4_supported, nvfp4_reason)
-    def test_te_nvfp4_shardy(self):
-        """Test Transformer Engine with NVFP4"""
-        self.args.enable_shardy = True
-        self.args.use_fp8 = True
-        self.args.fp8_recipe = "NVFP4BlockScaling"
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.40 and actual[1] > 0.82
-
-    @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
-    def test_te_mxfp8_with_sp_shardy(self):
-        """Test Transformer Engine with MXFP8 + SP"""
-        self.args.enable_shardy = True
-        self.args.enable_sp = True
-        self.args.use_fp8 = True
-        self.args.fp8_recipe = "MXFP8BlockScaling"
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.36 and actual[1] > 0.84
-
-    @unittest.skipIf(not is_nvfp4_supported, nvfp4_reason)
-    def test_te_nvfp4_with_sp_shardy(self):
-        """Test Transformer Engine with NVFP4"""
-        self.args.enable_shardy = True
         self.args.enable_sp = True
         self.args.use_fp8 = True
         self.args.fp8_recipe = "NVFP4BlockScaling"

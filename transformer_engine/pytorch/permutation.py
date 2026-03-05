@@ -294,6 +294,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     columnwise_scale_inv=None,
                     quantizer=None,
                     requires_grad=output.requires_grad,
+                    with_gemm_swizzled_scales=False,
                 )
 
         ctx.save_for_backward(row_id_map, pad_offsets)
@@ -504,6 +505,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         columnwise_scale_inv=None,
                         quantizer=None,
                         requires_grad=act_grad.requires_grad,
+                        with_gemm_swizzled_scales=False,
                     )
 
         if not ctx.needs_input_grad[2]:

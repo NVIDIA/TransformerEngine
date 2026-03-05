@@ -840,13 +840,24 @@ def cp_p2p_fwd_fused_attn(
         q_part = q_part.contiguous()
         if attn_bias is not None:
             idx = (rank - step) % cp_size
-            attn_bias_inputs = torch.cat(
-                (
-                    attn_bias_[..., 1, :, idx, :],
-                    attn_bias_[..., 1, :, (2 * cp_size - idx - 1), :],
-                ),
-                dim=-1,
-            ).contiguous()
+            # For bias shape 111s, only the s_kv dim is split, i.e. [b, h, sq, 2*cp, sk//(2*cp)])
+            if attn_bias.shape[-3] == 1:
+                attn_bias_inputs = torch.cat(
+                    (
+                        attn_bias_[..., :, idx, :],
+                        attn_bias_[..., :, (2 * cp_size - idx - 1), :],
+                    ),
+                    dim=-1,
+                ).contiguous()
+            # For bias shapes 1hss, 11ss, bhss, b1ss, the s_kv and s_q dims are split, i.e. [b, h, 2, sq//2, 2*cp, sk//(2*cp)])
+            else:
+                attn_bias_inputs = torch.cat(
+                    (
+                        attn_bias_[..., 1, :, idx, :],
+                        attn_bias_[..., 1, :, (2 * cp_size - idx - 1), :],
+                    ),
+                    dim=-1,
+                ).contiguous()
         max_seqlen_q_ = max_seqlen_q // 2
         max_seqlen_kv_ = max_seqlen_kv
         cu_seqlens_q_ = cu_seqlens_q_per_step
@@ -1442,20 +1453,33 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         attn_bias_ = None
         if attn_bias is not None:
             assert len(attn_bias.shape) == 4, (
-                "Only support bias shape of [b, h, sq, sk] for forward, "
-                "and [1, h, sq, sk] for backward!"
+                "Only support bias shape of [1,1,sq,skv], [1,h,sq,skv], [b,1,sq,skv], [b,h,sq,skv],"
+                " [1,1,1,skv] for forward, and [1,1,sq,skv], [1,h,sq,skv], [b,1,sq,skv],"
+                " [b,h,sq,skv] for backward!"
             )
-            assert (
-                attn_bias.shape[-2] % 2 == 0 and attn_bias.shape[-1] % (2 * cp_size) == 0
-            ), "Sequence length does not meet divisible requirements!"
-            # [b, h, sq, sk] -> [b, h, 2, sq//2, 2*cp, sk//(2*cp)]
-            attn_bias_ = attn_bias.view(
-                *attn_bias.shape[:-2],
-                2,
-                attn_bias.shape[-2] // 2,
-                2 * cp_size,
-                attn_bias.shape[-1] // (2 * cp_size),
-            )
+            # For all bias shapes except 111s, sq must be divisible by 2 and skv must be divisible by 2*cp_size
+            # For bias shape 111s, only skv must be divisible by 2*cp_size
+            if attn_bias.shape[-2] != 1:
+                assert (
+                    attn_bias.shape[-2] % 2 == 0 and attn_bias.shape[-1] % (2 * cp_size) == 0
+                ), "Sequence length does not meet divisible requirements!"
+                # [b, h, sq, sk] -> [b, h, 2, sq//2, 2*cp, sk//(2*cp)]
+                attn_bias_ = attn_bias.view(
+                    *attn_bias.shape[:-2],
+                    2,
+                    attn_bias.shape[-2] // 2,
+                    2 * cp_size,
+                    attn_bias.shape[-1] // (2 * cp_size),
+                )
+            else:
+                assert (
+                    attn_bias.shape[-1] % (2 * cp_size) == 0
+                ), "Sequence length does not meet divisible requirements!"
+                # [b, h, sq, sk] -> [b, h, sq, 2*cp, sk//(2*cp)]
+                attn_bias_ = attn_bias.view(
+                    *attn_bias.shape[:-1], 2 * cp_size, attn_bias.shape[-1] // (2 * cp_size)
+                )
+
             # [b, h, sq, sk] -> [b, h, sq, 2*cp, sk//(2*cp)]
             attn_bias = attn_bias.view(
                 *attn_bias.shape[:-1], 2 * cp_size, attn_bias.shape[-1] // (2 * cp_size)
@@ -2076,10 +2100,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias = torch.zeros(
                 *ctx.attn_bias_shape, dtype=attn_biases[0].dtype, device=attn_biases[0].device
             )
-            # [b, h, sq, 2*cp, sk//(2*cp)] -> [b, h, 2, sq//2, 2*cp, sk//(2*cp)]
-            attn_dbias_ = attn_dbias.view(
-                *attn_dbias.shape[:-3], 2, attn_dbias.shape[-3] // 2, *attn_dbias.shape[-2:]
-            )
+            # [b, h, sq, 2*cp, sk//(2*cp)] -> [b, h, 2, sq//2, 2*cp, sk//(2*cp)] only when sq > 1 (i.e. all supported bias shapes except 111s)
+            if attn_dbias.shape[-3] > 1:
+                attn_dbias_ = attn_dbias.view(
+                    *attn_dbias.shape[:-3], 2, attn_dbias.shape[-3] // 2, *attn_dbias.shape[-2:]
+                )
+            else:
+                attn_dbias_ = None
         else:
             attn_dbias = None
             attn_dbias_ = None
@@ -2507,8 +2534,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 elif i >= (cp_size - rank - 1):
                     # [b, h, sq, sk//(2*cp)]
                     attn_dbias[..., idx, :].copy_(dbias_)
-                else:
-                    # [b, h, sq//2, sk//cp] -> [b, h, sq//2, 2, sk//(2*cp)]
+                elif attn_dbias_ is not None:
+                    # upper-triangle: [b, h, sq//2, sk//cp] -> [b, h, sq//2, 2, sk//(2*cp)]
                     dbias_ = dbias_.view(*dbias_.shape[:-1], 2, dbias_.shape[-1] // 2)
                     attn_dbias_[..., 1, :, idx, :].copy_(dbias_[..., 0, :])
                     attn_dbias_[..., 1, :, (2 * cp_size - idx - 1), :].copy_(dbias_[..., 1, :])
@@ -4026,28 +4053,30 @@ def attn_forward_func_with_cp(
     assert not sliding_window_attn or cp_comm_type in [
         "a2a",
         "all_gather",
-    ], "Context parallelism does not support sliding window attention with {cp_comm_type=}!"
+    ], f"Context parallelism does not support sliding window attention with {cp_comm_type=}!"
 
     enable_mla = k.shape[-1] != v.shape[-1]
     assert not enable_mla or cp_comm_type in [
         "p2p",
         "a2a+p2p",
-    ], "Context parallelism does not support MLA with {cp_comm_type=}!"
+    ], f"Context parallelism does not support MLA with {cp_comm_type=}!"
 
     if fp8 and fp8_meta is not None:
         if fp8_meta["recipe"].fp8_dpa:
             assert (
                 softmax_type == "vanilla"
-            ), "Context parallelism does not support {softmax_type=} with FP8 attention!"
+            ), f"Context parallelism does not support {softmax_type=} with FP8 attention!"
     assert (
         softmax_type == "vanilla" or use_fused_attention
-    ), "Context parallelism only supports {softmax_type=} with FusedAttention backend!"
+    ), f"Context parallelism only supports {softmax_type=} with FusedAttention backend!"
     assert (
         softmax_type == "vanilla" or cp_comm_type == "a2a"
-    ), "Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
-    assert (
-        softmax_type == "vanilla" or qkv_format != "thd"
-    ), "Context parallelism does not support {softmax_type=} with qkv_format = 'thd'!"
+    ), f"Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
+    if get_cudnn_version() < (9, 18, 0):
+        assert softmax_type == "vanilla" or qkv_format != "thd", (
+            f"Before cuDNN 9.18.0, context parallelism does not support {softmax_type=} with"
+            " qkv_format = 'thd'!"
+        )
 
     args = [
         is_training,
