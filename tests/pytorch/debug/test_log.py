@@ -685,7 +685,7 @@ def test_dump_tensors_sanity(feature_dirs):
         pytest.skip(reason_for_no_fp8)
 
     with debug_session(DUMP_TENSORS_CONFIG, feature_dirs) as log_dir:
-        from transformer_engine.pytorch.quantization import RecipeState
+        recipe_state = RecipeState.create(
 
         recipe_state = RecipeState.create(
             recipe.DelayedScaling(),
