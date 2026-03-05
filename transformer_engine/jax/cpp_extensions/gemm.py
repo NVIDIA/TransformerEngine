@@ -1247,6 +1247,12 @@ def _te_gemm(
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs_amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
 
+    if not collective_op.is_none and scaling_mode.is_1d_block_scaling():
+        raise ValueError(
+            f"Collective GEMM is not yet supported with {scaling_mode} quantization. "
+            "Only DELAYED_TENSOR_SCALING and CURRENT_TENSOR_SCALING are supported."
+        )
+
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
     if bias is None:
         bias = jnp.empty(0, dtype=out_dtype)
