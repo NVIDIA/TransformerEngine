@@ -770,7 +770,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # p2p_comm_buffers[0].copy_(p2p_comm_buffers[0])
         # p2p_comm_buffers[1] = nvshmem.tensor(list(p2p_comm_buffers[0].shape), dtype=p2p_comm_buffers[0].dtype)
         device = Device()
-        stream = device.create_stream()
+        communicate_stream = device.create_stream()
         out = None
         for i in range(cp_size + 1):
             if i < cp_size:
@@ -778,6 +778,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     # wait until KV is received
                     for req in send_recv_reqs[(i + 1) % 2]:
                         req.wait()
+                    if nvshmem_kv is not None:
+                        # If NVSHMEM is available, ensure the get is completed before using the buffer
+                        communicate_stream.sync()
 
                     if i < (cp_size - 1):                 
                         p2p_comm_buffers[i + 1] = nvshmem.tensor(list(p2p_comm_buffers[i].shape), dtype=p2p_comm_buffers[i].dtype)                      
@@ -787,7 +790,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             # Map owner idx to global rank (accounting for a2a groups)
                             owner_global = cp_global_ranks[owner_idx * cp_size_a2a + rank_a2a]
                             # nvshmem_get: dst (local buffer), src (symmetric address), peer=owner_global
-                            nvshmem_get_on_stream(p2p_comm_buffers[i + 1], nvshmem_kv, owner_global, stream=stream)
+                            nvshmem_get_on_stream(p2p_comm_buffers[i + 1], nvshmem_kv, owner_global, stream=communicate_stream)
                         else:
                             # fallback to P2P if NVSHMEM not available
                             send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
