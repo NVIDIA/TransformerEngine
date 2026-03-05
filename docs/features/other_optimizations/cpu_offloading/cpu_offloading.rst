@@ -50,13 +50,20 @@ memory-bound operations like quantization may be noticeable.
 CPU Offloading in Transformer Engine
 ------------------------------------
 
-Transformer Engine supports CPU offloading of activations for **sequential models**. By sequential, we mean that the model is a sequence of layers, where each layer
-consumes the output of the previous one — which is the case for most LLM architectures. These layers may be any PyTorch modules and not just TE layers.
+Transformer Engine supports CPU offloading of activations for **sequential models**.
+A model is considered sequential if it satisfies the following conditions:
+
+1. The model is a sequence of layers: ``x₁ = Layer₁(x₀)``, ``x₂ = Layer₂(x₁)``, ..., ``xₙ = Layerₙ(xₙ₋₁)``.
+   **The layers may be any PyTorch modules**, not just TE layers.
+2. Each intermediate tensor ``xᵢ`` is used only as input to the next layer (not elsewhere in the model).
+3. Computing the gradient of ``xᵢ`` requires all backward operations within ``Layerᵢ₊₁`` to complete first.
+
+Most LLM architectures (stacked Transformer blocks) satisfy these conditions.
 
 .. raw:: html
    :file: img/layer_sequence.svg
 
-*Figure 2. Sequential model: each layer consumes the output of the previous one (x₀ → Layer 1 → x₁ → Layer 2 → ...).*
+*Figure 2. Sequential model: xᵢ₊₁ = Layerᵢ₊₁(xᵢ). Each layer consumes only the output of the previous one.*
 
 The example below shows how to offload activations for a sequence of ``torch.nn.Linear`` layers using the default scheduling algorithm:
 
@@ -102,11 +109,22 @@ The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns 
 that must be used together during the forward pass:
 
 - **context manager** — wraps each layer's forward pass to intercept tensors saved for backward.
-- **sync function** — called on the layer's output tensor to register a backward hook that
-  triggers activation reload before each layer's backward pass.
+- **sync function** — registers a backward hook on the output tensor to trigger activation reload.
 
-Both are required: the context manager captures activations, and the sync function ensures
-they are reloaded at the right time during backward.
+The usage pattern is:
+
+.. tabs::
+
+   .. tab:: PyTorch
+
+      .. code-block:: python
+
+          cpu_offload_context, sync_function = get_cpu_offload_context(...)
+
+          for layer in layers:
+              with cpu_offload_context:
+                  x = layer(x)
+              x = sync_function(x)
 
 
 Default Offloading Scheduling
