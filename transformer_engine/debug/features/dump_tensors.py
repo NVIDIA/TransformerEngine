@@ -295,6 +295,11 @@ class DumpTensors(TEConfigAPIMapper):
         elif isinstance(quantized_tensor, NVFP4Tensor):
             tensors = _get_extended_tensors_nvfp4(quantized_tensor)
         else:
+            debug_api.log_message(
+                f"[TE DumpTensors] dump_quantized_internals=True but tensor type "
+                f"{type(quantized_tensor).__name__} is not supported for internals extraction. "
+                "Skipping internals."
+            )
             return {}
 
         # Filter out None values
