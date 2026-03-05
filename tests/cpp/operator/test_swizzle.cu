@@ -152,9 +152,12 @@ void performTestUnswizzle1D(const int num_tiles_M, const int num_tiles_K, bool r
     SF_MODE_Y = 1;
   }
 
+  if (!rowwise && !columnwise) {
+    GTEST_SKIP() << "TEST SKIPPED, Either rowwise or columnwise scaling mode must be true.";
+  }
   if ((rowwise && columnwise) || !(rowwise || columnwise)){
     GTEST_SKIP() << "TEST SKIPPED, The scaling mode " + std::to_string(SF_MODE_X) + "x" +
-      std::to_string(SF_MODE_Y) + "is not implemented.";
+      std::to_string(SF_MODE_Y) + " is not implemented.";
   }
 
   DType dtype = DType::kFloat8E4M3;
@@ -292,10 +295,13 @@ void performTestSwizzleUnswizzleRoundtrip(const int num_tiles_M, const int num_t
     SF_MODE_X = 32;
     SF_MODE_Y = 1;
   }
-
+  
+  if (!rowwise && !columnwise) {
+    GTEST_SKIP() << "TEST SKIPPED, Either rowwise or columnwise scaling mode must be true.";
+  }
   if ((rowwise && columnwise) || !(rowwise || columnwise)){
     GTEST_SKIP() << "TEST SKIPPED, The scaling mode " + std::to_string(SF_MODE_X) + "x" +
-      std::to_string(SF_MODE_Y) + "is not implemented.";
+      std::to_string(SF_MODE_Y) + " is not implemented.";
   }
 
   DType dtype = DType::kFloat8E4M3;

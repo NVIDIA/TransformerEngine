@@ -79,6 +79,7 @@ __device__ inline void regs_unshuffle_with_bit_shifts(LType* regs_vec) {
 #pragma unroll
   for (int i = 0; i < kVectorSize; i++) regs[i] = new_regs[i];
 }
+
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
 __device__ void swizzle_col_scaling_kernel_impl(const void* input, void* output, const int M,
                                                 const int K, const int original_M,
@@ -1425,10 +1426,10 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
   NVTE_CHECK(!all_has_data || !all_has_columnwise_data,
              "All tensors have both data and columnwise data.");
 
-  const bool rowwise_swizzle = all_has_data || all_nvfp4;
-  const bool columnwise_swizzle = all_has_columnwise_data && !all_nvfp4;
+  const bool rowwise_unswizzle = all_has_data || all_nvfp4;
+  const bool columnwise_unswizzle = all_has_columnwise_data && !all_nvfp4;
 
-  if (rowwise_swizzle) {
+  if (rowwise_unswizzle) {
     MultiSwizzleArgs kernel_args;
     kernel_args.num_tensors = 0;
     kernel_args.block_range[0] = 0;
@@ -1497,7 +1498,7 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
         kernel_args, vec_load_size, true, stream);
   }
 
-  if (columnwise_swizzle) {
+  if (columnwise_unswizzle) {
     NVTE_CHECK(!all_nvfp4, "NVFP4 shouldn't end up here because it only needs rowwise swizzle");
 
     MultiSwizzleArgs kernel_args;
