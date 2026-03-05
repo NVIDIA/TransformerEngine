@@ -375,9 +375,10 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
               << std::endl;
   });
 
-  return GemmV2FFI(stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output, workspace,
-            GemmConfig{scaling_mode, collective_op, lhs_axis_boundary, rhs_axis_boundary,
-                       lhs_transposed, rhs_transposed, use_split_accumulator});
+  return GemmV2FFI(stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta, output,
+                   workspace,
+                   GemmConfig{scaling_mode, collective_op, lhs_axis_boundary, rhs_axis_boundary,
+                              lhs_transposed, rhs_transposed, use_split_accumulator});
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,

@@ -1763,7 +1763,9 @@ def gemm(
     # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
     if not GemmPrimitive.enabled():
         assert collective_op.is_none, "JAX GEMM does not support collective GEMM"
-        output = _jax_gemm(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer, use_split_accumulator)
+        output = _jax_gemm(
+            lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer, use_split_accumulator
+        )
         if bias is not None:
             output += bias  # Unfused
         return output
