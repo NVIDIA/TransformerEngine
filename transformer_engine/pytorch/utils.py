@@ -430,46 +430,6 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     with torch.enable_grad():
         return tensor.to(dtype=dtype)
 
-def mask_distributed_columns_graph_compatible(tensor, num_mask_cols, etp_size, valid_indices=None):
-    """
-    CUDA graph compatible version using index_select.
-
-    Args:
-        tensor: [M, N] input tensor
-        num_mask_cols: total columns to mask
-        etp_size: number of chunks
-        valid_indices: pre-computed valid column indices (optional, will be computed if None)
-
-    Returns:
-        result: [M, N - num_mask_cols] tensor with masked columns removed
-        valid_indices: indices of valid columns (for reuse)
-    """
-    # Sanity check
-    assert num_mask_cols > 0 and etp_size > 1
-    _, N = tensor.shape
-
-    chunk_size = N // etp_size
-    mask_per_chunk = num_mask_cols // etp_size
-    assert num_mask_cols % etp_size == 0 and mask_per_chunk >= 1
-
-    # Pre-compute valid indices if not provided
-    if valid_indices is None:
-        # Build list of valid column indices
-        indices_list = []
-        for chunk_idx in range(etp_size):
-            chunk_start = chunk_idx * chunk_size
-            chunk_end = chunk_start + chunk_size
-            valid_end = chunk_end - mask_per_chunk
-            indices_list.extend(range(chunk_start, valid_end))
-
-        # Allocated during warmup of CG.
-        valid_indices = torch.tensor(indices_list, dtype=torch.long, device=tensor.device)
-
-    # Use index_select instead of boolean indexing (CUDA graph compatible)
-    result = torch.index_select(tensor, dim=1, index=valid_indices)
-
-    return result, valid_indices
-
 
 def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
     """Check if tensor dimensions are supported for FP8 TN GEMM"""

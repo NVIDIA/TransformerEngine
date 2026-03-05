@@ -47,7 +47,6 @@ from ..utils import (
     get_nvtx_range_context,
 )
 from ..distributed import (
-    set_extended_tensor_parallel_attributes,
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
@@ -1800,7 +1799,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         checkpoint: bool = False,
-        etp_group: Optional[dist_group_type] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1844,11 +1842,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.tp_size = get_distributed_world_size(tp_group)
             self.set_tensor_parallel_group(tp_group)
         self.set_nccl_overlap_warning_if_tp()
-
-        if etp_group is None:
-            self.etp_size = 1
-        else:
-            self.etp_size = get_distributed_world_size(etp_group)
 
         if init_method is None:
             init_method = get_default_init_method()
@@ -2014,9 +2007,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             # Set parallel attributes for linear parameters
             set_tensor_model_parallel_attributes(self.fc1_weight, True, 0, 1)
             set_tensor_model_parallel_attributes(self.fc2_weight, True, 1, 1)
-            if self.etp_size > 1:
-                set_extended_tensor_parallel_attributes(self.fc1_weight, True, 0, 1)
-                set_extended_tensor_parallel_attributes(self.fc2_weight, True, 0, 1)
             if self.use_bias:
                 set_tensor_model_parallel_attributes(self.fc1_bias, True, 0, 1)
                 if self.set_parallel_mode:

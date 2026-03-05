@@ -34,7 +34,6 @@ from ..utils import (
     get_nvtx_range_context,
 )
 from ..distributed import (
-    set_extended_tensor_parallel_attributes,
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     is_fp8_activation_recompute_enabled,
@@ -46,9 +45,9 @@ from ..cpp_extensions import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
+
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..quantized_tensor import (
-    QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
@@ -100,7 +99,6 @@ class _GroupedLinear(torch.autograd.Function):
             save_original_input,
             debug,
             etp_size,
-            recompute,
         ) = non_tensor_args
 
         num_gemms = len(m_splits)
@@ -178,7 +176,7 @@ class _GroupedLinear(torch.autograd.Function):
             start_offload(*inputmats)
 
         # Initialize weights
-        weights_fp8: list        
+        weights_fp8: list
         if fp8 or debug:
             # FP8 cast to workspace buffer
             weights_fp8 = []
@@ -193,6 +191,7 @@ class _GroupedLinear(torch.autograd.Function):
                     workspace_dtype=activation_dtype,
                 )
                 weights_fp8.append(weight_fp8)
+
         else:
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
 
@@ -331,7 +330,6 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
             ctx.etp_size = etp_size
-            ctx.recompute = recompute
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -342,7 +340,6 @@ class _GroupedLinear(torch.autograd.Function):
         with get_nvtx_range_context("_GroupedLinear_backward"):
             saved_tensors = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
             N = ctx.num_gemms
-
             if ctx.etp_size == 1:
                 inputmats = saved_tensors[:N]
                 weights = saved_tensors[N : 2 * N]
@@ -352,15 +349,17 @@ class _GroupedLinear(torch.autograd.Function):
                 inputmats = saved_tensors[:N]
                 origin_weights = saved_tensors[N : 2 * N]
                 biases = saved_tensors[2 * N : 3 * N]
-
-            if ctx.fuse_wgrad_accumulation:
-                main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+            main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
 
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
                     for i, weight in enumerate(ctx.weight_objects):
                         origin_weights[i] = ctx.weight_objects[i]
                         ctx.weight_objects[i] = None
+
+            if ctx.fuse_wgrad_accumulation:
+                for i in range(N):
+                    origin_weights[i].main_grad = main_grads[i]
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
@@ -456,32 +455,7 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
                 )
 
-            def handle_custom_ddp_from_mcore(weight, wgrad):
-                if ctx.weights_requires_grad:
-                    # Handle custom DDP from mcore.
-                    if ctx.fuse_wgrad_accumulation and hasattr(
-                        weight, "grad_added_to_main_grad"
-                    ):
-                        weight.grad_added_to_main_grad = True
-                        if getattr(weight, "zero_out_wgrad", False):
-                            wgrad = get_dummy_wgrad(
-                                list(weight.main_grad.shape),
-                                weight.dtype,
-                                zero=True,
-                            )
-                        else:
-                            wgrad = get_dummy_wgrad(
-                                list(weight.main_grad.shape),
-                                weight.dtype,
-                            )
-                    elif ctx.fuse_wgrad_accumulation:
-                        wgrad = None
-                else:
-                    wgrad = None
-                return wgrad
-
             if ctx.weights_requires_grad:
-                """Wgrad computation."""
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
                 if ctx.fp8:
                     recipe = ctx.fp8_recipe
@@ -489,7 +463,6 @@ class _GroupedLinear(torch.autograd.Function):
                         wgrad_gemm_use_split_accumulator = (
                             recipe.fp8_gemm_wgrad.use_split_accumulator
                         )
-
                 if ctx.fuse_wgrad_accumulation:
                     wgrad_list = main_grads
                 else:
@@ -555,13 +528,39 @@ class _GroupedLinear(torch.autograd.Function):
                     # Deallocate input tensor
                     clear_tensor_data(*inputmats)
 
-            if ctx.etp_size > 1:
-                wgrad_list = origin_weights[0].batched_wgrad_reduce_scatter(wgrad_list, ctx.fuse_wgrad_accumulation)
-            elif ctx.fuse_wgrad_accumulation:
-                wgrad_list = [
-                        handle_custom_ddp_from_mcore(weight, wgrad)
-                        for weight, wgrad in zip(origin_weights, wgrad_list)
-                    ]
+                def handle_custom_ddp_from_mcore(weight, wgrad):
+                    if ctx.weights_requires_grad:
+                        # Handle custom DDP from mcore.
+                        if ctx.fuse_wgrad_accumulation and hasattr(
+                            weight, "grad_added_to_main_grad"
+                        ):
+                            weight.grad_added_to_main_grad = True
+                            if getattr(weight, "zero_out_wgrad", False):
+                                wgrad = get_dummy_wgrad(
+                                    list(weight.main_grad.shape),
+                                    weight.dtype,
+                                    zero=True,
+                                )
+                            else:
+                                wgrad = get_dummy_wgrad(
+                                    list(weight.main_grad.shape),
+                                    weight.dtype,
+                                )
+                        elif ctx.fuse_wgrad_accumulation:
+                            wgrad = None
+                    else:
+                        wgrad = None
+                    return wgrad
+
+                if ctx.etp_size > 1:
+                    wgrad_list = origin_weights[0].batched_wgrad_reduce_scatter(wgrad_list, ctx.fuse_wgrad_accumulation)
+                elif ctx.fuse_wgrad_accumulation:
+                    wgrad_list = [
+                            handle_custom_ddp_from_mcore(weight, wgrad)
+                            for weight, wgrad in zip(origin_weights, wgrad_list)
+                        ]
+            else:
+                wgrad_list = [None] * ctx.num_gemms
 
             if not ctx.use_bias or (
                 ctx.wgrad_store is not None
@@ -669,7 +668,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         single_grouped_parameter: bool = False,
         name: Optional[str] = None,
         etp_group: Optional[dist_group_type] = None,
-        recompute: bool = False,
     ) -> None:
         super().__init__(name)
 
@@ -727,7 +725,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         else:
             self.etp_size = get_distributed_world_size(etp_group)
             assert tp_size == 1, f"TODO(shiqingf): ETP+TP is not well supported yet."
-        self.recompute = recompute
 
         self.parallel_mode = parallel_mode
         assert (
@@ -989,7 +986,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.save_original_input,
                 debug,
                 self.etp_size,
-                self.recompute,
             )
             out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
 

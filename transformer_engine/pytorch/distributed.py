@@ -10,7 +10,7 @@ from contextlib import contextmanager, AbstractContextManager, ContextDecorator,
 from functools import lru_cache
 from dataclasses import dataclass
 import math
-from typing import Any, Callable, ContextManager, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 
 import torch
@@ -59,14 +59,6 @@ _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
     "partition_dim": -1,
     "partition_stride": 1,
 }
-
-
-_EXTENDED_TENSOR_MODEL_PARALLEL_ATTRIBUTE_DEFAUTLTS = {
-    'etp_model_parallel': False,
-    'etp_partition_dim': -1,
-    'etp_partition_stride': 1,
-}
-
 
 _USE_REENTRANT_ACTIVATION_RECOMPUTE = True
 
@@ -165,19 +157,6 @@ def set_tensor_model_parallel_attributes(
     setattr(tensor, "tensor_model_parallel", is_parallel)
     setattr(tensor, "partition_dim", dim)
     setattr(tensor, "partition_stride", stride)
-
-
-def set_extended_tensor_parallel_attributes(
-    tensor: torch.Tensor, is_parallel: bool, dim: int, stride: int
-) -> None:
-    """Set ps attributes to tensor."""
-    # Make sure the attributes are not set.
-    for attribute in _EXTENDED_TENSOR_MODEL_PARALLEL_ATTRIBUTE_DEFAUTLTS:
-        assert not hasattr(tensor, attribute)
-    # Set the attributes.
-    setattr(tensor, 'etp_model_parallel', is_parallel)
-    setattr(tensor, 'etp_partition_dim', dim)
-    setattr(tensor, 'etp_partition_stride', stride)
 
 
 @lru_cache
