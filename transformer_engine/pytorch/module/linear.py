@@ -25,6 +25,7 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import noop_cat, WeightGradStore
+from .extended_tensor_parallelism import wrap_module_params_etp
 from ..quantization import FP8GlobalStateManager
 from ..utils import (
     cast_if_needed,
@@ -128,6 +129,7 @@ class _Linear(torch.autograd.Function):
             symmetric_ar_type,
             save_original_input,
             debug,
+            etp_size,
         ) = non_tensor_args
 
         # NVTX label for profiling
@@ -249,6 +251,15 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+        
+        if etp_size > 1:
+            weight_etp_sharded = weight
+            weight = weight.all_gather_and_prefetch(
+                fwd=True,
+                skip_weight_cast=is_first_microbatch is False,
+                cast_noop_flag=skip_fp8_weight_update,
+            )
+
         weightmat = weight
         if fp8 or debug:
             # Configure quantizer
@@ -434,8 +445,8 @@ class _Linear(torch.autograd.Function):
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
-                weightmat,
-                weight,
+                weightmat if etp_size == 1 else None,
+                weight if etp_size == 1 else weight_etp_sharded,
                 bias,
             )
             ctx.save_for_backward(*tensors_to_save)
@@ -456,6 +467,8 @@ class _Linear(torch.autograd.Function):
                 if hasattr(weight, "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_func = weight.get_main_grad
+                elif etp_size > 1:
+                    ctx.main_grad_func = weight_etp_sharded.get_wgrad_tensor
                 else:
                     ctx.main_grad_func = lambda: weight.main_grad
 
@@ -486,6 +499,7 @@ class _Linear(torch.autograd.Function):
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
+            ctx.etp_size = etp_size
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -522,7 +536,7 @@ class _Linear(torch.autograd.Function):
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
                     weight = ctx.weight_object
-            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation and ctx.etp_size == 1:
                 weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
@@ -684,6 +698,10 @@ class _Linear(torch.autograd.Function):
             # Compute grad input tensor
             # --------------------------------------------------
 
+            if ctx.etp_size > 1:
+                weight_fp8 = weight.all_gather_and_prefetch_bwd(
+                    nvtx_label=nvtx_label)
+
             dgrad = None
             dgrad_work = None
             if ctx.requires_dgrad:
@@ -832,7 +850,9 @@ class _Linear(torch.autograd.Function):
                         use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
                 # Figure out whether to output wgrad GEMM directly into main grad
-                if ctx.is_first_microbatch is not None:
+                if ctx.etp_size > 1:
+                    accumulate_wgrad_into_param_main_grad = False
+                elif ctx.is_first_microbatch is not None:
                     accumulate_wgrad_into_param_main_grad = (
                         ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
                     )
@@ -943,6 +963,8 @@ class _Linear(torch.autograd.Function):
                 dgrad_work.wait()
                 dgrad_work = None
 
+        if ctx.etp_size > 1:
+            wgrad = weight.wgrad_reduce_scatter(wgrad, ctx.fuse_wgrad_accumulation)
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
             if (
@@ -1098,6 +1120,7 @@ class Linear(TransformerEngineBaseModule):
         symmetric_ar_type: Optional[str] = None,
         save_original_input: bool = False,
         name: Optional[str] = None,
+        etp_group: Optional[dist_group_type] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1125,6 +1148,11 @@ class Linear(TransformerEngineBaseModule):
             self.tp_size = get_distributed_world_size(tp_group)
             self.set_tensor_parallel_group(tp_group)
         self.set_nccl_overlap_warning_if_tp()
+
+        if etp_group is None:
+            self.etp_size = 1
+        else:
+            self.etp_size = get_distributed_world_size(etp_group)
 
         self.parallel_mode = parallel_mode
         assert (
@@ -1297,6 +1325,10 @@ class Linear(TransformerEngineBaseModule):
 
         self.reset_parameters(defer_init=device == "meta")
 
+        if etp_group is not None:
+            wrap_module_params_etp(self, self.weight_names, etp_group)
+            del weight_tensor
+
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
         if self.parallel_mode == "row" and self.apply_bias:
@@ -1399,6 +1431,11 @@ class Linear(TransformerEngineBaseModule):
         try:
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
+            if self.etp_size > 1:
+                weight_tensor.setup(
+                    weight_quantizer=self._get_weight_quantizers(),
+                )
+
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
                 if not debug
@@ -1459,6 +1496,7 @@ class Linear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
+                self.etp_size,
             )
             out = linear_fn(
                 *autograd_ctx,

@@ -297,6 +297,18 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
         )
 
+    def copy_(self, tensor: NVFP4TensorStorage):
+        assert tensor._fp4_dtype == self._fp4_dtype
+
+        self._rowwise_data.copy_(tensor._rowwise_data)
+        self._columnwise_data.copy_(tensor._columnwise_data)
+        self._rowwise_scale_inv.copy_(tensor._rowwise_scale_inv)
+        self._columnwise_scale_inv.copy_(tensor._columnwise_scale_inv)
+        self._amax_rowwise.copy_(tensor._amax_rowwise)
+        self._amax_columnwise.copy_(tensor._amax_columnwise)
+        self._quantizer = tensor._quantizer.copy() if tensor._quantizer is not None else None
+
+
     def __repr__(self):
         data_rowwise = self.dequantize()
 

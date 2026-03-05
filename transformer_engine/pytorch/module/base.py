@@ -631,6 +631,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
         self.wgrad_store = None
+        self.etp_size = 1
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -956,6 +957,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fast_setattr("tp_group", tp_group)
         self.fast_setattr("tp_group_initialized", True)
 
+
+
     def _get_fp8_params(self) -> Union[List[torch.Tensor], None]:
         """returns the FP8 weights."""
         fp8_params = []
@@ -1242,6 +1245,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         for name, param in self.named_parameters(recurse=False):
             # Check if parameter is a DTensor (FSDP2) or regular tensor
             is_dtensor = isinstance(param, DTensor)
+            from .extended_tensor_parallelism import ETPShardedParam
+            is_etp = isinstance(param, ETPShardedParam)
+
             dtensor_param = param if is_dtensor else None
             # Need to update/quantize local tensor in case of DTensor
             param = param._local_tensor if is_dtensor else param

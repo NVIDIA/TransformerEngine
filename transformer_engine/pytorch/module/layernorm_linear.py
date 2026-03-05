@@ -26,6 +26,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
+from .extended_tensor_parallelism import wrap_module_params_etp
 from ..quantization import FP8GlobalStateManager
 from ..utils import (
     assert_dim_for_fp8_exec,
@@ -42,6 +43,7 @@ from ..utils import (
     get_nvtx_range_context,
 )
 from ..distributed import (
+    set_extended_tensor_parallel_attributes,
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
@@ -71,8 +73,10 @@ from ..cpu_offload import (
     mark_not_offload,
     mark_activation_offload,
 )
+from ..tensor.nvfp4_tensor import NVFP4Tensor
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 
 from ..cpp_extensions import (
@@ -140,6 +144,7 @@ class _LayerNormLinear(torch.autograd.Function):
             skip_fp8_weight_update,
             symmetric_ar_type,
             debug,
+            etp_size,
         ) = non_tensor_args
 
         # NVTX label for profiling
@@ -286,6 +291,15 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+
+        if etp_size > 1:
+            weight_etp_sharded = weight
+            weight = weight.all_gather_and_prefetch(
+                fwd=True,
+                skip_weight_cast=is_first_microbatch is False,
+                cast_noop_flag=skip_fp8_weight_update,
+            )
+
         weightmat = weight
         is_weight_param_quantized = False
         if fp8 or debug:
@@ -368,6 +382,7 @@ class _LayerNormLinear(torch.autograd.Function):
             extra_output=reduce_scatter_out,
         )
         nvtx_range_pop(f"{nvtx_label}.gemm")
+
         # ------------------------------------------------------
         # Finished forward GEMM...
         # ------------------------------------------------------
@@ -400,7 +415,7 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
         else:
             out = gemm_out
-        out = out.view(-1, *inp_shape[1:-1], out_features)
+        out = out.view(-1, *inp_shape[1:-1], out.shape[-1])
         # ------------------------------------------------------
         # Output tensor is ready to return...
         # ------------------------------------------------------
@@ -463,8 +478,9 @@ class _LayerNormLinear(torch.autograd.Function):
 
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
-                weightmat,
-                weight,
+                # For ETP, avoid keeping the gathered weightmat in memory for memory saving.
+                weightmat if etp_size == 1 else None,
+                weight if etp_size == 1 else weight_etp_sharded,
                 bias,
                 ln_weight,
                 ln_out,
@@ -483,6 +499,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 if hasattr(weight, "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_func = weight.get_main_grad
+                elif etp_size > 1:
+                    ctx.main_grad_func = weight_etp_sharded.get_wgrad_tensor
                 else:
                     ctx.main_grad_func = lambda: weight.main_grad
             ctx.grad_input_quantizer = grad_input_quantizer
@@ -523,6 +541,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
+            ctx.etp_size = etp_size
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -567,7 +586,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
                 ctx.main_grad_func()
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
+                if origin_weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
                 else None
             )
 
@@ -590,7 +609,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
                     origin_weight = ctx.weight_object
-            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation and ctx.etp_size == 1:
                 origin_weight.main_grad = main_grad
 
             # Configure Userbuffers communication (comm+GEMM overlap)
@@ -640,13 +659,14 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
+            grad_output = grad_outputs[0]
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
                 grad_output,
                 grad_bias,
             ) = TransformerEngineBaseModule.grad_output_preprocess(
                 ctx,
-                grad_outputs[0],
+                grad_output,
                 ctx.parallel_mode == "row",
                 ctx.grad_output_quantizer,
             )
@@ -702,6 +722,10 @@ class _LayerNormLinear(torch.autograd.Function):
             # --------------------------------------------------
 
             # Make sure required data is available
+            if ctx.etp_size > 1:
+                weight = origin_weight.all_gather_and_prefetch_bwd(
+                    nvtx_label=nvtx_label)
+
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
             if ctx.weight_quantizer is not None and isinstance(weight, QuantizedTensorStorage):
@@ -843,7 +867,11 @@ class _LayerNormLinear(torch.autograd.Function):
                         use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
                 # Figure out whether to output wgrad GEMM directly into main grad
-                if ctx.is_first_microbatch is not None:
+                if ctx.etp_size > 1:
+                    # When ETP is enabled, GA is always disabled. ETP Wgrad workflow:
+                    #  allocte wgrad_out tmp buffer -> RS(wgrad_gemm) -> GradientAccumulation
+                    accumulate_wgrad_into_param_main_grad = False
+                elif ctx.is_first_microbatch is not None:
                     accumulate_wgrad_into_param_main_grad = (
                         ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
                     )
@@ -910,6 +938,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             "with Userbuffers (tensor-parallel communication overlapping)"
                         )
                     ctx.wgrad_store.put([ln_out_total, grad_output], wgrad_gemm)
+                    assert False, f"TODO(shiqingf): not supported for ETP..."
                 else:
 
                     # Call wgrad GEMM now
@@ -941,9 +970,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     else:
                         dgrad = ub_obj_wgrad.get_buffer(local_chunk=True).clone()
 
-            # --------------------------------------------------
-            # Grad weight has been computed...
-            # --------------------------------------------------
+                if ctx.etp_size > 1:
+                    wgrad = origin_weight.wgrad_reduce_scatter(wgrad, ctx.fuse_wgrad_accumulation)
 
             # Don't return grad bias if not needed
             if not ctx.use_bias:
@@ -992,7 +1020,9 @@ class _LayerNormLinear(torch.autograd.Function):
             clear_tensor_data(mu)
             clear_tensor_data(rsigma)
 
-        if ctx.requires_wgrad:
+        if ctx.etp_size > 1:
+            wgrad = None
+        elif ctx.requires_wgrad:
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
                 origin_weight.grad_added_to_main_grad = True
@@ -1160,6 +1190,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
+        etp_group: Optional[dist_group_type] = None,
     ) -> None:
         super().__init__(name)
 
@@ -1190,6 +1221,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.set_tensor_parallel_group(tp_group)
         self.set_nccl_overlap_warning_if_tp()
 
+        if etp_group is None:
+            self.etp_size = 1
+        else:
+            self.etp_size = get_distributed_world_size(etp_group)
         self.parallel_mode = parallel_mode
         assert (
             self.parallel_mode in GemmParallelModes
@@ -1199,6 +1234,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.out_features = divide(self.out_features, self.tp_size)
         elif self.parallel_mode == "row":
             self.in_features = divide(self.in_features, self.tp_size)
+        self.tp_out_features = self.out_features
 
         if init_method is None:
             init_method = get_default_init_method()
@@ -1382,6 +1418,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         self.reset_parameters(defer_init=device == "meta")
 
+        if etp_group is not None:
+            wrap_module_params_etp(self, self.weight_names, etp_group)
+            del weight_tensor
+
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
         if self.parallel_mode == "row" and self.apply_bias:
@@ -1401,6 +1441,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             for name, param in self.named_parameters():
                 if name in self.weight_names or name in self.bias_names:
                     param.skip_backward_post_hook = True
+
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -1445,6 +1486,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     dim=1 if self.parallel_mode == "row" else 0,
                     stride=1,
                 )
+                if self.etp_size > 1:
+                    set_extended_tensor_parallel_attributes(
+                       tensor=getattr(self, weight),
+                       is_parallel=True,
+                       dim=0,  # ETP always shard along the first dim.
+                       stride=1,
+                    )
 
             # Set parallelism attributes for linear biases
             if self.use_bias:
@@ -1516,6 +1564,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             # Get concatenated weight and bias tensors
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
+            if self.etp_size > 1:
+                weight_tensor.setup(
+                    weight_quantizer=self._get_weight_quantizers(),
+                )
+
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad, is_grad_enabled)
                 if not debug
@@ -1580,6 +1633,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 debug,
+                self.etp_size,
             )
             out = fwd_fn(
                 *autograd_ctx,
