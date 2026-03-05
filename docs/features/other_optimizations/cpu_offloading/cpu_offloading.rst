@@ -105,13 +105,13 @@ There are two modes of operation:
 2. **Manual synchronization** — set ``manual_synchronization=True`` (``num_layers`` is ignored in this mode).
    This mode provides explicit control over when to start offload/reload using the returned ``ManualOffloadSynchronizer``.
 
-The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns two objects
-that must be used together during the forward pass:
+The :func:`transformer_engine.pytorch.get_cpu_offload_context` function returns:
 
 - **context manager** — wraps each layer's forward pass to intercept tensors saved for backward.
 - **sync function** — registers a backward hook on the output tensor to trigger activation reload.
+- **ManualOffloadSynchronizer** *(only in manual mode)* — provides explicit control over offload/reload.
 
-The usage pattern is:
+The usage pattern for default scheduling is:
 
 .. tabs::
 
@@ -167,13 +167,13 @@ When ``num_layers`` is too high, the GPU memory limit forces stalls:
 Manual Synchronization
 ----------------------
 
-For custom scheduling, set ``manual_synchronization=True``
-and pass a custom ``offload_stream``. This returns a ``ManualOffloadSynchronizer``
-with explicit control over transfers and allows synchronization via stream operations.
+For custom scheduling, set ``manual_synchronization=True``.
+Optionally, pass a custom ``offload_stream`` for fine-grained synchronization.
+This mode returns a ``ManualOffloadSynchronizer`` with explicit control over transfers.
 
 This mode is useful when training does not follow the standard "all forwards then all backwards"
-pattern — for example, in pipeline parallelism. Having access to the ``offload_stream`` enables
-custom synchronization logic (e.g., waiting, recording events) tailored to the specific workload.
+pattern — for example, in pipeline parallelism. Providing a custom ``offload_stream`` enables
+additional synchronization logic (e.g., waiting, recording events) tailored to the specific workload.
 
 The ``ManualOffloadSynchronizer`` object provides the following methods:
 
