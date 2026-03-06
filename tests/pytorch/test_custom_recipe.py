@@ -726,9 +726,9 @@ def test_grouped_linear_module_type_dispatch():
     assert len(non_none) > 0, "No QuantizerRole objects recorded"
     for r in non_none:
         assert isinstance(r, QuantizerRole)
-        assert r.module_type == "grouped_linear", (
-            f"Expected module_type='grouped_linear', got '{r.module_type}'"
-        )
+        assert (
+            r.module_type == "grouped_linear"
+        ), f"Expected module_type='grouped_linear', got '{r.module_type}'"
         assert r.name == "experts", f"Expected name='experts', got '{r.name}'"
 
     fwd_types = {r.tensor_type for r in non_none if r.tensor_type in ("input", "weight")}
@@ -1084,9 +1084,9 @@ def test_custom_recipe_debug_tool_compat():
             assert inp_step.grad is not None, "Input gradient should exist"
 
             log_files = list(pathlib.Path(log_dir).rglob("*.log"))
-            assert len(log_files) > 0, (
-                f"Debug log output expected in {log_dir} but no .log files found"
-            )
+            assert (
+                len(log_files) > 0
+            ), f"Debug log output expected in {log_dir} but no .log files found"
     finally:
         debug_api.end_debug()
         TEDebugState._reset()

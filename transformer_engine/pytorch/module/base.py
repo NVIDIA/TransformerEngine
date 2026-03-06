@@ -805,7 +805,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
 
         # Initialize recipe state and quantizers
-        roles = self.get_quantizer_roles(fwd=fwd, num_quantizers=num_fp8_tensors)  # pylint: disable=assignment-from-none
+        roles = self.get_quantizer_roles(
+            fwd=fwd, num_quantizers=num_fp8_tensors
+        )  # pylint: disable=assignment-from-none
         if roles is not None:
             assert (
                 len(roles) == num_fp8_tensors
@@ -1212,8 +1214,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if delayed_scaling_recipe:
                 if self.sequence_parallel:
                     assert (
-                        self.fp8_meta["recipe"].custom()
-                        or self.fp8_meta["recipe"].reduce_amax
+                        self.fp8_meta["recipe"].custom() or self.fp8_meta["recipe"].reduce_amax
                     ), (
                         "Amax reduction across tensor parallel group is "
                         "necessary when using sequence parallelism with FP8."
