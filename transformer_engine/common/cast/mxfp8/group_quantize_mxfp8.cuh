@@ -142,6 +142,10 @@ __device__ __forceinline__ size_t get_tensor_cols_num(
     case ShapeRepresentation::VARYING_LAST_DIM:
     case ShapeRepresentation::VARYING_BOTH_DIMS:
       cols_num = static_cast<size_t>(last_dims_ptr[tensor_id]);
+      if (cols_num % 128 != 0) {
+        NVTE_DEVICE_ERROR("For non-single tensors, the last dimension of each tensor in a group "
+                          "must be divisible by 128.");
+      }
       break;
   }
   return cols_num;
@@ -215,7 +219,8 @@ decode_block(const JobDescriptor &job, const bool is_single_tensor,
              const int64_t *const __restrict__ offsets_ptr) {
   BlockDescriptor block{};
   block.tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[job.tensor_id]);
-  const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, static_cast<size_t>(128));
+  const size_t CHUNK_DIM_X_ = CHUNK_DIM_X;
+  const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, CHUNK_DIM_X_);
   block.block_id_in_current_tensor =
       is_single_tensor ? job.block_id : (job.block_id - block.tensor_base / ELTS_PER_CHUNK);
   block.block_id_Y = block.block_id_in_current_tensor / blocks_X_num_in_current_tensor;

@@ -371,7 +371,7 @@ void performTest(const ProcessingMethod processing_method,
 
     NVTEShape logical_shape_ = nvte_make_shape(logical_shape_vec.data(), logical_shape_vec.size());
 
-    std::vector<size_t> dbias_logical_shape_vec= {num_tensors, cols};
+    std::vector<size_t> dbias_logical_shape_vec = {num_tensors, cols};
     NVTEShape dbias_logical_shape_ = nvte_make_shape(dbias_logical_shape_vec.data(),
                                                      dbias_logical_shape_vec.size());
 
