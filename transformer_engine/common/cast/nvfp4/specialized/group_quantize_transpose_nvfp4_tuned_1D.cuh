@@ -1009,10 +1009,9 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace group_quantize_transpose_tuned_kernel
 
-inline void group_quantize_transpose_tuned_1D(const GroupedTensor *input, const Tensor *noop,
-                                              GroupedTensor *output,
-                                              const QuantizationConfig *quant_config,
-                                              cudaStream_t stream) {
+inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *noop,
+                                     GroupedTensor *output, const QuantizationConfig *quant_config,
+                                     cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
   using namespace group_quantize_transpose_tuned_kernel;
   using namespace ptx;
@@ -1027,6 +1026,8 @@ inline void group_quantize_transpose_tuned_1D(const GroupedTensor *input, const 
   NVTE_CHECK(input->num_tensors == output->num_tensors,
              "Number of input and output tensors must be same.");
   NVTE_CHECK(input->has_data(), "Cannot quantize tensor without rowwise data.");
+  NVTE_CHECK(input->dtype() == DType::kBFloat16,
+             "Optimized grouped NVFP4 kernel supports only BF16 input.");
   NVTE_CHECK(output->has_data(), "Grouped NVFP4 output tensor must be allocated.");
   NVTE_CHECK(is_fp4_dtype(output->dtype()), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
@@ -1049,9 +1050,8 @@ inline void group_quantize_transpose_tuned_1D(const GroupedTensor *input, const 
     shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
   }
 
-  const bool use_single_work_grid =
-      (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
-       shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
+  const bool use_single_work_grid = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS
+                                     || shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
 
   const size_t first_logical_dim = input->logical_shape.data[0];
   const size_t last_logical_dim = input->logical_shape.data[1];
