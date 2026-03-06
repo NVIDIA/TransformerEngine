@@ -437,10 +437,10 @@ __device__ __forceinline__ size_t get_tensor_cols_num(
   return cols_num;
 }
 
-__device__ __forceinline__ size_t get_tensor_base_offset(
-    const size_t tensor_id, const ShapeRepresentation shape_rep, const size_t first_logical_dim,
-    const size_t last_logical_dim, const size_t num_tensors,
-    const int64_t *const __restrict__ offsets_ptr) {
+__device__ __forceinline__ size_t
+get_tensor_base_offset(const size_t tensor_id, const ShapeRepresentation shape_rep,
+                       const size_t first_logical_dim, const size_t last_logical_dim,
+                       const size_t num_tensors, const int64_t *const __restrict__ offsets_ptr) {
   if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
     const size_t rows_per_tensor = first_logical_dim / num_tensors;
     return tensor_id * rows_per_tensor * last_logical_dim;
@@ -497,11 +497,11 @@ __device__ __forceinline__ JobDescriptor decode_job(
   JobDescriptor job{};
   job.block_id = static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
   job.block_global_offset = use_single_work_grid
-          ? (ctaid_Y * CHUNK_DIM_Y * last_logical_dim + ctaid_X * CHUNK_DIM_X)
-          : (job.block_id * ELTS_PER_CHUNK);
-  job.tensor_id =
-      get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset, static_cast<size_t>(ctaid_Y),
-                            first_logical_dim, last_logical_dim, offsets_ptr);
+                                ? (ctaid_Y * CHUNK_DIM_Y * last_logical_dim + ctaid_X * CHUNK_DIM_X)
+                                : (job.block_id * ELTS_PER_CHUNK);
+  job.tensor_id = get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset,
+                                        static_cast<size_t>(ctaid_Y), first_logical_dim,
+                                        last_logical_dim, offsets_ptr);
   job.rows =
       get_tensor_rows_num(job.tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   job.cols = get_tensor_cols_num(job.tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
@@ -538,8 +538,7 @@ __device__ __forceinline__ BlockDescriptor decode_block(
     block.block_id_X = static_cast<size_t>(ctaid_X);
     if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
       const size_t rows_per_tensor = first_logical_dim / num_tensors;
-      const size_t blocks_Y_per_tensor =
-          DIVUP(rows_per_tensor, static_cast<size_t>(CHUNK_DIM_Y));
+      const size_t blocks_Y_per_tensor = DIVUP(rows_per_tensor, static_cast<size_t>(CHUNK_DIM_Y));
       block.block_id_Y = static_cast<size_t>(ctaid_Y) - job.tensor_id * blocks_Y_per_tensor;
     } else {
       const size_t tensor_base_row = block.tensor_base / job.cols;
@@ -639,10 +638,10 @@ __global__ void update_tma_descriptors(
   }
 
   if (rowwise) {
-    const uintptr_t global_data_ptr = get_pointer_with_offset_bits(
-        reinterpret_cast<uintptr_t>(output_data_ptr), offset_elts, 4);
-    modify_base_tensor_map(base_tensor_map_output, &g_tensor_maps_output[tensor_id], global_data_ptr,
-                           rows, cols, 4);
+    const uintptr_t global_data_ptr =
+        get_pointer_with_offset_bits(reinterpret_cast<uintptr_t>(output_data_ptr), offset_elts, 4);
+    modify_base_tensor_map(base_tensor_map_output, &g_tensor_maps_output[tensor_id],
+                           global_data_ptr, rows, cols, 4);
   }
 
   if (colwise) {
@@ -682,8 +681,8 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     return;
   }
 
-  const size_t launch_block_id =
-      static_cast<size_t>(blockIdx.y) * static_cast<size_t>(gridDim.x) + static_cast<size_t>(blockIdx.x);
+  const size_t launch_block_id = static_cast<size_t>(blockIdx.y) * static_cast<size_t>(gridDim.x) +
+                                 static_cast<size_t>(blockIdx.x);
   const size_t rng_sequence = threadIdx.x + launch_block_id * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
@@ -693,9 +692,8 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   int rnd_idx = 0;
 
   const bool leading_thread = (threadIdx.x == 0);
-  const bool use_single_work_grid =
-      (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
-       shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
+  const bool use_single_work_grid = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                     shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
 
   constexpr int buff_elems = BUFF_DIM_Y * BUFF_IN_DIM_X;
   constexpr int buff_elems_total_in = BUFFS_NUM_IN * buff_elems;
@@ -775,10 +773,9 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   bool has_prefetched_current_job = true;
 
   {
-    const JobDescriptor first_job = decode_job(shape_rep, use_single_work_grid, num_tensors,
-                                               first_logical_dim, last_logical_dim, work_blocks_X,
-                                               ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr,
-                                               last_dims_ptr);
+    const JobDescriptor first_job = decode_job(
+        shape_rep, use_single_work_grid, num_tensors, first_logical_dim, last_logical_dim,
+        work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
     if (!is_job_valid(first_job, shape_rep, total_work_blocks, offsets_ptr)) {
       return;
     }
@@ -809,10 +806,9 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   }
 
   while (!job_finished) {
-    const JobDescriptor current_job = decode_job(shape_rep, use_single_work_grid, num_tensors,
-                                                 first_logical_dim, last_logical_dim, work_blocks_X,
-                                                 ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr,
-                                                 last_dims_ptr);
+    const JobDescriptor current_job = decode_job(
+        shape_rep, use_single_work_grid, num_tensors, first_logical_dim, last_logical_dim,
+        work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
     const bool current_job_is_valid =
         is_job_valid(current_job, shape_rep, total_work_blocks, offsets_ptr);
     if (!current_job_is_valid) {
@@ -847,14 +843,12 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     const size_t scale_stride = get_nvfp4_scale_stride(cols);
     const size_t scale_stride_t = get_nvfp4_scale_stride(rows);
 
-    const size_t rowwise_scale_base =
-        get_grouped_scale_base_offset(current_job.tensor_id, shape_rep, first_logical_dim,
-                                      last_logical_dim, num_tensors, first_dims_ptr, last_dims_ptr,
-                                      true);
-    const size_t colwise_scale_base =
-        get_grouped_scale_base_offset(current_job.tensor_id, shape_rep, first_logical_dim,
-                                      last_logical_dim, num_tensors, first_dims_ptr, last_dims_ptr,
-                                      false);
+    const size_t rowwise_scale_base = get_grouped_scale_base_offset(
+        current_job.tensor_id, shape_rep, first_logical_dim, last_logical_dim, num_tensors,
+        first_dims_ptr, last_dims_ptr, true);
+    const size_t colwise_scale_base = get_grouped_scale_base_offset(
+        current_job.tensor_id, shape_rep, first_logical_dim, last_logical_dim, num_tensors,
+        first_dims_ptr, last_dims_ptr, false);
     nvfp4_scale_t *const scales_rowwise = scales_ptr + rowwise_scale_base;
     nvfp4_scale_t *const scales_colwise =
         RETURN_TRANSPOSE ? (scales_t_ptr + colwise_scale_base) : nullptr;
@@ -905,22 +899,20 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
         }
       }
 
-      if ((stage >= STAGES - PREFETCH_STAGES) && allow_next_job_prefetch &&
-          !job_finished) {
+      if ((stage >= STAGES - PREFETCH_STAGES) && allow_next_job_prefetch && !job_finished) {
         prefetch_job = decode_job(shape_rep, use_single_work_grid, num_tensors, first_logical_dim,
                                   last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr,
                                   first_dims_ptr, last_dims_ptr);
         allow_next_job_prefetch =
             is_job_valid(prefetch_job, shape_rep, total_work_blocks, offsets_ptr);
         if (allow_next_job_prefetch) {
-          prefetch_block = decode_block(prefetch_job, shape_rep, use_single_work_grid,
-                                        first_logical_dim, last_logical_dim, num_tensors, ctaid_X,
-                                        ctaid_Y, offsets_ptr);
+          prefetch_block =
+              decode_block(prefetch_job, shape_rep, use_single_work_grid, first_logical_dim,
+                           last_logical_dim, num_tensors, ctaid_X, ctaid_Y, offsets_ptr);
         }
       }
 
-      if ((stage < STAGES - PREFETCH_STAGES) ||
-          (allow_next_job_prefetch && !job_finished)) {
+      if ((stage < STAGES - PREFETCH_STAGES) || (allow_next_job_prefetch && !job_finished)) {
         const int next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
         const int next_prefetch_stage = (stage + PREFETCH_STAGES) % STAGES;
         const int next_prefetch_stage_Y = next_prefetch_stage / STAGES_X;
@@ -1011,8 +1003,10 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
         for (size_t row_tr = threadIdx.x; row_tr < CHUNK_DIM_X; row_tr += THREADS_NUM) {
           const size_t row_tr_global = scales_block_offset_Y_tr + row_tr;
           if (row_tr_global < cols) {
-            ColwiseScalesVec &scales_vec = *reinterpret_cast<ColwiseScalesVec *>(sSFcolwise[row_tr]);
-            const size_t scale_idx_global = row_tr_global * scale_stride_t + scales_block_offset_X_tr;
+            ColwiseScalesVec &scales_vec =
+                *reinterpret_cast<ColwiseScalesVec *>(sSFcolwise[row_tr]);
+            const size_t scale_idx_global =
+                row_tr_global * scale_stride_t + scales_block_offset_X_tr;
             scales_vec.store_to_elts(&scales_colwise[scale_idx_global], 0, colwise_count);
           }
         }
@@ -1079,8 +1073,8 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
     shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
   }
 
-  const bool use_single_work_grid = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS
-                                     || shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
+  const bool use_single_work_grid = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                     shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
 
   const size_t first_logical_dim = input->logical_shape.data[0];
   const size_t last_logical_dim = input->logical_shape.data[1];
@@ -1148,22 +1142,30 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
 
   const size_t dummy_first_logical_dim = 32;
   const size_t dummy_last_logical_dim = 32;
-  create_2D_tensor_map(tensor_map_input, input->data, dummy_first_logical_dim, dummy_last_logical_dim,
-                       BUFF_DIM_Y, BUFF_DIM_X, dummy_last_logical_dim, 0, sizeof(IType) * 8);
-  create_2D_tensor_map(tensor_map_output, output->data, dummy_first_logical_dim, dummy_last_logical_dim,
-                       BUFF_DIM_Y, BUFF_DIM_X, dummy_last_logical_dim, 0, 4);
+  create_2D_tensor_map(tensor_map_input, input->data, dummy_first_logical_dim,
+                       dummy_last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X, dummy_last_logical_dim, 0,
+                       sizeof(IType) * 8);
+  create_2D_tensor_map(tensor_map_output, output->data, dummy_first_logical_dim,
+                       dummy_last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X, dummy_last_logical_dim, 0,
+                       4);
   if (return_transpose) {
-    create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data, dummy_last_logical_dim,
-                         dummy_first_logical_dim, BUFF_DIM_X, BUFF_DIM_Y, dummy_first_logical_dim, 0, 4);
+    create_2D_tensor_map(tensor_map_output_transpose, output->columnwise_data,
+                         dummy_last_logical_dim, dummy_first_logical_dim, BUFF_DIM_X, BUFF_DIM_Y,
+                         dummy_first_logical_dim, 0, 4);
   }
 
   constexpr int buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr int buff_elems_total_in = BUFFS_NUM_IN * buff_elems;
-  constexpr int buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total_in * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_aligned_out = DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_aligned_out_t = DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_scales = DIVUP_TO_MULTIPLE(CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_scales_transpose = DIVUP_TO_MULTIPLE(CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total_in * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_out_t =
+      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_scales = DIVUP_TO_MULTIPLE(
+      CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_scales_transpose = DIVUP_TO_MULTIPLE(
+      CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
 
   const int in_mem = buff_size_aligned_in;
   const int out_data_mem = buff_size_aligned_out;
@@ -1171,7 +1173,8 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
   const int out_scales_mem = buff_size_scales;
   const int out_scales_transpose_mem = return_transpose ? buff_size_scales_transpose : 0;
   const int out_mem = out_data_mem + out_data_transpose_mem;
-  const int dshmem_size = in_mem + out_mem + out_scales_transpose_mem + out_scales_mem + TMA_SHMEM_ALIGNMENT;
+  const int dshmem_size =
+      in_mem + out_mem + out_scales_transpose_mem + out_scales_mem + TMA_SHMEM_ALIGNMENT;
 
   const IType *const input_dptr = reinterpret_cast<const IType *>(input->data.dptr);
   const void *const output_dptr = output->data.dptr;
@@ -1183,12 +1186,14 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
       first_dims_ptr, last_dims_ptr, true, return_transpose);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(use_fast_math, USE_FAST_MATH,
-          TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE,
-            {
-            auto kernel = group_quantize_transpose_nvfp4_tuned_1D_kernel
-                          <USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE>;
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          use_fast_math, USE_FAST_MATH,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+            auto kernel =
+                group_quantize_transpose_nvfp4_tuned_1D_kernel<USE_STOCHASTIC_ROUNDING,
+                                                               USE_FAST_MATH, RETURN_TRANSPOSE>;
 
             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
