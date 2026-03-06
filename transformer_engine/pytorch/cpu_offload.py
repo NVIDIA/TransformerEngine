@@ -769,14 +769,14 @@ def get_cpu_offload_context(
             out[i] = sync_function(out[i])
             manual_controller.start_offload_layer(i)
 
-        offload_stream.synchronize()
+        # Release GPU memory - each call inserts a GPU-side wait_event on the compute stream
         for i in range(num_layers):
             manual_controller.release_activation_forward_gpu_memory(i)
 
+        # Start reloading - backward will wait for each tensor's reload via wait_event
         for i in range(num_layers - 1, -1, -1):
             manual_controller.start_reload_layer(i)
 
-        offload_stream.synchronize()
         for i in range(num_layers):
             out[i].sum().backward()
 
