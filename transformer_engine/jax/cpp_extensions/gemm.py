@@ -380,8 +380,8 @@ def get_rhs_axis_boundary(rhs_cdims, is_transposed):
 
 @cache
 def _get_high_precision_accumulation_from_env() -> bool:
-    """Read TE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION once per process (cached)."""
-    return os.getenv("TE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION", "0") == "1"
+    """Read NVTE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION once per process (cached)."""
+    return os.getenv("NVTE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION", "0") == "1"
 
 
 def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
@@ -909,9 +909,7 @@ class GemmPrimitive(BasePrimitive):
         )
 
         # Bias sharding is based on GEMM output before any scatter
-        bias_specs = (
-            tuple(list(rhs_non_cspecs).copy()) if arg_infos[4].size > 0 else (None,)
-        )  # bias is operand index 4
+        bias_specs = rhs_non_cspecs if arg_infos[4].size > 0 else (None,)  # bias is operand index 4
 
         if not collective_op.is_none:
             assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
