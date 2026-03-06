@@ -1799,6 +1799,22 @@ class TestGroupedDense:
 
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
 
+    @pytest_parametrize_wrapper("layout", ["NN"])
+    def test_grouped_gemm_fp16_with_bias(self, input_shape, layout):
+        """Directly exercises the v2 grouped GEMM path with bias (bfloat16 only, since v2 is
+        only active for bfloat16 no-scaling inputs)."""
+        dtype = jnp.bfloat16
+        lhs, rhs, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
+            dtype, input_shape, layout, with_bias=True
+        )
+        ref_out = self._ref_grouped_dense(lhs, rhs, bias, group_sizes, contracting_dims)
+
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+            lhs, rhs, group_sizes, contracting_dims, bias=bias
+        )
+
+        self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
+
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
     @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)

@@ -1685,6 +1685,17 @@ class GroupedGemmPrimitive(BasePrimitive):
             use_async_d2h_group_sizes=use_async_d2h_group_sizes,
             use_v2_ffi=use_v2_ffi,
         )
+        if use_v2_ffi and has_bias:
+            # The C++ FFI for v2 grouped GEMM does not support bias, so we apply it here in
+            # pure JAX. Groups are contiguous, so we build a per-token expert index via
+            # jnp.repeat and gather the corresponding bias row for each token.
+            num_groups = group_sizes.shape[0]
+            segment_ids = jnp.repeat(
+                jnp.arange(num_groups, dtype=jnp.int32),
+                group_sizes,
+                total_repeat_length=M,
+            )
+            out = out + bias[segment_ids].astype(out.dtype)
         return (out,)
 
 
@@ -2008,18 +2019,17 @@ def grouped_gemm_copy_group_sizes(
 def _can_use_v2_grouped_gemm(
     scaling_mode: ScalingMode,
     dtype: jnp.dtype,
-    has_bias: bool,
 ) -> bool:
     """Determine whether the cuda-graphable grouped GEMM implementation can be used based on the input parameters."""
     # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
     # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
     # feature-compatible with the main branch.
-    # Bias can be supported in a kernel or in pure-JAX in the future.
+    # Bias is applied in pure JAX after the GEMM in GroupedGemmPrimitive.impl.
 
     if not _v2_grouped_gemm_available:
         return False
 
-    return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
+    return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16
 
 
 def grouped_gemm(
@@ -2205,7 +2215,7 @@ def grouped_gemm(
         " and padded with zeros to not affect the result of the MoE block."
     )
 
-    use_v2_ffi = _can_use_v2_grouped_gemm(scaling_mode, lhs_data.dtype, has_bias)
+    use_v2_ffi = _can_use_v2_grouped_gemm(scaling_mode, lhs_data.dtype)
     if use_v2_ffi:
         num_gemms = group_sizes.shape[0]
         additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
