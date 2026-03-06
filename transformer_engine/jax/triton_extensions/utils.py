@@ -172,9 +172,9 @@ if version.parse(jaxlib.__version__) < version.parse(_JAXLIB_MIN_VERSION):
     raise RuntimeError(
         f"jaxlib {jaxlib.__version__} is too old for transformer_engine.jax.triton_extensions.\n"
         f"Triton kernel dispatch segfaults with jaxlib < {_JAXLIB_MIN_VERSION}.\n"
-        f"Please upgrade: pip install --upgrade jax jaxlib\n"
-        f"Or use a JAX nightly container dated 2025-09-24 or later.\n"
-        f"If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
+        "Please upgrade: pip install --upgrade jax jaxlib\n"
+        "Or use a JAX nightly container dated 2025-09-24 or later.\n"
+        "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
     )
 
 
