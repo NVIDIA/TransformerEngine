@@ -123,7 +123,6 @@ void run_grouped_gemm_case(const TestParams& params) {
 
   for (size_t i = 0; i < num_gemms; ++i) {
     const auto [M, N, K] = shapes[i];
-
     const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{N, K}
                                                       : std::vector<size_t>{K, N};
     const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{K, M}

@@ -138,6 +138,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmV2Handler);
 
 // Amax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
@@ -152,6 +153,12 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 // CuBLAS helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 
+// Router
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
+
 }  // namespace jax
 }  // namespace transformer_engine
 
@@ -165,6 +172,7 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Score_Function);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Quantize_Layout);
 

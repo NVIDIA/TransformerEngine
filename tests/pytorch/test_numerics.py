@@ -51,7 +51,7 @@ from transformer_engine.pytorch.cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
 )
-from transformer_engine.pytorch.tensor.storage.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states
@@ -2874,10 +2874,12 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
 
 
 def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:
+    if grouped_tensor.rowwise_data is None:
+        raise RuntimeError("GroupedTensor rowwise_data is not initialized.")
     offset = 0
     for tensor in tensors:
         numel = tensor.numel()
-        grouped_tensor.data[offset : offset + numel].copy_(tensor.reshape(-1))
+        grouped_tensor.rowwise_data[offset : offset + numel].copy_(tensor.reshape(-1))
         offset += numel
 
 
