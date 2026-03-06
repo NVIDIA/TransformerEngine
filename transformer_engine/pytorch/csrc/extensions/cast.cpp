@@ -18,6 +18,7 @@
 #include "common.h"
 #include "common/util/system.h"
 #include "pybind.h"
+#include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -1012,14 +1013,46 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
 
   // Compute amaxes
   if (quantizer.with_post_rht_amax) {
-    // We need:
+    // True post-RHT amax path:
     // 1. Rowwise amax = amax for input
     // 2. Columnwise amax = amax for RHT(input.t)
     nvte_group_hadamard_transform_amax(
         input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
         split_sections.data(), num_tensors, 0, quantizer.rht_matrix_random_sign_mask_t, stream);
+  } else if (quantizer.with_amax_estimation) {
+    // Consume/compute pre-RHT amax, and later estimate post-RHT amax from it
+    for (size_t i = 0; i < num_tensors; ++i) {
+      if (input_list[i].numel() == 0) {
+        continue;
+      }
+
+      // Compute pre-RHT amax of split input
+      nvte_compute_amax_with_config(input_list[i].data(), output_list[i].data(),
+                                    quant_config_list[i], stream);
+
+      // Mirror pre-RHT amax to both row-wise and column-wise amax buffers
+      auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
+      auto columnwise_amax_ptr = output_list[i].get_columnwise_amax().data_ptr;
+      void *amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+      if (amax_ptr != nullptr) {
+        if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
+          NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),
+                                          cudaMemcpyDeviceToDevice, stream));
+        }
+        if (columnwise_amax_ptr != amax_ptr && columnwise_amax_ptr != nullptr) {
+          NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, amax_ptr, sizeof(float),
+                                          cudaMemcpyDeviceToDevice, stream));
+        }
+      }
+
+      // Estimate post-RHT amax for columnwise path via scaling.
+      if (quantizer.columnwise_usage) {
+        nvte_scale_amax(output_list[i].data(), /*columnwise=*/true, quantizer.amax_estimation_scale,
+                        stream);
+      }
+    }
   } else {
-    // RHT is enabled, but amax is pre-RHT amax
+    // with_rht but not with_post_rht_amax and not using estimation
     NVTE_ERROR("NVFP4 split-quantize does not yet support pre-RHT amax");
   }
 
