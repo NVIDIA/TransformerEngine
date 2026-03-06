@@ -10,6 +10,7 @@ from itertools import chain
 from torch.distributed.tensor import DTensor
 
 import warnings
+import os
 
 import functools
 import torch
@@ -171,8 +172,9 @@ class _GroupedLinear(torch.autograd.Function):
                     and not in_fp8_activation_recompute_phase()
                 )
             # No need to set the quantizer states if weight is already quantized
-            if weight_quantizers[0] is not None and not isinstance(
-                weights[0], QuantizedTensorStorage
+            # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
+            if weight_quantizers[0] is not None and (
+                not isinstance(weights[0], QuantizedTensorStorage) or debug
             ):
                 for weight_quantizer in weight_quantizers:
                     weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
@@ -931,22 +933,17 @@ class GroupedLinear(TransformerEngineBaseModule):
         if defer_init:
             return
 
-        if self.single_weight:
-            weight = getattr(self, "weight0")
-            logical_shape = (self.num_gemms * self.out_features, self.in_features)
-            self.grouped_weight_storage = GroupedTensor(
-                num_tensors=self.num_gemms,
-                shape=[(self.out_features, self.in_features) for _ in range(self.num_gemms)],
-                quantizer=None,
-                dtype=self.params_dtype,
-                data=weight,
-                logical_shape=logical_shape,
-            )
+        weight_quantizers = self._get_weight_quantizers()
+        recipe = (
+            weight_quantizers[0]._get_compatible_recipe()
+            if weight_quantizers and weight_quantizers[0] is not None
+            else None
+        )
+        if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
             self.set_tensor_parallel_attributes(defer_init=defer_init)
             return
 
         weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
-        weight_quantizers = self._get_weight_quantizers()
 
         # Create the weight storage.
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
@@ -954,14 +951,16 @@ class GroupedLinear(TransformerEngineBaseModule):
             shape=[(self.out_features, self.in_features)] * self.num_gemms,
             quantizer=weight_quantizers[0],
             dtype=self.params_dtype,
+            device=weights[0].device,
         )
-        self.grouped_weight_storage = grouped_weights
 
         # Copy existing params into storage.
-        # TODO(ksivamani): Verify correctness of copy for all recipes.
         with torch.no_grad():
             for i in range(self.num_gemms):
-                grouped_weights.quantized_tensors[i].copy_(weights[i])
+                if self.primary_weights_in_fp8:
+                    grouped_weights.quantized_tensors[i].copy_from_storage(weights[i])
+                else:
+                    grouped_weights.quantized_tensors[i].copy_(weights[i])
 
         # Re-register the grouped weights as parameters.
         for i in range(self.num_gemms):
@@ -977,7 +976,9 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
-        self.make_grouped_weights(defer_init=defer_init)
+        # Grouped tensor weights is an opt-in feature.
+        if bool(int(os.getenv("NVTE_ALLOC_CONTIGUOUS_GROUPED_LINEAR_WEIGHTS", "0"))):
+            self.make_grouped_weights(defer_init=defer_init)
 
     def set_tensor_parallel_attributes(self, defer_init=False) -> None:
         """Set attributes needed for TP"""
@@ -1053,9 +1054,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                     debug = False
                     quantizers = self._get_quantizers()
 
-                if isinstance(weight_tensors, QuantizedTensorStorage):
-                    raise RuntimeError("FP8 weights are not supported in debug mode.")
-
             (
                 input_quantizers,
                 weight_quantizers,
@@ -1127,8 +1125,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             del grad_biases_
             del wgrad_list
             del tensor_list
-            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-                wgrad_accumulation_and_reduce_hook()
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""
@@ -1180,7 +1177,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
-        if not self.fp8 and not self.fp8_calibration:
+        if not self.fp8 and not self.fp8_calibration and not self.primary_weights_in_fp8:
             return [None] * self.num_gemms
         weight_quantizers = [
             self.quantizers["scaling_fwd"][
@@ -1188,8 +1185,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             ]
             for i in range(self.num_weight_params)
         ]
-        for i in range(self.num_weight_params):
-            weight_quantizers[i].internal = True
+        for i in range(self.num_gemms):
+            weight_quantizers[i].internal = not self.primary_weights_in_fp8
         return weight_quantizers
 
     def _get_quantizers(self):
