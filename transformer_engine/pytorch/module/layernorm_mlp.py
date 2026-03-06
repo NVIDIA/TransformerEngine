@@ -2000,20 +2000,29 @@ class LayerNormMLP(TransformerEngineBaseModule):
         base_name = self.name or ""
         fc1_name = f"{base_name}.fc1" if base_name else "fc1"
         fc2_name = f"{base_name}.fc2" if base_name else "fc2"
+        # Roles use the *consumer's* identity: internal boundary tensors are
+        # labeled with the downstream module that will consume them.
+        #
+        # Forward:  fc1_input -> fc1 GEMM -> [act] -> fc2_input -> fc2 GEMM -> output
+        # Backward: grad_input <- fc1 GEMM <- [act'] <- fc2 GEMM <- grad_output
         if fwd:
             base = [
                 QuantizerRole(module_type="linear", tensor_type="input", name=fc1_name),
                 QuantizerRole(module_type="linear", tensor_type="weight", name=fc1_name),
+                # fc1 output — consumed by fc2 (via activation), so labeled as fc2 input
                 QuantizerRole(module_type="linear", tensor_type="input", name=fc2_name),
                 QuantizerRole(module_type="linear", tensor_type="input", name=fc2_name),
                 QuantizerRole(module_type="linear", tensor_type="weight", name=fc2_name),
+                # fc2 output — boundary, consumer unknown
                 self._output_quantizer_role,
             ]
         else:
             base = [
                 QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc1_name),
+                # fc1 grad_input — boundary, consumer unknown
                 self._grad_input_quantizer_role,
                 QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc2_name),
+                # fc2 grad_input — consumed by fc1 (via activation'), so labeled as fc1 grad_output
                 QuantizerRole(module_type="linear", tensor_type="grad_output", name=fc1_name),
             ]
         return [base[i % len(base)] for i in range(num_quantizers)]
