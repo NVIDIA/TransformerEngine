@@ -55,7 +55,7 @@ _quantization_params = [
 
 
 def make_quantizer(quantization: str, num_tensors: int, shape: List[Tuple[int, int]]) -> Quantizer:
-    """Create quantizer for given quantization scheme"""
+    """Create quantizers for given quantization scheme"""
 
     if quantization == "fp8_delayed_scaling":
         quantizer = Float8Quantizer(
