@@ -466,6 +466,7 @@ using int16 = int16_t;
 using int32 = int32_t;
 using int64 = int64_t;
 using fp32 = float;
+using fp64 = double;
 using fp16 = half;
 using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
@@ -494,6 +495,7 @@ TRANSFORMER_ENGINE_TYPE_NAME(int16_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int32_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int64_t)
 TRANSFORMER_ENGINE_TYPE_NAME(float)
+TRANSFORMER_ENGINE_TYPE_NAME(double)
 TRANSFORMER_ENGINE_TYPE_NAME(half)
 TRANSFORMER_ENGINE_TYPE_NAME(nv_bfloat16)
 TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e4m3)
@@ -566,14 +568,15 @@ struct BitsNumber {
 template <typename T>
 struct TypeInfo {
 #if FP4_TYPE_SUPPORTED
-  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp4e2m1
+  using types =
+      std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp4e2m1, fp64
 #if CUDA_VERSION >= 12080
-                           ,
-                           fp8e8m0
+                 ,
+                 fp8e8m0
 #endif
-                           >;
+                 >;
 #else
-  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2
+  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp64
 #if CUDA_VERSION >= 12080
                            ,
                            fp8e8m0
@@ -640,6 +643,10 @@ struct TypeInfo {
     } break;                                                 \
     case DType::kFloat32: {                                  \
       using type = float;                                    \
+      { __VA_ARGS__ }                                        \
+    } break;                                                 \
+    case DType::kFloat64: {                                  \
+      using type = double;                                   \
       { __VA_ARGS__ }                                        \
     } break;                                                 \
     case DType::kFloat16: {                                  \
