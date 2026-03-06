@@ -933,6 +933,17 @@ class GroupedLinear(TransformerEngineBaseModule):
         if defer_init:
             return
 
+        if self.single_weight:
+            weight = getattr(self, "weight0")
+            logical_shape = (self.num_gemms * self.out_features, self.in_features)
+            self.grouped_weight_storage = GroupedTensor(
+                num_tensors=self.num_gemms,
+                shape=[(self.out_features, self.in_features) for _ in range(self.num_gemms)],
+                quantizer=None,
+                dtype=self.params_dtype,
+                data=weight,
+                logical_shape=logical_shape,
+            )
         weight_quantizers = self._get_weight_quantizers()
         recipe = (
             weight_quantizers[0]._get_compatible_recipe()
@@ -953,7 +964,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             dtype=self.params_dtype,
             device=weights[0].device,
         )
-
+        self.grouped_weight_storage = grouped_weights
         # Copy existing params into storage.
         with torch.no_grad():
             for i in range(self.num_gemms):
@@ -1185,7 +1196,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             ]
             for i in range(self.num_weight_params)
         ]
-        for i in range(self.num_gemms):
+        for i in range(self.num_weight_params):
             weight_quantizers[i].internal = not self.primary_weights_in_fp8
         return weight_quantizers
 

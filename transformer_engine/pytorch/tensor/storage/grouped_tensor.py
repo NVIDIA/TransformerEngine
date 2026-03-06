@@ -676,10 +676,121 @@ class GroupedLinear(TransformerEngineBaseModule):
             self.set_tensor_parallel_group(tp_group)
         self.set_nccl_overlap_warning_if_tp()
 
-        if self.tp_size > 1 and bias:
-            raise ValueError(
-                "GroupedLinear doesn't support bias when TP > 1. "
-                "Because the TP communication is handled outside of this module."
+        return (
+            f"GroupedTensor with {self.num_tensors} tensors "
+            f"({', '.join(shape_info) if shape_info else 'uniform'}), "
+            f"logical_shape={self.logical_shape}, "
+            f"dtype={self.get_dtype()}"
+        )
+
+    @staticmethod
+    def make_grouped_tensor_with_shapes(
+        num_tensors: int,
+        shape: List[Tuple[int, int]],
+        quantizer: Optional[Quantizer] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> GroupedTensor:
+        """
+        Create a GroupedTensor for storing multiple weight tensors of the same shape.
+
+        Args:
+            num_tensors: Number of tensors
+            shape: 2D shape of each tensor (len num_tensors)
+            quantizer: Quantizer for each tensor
+            device: Device to allocate tensors on, defaults to current cuda device
+            dtype: Data type of the tensor (for high precision case)
+
+        Returns:
+            A GroupedTensor.
+        """
+
+        # First dim
+        first_dim_list = [s[0] for s in shape]
+        uniform_first_dim = all(first_dim_list[0] == x for x in first_dim_list)
+        logical_first_dim = sum(first_dim_list)
+        if uniform_first_dim:
+            first_dims = None
+        else:
+            first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device=device)
+
+        # Last dim
+        last_dim_list = [s[1] for s in shape]
+        logical_last_dim = last_dim_list[0]
+        assert all(logical_last_dim == x for x in last_dim_list), "Last dims should be uniform"
+
+        return GroupedTensor.make_grouped_tensor(
+            num_tensors=num_tensors,
+            first_dims=first_dims,
+            last_dims=None,
+            logical_first_dim=logical_first_dim,
+            logical_last_dim=logical_last_dim,
+            quantizer=quantizer,
+            device=device,
+            dtype=dtype,
+        )
+
+    @staticmethod
+    def make_grouped_tensor(
+        num_tensors: int,
+        first_dims: Optional[torch.Tensor],
+        last_dims: Optional[torch.Tensor],
+        logical_first_dim: int,
+        logical_last_dim: int,
+        quantizer: Optional[Quantizer] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> GroupedTensor:
+        """
+        Create a GroupedTensor for storing multiple weight tensors of the same shape.
+
+        Args:
+            num_tensors: Number of tensors
+            first_dims: Device tensor of int64 array of length num_tensors (or None if uniform)
+            last_dims: Device tensor of int64 array of length num_tensors (or None if uniform)
+            logical_first_dim: Logical first dimension
+            logical_last_dim: Logical last dimension
+            quantizer: Quantizer for each tensor
+                       Used to figure out the recipe and what to allocate.
+            device: Device to allocate tensors on, defaults to current cuda device
+            dtype: Data type of the tensor (for high precision case)
+
+        Returns:
+            A GroupedTensor.
+        """
+
+        # Set device
+        if device is None:
+            device = torch.cuda.current_device()
+
+        # Shape patterns and validation.
+        all_same_first = first_dims is None
+        all_same_last = last_dims is None
+
+        assert all_same_last, "Last dim must be uniform for GroupedTensor"
+        assert logical_first_dim > 0, "Logical first dim must be positive for GroupedTensor"
+        assert logical_last_dim > 0, "Logical last dim must be positive for GroupedTensor"
+
+        # assert (
+        #     logical_first_dim % 128 == 0
+        # ), "Logical first dim must be divisible by 128"
+        # assert logical_last_dim % 128 == 0, "Logical last dim must be divisible by 128"
+
+        # Calculate tensor offsets (cumulative element offsets)
+        tensor_offsets = None
+        offsets = None
+        shape = []
+        if not all_same_first:
+            # Need explicit offsets for non-uniform shapes
+            # Offsets are based on number of elements and not pointers.
+            # Kernels need to calculate precise pointers based on size of elements.
+
+            # TODO(ksivaman): Single kernel + remove the host offset calculation.
+            tensor_offsets = torch.cat(
+                [
+                    torch.zeros(1, device=first_dims.device, dtype=first_dims.dtype),
+                    torch.cumsum(first_dims * logical_last_dim, dim=0),
+                ]
             )
 
         self.parallel_mode = parallel_mode
