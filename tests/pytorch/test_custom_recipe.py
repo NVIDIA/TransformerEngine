@@ -101,7 +101,7 @@ def test_custom_recipe_sanity(module_type):
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role.tensor_type in ("grad_output"):
+        if role.tensor_type == "grad_output":
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -138,7 +138,7 @@ def test_custom_recipe_grouped_linear_sanity():
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role.tensor_type in ("grad_output"):
+        if role.tensor_type == "grad_output":
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -200,7 +200,7 @@ def test_custom_recipe_matches_current_scaling():
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role.tensor_type in ("grad_output"):
+        if role.tensor_type == "grad_output":
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -257,7 +257,7 @@ def test_custom_recipe_ops_linear_2_1_layout():
     def quantizer_factory(role):
         if role is None:
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
-        if role.tensor_type in ("grad_output"):
+        if role.tensor_type == "grad_output":
             return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -689,6 +689,55 @@ def test_custom_recipe_quantization_targets():
         _check_q(mod, NVFP4Quantizer, "default")
 
 
+def test_grouped_linear_module_type_dispatch():
+    """Verify GroupedLinear emits module_type='grouped_linear' so factories can
+    distinguish it from regular Linear (critical for MoE mixed-recipe dispatch)."""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported on this device: {reason}")
+
+    torch.manual_seed(0)
+
+    num_gemms = 2
+    in_features = 64
+    out_features = 64
+    batch = 16
+    m_splits = [batch // num_gemms] * num_gemms
+
+    model = GroupedLinear(
+        num_gemms, in_features, out_features, params_dtype=torch.bfloat16, name="experts"
+    ).cuda()
+    inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    recorded_roles = []
+
+    def recording_factory(role):
+        recorded_roles.append(role)
+        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+    custom_recipe = recipe.CustomRecipe(qfactory=recording_factory)
+
+    with autocast(enabled=True, recipe=custom_recipe):
+        out = model(inp, m_splits)
+    loss = out.float().sum()
+    loss.backward()
+
+    non_none = [r for r in recorded_roles if r is not None]
+    assert len(non_none) > 0, "No QuantizerRole objects recorded"
+    for r in non_none:
+        assert isinstance(r, QuantizerRole)
+        assert r.module_type == "grouped_linear", (
+            f"Expected module_type='grouped_linear', got '{r.module_type}'"
+        )
+        assert r.name == "experts", f"Expected name='experts', got '{r.name}'"
+
+    fwd_types = {r.tensor_type for r in non_none if r.tensor_type in ("input", "weight")}
+    bwd_types = {r.tensor_type for r in non_none if r.tensor_type == "grad_output"}
+    assert "input" in fwd_types, "Missing 'input' tensor_type in forward roles"
+    assert "weight" in fwd_types, "Missing 'weight' tensor_type in forward roles"
+    assert "grad_output" in bwd_types, "Missing 'grad_output' tensor_type in backward roles"
+
+
 def test_delayed_scaling_request_wiring():
     """Shared buffers, correct views, Float8Quantizer instances."""
     available, reason = te.is_fp8_available(return_reason=True)
@@ -953,3 +1002,94 @@ def test_custom_recipe_dpa_fp8():
             assert isinstance(
                 q, NVFP4Quantizer
             ), f"qkv_proj fwd slot {i}: expected NVFP4Quantizer, got {type(q).__name__}"
+
+
+def test_custom_recipe_debug_tool_compat():
+    """Custom recipe quantizers should work when wrapped by DebugQuantizer.
+
+    Verifies that the debug tool (nvdlfw_inspect) can wrap custom-recipe
+    quantizers produced via QuantizerRole dispatch without errors.
+    """
+    try:
+        import nvdlfw_inspect.api as debug_api
+    except ImportError:
+        pytest.skip("nvdlfw_inspect not installed")
+
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    import pathlib
+    import tempfile
+
+    from transformer_engine.debug.pytorch.debug_state import TEDebugState
+
+    te_debug_features = str(
+        pathlib.Path(__file__).resolve().parent.parent.parent
+        / "transformer_engine"
+        / "debug"
+        / "features"
+    )
+
+    # Log config that keeps DebugQuantizer active (not bypassed by no_debug_features_active)
+    log_config = """log:
+  layers:
+    layer_types: [linear]
+  enabled: True
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      tensors: [activation, weight]
+      stats: [max]
+      start_step: 0
+      end_step: 3
+"""
+
+    torch.manual_seed(0)
+
+    in_features = 64
+    out_features = 64
+    batch = 16
+
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".yaml", delete=False) as cfg:
+        cfg.write(log_config)
+        cfg.flush()
+        config_path = cfg.name
+
+    try:
+        with tempfile.TemporaryDirectory() as log_dir:
+            debug_api.initialize(
+                config_file=config_path,
+                feature_dirs=te_debug_features,
+                log_dir=log_dir,
+            )
+
+            model = Linear(
+                in_features, out_features, params_dtype=torch.bfloat16, name="layer"
+            ).cuda()
+
+            custom_recipe = recipe.CustomRecipe(qfactory=current_scaling_quantizer_factory)
+
+            assert TEDebugState.debug_enabled, "Debug mode should be active"
+
+            for _ in range(3):
+                inp_step = torch.randn(
+                    batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+                )
+                with autocast(enabled=True, recipe=custom_recipe):
+                    out = model(inp_step)
+                out.float().sum().backward()
+                debug_api.step()
+
+            assert inp_step.grad is not None, "Input gradient should exist"
+
+            log_files = list(pathlib.Path(log_dir).rglob("*.log"))
+            assert len(log_files) > 0, (
+                f"Debug log output expected in {log_dir} but no .log files found"
+            )
+    finally:
+        debug_api.end_debug()
+        TEDebugState._reset()
+        import os
+
+        os.unlink(config_path)
