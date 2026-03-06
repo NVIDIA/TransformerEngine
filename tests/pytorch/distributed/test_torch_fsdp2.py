@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -64,28 +65,38 @@ def fp_recipe(request):
 def _run_test(fp_init, sharding_dims, recipe, layer_type):
     test_path = Path(__file__).parent.resolve() / "run_fsdp2_model.py"
     test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(test_path)]
-
     if fp_init:
         test_cmd += ["--fp8-init"]
-
-    if len(sharding_dims) == 1:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0])]
-    elif len(sharding_dims) == 2:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0]), str(sharding_dims[1])]
-    else:
-        assert False
+    test_cmd += ["--sharding-dims"]
+    for x in sharding_dims:
+        test_cmd.append(str(x))
     test_cmd += ["--recipe", recipe]
     test_cmd += ["--layer-type", layer_type]
-
     subprocess.run(test_cmd, env=os.environ, check=True)
 
 
-@pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
+@pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs.")
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
-@pytest.mark.parametrize("sharding_dims", ([NUM_PROCS], [2, NUM_PROCS // 2]))
+@pytest.mark.parametrize(
+    "sharding_dims",
+    (
+        # FSDP
+        [NUM_PROCS],
+        # HSDP
+        [2, NUM_PROCS // 2],
+        # (H/F)SDP-TP
+        [NUM_PROCS // 4, 2, 2],
+    ),
+)
 @pytest.mark.parametrize("fp8_init", (False, True))
 @pytest.mark.parametrize("layer_type", ("LayerNormLinear", "TransformerLayer"))
 def test_distributed(fp8_init, sharding_dims, fp_recipe, layer_type):
+
+    parallel_size = math.prod(x for x in sharding_dims if x != 0)
+    if NUM_PROCS < parallel_size:
+        pytest.skip(
+            f"Insufficient devices ({NUM_PROCS}) to test sharding configuration: {sharding_dims}"
+        )
 
     if fp_recipe in ("Float8BlockScaling", "NVFP4BlockScaling") and fp8_init:
         pytest.xfail(f"{fp_recipe} + fp8_init: test_fp8_fsdp2_allgather is currently failing.")
