@@ -162,6 +162,21 @@ except ImportError as e:
         "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
     ) from e
 
+# Minimum jaxlib version required for Triton kernel dispatch to work correctly.
+# jaxlib < 0.8.0.dev20250924 segfaults in pxla.py during Triton kernel execution
+# (bisected: last known segfault = jax-2025-09-23, first known pass = jax-2025-09-24).
+_JAXLIB_MIN_VERSION = "0.8.0.dev20250924"
+import jaxlib  # noqa: E402
+
+if version.parse(jaxlib.__version__) < version.parse(_JAXLIB_MIN_VERSION):
+    raise RuntimeError(
+        f"jaxlib {jaxlib.__version__} is too old for transformer_engine.jax.triton_extensions.\n"
+        f"Triton kernel dispatch segfaults with jaxlib < {_JAXLIB_MIN_VERSION}.\n"
+        f"Please upgrade: pip install --upgrade jax jaxlib\n"
+        f"Or use a JAX nightly container dated 2025-09-24 or later.\n"
+        f"If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
+    )
+
 
 __all__ = ["triton_call_lowering", "get_triton_info"]
 
