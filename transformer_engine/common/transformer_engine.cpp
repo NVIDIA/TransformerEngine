@@ -1130,6 +1130,7 @@ int nvte_is_non_tn_fp8_gemm_supported() {
   static std::vector<int> cache(num_devices, -1);
   static std::vector<std::once_flag> flags(num_devices);
   int device_id = transformer_engine::cuda::current_device();
+  // TODO: KL check if this condition is now supported or not ?
   std::call_once(flags[device_id], [&]() {
     int deviceComputeCapability = transformer_engine::cuda::sm_arch(device_id);
     // Note: this is temporary restriction and should be lifted in the future.

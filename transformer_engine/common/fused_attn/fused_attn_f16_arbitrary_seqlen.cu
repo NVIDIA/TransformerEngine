@@ -1102,6 +1102,9 @@ void fused_attn_arbitrary_seqlen_fwd(
     devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
   }
 
+  const int device_id = cuda::current_device();
+  const int sm_arch_ = cuda::sm_arch(device_id);
+
   void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
   void *devPtrSeqOffsetsQ = cu_seqlens_q_padded->data.dptr;
@@ -1128,7 +1131,8 @@ void fused_attn_arbitrary_seqlen_fwd(
     if (return_max_logit) {
       Tensor *output_Max = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_Max->data.dptr = nullptr;
-      if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
+      if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) &&
+          !(sm_arch_ >= 120)) {
         output_Max->data.shape = {num_tokens_q, num_attn_heads, 1};
       } else {
         output_Max->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
@@ -1136,7 +1140,8 @@ void fused_attn_arbitrary_seqlen_fwd(
       output_Max->data.dtype = DType::kFloat32;
       Tensor *output_Sum_Exp = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_Sum_Exp->data.dptr = nullptr;
-      if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
+      if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) &&
+          !(sm_arch_ >= 120)) {
         output_Sum_Exp->data.shape = {num_tokens_q, num_attn_heads, 1};
       } else {
         output_Sum_Exp->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
@@ -1145,7 +1150,8 @@ void fused_attn_arbitrary_seqlen_fwd(
     } else {
       Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_S->data.dptr = nullptr;
-      if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
+      if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) &&
+          !(sm_arch_ >= 120)) {
         output_S->data.shape = {num_tokens_q, num_attn_heads, 1};
       } else {
         output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
