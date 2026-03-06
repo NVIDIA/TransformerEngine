@@ -143,8 +143,9 @@ __device__ __forceinline__ size_t get_tensor_cols_num(
     case ShapeRepresentation::VARYING_BOTH_DIMS:
       cols_num = static_cast<size_t>(last_dims_ptr[tensor_id]);
       if (cols_num % 128 != 0) {
-        NVTE_DEVICE_ERROR("For non-single tensors, the last dimension of each tensor in a group "
-                          "must be divisible by 128.");
+        NVTE_DEVICE_ERROR(
+            "For non-single tensors, the last dimension of each tensor in a group "
+            "must be divisible by 128.");
       }
       break;
   }
