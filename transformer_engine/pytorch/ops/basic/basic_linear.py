@@ -332,12 +332,15 @@ class BasicLinear(BasicOperation):
             # Note: We cache the quantized input for backward pass,
             # but discard the quantized weights.
             weight_requires_grad = requires_grad and self.weight.requires_grad
+            columnwise_usage = weight_requires_grad
+            if FP8GlobalStateManager.get_fp8_recipe().backward_mode in ("unquant", "dequant"):
+                columnwise_usage = False
             input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
             grad_output_quantizer = self.get_quantizer("backward", 0)
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             weight_quantizer.set_usage(rowwise=True, columnwise=False)
-            grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            grad_output_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
@@ -355,6 +358,13 @@ class BasicLinear(BasicOperation):
             grad_output_quantizer.internal = True
             if not (self.tensor_parallel_mode == "row" and self.sequence_parallel):
                 grad_output_quantizer.optimize_for_gemm = True
+        if FP8GlobalStateManager.is_fp8_enabled():
+            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if fp8_recipe.backward_mode == "dequant" and (fp8_recipe.mxfp8() or fp8_recipe.nvfp4()):
+                if input_quantizer is not None:
+                    input_quantizer.optimize_for_gemm = False
+                if grad_output_quantizer is not None:
+                    grad_output_quantizer.optimize_for_gemm = False
 
         # Configure weight quantizer
         # Note: This function may be called in base class constructor,
@@ -420,6 +430,7 @@ class BasicLinear(BasicOperation):
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         sequence_parallel: bool = False,
         with_quantized_compute: bool = False,
+        backward_mode: str = "default",
         input_quantizer: Optional[Quantizer] = None,
         weight_quantizer: Optional[Quantizer] = None,
         output_quantizer: Optional[Quantizer] = None,
@@ -459,6 +470,8 @@ class BasicLinear(BasicOperation):
             distributing along inner dimension (embedding dim)
         with_quantized_compute: bool, default = False
             Whether to perform compute with quantized data.
+        backward_mode: {`"default"`, `"unquant"`, `"dequant"`}, default = `"default"`
+            Backward-mode policy for quantized compute.
         input_quantizer: Quantizer, optional
             Builder class for quantized input tensor.
         weight_quantizer: Quantizer, optional
@@ -510,7 +523,10 @@ class BasicLinear(BasicOperation):
         if with_quantized_compute:
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            input_quantizer.set_usage(
+                rowwise=True,
+                columnwise=weight_requires_grad and backward_mode == "default",
+            )
             if with_x_all_gather:
                 input_quantizer.set_usage(columnwise=False)
                 x, x_async = gather_along_first_dim(
@@ -542,7 +558,10 @@ class BasicLinear(BasicOperation):
         elif with_quantized_compute and not is_quantized_tensor(w):
             if weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
-            weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+            weight_quantizer.set_usage(
+                rowwise=True,
+                columnwise=input_requires_grad and backward_mode == "default",
+            )
             w = weight_quantizer(w)
 
         # Check output tensor
@@ -611,14 +630,23 @@ class BasicLinear(BasicOperation):
 
         # Prepare weight tensor for backward pass
         if input_requires_grad:
-            if w is not weight and with_quantized_compute and is_quantized_tensor(w):
+            if (
+                w is not weight
+                and with_quantized_compute
+                and is_quantized_tensor(w)
+                and backward_mode == "default"
+            ):
                 w.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:
             w = None
 
         # Prepare input tensor for backward pass
         if weight_requires_grad:
-            if with_quantized_compute and is_quantized_tensor(x_local):
+            if (
+                with_quantized_compute
+                and is_quantized_tensor(x_local)
+                and backward_mode == "default"
+            ):
                 if not (isinstance(x_local, Float8TensorStorage) and with_x_all_gather):
                     # FP8 does not support all-gather of transpose data
                     x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
@@ -968,6 +996,10 @@ class BasicLinear(BasicOperation):
         grad_output_quantizer = self.get_quantizer("backward", 0)
         grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        if with_quantized_compute:
+            backward_mode = FP8GlobalStateManager.get_fp8_recipe().backward_mode
+        else:
+            backward_mode = "default"
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
@@ -984,6 +1016,7 @@ class BasicLinear(BasicOperation):
             tensor_parallel_group=self.tensor_parallel_group,
             sequence_parallel=self.sequence_parallel,
             with_quantized_compute=with_quantized_compute,
+            backward_mode=backward_mode,
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=output_quantizer,
@@ -993,10 +1026,13 @@ class BasicLinear(BasicOperation):
 
         # Save state for backward pass
         if ctx.requires_grad:
+            saved_input = input_ if backward_mode == "unquant" else x_local
+            saved_weight = self.weight if backward_mode == "unquant" else w
             if is_cpu_offload_enabled():
-                mark_activation_offload(x_local)
-            ctx.save_for_backward(x_local, w)
-            ctx.with_quantized_compute = with_quantized_compute
+                mark_activation_offload(saved_input)
+            ctx.save_for_backward(saved_input, saved_weight)
+            ctx.with_quantized_compute = with_quantized_compute and backward_mode == "default"
+            ctx.backward_mode = backward_mode
             ctx.input_quantizer = input_quantizer
             ctx.weight_quantizer = weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer

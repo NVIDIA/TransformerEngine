@@ -117,7 +117,7 @@ def quantization_tols(name: str) -> dict[str, float]:
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
-def make_recipe(name: Optional[str]) -> Optional[Recipe]:
+def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
     """Make recipe for quantization scheme"""
     if name is None:
         return None
@@ -125,22 +125,26 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
         return transformer_engine.common.recipe.DelayedScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
             amax_history_len=8,
+            **recipe_kwargs,
         )
     if name == "fp8_current_scaling":
         return transformer_engine.common.recipe.Float8CurrentScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            **recipe_kwargs,
         )
     if name == "mxfp8":
         return transformer_engine.common.recipe.MXFP8BlockScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            **recipe_kwargs,
         )
     if name == "fp8_block_scaling":
-        return transformer_engine.common.recipe.Float8BlockScaling()
+        return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
     if name == "nvfp4":
         return transformer_engine.common.recipe.NVFP4BlockScaling(
             disable_rht=True,
             disable_stochastic_rounding=True,
             disable_2d_quantization=True,
+            **recipe_kwargs,
         )
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
