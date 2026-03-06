@@ -626,10 +626,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, config):
+        # batch_dims: each element is the batch axis (0, ...) or None. Only 0 or None allowed.
         check_valid_batch_dims(batch_dims)
         assert FusedAttnFwdPrimitive.outer_primitive is not None
         q_bdim, _, _, _, _, seed_bdim, *_ = batch_dims
-
+        # Pass through; segment_ids/segment_pos may have different batch dims (e.g. vmapped ids,
+        # replicated pos). get_seqlens_and_offsets() in attention.py handles conversion without expanding.
         out_bdims = q_bdim, q_bdim, seed_bdim
         return (
             FusedAttnFwdPrimitive.outer_primitive.bind(*batched_args, config=config),
@@ -1084,7 +1086,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         check_valid_batch_dims(batch_dims)
         assert FusedAttnBwdPrimitive.outer_primitive is not None
         q_bdim, k_bdim, v_bdim, bias_bdim, softmax_offset_bdim, *_ = batch_dims
-
+        # Pass through; segment_ids/segment_pos may have different batch dims. Conversion is in attention.py.
         out_bdims = q_bdim, k_bdim, v_bdim, bias_bdim, softmax_offset_bdim
         return (
             FusedAttnBwdPrimitive.outer_primitive.bind(*batched_args, config=config),
