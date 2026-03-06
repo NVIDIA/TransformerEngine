@@ -14,6 +14,7 @@
 #include "../test_common.h"
 #include "transformer_engine/transformer_engine.h"
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <numeric>
 
@@ -72,14 +73,14 @@ float compute_global_encode_scaling_factor_FP4(const float global_amax, const bo
 
 // 1D Scaling: Original implementation with 1x16 blocks
 template <typename InputType>
-void quantize_nvfp4_1d(const InputType* const input,
-                       fp4e2m1x2* const output,
-                       fp8e4m3* const scales,
-                       const size_t rows,
-                       const size_t cols,
-                       const size_t scales_stride,
-                       const float global_amax,
-                       const bool use_fast_math) {
+void quantize_nvfp4(const InputType* const input,
+                    fp4e2m1x2* const output,
+                    fp8e4m3* const scales,
+                    const size_t rows,
+                    const size_t cols,
+                    const size_t scales_stride,
+                    const float global_amax,
+                    const bool use_fast_math) {
 
     // Compute a global encoding/decoding scaling factor for all S_dec_b
     const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math);
@@ -152,18 +153,6 @@ void quantize_nvfp4_1d(const InputType* const input,
 }
 
 template <typename InputType>
-void quantize_nvfp4(const InputType* const input,
-                    fp4e2m1x2* const output,
-                    fp8e4m3* const scales,
-                    const size_t rows,
-                    const size_t cols,
-                    const size_t scales_stride,
-                    const float global_amax,
-                    const bool use_fast_math) {
-    quantize_nvfp4_1d(input, output, scales, rows, cols, scales_stride, global_amax, use_fast_math);
-}
-
-template <typename InputType>
 void compute_ref(const InputType* input,
                  fp4e2m1x2* output,
                  fp4e2m1x2* output_t,
@@ -178,8 +167,8 @@ void compute_ref(const InputType* input,
 {
     std::vector<InputType> input_t = create_transpose(input, rows, cols);
 
-    quantize_nvfp4(input, output, scales, rows, cols, scales_stride, global_amax, use_fast_math);
-    quantize_nvfp4(input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, global_amax, use_fast_math);
+    quantize_nvfp4<InputType>(input, output, scales, rows, cols, scales_stride, global_amax, use_fast_math);
+    quantize_nvfp4<InputType>(input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, global_amax, use_fast_math);
 }
 
 void compare_nvfp4_tensors(const std::string& name,
@@ -376,13 +365,44 @@ void performTest(const ShapeRepresentation shape_rep,
     const double atol = 1.0E-6;
     const double rtol = 1.0E-6;
 
-    QuantizationConfigWrapper quant_config;
-    quant_config.set_use_fast_math(use_fast_math);
-    quant_config.set_stochastic_rounding(false);
-    quant_config.set_nvfp4_2d_quantization(false);
+    std::vector<size_t> rowwise_scales_stride(num_tensors, 0);
+    std::vector<size_t> colwise_scales_stride(num_tensors, 0);
+    std::vector<size_t> rowwise_unpadded_blocks_X(num_tensors, 0);
+    std::vector<size_t> colwise_unpadded_blocks_X(num_tensors, 0);
+    std::vector<size_t> rowwise_scale_offsets(num_tensors, 0);
+    std::vector<size_t> colwise_scale_offsets(num_tensors, 0);
 
-    // Grouped NVFP4 kernel is not available yet.
-    // Validate grouped metadata/configuration by quantizing each tensor independently.
+    size_t rowwise_scales_num = 0;
+    size_t colwise_scales_num = 0;
+
+    for (size_t t = 0; t < num_tensors; ++t) {
+        const size_t rows = first_dims[t];
+        const size_t cols = last_dims[t];
+        rowwise_unpadded_blocks_X[t] = divide_round_up(cols, static_cast<size_t>(16));
+        colwise_unpadded_blocks_X[t] = divide_round_up(rows, static_cast<size_t>(16));
+
+        rowwise_scales_stride[t] =
+            round_up_to_nearest_multiple(rowwise_unpadded_blocks_X[t], static_cast<size_t>(4));
+        colwise_scales_stride[t] =
+            round_up_to_nearest_multiple(colwise_unpadded_blocks_X[t], static_cast<size_t>(4));
+
+        rowwise_scale_offsets[t] = rowwise_scales_num;
+        colwise_scale_offsets[t] = colwise_scales_num;
+
+        rowwise_scales_num += rows * rowwise_scales_stride[t];
+        colwise_scales_num += cols * colwise_scales_stride[t];
+    }
+
+    std::vector<fp4e2m1> out_data_rowwise_h(total_elts / 2);
+    std::vector<fp4e2m1> out_data_colwise_h(total_elts / 2);
+    std::vector<fp8e4m3> out_scales_rowwise_h(rowwise_scales_num);
+    std::vector<fp8e4m3> out_scales_colwise_h(colwise_scales_num);
+
+    std::vector<fp4e2m1> out_data_rowwise_ref(total_elts / 2);
+    std::vector<fp4e2m1> out_data_colwise_ref(total_elts / 2);
+    std::vector<std::vector<fp8e4m3>> out_scales_rowwise_ref(num_tensors);
+    std::vector<std::vector<fp8e4m3>> out_scales_colwise_ref(num_tensors);
+
     for (size_t t = 0; t < num_tensors; ++t) {
         const size_t rows = first_dims[t];
         const size_t cols = last_dims[t];
@@ -390,76 +410,208 @@ void performTest(const ShapeRepresentation shape_rep,
         const size_t tensor_numel = rows * cols;
         ASSERT_EQ(offsets[t + 1] - offsets[t], tensor_numel);
         ASSERT_LE(tensor_offset + tensor_numel, total_elts);
+        ASSERT_EQ(tensor_numel % 2, 0U);
 
-        const std::array<size_t, 4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16);
-        const std::array<size_t, 4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
-
-        const size_t unpadded_blocks_Y = scale_dims[0];
-        const size_t unpadded_blocks_X = scale_dims[1];
-        const size_t blocks_Y = scale_dims[2];
-        const size_t blocks_X = scale_dims[3];
-        const size_t scales_stride = blocks_X;
-
-        const size_t unpadded_blocks_Y_t = scale_dims_t[0];
-        const size_t unpadded_blocks_X_t = scale_dims_t[1];
-        const size_t blocks_Y_t = scale_dims_t[2];
-        const size_t blocks_X_t = scale_dims_t[3];
-        const size_t scales_stride_t = blocks_X_t;
-
-        std::unique_ptr<fp4e2m1x2[]> ref_output = std::make_unique<fp4e2m1x2[]>(rows * (cols / 2));
-        std::unique_ptr<fp4e2m1x2[]> ref_output_t = std::make_unique<fp4e2m1x2[]>(cols * (rows / 2));
-        std::unique_ptr<fp8e4m3[]> ref_scales = std::make_unique<fp8e4m3[]>(blocks_Y * blocks_X);
-        std::unique_ptr<fp8e4m3[]> ref_scales_t = std::make_unique<fp8e4m3[]>(blocks_Y_t * blocks_X_t);
-
-        float amax = 0.0f;
-        for (size_t idx = 0; idx < tensor_numel; ++idx) {
-            amax = fmaxf(amax, fabsf(static_cast<float>(grouped_input[tensor_offset + idx])));
-        }
-
-        Tensor input("input_tensor_" + std::to_string(t), std::vector<size_t>{rows, cols}, itype);
-        std::copy(grouped_input.begin() + tensor_offset,
-                  grouped_input.begin() + tensor_offset + tensor_numel,
-                  input.rowwise_cpu_dptr<InputType>());
-        input.from_cpu();
-
-        Tensor output("output_tensor_" + std::to_string(t), std::vector<size_t>{rows, cols}, otype,
-                      true, true, NVTE_NVFP4_1D_SCALING);
-        output.set_scale(amax);
+        std::unique_ptr<fp4e2m1x2[]> ref_output =
+            std::make_unique<fp4e2m1x2[]>(tensor_numel / 2);
+        std::unique_ptr<fp4e2m1x2[]> ref_output_t =
+            std::make_unique<fp4e2m1x2[]>(tensor_numel / 2);
+        std::unique_ptr<fp8e4m3[]> ref_scales =
+            std::make_unique<fp8e4m3[]>(rows * rowwise_scales_stride[t]);
+        std::unique_ptr<fp8e4m3[]> ref_scales_t =
+            std::make_unique<fp8e4m3[]>(cols * colwise_scales_stride[t]);
 
         compute_ref<InputType>(grouped_input.data() + tensor_offset,
                                ref_output.get(),
                                ref_output_t.get(),
                                ref_scales.get(),
                                ref_scales_t.get(),
-                               output.scale(),
+                               0.0f,
                                rows,
                                cols,
-                               scales_stride,
-                               scales_stride_t,
+                               rowwise_scales_stride[t],
+                               colwise_scales_stride[t],
                                use_fast_math);
 
-        nvte_quantize_v2(input.data(), output.data(), quant_config, 0);
+        std::memcpy(out_data_rowwise_ref.data() + tensor_offset / 2, ref_output.get(),
+                    (tensor_numel / 2) * sizeof(fp4e2m1x2));
+        std::memcpy(out_data_colwise_ref.data() + tensor_offset / 2, ref_output_t.get(),
+                    (tensor_numel / 2) * sizeof(fp4e2m1x2));
 
-        cudaDeviceSynchronize();
-        auto err = cudaGetLastError();
-        ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+        out_scales_rowwise_ref[t].assign(ref_scales.get(),
+                                         ref_scales.get() + rows * rowwise_scales_stride[t]);
+        out_scales_colwise_ref[t].assign(ref_scales_t.get(),
+                                         ref_scales_t.get() + cols * colwise_scales_stride[t]);
+    }
 
-        compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(),
-                             static_cast<int>(rows), static_cast<int>(cols), atol, rtol, true, false);
+    const size_t in_data_size = total_elts * sizeof(InputType);
+    const size_t out_data_size = (total_elts * typeToNumBits(otype)) / 8;
+    const size_t rowwise_scales_size = rowwise_scales_num * sizeof(fp8e4m3);
+    const size_t colwise_scales_size = colwise_scales_num * sizeof(fp8e4m3);
+
+    std::vector<int64_t> first_dims_h(num_tensors, 0);
+    std::vector<int64_t> last_dims_h(num_tensors, 0);
+    std::vector<int64_t> offsets_h(num_tensors + 1, 0);
+    for (size_t t = 0; t < num_tensors; ++t) {
+        first_dims_h[t] = static_cast<int64_t>(first_dims[t]);
+        last_dims_h[t] = static_cast<int64_t>(last_dims[t]);
+    }
+    for (size_t t = 0; t < num_tensors + 1; ++t) {
+        offsets_h[t] = static_cast<int64_t>(offsets[t]);
+    }
+
+    InputType* in_data_d = nullptr;
+    fp4e2m1* out_data_rowwise_d = nullptr;
+    fp4e2m1* out_data_colwise_d = nullptr;
+    fp8e4m3* out_scales_rowwise_d = nullptr;
+    fp8e4m3* out_scales_colwise_d = nullptr;
+    int64_t* first_dims_d = nullptr;
+    int64_t* last_dims_d = nullptr;
+    int64_t* offsets_d = nullptr;
+
+    cudaMalloc((void**)&in_data_d, in_data_size);
+    cudaMalloc((void**)&out_data_rowwise_d, out_data_size);
+    cudaMalloc((void**)&out_data_colwise_d, out_data_size);
+    cudaMalloc((void**)&out_scales_rowwise_d, rowwise_scales_size);
+    cudaMalloc((void**)&out_scales_colwise_d, colwise_scales_size);
+
+    cudaMalloc((void**)&first_dims_d, num_tensors * sizeof(int64_t));
+    cudaMalloc((void**)&last_dims_d, num_tensors * sizeof(int64_t));
+    cudaMalloc((void**)&offsets_d, (num_tensors + 1) * sizeof(int64_t));
+
+    cudaMemcpy(in_data_d, grouped_input.data(), in_data_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(first_dims_d, first_dims_h.data(), num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(last_dims_d, last_dims_h.data(), num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(offsets_d, offsets_h.data(), (num_tensors + 1) * sizeof(int64_t), cudaMemcpyHostToDevice);
+
+    cudaMemset(out_data_rowwise_d, 0, out_data_size);
+    cudaMemset(out_data_colwise_d, 0, out_data_size);
+    cudaMemset(out_scales_rowwise_d, 0, rowwise_scales_size);
+    cudaMemset(out_scales_colwise_d, 0, colwise_scales_size);
+
+    NVTEShape logical_shape_ = nvte_make_shape(logical_shape.data(), logical_shape.size());
+
+    NVTEShape first_dims_shape_;
+    NVTEShape last_dims_shape_;
+    NVTEShape offsets_shape_;
+    first_dims_shape_.ndim = 1;
+    last_dims_shape_.ndim = 1;
+    offsets_shape_.ndim = 1;
+    first_dims_shape_.data[0] = num_tensors;
+    last_dims_shape_.data[0] = num_tensors;
+    offsets_shape_.data[0] = num_tensors + 1;
+
+    NVTEGroupedTensor in_group_tensor =
+        nvte_create_grouped_tensor(NVTE_DELAYED_TENSOR_SCALING, num_tensors, logical_shape_);
+    NVTEGroupedTensor out_group_tensor =
+        nvte_create_grouped_tensor(NVTE_NVFP4_1D_SCALING, num_tensors, logical_shape_);
+
+    NVTEBasicTensor in_data_tensor = {in_data_d, static_cast<NVTEDType>(itype), logical_shape_};
+    nvte_set_grouped_tensor_param(in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData,
+                                  &in_data_tensor, sizeof(in_data_tensor));
+
+    NVTEBasicTensor out_data_rowwise_tensor = {out_data_rowwise_d, NVTEDType::kNVTEFloat4E2M1, logical_shape_};
+    NVTEBasicTensor out_data_colwise_tensor = {out_data_colwise_d, NVTEDType::kNVTEFloat4E2M1, logical_shape_};
+    nvte_set_grouped_tensor_param(out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData,
+                                  &out_data_rowwise_tensor, sizeof(out_data_rowwise_tensor));
+    nvte_set_grouped_tensor_param(out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseData,
+                                  &out_data_colwise_tensor, sizeof(out_data_colwise_tensor));
+
+    std::vector<size_t> rowwise_scales_shape = {rowwise_scales_num};
+    std::vector<size_t> colwise_scales_shape = {colwise_scales_num};
+    NVTEShape rowwise_scales_shape_ =
+        nvte_make_shape(rowwise_scales_shape.data(), rowwise_scales_shape.size());
+    NVTEShape colwise_scales_shape_ =
+        nvte_make_shape(colwise_scales_shape.data(), colwise_scales_shape.size());
+    NVTEBasicTensor out_scales_rowwise_tensor = {
+        out_scales_rowwise_d, NVTEDType::kNVTEFloat8E4M3, rowwise_scales_shape_};
+    NVTEBasicTensor out_scales_colwise_tensor = {
+        out_scales_colwise_d, NVTEDType::kNVTEFloat8E4M3, colwise_scales_shape_};
+    nvte_set_grouped_tensor_param(out_group_tensor,
+                                  NVTEGroupedTensorParam::kNVTEGroupedRowwiseScaleInv,
+                                  &out_scales_rowwise_tensor, sizeof(out_scales_rowwise_tensor));
+    nvte_set_grouped_tensor_param(out_group_tensor,
+                                  NVTEGroupedTensorParam::kNVTEGroupedColumnwiseScaleInv,
+                                  &out_scales_colwise_tensor, sizeof(out_scales_colwise_tensor));
+
+    if ((shape_rep == VARYING_FIRST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
+        NVTEBasicTensor first_dims_tensor = {first_dims_d, kNVTEInt64, first_dims_shape_};
+        nvte_set_grouped_tensor_param(in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims,
+                                      &first_dims_tensor, sizeof(first_dims_tensor));
+        nvte_set_grouped_tensor_param(out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims,
+                                      &first_dims_tensor, sizeof(first_dims_tensor));
+    }
+
+    if ((shape_rep == VARYING_LAST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
+        NVTEBasicTensor last_dims_tensor = {last_dims_d, kNVTEInt64, last_dims_shape_};
+        nvte_set_grouped_tensor_param(in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims,
+                                      &last_dims_tensor, sizeof(last_dims_tensor));
+        nvte_set_grouped_tensor_param(out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims,
+                                      &last_dims_tensor, sizeof(last_dims_tensor));
+    }
+
+    if (shape_rep != SAME_BOTH_DIMS) {
+        NVTEBasicTensor offsets_tensor = {offsets_d, kNVTEInt64, offsets_shape_};
+        nvte_set_grouped_tensor_param(in_group_tensor,
+                                      NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets,
+                                      &offsets_tensor, sizeof(offsets_tensor));
+        nvte_set_grouped_tensor_param(out_group_tensor,
+                                      NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets,
+                                      &offsets_tensor, sizeof(offsets_tensor));
+    }
+
+    nvte_group_quantize(in_group_tensor, out_group_tensor, 0);
+    cudaDeviceSynchronize();
+    auto err = cudaGetLastError();
+    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    cudaMemcpy(out_data_rowwise_h.data(), out_data_rowwise_d, out_data_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_data_colwise_h.data(), out_data_colwise_d, out_data_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_scales_rowwise_h.data(), out_scales_rowwise_d, rowwise_scales_size,
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_scales_colwise_h.data(), out_scales_colwise_d, colwise_scales_size,
+               cudaMemcpyDeviceToHost);
+
+    for (size_t t = 0; t < num_tensors; ++t) {
+        const size_t rows = first_dims[t];
+        const size_t cols = last_dims[t];
+        const size_t tensor_offset = offsets[t];
+
+        const fp4e2m1* test_output = out_data_rowwise_h.data() + tensor_offset / 2;
+        const fp4e2m1* ref_output = out_data_rowwise_ref.data() + tensor_offset / 2;
+        const fp4e2m1* test_output_t = out_data_colwise_h.data() + tensor_offset / 2;
+        const fp4e2m1* ref_output_t = out_data_colwise_ref.data() + tensor_offset / 2;
+
+        compare_nvfp4_tensors("output_" + std::to_string(t), test_output, ref_output,
+                              static_cast<int>(rows), static_cast<int>(cols), atol, rtol);
+        compare_nvfp4_tensors("output_t_" + std::to_string(t), test_output_t, ref_output_t,
+                              static_cast<int>(cols), static_cast<int>(rows), atol, rtol);
 
         size_t scale_mismatches_num = 0;
-        compare_scaling_factors<fp8e4m3>("scales_" + std::to_string(t),
-                                         output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
-                                         ref_scales.get(),
-                                         unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-                                         scale_mismatches_num);
+        compare_scaling_factors<fp8e4m3>(
+            "scales_" + std::to_string(t),
+            out_scales_rowwise_h.data() + rowwise_scale_offsets[t],
+            out_scales_rowwise_ref[t].data(),
+            rows, rowwise_unpadded_blocks_X[t], rowwise_scales_stride[t], scale_mismatches_num);
 
-        compare_scaling_factors<fp8e4m3>("scales_t_" + std::to_string(t),
-                                         output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
-                                         ref_scales_t.get(),
-                                         unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
-                                         scale_mismatches_num);
+        compare_scaling_factors<fp8e4m3>(
+            "scales_t_" + std::to_string(t),
+            out_scales_colwise_h.data() + colwise_scale_offsets[t],
+            out_scales_colwise_ref[t].data(),
+            cols, colwise_unpadded_blocks_X[t], colwise_scales_stride[t], scale_mismatches_num);
     }
+
+    nvte_destroy_grouped_tensor(in_group_tensor);
+    nvte_destroy_grouped_tensor(out_group_tensor);
+
+    cudaFree(in_data_d);
+    cudaFree(out_data_rowwise_d);
+    cudaFree(out_data_colwise_d);
+    cudaFree(out_scales_rowwise_d);
+    cudaFree(out_scales_colwise_d);
+    cudaFree(first_dims_d);
+    cudaFree(last_dims_d);
+    cudaFree(offsets_d);
 }
 
 // {shape_representation, num_tensors, [logical_shape_M, logical_shape_K], [M_i], [K_i]}
