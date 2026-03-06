@@ -141,6 +141,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
+  m.def("group_dequantize", transformer_engine::pytorch::group_dequantize, py::arg("input"),
+        py::arg("otype"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
