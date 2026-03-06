@@ -100,14 +100,14 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
   const size_t tensor_id = blockIdx.y;
   const size_t tensor_rows = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS)
                                  ? (first_logical_dim / num_tensors)
-                                 : first_dims_ptr[tensor_id];
+                                 : static_cast<size_t>(first_dims_ptr[tensor_id]);
 
   const size_t rows = tensor_rows / chunk_dim_Y;
   const size_t cols = last_logical_dim;
 
   const size_t dbias_in_offset_Y = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS)
                                        ? (tensor_id * (tensor_rows / chunk_dim_Y))
-                                       : (offsets_ptr[tensor_id] / cols / chunk_dim_Y);
+                                       : (static_cast<size_t>(offsets_ptr[tensor_id]) / cols / chunk_dim_Y);
 
   const size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
