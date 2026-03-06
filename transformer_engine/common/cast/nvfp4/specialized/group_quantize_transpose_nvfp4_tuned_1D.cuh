@@ -45,7 +45,13 @@ struct TunableConfig {
   static constexpr int STATIC_PERSISTENT_BLOCKS_PER_SM = 4;
 };
 
-static_assert(!TunableConfig::PERSISTENT || (TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM > 0),
+constexpr int CHUNK_DIM_Y = TunableConfig::CHUNK_DIM_Y;
+constexpr int CHUNK_DIM_X = TunableConfig::CHUNK_DIM_X;
+constexpr int PREFETCH_STAGES = TunableConfig::PREFETCH_STAGES;
+constexpr bool PERSISTENT = TunableConfig::PERSISTENT;
+constexpr int STATIC_PERSISTENT_BLOCKS_PER_SM = TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM;
+
+static_assert(!PERSISTENT || (STATIC_PERSISTENT_BLOCKS_PER_SM > 0),
               "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero in persistent mode.");
 
 constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
@@ -64,9 +70,9 @@ static_assert(ELTS_PER_THREAD == SCALE_DIM && "Hardcoded and fixed parameter\0")
 static_assert((THREADS_NUM * ELTS_PER_THREAD <= TILE_DIM_Y * TILE_DIM_X) &&
               "Unbalanced threads workload\0");
 
-static_assert((TunableConfig::CHUNK_DIM_Y % TILE_DIM_Y == 0) &&
+static_assert((CHUNK_DIM_Y % TILE_DIM_Y == 0) &&
               "Chunk size Y must be evenly divisible by the tile size Y\0");
-static_assert((TunableConfig::CHUNK_DIM_X % TILE_DIM_X == 0) &&
+static_assert((CHUNK_DIM_X % TILE_DIM_X == 0) &&
               "Chunk size X must be evenly divisible by the tile size X\0");
 
 static_assert((TILE_DIM_Y % SCALE_DIM == 0) &&
@@ -74,13 +80,13 @@ static_assert((TILE_DIM_Y % SCALE_DIM == 0) &&
 static_assert((TILE_DIM_X % SCALE_DIM == 0) &&
               "Tile size X must be evenly divisible by the scale dim\0");
 
-constexpr int TILES_Y = TunableConfig::CHUNK_DIM_Y / TILE_DIM_Y;
-constexpr int TILES_X = TunableConfig::CHUNK_DIM_X / TILE_DIM_X;
+constexpr int TILES_Y = CHUNK_DIM_Y / TILE_DIM_Y;
+constexpr int TILES_X = CHUNK_DIM_X / TILE_DIM_X;
 
 constexpr int THREADS_PER_SCALE_ROWWISE = SCALE_DIM / ELTS_PER_THREAD;
 
-constexpr int SCALES_PER_CHUNK_Y = TunableConfig::CHUNK_DIM_Y / SCALE_DIM;
-constexpr int SCALES_PER_CHUNK_X = TunableConfig::CHUNK_DIM_X / SCALE_DIM;
+constexpr int SCALES_PER_CHUNK_Y = CHUNK_DIM_Y / SCALE_DIM;
+constexpr int SCALES_PER_CHUNK_X = CHUNK_DIM_X / SCALE_DIM;
 
 constexpr int SCALES_PER_TILE_Y = TILE_DIM_Y / SCALE_DIM;
 constexpr int SCALES_PER_TILE_X = TILE_DIM_X / SCALE_DIM;
@@ -89,7 +95,7 @@ constexpr int STAGES_Y = TILES_Y;
 constexpr int STAGES_X = TILES_X;
 constexpr int STAGES = STAGES_Y * STAGES_X;
 
-constexpr int BUFFS_NUM = TunableConfig::PREFETCH_STAGES + 1;
+constexpr int BUFFS_NUM = PREFETCH_STAGES + 1;
 constexpr int BUFFS_NUM_IN = BUFFS_NUM;
 constexpr int BUFFS_NUM_OUT = BUFFS_NUM;
 constexpr int BUFFS_NUM_OUT_TR = 2;
@@ -135,7 +141,7 @@ constexpr int BUFF_OUT_IT_OFFSET = BUFF_OUT_TR_DIM_X / ITERATIONS_TR / STAGES;
 static_assert(BUFF_DIM_Y >= SCALE_DIM &&
               "Number of buffer rows must be greater or equal to the size of the columwise "
               "scaling block\0");
-static_assert(TunableConfig::CHUNK_DIM_Y >= BUFF_DIM_Y);
+static_assert(CHUNK_DIM_Y >= BUFF_DIM_Y);
 static_assert(BUFF_DIM_Y >= THREADS_Y_ROWWISE &&
               "Number of buffer rows must be greater or equal to the number of rowwise "
               "processing threads in Y dimension\0");
@@ -152,8 +158,8 @@ using IType3D = IType[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X];
 using IType2x3D = IType2[BUFFS_NUM_IN][BUFF_IN_DIM_Y][BUFF_IN_DIM_X / 2];
 using OType2x3D = fp4e2m1x2[BUFFS_NUM_OUT][BUFF_OUT_DIM_Y][BUFF_OUT_DIM_X];
 using OType2xt3D = fp4e2m1x2[BUFFS_NUM_OUT_TR][BUFF_OUT_TR_DIM_Y][BUFF_OUT_TR_DIM_X];
-using ScalesType2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
-using ScalesTypeTr2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
+using ScalesType2D = nvfp4_scale_t[CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
+using ScalesTypeTr2D = nvfp4_scale_t[CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
 using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<10>;
 
 template <bool USE_FAST_MATH>
@@ -366,7 +372,7 @@ __device__ __forceinline__ size_t get_current_tensor_id(
     const size_t block_Y, const size_t first_logical_dim, const size_t last_logical_dim,
     const int64_t *const __restrict__ offsets_ptr) {
   if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
-    const size_t current_row = block_Y * TunableConfig::CHUNK_DIM_Y;
+    const size_t current_row = block_Y * CHUNK_DIM_Y;
     const size_t rows_per_tensor = first_logical_dim / num_tensors;
     return current_row / rows_per_tensor;
   }
@@ -464,11 +470,10 @@ __device__ __forceinline__ JobDescriptor decode_job(
     const int64_t *const __restrict__ last_dims_ptr) {
   JobDescriptor job{};
   job.block_id = static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
-  job.block_global_offset =
-      use_single_work_grid
-          ? (static_cast<size_t>(ctaid_Y) * TunableConfig::CHUNK_DIM_Y * last_logical_dim +
-             static_cast<size_t>(ctaid_X) * TunableConfig::CHUNK_DIM_X)
-          : (job.block_id * TunableConfig::CHUNK_DIM_Y * TunableConfig::CHUNK_DIM_X);
+  job.block_global_offset = use_single_work_grid
+          ? (static_cast<size_t>(ctaid_Y) * CHUNK_DIM_Y * last_logical_dim +
+             static_cast<size_t>(ctaid_X) * CHUNK_DIM_X)
+          : (job.block_id * CHUNK_DIM_Y * CHUNK_DIM_X);
   job.tensor_id =
       get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset, static_cast<size_t>(ctaid_Y),
                             first_logical_dim, last_logical_dim, offsets_ptr);
@@ -504,28 +509,28 @@ __device__ __forceinline__ BlockDescriptor decode_block(
   block.tensor_base = get_tensor_base_offset(job.tensor_id, shape_rep, first_logical_dim,
                                              last_logical_dim, num_tensors, offsets_ptr);
 
-  const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, static_cast<size_t>(TunableConfig::CHUNK_DIM_X));
+  const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, static_cast<size_t>(CHUNK_DIM_X));
   if (use_single_work_grid) {
     block.block_id_X = static_cast<size_t>(ctaid_X);
     if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
       const size_t rows_per_tensor = first_logical_dim / num_tensors;
       const size_t blocks_Y_per_tensor =
-          DIVUP(rows_per_tensor, static_cast<size_t>(TunableConfig::CHUNK_DIM_Y));
+          DIVUP(rows_per_tensor, static_cast<size_t>(CHUNK_DIM_Y));
       block.block_id_Y = static_cast<size_t>(ctaid_Y) - job.tensor_id * blocks_Y_per_tensor;
     } else {
       const size_t tensor_base_row = block.tensor_base / job.cols;
       block.block_id_Y =
-          static_cast<size_t>(ctaid_Y) - tensor_base_row / static_cast<size_t>(TunableConfig::CHUNK_DIM_Y);
+          static_cast<size_t>(ctaid_Y) - tensor_base_row / static_cast<size_t>(CHUNK_DIM_Y);
     }
   } else {
     const size_t block_id_in_current_tensor =
-        job.block_id - block.tensor_base / (TunableConfig::CHUNK_DIM_Y * TunableConfig::CHUNK_DIM_X);
+        job.block_id - block.tensor_base / (CHUNK_DIM_Y * CHUNK_DIM_X);
     block.block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
     block.block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
   }
 
-  block.block_offset_Y = block.block_id_Y * TunableConfig::CHUNK_DIM_Y;
-  block.block_offset_X = block.block_id_X * TunableConfig::CHUNK_DIM_X;
+  block.block_offset_Y = block.block_id_Y * CHUNK_DIM_Y;
+  block.block_offset_X = block.block_id_X * CHUNK_DIM_X;
   return block;
 }
 
@@ -683,7 +688,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   constexpr int out_mem_rowwise_data = buff_size_aligned_out;
   constexpr int out_mem_colwise_data = RETURN_TRANSPOSE ? buff_size_aligned_out_t : 0;
   constexpr int out_mem_rowwise_scales = DIVUP_TO_MULTIPLE(
-      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+      CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
 
   extern __shared__ unsigned char dynamic_shmem[];
   unsigned char *dshmem = common::align_smem_ptr_per_TMA_requirements(dynamic_shmem);
@@ -730,7 +735,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   int32_t ctaid_Y = static_cast<int32_t>(blockIdx.y);
   size_t static_next_block_id = 0;
   size_t static_block_stride = 0;
-  if constexpr (TunableConfig::PERSISTENT) {
+  if constexpr (PERSISTENT) {
     if (launch_block_id >= total_work_blocks) {
       return;
     }
@@ -763,7 +768,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
       fence_acquire_tensormap(&tensor_map_input);
     }
 #pragma unroll
-    for (int stage = 0; stage < TunableConfig::PREFETCH_STAGES; ++stage) {
+    for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
       const int stage_Y = stage / STAGES_X;
       const int stage_X = stage % STAGES_X;
       const int stage_offset_Y = stage_Y * TILE_DIM_Y;
@@ -793,7 +798,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
         ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
                                                          IN_buff_readable_parity[buff_in]);
         IN_buff_readable_parity[buff_in] ^= 1;
-        ptx::cp_async_bulk_wait_group_read<TunableConfig::PREFETCH_STAGES>();
+        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
       }
       break;
     }
@@ -812,9 +817,9 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     const size_t chunk_rows = rows - block_offset_Y;
     const size_t chunk_cols = cols - block_offset_X;
 
-    const size_t scales_block_offset_Y_rowwise = current_block.block_id_Y * TunableConfig::CHUNK_DIM_Y;
+    const size_t scales_block_offset_Y_rowwise = current_block.block_id_Y * CHUNK_DIM_Y;
     const size_t scales_block_offset_X_rowwise = current_block.block_id_X * SCALES_PER_CHUNK_X;
-    const size_t scales_block_offset_Y_tr = current_block.block_id_X * TunableConfig::CHUNK_DIM_X;
+    const size_t scales_block_offset_Y_tr = current_block.block_id_X * CHUNK_DIM_X;
     const size_t scales_block_offset_X_tr = current_block.block_id_Y * SCALES_PER_CHUNK_Y;
 
     nvfp4_scale_t *const scales_rowwise = scales_ptr + current_block.tensor_base / SCALE_DIM;
@@ -849,8 +854,8 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
       JobDescriptor prefetch_job = current_job;
       BlockDescriptor prefetch_block = current_block;
 
-      if (stage == STAGES - TunableConfig::PREFETCH_STAGES) {
-        if constexpr (TunableConfig::PERSISTENT) {
+      if (stage == STAGES - PREFETCH_STAGES) {
+        if constexpr (PERSISTENT) {
           if (static_next_block_id < total_work_blocks) {
             ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
             ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
@@ -864,14 +869,14 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
           ctaid_X = -1;
           ctaid_Y = -1;
         }
-        if constexpr (!TunableConfig::PERSISTENT) {
+        if constexpr (!PERSISTENT) {
           if (ctaid_X == -1 && ctaid_Y == -1) {
             job_finished = true;
           }
         }
       }
 
-      if ((stage >= STAGES - TunableConfig::PREFETCH_STAGES) && allow_next_job_prefetch &&
+      if ((stage >= STAGES - PREFETCH_STAGES) && allow_next_job_prefetch &&
           !job_finished) {
         prefetch_job = decode_job(shape_rep, use_single_work_grid, num_tensors, first_logical_dim,
                                   last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr,
@@ -885,16 +890,16 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
         }
       }
 
-      if ((stage < STAGES - TunableConfig::PREFETCH_STAGES) ||
+      if ((stage < STAGES - PREFETCH_STAGES) ||
           (allow_next_job_prefetch && !job_finished)) {
-        const int next_prefetch_buff = (buff_in + TunableConfig::PREFETCH_STAGES) % BUFFS_NUM;
-        const int next_prefetch_stage = (stage + TunableConfig::PREFETCH_STAGES) % STAGES;
+        const int next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
+        const int next_prefetch_stage = (stage + PREFETCH_STAGES) % STAGES;
         const int next_prefetch_stage_Y = next_prefetch_stage / STAGES_X;
         const int next_prefetch_stage_X = next_prefetch_stage % STAGES_X;
         const int next_prefetch_stage_offset_Y = next_prefetch_stage_Y * TILE_DIM_Y;
         const int next_prefetch_stage_offset_X = next_prefetch_stage_X * TILE_DIM_X;
 
-        if (stage >= STAGES - TunableConfig::PREFETCH_STAGES) {
+        if (stage >= STAGES - PREFETCH_STAGES) {
           prefetched_next_job = true;
         }
 
@@ -904,7 +909,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
             static_cast<int>(prefetch_block.block_offset_X) + next_prefetch_stage_offset_X;
 
         const CUtensorMap &prefetch_tensor_map_input = g_tensor_maps_input[prefetch_job.tensor_id];
-        if (leading_thread && stage == STAGES - TunableConfig::PREFETCH_STAGES) {
+        if (leading_thread && stage == STAGES - PREFETCH_STAGES) {
           fence_acquire_tensormap(&prefetch_tensor_map_input);
         }
 
@@ -922,7 +927,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
       ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
                                                        IN_buff_readable_parity[buff_in]);
       IN_buff_readable_parity[buff_in] ^= 1;
-      ptx::cp_async_bulk_wait_group_read<TunableConfig::PREFETCH_STAGES>();
+      ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
 
       rowwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH>(
           sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in, buff_out,
@@ -962,7 +967,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     {
       using RowwiseScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_X>;
       const int rowwise_count = min(SCALES_PER_CHUNK_X, static_cast<int>(chunk_cols / SCALE_DIM));
-      for (size_t row = threadIdx.x; row < TunableConfig::CHUNK_DIM_Y; row += THREADS_NUM) {
+      for (size_t row = threadIdx.x; row < CHUNK_DIM_Y; row += THREADS_NUM) {
         const size_t row_global = scales_block_offset_Y_rowwise + row;
         if (row_global < rows) {
           RowwiseScalesVec &scales_vec = *reinterpret_cast<RowwiseScalesVec *>(sSFrowwise[row]);
@@ -974,7 +979,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
       if constexpr (RETURN_TRANSPOSE) {
         using ColwiseScalesVec = Vec<nvfp4_scale_t, SCALES_PER_CHUNK_Y>;
         const int colwise_count = min(SCALES_PER_CHUNK_Y, static_cast<int>(chunk_rows / SCALE_DIM));
-        for (size_t row_tr = threadIdx.x; row_tr < TunableConfig::CHUNK_DIM_X; row_tr += THREADS_NUM) {
+        for (size_t row_tr = threadIdx.x; row_tr < CHUNK_DIM_X; row_tr += THREADS_NUM) {
           const size_t row_tr_global = scales_block_offset_Y_tr + row_tr;
           if (row_tr_global < cols) {
             ColwiseScalesVec &scales_vec = *reinterpret_cast<ColwiseScalesVec *>(sSFcolwise[row_tr]);
@@ -1068,21 +1073,19 @@ inline void group_quantize_transpose_tuned_1D(const GroupedTensor *input, const 
   size_t work_blocks_X = 0;
   size_t work_blocks_Y = 0;
   if (use_single_work_grid) {
-    work_blocks_Y = DIVUP(first_logical_dim, static_cast<size_t>(TunableConfig::CHUNK_DIM_Y));
-    work_blocks_X = DIVUP(last_logical_dim, static_cast<size_t>(TunableConfig::CHUNK_DIM_X));
+    work_blocks_Y = DIVUP(first_logical_dim, static_cast<size_t>(CHUNK_DIM_Y));
+    work_blocks_X = DIVUP(last_logical_dim, static_cast<size_t>(CHUNK_DIM_X));
   } else {
     work_blocks_Y = 1;
-    work_blocks_X = DIVUP(
-        elts_total,
-        static_cast<size_t>(TunableConfig::CHUNK_DIM_Y * TunableConfig::CHUNK_DIM_X));
+    work_blocks_X = DIVUP(elts_total, static_cast<size_t>(CHUNK_DIM_Y * CHUNK_DIM_X));
   }
 
   size_t launch_blocks_X = work_blocks_X;
   size_t launch_blocks_Y = work_blocks_Y;
-  if constexpr (TunableConfig::PERSISTENT) {
+  if constexpr (PERSISTENT) {
     const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
     const size_t static_grid_size =
-        sm_num * static_cast<size_t>(TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM);
+        sm_num * static_cast<size_t>(STATIC_PERSISTENT_BLOCKS_PER_SM);
     NVTE_CHECK(static_grid_size > 0, "Static persistent grid size must be greater than zero.");
     launch_blocks_X = static_grid_size;
     launch_blocks_Y = 1;
@@ -1130,16 +1133,11 @@ inline void group_quantize_transpose_tuned_1D(const GroupedTensor *input, const 
 
   constexpr int buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr int buff_elems_total_in = BUFFS_NUM_IN * buff_elems;
-  constexpr int buff_size_aligned_in =
-      DIVUP_TO_MULTIPLE(buff_elems_total_in * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_aligned_out =
-      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_aligned_out_t =
-      DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_scales = DIVUP_TO_MULTIPLE(
-      TunableConfig::CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
-  constexpr int buff_size_scales_transpose = DIVUP_TO_MULTIPLE(
-      TunableConfig::CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total_in * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_out = DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT * BUFF_OUT_SIZE, TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_aligned_out_t = DIVUP_TO_MULTIPLE(BUFFS_NUM_OUT_TR * BUFF_OUT_TR_SIZE, TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_scales = DIVUP_TO_MULTIPLE(CHUNK_DIM_Y * SCALES_PER_CHUNK_X * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
+  constexpr int buff_size_scales_transpose = DIVUP_TO_MULTIPLE(CHUNK_DIM_X * SCALES_PER_CHUNK_Y * sizeof(nvfp4_scale_t), TMA_SHMEM_ALIGNMENT);
 
   const int in_mem = buff_size_aligned_in;
   const int out_data_mem = buff_size_aligned_out;
@@ -1147,8 +1145,7 @@ inline void group_quantize_transpose_tuned_1D(const GroupedTensor *input, const 
   const int out_scales_mem = buff_size_scales;
   const int out_scales_transpose_mem = return_transpose ? buff_size_scales_transpose : 0;
   const int out_mem = out_data_mem + out_data_transpose_mem;
-  const int dshmem_size =
-      in_mem + out_mem + out_scales_transpose_mem + out_scales_mem + TMA_SHMEM_ALIGNMENT;
+  const int dshmem_size = in_mem + out_mem + out_scales_transpose_mem + out_scales_mem + TMA_SHMEM_ALIGNMENT;
 
   const IType *const input_dptr = reinterpret_cast<const IType *>(input->data.dptr);
   const void *const output_dptr = output->data.dptr;
@@ -1160,14 +1157,12 @@ inline void group_quantize_transpose_tuned_1D(const GroupedTensor *input, const 
       first_dims_ptr, last_dims_ptr, true, return_transpose);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          use_fast_math, USE_FAST_MATH,
-          TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-            auto kernel =
-                group_quantize_transpose_nvfp4_tuned_1D_kernel<USE_STOCHASTIC_ROUNDING,
-                                                               USE_FAST_MATH, RETURN_TRANSPOSE>;
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(use_fast_math, USE_FAST_MATH,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE,
+            {
+            auto kernel = group_quantize_transpose_nvfp4_tuned_1D_kernel
+                          <USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE>;
 
             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
