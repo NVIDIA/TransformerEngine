@@ -37,6 +37,7 @@ class QuantizedTensorStorage:
     XTensor should only implement the functionality needed
     to behave like regular torch.Tensor (like __torch_dispatch__)."""
 
+    _dtype: torch.dtype
     _quantizer: Optional[Quantizer]
 
     def update_usage(
@@ -367,10 +368,13 @@ class QuantizedTensor(torch.Tensor):
         shape: Iterable[int],
         dtype: torch.dtype,
         *,
+        fake_dtype: Optional[torch.dtype] = None,
         requires_grad: bool = False,
         device: Optional[torch.device] = None,
         stride: Optional[Iterable[int]] = None,
     ):
+        if fake_dtype is not None and fake_dtype != dtype:
+            raise ValueError(f"fake_dtype ({fake_dtype}) does not match dtype ({dtype})")
         # For stride, We are assuming only contiguous tensors
         # Calculate stride from shape if not provided. When creating this object from
         # C++ code, we provide the stride computed from shape in C++ to avoid the
@@ -485,7 +489,7 @@ class QuantizedTensor(torch.Tensor):
         )
 
     def __repr__(self, *, tensor_contents=None) -> str:
-        return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
+        return f"{self.__class__.__name__}(data={self.dequantize()})"
 
     def float(self) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -588,7 +592,7 @@ class QuantizedTensor(torch.Tensor):
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
-                return arg.dequantize(dtype=arg.dtype)
+                return arg.dequantize()
             return arg
 
         def maybe_update_inplace(arg, new_arg, schema_arg):
