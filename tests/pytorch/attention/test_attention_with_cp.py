@@ -159,7 +159,9 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"
     ),  # MHA
     "cp_1_5": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 512)),  # MHA
-    "cp_2_0": ModelConfig(2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(128, 0)),  # GQA
+    "cp_2_0": ModelConfig(
+        2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(128, 0)
+    ),  # GQA
     "cp_2_1": ModelConfig(
         2, 4096, 128, 192, head_dim_v=128, attn_mask_type="causal"
     ),  # num_gqa_groups=4, attn_mask_type="causal"),  # GQA
@@ -240,8 +242,8 @@ if test_essential:
         # "cp_4_2",
     ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
-    dtypes = ["fp8"] #["bf16", "fp8"]
-    qkv_formats = ["bshd"]#, "sbhd", "thd"]
+    dtypes = ["fp8"]  # ["bf16", "fp8"]
+    qkv_formats = ["bshd"]  # , "sbhd", "thd"]
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
@@ -327,7 +329,9 @@ def test_cp_with_fused_attention(
     # ):
     #     pytest.skip("fp8 only works with P2P, A2A and A2A+P2P for scaling_mode = current!")
     if f16_O and (dtype != "fp8" or scaling_mode not in ["current", "mxfp8"]):
-        pytest.skip("f16_O only needs to be tested for dtype = fp8 and scaling_mode in [current, mxfp8]!")
+        pytest.skip(
+            "f16_O only needs to be tested for dtype = fp8 and scaling_mode in [current, mxfp8]!"
+        )
     # if cp_comm_type not in ["p2p", "a2a+p2p", "a2a"] and config.head_dim_qk != config.head_dim_v:
     #     pytest.skip("MLA CP currently only support KV P2P!")
     # if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
