@@ -877,9 +877,7 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_fused_attention = False
-        elif cp_comm_type in ["a2a", "a2a+p2p"] and (
-            num_heads % 2 != 0 or num_gqa_groups % 2 != 0
-        ):
+        elif cp_comm_type in ["a2a", "a2a+p2p"] and (num_heads % 2 != 0 or num_gqa_groups % 2 != 0):
             logger.debug(
                 "Disabling FusedAttention as cp_comm_type = %s requires num_heads and"
                 " num_gqa_groups divisible by 2 (got num_heads = %s, num_gqa_groups = %s)",

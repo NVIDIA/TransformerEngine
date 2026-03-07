@@ -110,10 +110,15 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     if qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
         pytest.skip("No support for THD format with cp_comm_type={all_gather, a2a+p2p}!")
 
-    if config.window_size != (-1, 0) and config.window_size != (-1, -1) and cp_comm_type in [
-        "p2p",
-        "a2a+p2p",
-    ]:
+    if (
+        config.window_size != (-1, 0)
+        and config.window_size != (-1, -1)
+        and cp_comm_type
+        in [
+            "p2p",
+            "a2a+p2p",
+        ]
+    ):
         pytest.skip("No support for SWA with cp_comm_type={p2p, a2a+p2p}!")
 
     if cp_comm_type in ["a2a", "a2a+p2p"] and (
@@ -299,10 +304,15 @@ def test_cp_with_fused_attention(
     if qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
         pytest.skip("No support for THD format with cp_comm_type={all_gather, a2a+p2p}!")
 
-    if (config.window_size != (-1, 0) or config.window_size != (-1, -1)) and cp_comm_type in ["p2p", "a2a+p2p"]:
+    if (config.window_size != (-1, 0) or config.window_size != (-1, -1)) and cp_comm_type in [
+        "p2p",
+        "a2a+p2p",
+    ]:
         pytest.skip("No support for SWA with cp_comm_type={p2p, a2a+p2p}!")
 
-    if cp_comm_type in ["a2a", "a2a+p2p"] and (config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0):
+    if cp_comm_type in ["a2a", "a2a+p2p"] and (
+        config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0
+    ):
         pytest.skip(
             f"cp_comm_type=a2a requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) divisible by 2!"
@@ -312,7 +322,11 @@ def test_cp_with_fused_attention(
         pytest.skip("No support for non-vanilla softmax with FP8 attention!")
     if config.softmax_type != "vanilla" and cp_comm_type != "a2a":
         pytest.skip(f"No support for non-vanilla softmax with cp_comm_type={cp_comm_type}!")
-    if config.softmax_type != "vanilla" and qkv_format == "thd" and get_cudnn_version() < (9, 18, 0):
+    if (
+        config.softmax_type != "vanilla"
+        and qkv_format == "thd"
+        and get_cudnn_version() < (9, 18, 0)
+    ):
         pytest.skip("No support for non-vanilla softmax with THD format and cuDNN < 9.18.0!")
 
     if dtype == "fp8" and scaling_mode is None:
