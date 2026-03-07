@@ -35,11 +35,15 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DP,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
+from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from transformer_engine.pytorch.tensor.storage.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
@@ -471,12 +475,19 @@ def get_attention_backend(
 
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
+        fp8_recipe = fp8_meta["recipe"]
+        if fp8_meta.get("local_recipes", None) is not None:
+            fp8_recipe = fp8_meta["local_recipes"][0]
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for FP8 attention")
         use_flash_attention_2 = False
         if use_flash_attention_3 and is_training:
             if FlashAttentionUtils.v3_is_installed:
                 logger.debug("Disabling FlashAttention 3 for FP8 training")
+            use_flash_attention_3 = False
+        if use_flash_attention_3 and fp8_recipe.mxfp8():
+            if FlashAttentionUtils.v3_is_installed:
+                logger.debug("Disabling FlashAttention 3 for MXFP8")
             use_flash_attention_3 = False
         if use_unfused_attention:
             allow_emulation = (
@@ -485,9 +496,6 @@ def get_attention_backend(
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
                 use_unfused_attention = False
-        fp8_recipe = fp8_meta["recipe"]
-        if fp8_meta.get("local_recipes", None) is not None:
-            fp8_recipe = fp8_meta["local_recipes"][0]
         if use_fused_attention and fp8_recipe.float8_current_scaling():
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
@@ -507,6 +515,17 @@ def get_attention_backend(
                             " with cuDNN < 9.18.0"
                         )
                         use_fused_attention = False
+        if use_fused_attention and fp8_recipe.mxfp8():
+            if device_compute_capability < (10, 0):
+                logger.debug("Disabling FusedAttention for MXFP8 on arch < sm100")
+                use_fused_attention = False
+            else:
+                if cudnn_version < (9, 21, 0):
+                    logger.debug("Disabling FusedAttention for MXFP8 with cuDNN < 9.21.0")
+                    use_fused_attention = False
+                elif qkv_format == "thd":
+                    logger.debug("Disabling FusedAttention for MXFP8 with qkv_format = thd")
+                    use_fused_attention = False
 
         if device_compute_capability == (12, 0):
             if use_flash_attention:
@@ -599,9 +618,9 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
-            logger.debug("Disabling FlashAttention 2 as it does not support MLA.")
-            use_flash_attention_2 = False
+        # if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+        #     logger.debug("Disabling FlashAttention 2 as it does not support MLA.")
+        #     use_flash_attention_2 = False
 
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
@@ -816,10 +835,55 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        elif fp8 and fp8_meta["recipe"].fp8_dpa and head_dim_qk != head_dim_v:
+        elif fp8 and qkv_format == "thd":
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with FP8"
-                " MLA attention"
+                " attention and THD format"
+            )
+            use_fused_attention = False
+        elif fp8 and core_attention_bias_type != "no_bias":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with FP8"
+                " attention and bias"
+            )
+            use_fused_attention = False
+
+        elif core_attention_bias_type != "no_bias" and cp_comm_type in [
+            "all_gather",
+            "a2a",
+            "a2a+p2p",
+        ]:
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with bias"
+                " and cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_fused_attention = False
+        elif qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with THD"
+                " format and cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_fused_attention = False
+        elif (
+            window_size is not None
+            and (window_size != (-1, 0) or window_size != (-1, -1))
+            and cp_comm_type in ["p2p", "a2a+p2p"]
+        ):
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with sliding"
+                " window attention and cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_fused_attention = False
+        elif cp_comm_type in ["a2a", "a2a+p2p"] and (num_heads % 2 != 0 or num_gqa_groups % 2 != 0):
+            logger.debug(
+                "Disabling FusedAttention as cp_comm_type = %s requires num_heads and"
+                " num_gqa_groups divisible by 2 (got num_heads = %s, num_gqa_groups = %s)",
+                cp_comm_type,
+                num_heads,
+                num_gqa_groups,
             )
             use_fused_attention = False
 
@@ -872,12 +936,7 @@ def get_attention_backend(
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-        if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
-            logger.debug(
-                "Disabling FusedAttention as it does not support sliding window attention for FP8"
-            )
-            use_fused_attention = False
-        elif attention_dropout != 0.0:
+        if attention_dropout != 0.0:
             logger.debug(
                 "Disabling FusedAttention as it only supports sliding window attention "
                 "without dropout"
@@ -1013,7 +1072,7 @@ def get_attention_backend(
             use_fused_attention
             and window_size is not None
             and window_size[0] != -1
-            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+            and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
         ):
             logger.debug(
                 "Disabling FusedAttention as only sub-backend %s does not support "
@@ -2095,28 +2154,45 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, quantizers):
+def get_attention_quantizers(fp8, fp8_recipe, quantizers):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
         return [None] * 6
+
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-    QKV_quantizer.internal = True
+    QKV_quantizer.internal = False
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
-    O_quantizer = quantizers["scaling_fwd"][META_O]
-    O_quantizer.set_usage(rowwise=True, columnwise=False)
+
     S_quantizer = quantizers["scaling_fwd"][META_S]
     S_quantizer.internal = True
     S_quantizer.set_usage(rowwise=True, columnwise=False)
 
-    dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
-    dQKV_quantizer.interal = True
-    dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
+    O_quantizer = quantizers["scaling_fwd"][META_O]
+    O_quantizer.internal = False
+    O_quantizer.set_usage(rowwise=True, columnwise=False)
+
     dO_quantizer = quantizers["scaling_bwd"][META_DO]
+    dO_quantizer.internal = False
     dO_quantizer.set_usage(rowwise=True, columnwise=False)
-    dO_quantizer.internal = True
+
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
-    dP_quantizer.set_usage(rowwise=True, columnwise=False)
     dP_quantizer.interal = True
+    dP_quantizer.set_usage(rowwise=True, columnwise=False)
+
+    dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
+    dQKV_quantizer.interal = False
+    dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
+
+    if fp8_recipe.mxfp8():
+        QKV_quantizer.columnwise_usage = True
+        QKV_quantizer.optimize_for_gemm = True
+        S_quantizer = None
+        O_quantizer.columnwise_usage = True
+
+        dO_quantizer.columnwise_usage = True
+        dO_quantizer.optimize_for_gemm = True
+        dP_quantizer = None
+        dQKV_quantizer.columnwise_usage = True
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 
@@ -2170,18 +2246,74 @@ def print_quantizers(
                 type_str = "DS"
             elif isinstance(q, Float8CurrentScalingQuantizer):
                 type_str = "CS"
-            print(
-                f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
-                f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
-            )
+            elif isinstance(q, MXFP8Quantizer):
+                type_str = "MXFP8"
+            if type_str in ["DS", "CS"]:
+                print(
+                    f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
+                    f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
+                )
+            else:
+                print(f"{label} >> {names[i]:14s}: {type_str}")
+
+
+def permute_to_grouped_tensor(src_format, tensor):
+    """Permute tensor to bhsd or htd format for grouped quantization in MXFP8BlockScaling. src_format ={bshd, sbhd, thd}"""
+    if src_format in ["bhsd", "htd"]:
+        return tensor, src_format
+    tensor = tensor.contiguous() if not tensor.is_contiguous() else tensor
+    dim_s_or_t = src_format.find("s") if "s" in src_format else src_format.find("t")
+    dim_others = [i for i in range(len(tensor.shape)) if i != dim_s_or_t]
+    perm = [*dim_others[:-1], dim_s_or_t, dim_others[-1]]
+    tensor = tensor.permute(*perm).contiguous()
+    return tensor, "bhsd" if src_format != "thd" else "htd"
 
 
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
     """Combine q,k,v based on qkv_layout and quantize them together"""
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
     qkv_group = len(qkv_layout.split("_"))
     src_nominal_dtype = q.dtype
+    if isinstance(qkv_quantizer, MXFP8Quantizer):
+        # bs3hd, sb3hd, etc -> bshd_bshd_bhsd -> bhsd_bhsd_bhsd
+        # t3hd, etc -> thd_thd_thd -> htd_htd_htd
+        if q_format not in ["bhsd", "htd"]:
+            q, _ = permute_to_grouped_tensor(q_format, q)
+        if kv_format not in ["bhsd", "htd"]:
+            k, _ = permute_to_grouped_tensor(kv_format, k)
+            v, _ = permute_to_grouped_tensor(kv_format, v)
+        qkv_layout = "bhsd_bhsd_bhsd" if qkv_format != "thd" else "htd_htd_htd"
+
+        original_shapes = [x.shape for x in [q, k, v]]
+        s_q, d_qk = q.shape[-2:]
+        s_kv, d_v = v.shape[-2:]
+        assert s_q % 128 == 0
+        assert s_kv % 128 == 0
+        assert d_qk % 32 == 0
+        assert d_v % 32 == 0
+        # need to check seqlens in THD % 128 == 0
+        q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
+
+        # consider bhsd for now
+        if d_qk == d_v:
+            grouped_tensor = GroupedTensor.create_and_quantize(
+                tensors=[q, k, v], quantizer=qkv_quantizer
+            )
+            q_fp8, k_fp8, v_fp8 = grouped_tensor.quantized_tensors
+        else:
+            # grouped_tensor = GroupedTensor.create_and_quantize(
+            #     tensors=[q, k], quantizer=qkv_quantizer
+            # )
+            # q_fp8, k_fp8 = grouped_tensor.quantized_tensors
+            q_fp8 = qkv_quantizer(q)
+            k_fp8 = qkv_quantizer(k)
+            v_fp8 = qkv_quantizer(v)
+        q_fp8, k_fp8, v_fp8 = [x.view(s) for x, s in zip([q_fp8, k_fp8, v_fp8], original_shapes)]
+
+        return q_fp8, k_fp8, v_fp8, qkv_layout
+
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
@@ -2221,7 +2353,7 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
         for x in [q_data, k_data, v_data]
     ]
 
-    return q_fp8, k_fp8, v_fp8
+    return q_fp8, k_fp8, v_fp8, qkv_layout
 
 
 def combine_and_dequantize(
@@ -2230,13 +2362,18 @@ def combine_and_dequantize(
     """Combine q,k,v based on qkv_layout and dequantize them together"""
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
     qkv_group = len(qkv_layout.split("_"))
-    if all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
+    if all(isinstance(x, QuantizedTensor) for x in [q_fp8, k_fp8, v_fp8]):
         src_nominal_dtype = q_fp8.dtype
     else:
         assert src_nominal_dtype is not None, "The nominal dtype of input tensors is required!"
     if des_nominal_dtype is None:
         des_nominal_dtype = src_nominal_dtype
+
+    if all(isinstance(x, (MXFP8Tensor, MXFP8TensorStorage)) for x in [q_fp8, k_fp8, v_fp8]):
+        q, k, v = [x.dequantize(dtype=des_nominal_dtype) for x in [q_fp8, k_fp8, v_fp8]]
+        return q, k, v
 
     q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
     match qkv_group:

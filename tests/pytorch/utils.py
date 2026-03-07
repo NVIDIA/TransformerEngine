@@ -177,6 +177,7 @@ def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol, is_fp8):
     rmse = torch.sqrt((a - b).square().mean()).item()
     logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
     rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
+    # rmse_tol = rmse_tol * 1.1
     assert rmse < rmse_tol * rmse_range, (
         name_a
         + " vs "
