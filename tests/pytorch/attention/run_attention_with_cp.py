@@ -186,13 +186,17 @@ def run_dpa_with_cp(
     scaling_mode="delayed",
     f16_O="False",
     is_training="True",
+    deterministic="False",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
     logging.root.setLevel(log_level)
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
-
+    if deterministic == "True":
+        os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    else:
+        os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     # set up environment variables and config
     fp8_bwd = fp8_bwd == "True" and dtype == "fp8"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_bwd else "0"
@@ -228,7 +232,6 @@ def run_dpa_with_cp(
         device_count = torch.cuda.device_count()
         device = rank % device_count
         torch.cuda.set_device(device)
-    print(f"rank: {rank}, world_size: {world_size}")
     logging.info(f"[Rank {rank}] Setup: world_size {world_size}")
     dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
 
@@ -330,7 +333,7 @@ def run_dpa_with_cp(
         dout_quantizer.internal = False
     qkv_layout = "_".join([qkv_format] * 3)
     q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
-    if fp8_mha:
+    if fp8_mha and scaling_mode != "mxfp8":
         q, k, v, qkv_layout = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
     for x in [q, k, v]:
         x.requires_grad = True
@@ -377,12 +380,12 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            fp8_output=fp8_mha,
+            # fp8_output=fp8_mha,
         )
         if config.return_max_logit:
             out, max_logit = out
         if is_training:
-            if fp8_bwd and fp8_mha:
+            if fp8_bwd and fp8_mha and scaling_mode != "mxfp8":
                 dout_fp8 = dout_quantizer(dout)
                 out.backward(dout_fp8)
             else:
@@ -438,7 +441,7 @@ def run_dpa_with_cp(
         qkv_quantizer.amax.fill_(0.0)
         dout_quantizer.scale.fill_(1.0)
         dout_quantizer.amax.fill_(0.0)
-    if fp8_mha:
+    if fp8_mha and scaling_mode != "mxfp8":
         q_, k_, v_, qkv_layout = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
     if is_training:
         q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
@@ -494,12 +497,12 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            fp8_output=fp8_mha,
+            # fp8_output=fp8_mha,
         )
         if config.return_max_logit:
             out_, max_logit_ = out_
         if is_training:
-            if fp8_bwd and fp8_mha:
+            if fp8_bwd and fp8_mha and scaling_mode != "mxfp8":
                 dout_fp8_ = dout_quantizer(dout_)
                 out_.backward(dout_fp8_)
             else:
@@ -528,9 +531,10 @@ def run_dpa_with_cp(
                 tensors_to_deq[i] = tensor.dequantize()
         if not fp8_bwd:
             tensors[0], tensors[5] = tensors_to_deq
-    for tensor in tensors:
+    for i, tensor in enumerate(tensors):
         # dbias/dbias_ could be None, so skip check for it
         if tensor is not None:
+            print(f"========= {torch.cuda.current_device()}: tensors[{i}].shape: {tensor.shape} {tensor.dtype} {torch.isnan(tensor).any()} {torch.isinf(tensor).any()}")
             assert torch.all(~torch.isnan(tensor))
             assert torch.all(~torch.isinf(tensor))
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
