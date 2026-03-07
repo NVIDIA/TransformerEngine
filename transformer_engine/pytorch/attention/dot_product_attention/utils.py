@@ -835,12 +835,59 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        # elif fp8 and fp8_meta["recipe"].fp8_dpa and head_dim_qk != head_dim_v:
-        #     logger.debug(
-        #         "Disabling FusedAttention as it does not support context parallelism with FP8"
-        #         " MLA attention"
-        #     )
-        #     use_fused_attention = False
+        elif fp8 and qkv_format == "thd":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with FP8"
+                " attention and THD format"
+            )
+            use_fused_attention = False
+        elif fp8 and core_attention_bias_type != "no_bias":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with FP8"
+                " attention and bias"
+            )
+            use_fused_attention = False
+
+        elif core_attention_bias_type != "no_bias" and cp_comm_type in [
+            "all_gather",
+            "a2a",
+            "a2a+p2p",
+        ]:
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with bias"
+                " and cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_fused_attention = False
+        elif qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with THD"
+                " format and cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_fused_attention = False
+        elif (
+            window_size is not None
+            and (window_size != (-1, 0) or window_size != (-1, -1))
+            and cp_comm_type in ["p2p", "a2a+p2p"]
+        ):
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with sliding"
+                " window attention and cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_fused_attention = False
+        elif cp_comm_type in ["a2a", "a2a+p2p"] and (
+            num_heads % 2 != 0 or num_gqa_groups % 2 != 0
+        ):
+            logger.debug(
+                "Disabling FusedAttention as cp_comm_type = %s requires num_heads and"
+                " num_gqa_groups divisible by 2 (got num_heads = %s, num_gqa_groups = %s)",
+                cp_comm_type,
+                num_heads,
+                num_gqa_groups,
+            )
+            use_fused_attention = False
 
     # Filter: Attention mask
     # attn_mask_type              | attention_mask                       | supported backends
