@@ -160,51 +160,64 @@ before_script:
     # to avoid conflicts during rebase squash everything into one commit
     - git reset $(git commit-tree HEAD^{tree} -m "CI on branch ${GH_BRANCH}")
     - git rebase github/${GH_BRANCH}
+    - export GH_PR_LIST=$(echo "${GH_PR}" | tr ',' ' ' | xargs)                                      && echo "${GH_PR_LIST}"
+    - export GL_MR_LIST=$(echo "${GL_MR}" | tr ',' ' ' | xargs)                                      && echo "${GL_MR_LIST}"
     - BUILD_BRANCH_NAME=test
     - test ${RELEASE} && BUILD_BRANCH_NAME=build
     - test ${GH_NIGHTLY} && BUILD_BRANCH_NAME=nightly_${CI_TIMESTAMP}
     - test ${GH_WEEKLY} && BUILD_BRANCH_NAME=weekly_${CI_TIMESTAMP}
-    - test ${GH_PR} && BUILD_BRANCH_NAME=pr_${GH_PR}
-    - test ${GL_MR} && BUILD_BRANCH_NAME=pr_gl${GL_MR}
-    - test ${GL_MR_BRANCH} && BUILD_BRANCH_NAME=pr_gl_${GL_MR_BRANCH}
+    - |
+      if [ -n "${GH_PR_LIST}" ] && [ -n "${GL_MR_LIST}" ]; then
+          BUILD_BRANCH_NAME=pr_combo_gh${GH_PR//,/x}_gl${GL_MR//,/x}
+      elif [ -n "${GH_PR_LIST}" ]; then
+          BUILD_BRANCH_NAME=pr_${GH_PR//,/x}
+      elif [ -n "${GL_MR_LIST}" ]; then
+          BUILD_BRANCH_NAME=pr_gl${GL_MR//,/x}
+      elif test ${GL_MR_BRANCH}; then
+          BUILD_BRANCH_NAME=pr_gl_${GL_MR_BRANCH}
+      fi
     - BUILD_BRANCH_NAME=${BUILD_BRANCH_NAME}_${GH_BRANCH}
     - export BUILD_BRANCH_NAME=${BUILD_BRANCH_NAME}_${CI_PIPELINE_ID}_CI  && echo "${BUILD_BRANCH_NAME}"
     - git branch -D ${BUILD_BRANCH_NAME} || true
-    - test ${GH_PR} &&
-      FETCH_BRANCH=fetch_${GH_PR} &&
-      git remote -v &&
-      (git remote remove github || true) &&
-      (git branch -D ${FETCH_BRANCH} || true) &&
-      git remote add github ${GITHUB_REPO} &&
-      git fetch github pull/${GH_PR}/head:${FETCH_BRANCH} &&
-      export GIT_SHA=$(git rev-list $FETCH_BRANCH -n 1) &&
-      echo $TEST_COMMIT_SHA &&
-      git merge ${FETCH_BRANCH} -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
-      git checkout -b ${BUILD_BRANCH_NAME} &&
-      git submodule add ../../devops/dlfw-ci &&
-      git submodule add ../te_ci_artifacts &&
-      git commit -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
-      git remote remove github &&
-      git branch -D ${FETCH_BRANCH} &&
-      git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
-    - test ${GL_MR} &&
-      FETCH_BRANCH=fetch_gl${GL_MR} &&
-      git remote -v &&
-      (git branch -D ${FETCH_BRANCH} || true) &&
-      git fetch ${ORIGIN_SSH} merge-requests/${GL_MR}/head:${FETCH_BRANCH} &&
-      git merge ${FETCH_BRANCH} -m "Merged MR gitlab${GL_MR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
-      git checkout -b ${BUILD_BRANCH_NAME} &&
-      git submodule add ../../devops/dlfw-ci &&
-      git submodule add ../te_ci_artifacts &&
-      git commit -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
-      git branch -D ${FETCH_BRANCH} &&
-      git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
-    - echo "test ${GH_PR} || test ${GL_MR} || test ${GL_MR_BRANCH} || git checkout -b ${BUILD_BRANCH_NAME} && git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force"
-    - test ${GH_PR} || test ${GL_MR} || test ${GL_MR_BRANCH} ||
-      git checkout -b ${BUILD_BRANCH_NAME} &&
-      git submodule add ../../devops/dlfw-ci &&
-      git submodule add ../te_ci_artifacts &&
-      git commit -m "CI on branch ${GH_BRANCH}" &&
+    - export MERGED_CHANGE=0
+    - |
+      if [ -n "${GH_PR_LIST}" ]; then
+          git remote -v
+          (git remote remove github || true)
+          git remote add github ${GITHUB_REPO}
+          for PR_ID in ${GH_PR_LIST}; do
+              FETCH_BRANCH=fetch_gh_${PR_ID}
+              (git branch -D ${FETCH_BRANCH} || true)
+              git fetch github pull/${PR_ID}/head:${FETCH_BRANCH}
+              export GIT_SHA=$(git rev-list ${FETCH_BRANCH} -n 1)
+              git merge ${FETCH_BRANCH} -m "Merged PR ${PR_ID} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}"
+              git branch -D ${FETCH_BRANCH}
+              export MERGED_CHANGE=1
+          done
+          git remote remove github
+      fi
+    - |
+      if [ -n "${GL_MR_LIST}" ]; then
+          git remote -v
+          for MR_ID in ${GL_MR_LIST}; do
+              FETCH_BRANCH=fetch_gl${MR_ID}
+              (git branch -D ${FETCH_BRANCH} || true)
+              git fetch ${ORIGIN_SSH} merge-requests/${MR_ID}/head:${FETCH_BRANCH}
+              export GIT_SHA=$(git rev-list ${FETCH_BRANCH} -n 1)
+              git merge ${FETCH_BRANCH} -m "Merged MR gitlab${MR_ID} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}"
+              git branch -D ${FETCH_BRANCH}
+              export MERGED_CHANGE=1
+          done
+      fi
+    - |
+      git checkout -b ${BUILD_BRANCH_NAME}
+      git submodule add ../../devops/dlfw-ci
+      git submodule add ../te_ci_artifacts
+      if [ "${MERGED_CHANGE}" = "1" ]; then
+          git commit -m "Merged GH PRs [${GH_PR_LIST}] and GL MRs [${GL_MR_LIST}] into ${GH_BRANCH}, build ${CI_PIPELINE_ID}"
+      else
+          git commit -m "CI on branch ${GH_BRANCH}"
+      fi
       git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
     # version is available only after checkout so provide it here only once
     - export CODE_VERSION=$(cat VERSION)                                                           && echo "${DALI_VERSION}"
