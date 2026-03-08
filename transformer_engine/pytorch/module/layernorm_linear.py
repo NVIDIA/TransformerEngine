@@ -29,7 +29,6 @@ from .base import (
 from ..quantization import FP8GlobalStateManager
 from ..utils import (
     assert_dim_for_fp8_exec,
-    assert_dim_for_all_gather,
     cast_if_needed,
     clear_tensor_data,
     divide,
@@ -158,7 +157,6 @@ class _LayerNormLinear(torch.autograd.Function):
         inputmat = inp
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
-            assert_dim_for_all_gather(inputmat, with_input_all_gather, input_quantizer)
 
         # Cast for native AMP
         nvtx_range_push(f"{nvtx_label}.norm_input_cast")
