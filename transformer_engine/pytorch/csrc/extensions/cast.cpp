@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <tuple>
 #include <utility>
@@ -1359,10 +1360,13 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
       if (!input_shape.empty() && input_shape.back() % 128 != 0) {
-        NVTE_WARN(
-            "Unfused NVFP4 quantization fallback is triggered because the input tensor inner "
-            "dimension is not a multiple of 128, disabling NVFP4 grouped kernel fusion. "
-            "NVFP4 might bring performance regressions for this input tensor shape.");
+        static std::once_flag once_unfused_nvfp4_fallback_warning;
+        std::call_once(once_unfused_nvfp4_fallback_warning, []() {
+          NVTE_WARN(
+              "Unfused NVFP4 quantization fallback is triggered because the input tensor inner "
+              "dimension is not a multiple of 128, disabling NVFP4 grouped kernel fusion. "
+              "NVFP4 might bring performance regressions for this input tensor shape.");
+        });
         quantization_method = QuantizationMethod::UNFUSED;
       }
       if (!contiguous_data_and_scale) {
