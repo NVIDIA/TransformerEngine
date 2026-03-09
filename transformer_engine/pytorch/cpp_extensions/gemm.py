@@ -82,7 +82,7 @@ def general_gemm(
     layout: str = "TN",
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    use_split_accumulator: bool = False,
+    use_split_accumulator: bool = True,
     grad: bool = False,
     ub: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
     ub_type: tex.CommOverlapType = None,
@@ -310,6 +310,8 @@ def general_grouped_gemm_for_grouped_tensor(
     *,
     layout: str = "TN",
     accumulate: bool = False,
+    use_split_accumulator: bool = False,
+    bias=None,
     alpha: Optional[torch.Tensor] = None,
     beta: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -327,12 +329,19 @@ def general_grouped_gemm_for_grouped_tensor(
 
     num_tensors = A.num_tensors
 
-    if out.data is not None:
+    if out.rowwise_data is not None:
         device = out.data.device
     elif out.columnwise_data is not None:
         device = out.columnwise_data.device
     else:
         raise ValueError("Output GroupedTensor must have allocated data.")
+    if bias is not None:
+        if bias.rowwise_data is None:
+            raise ValueError("Bias GroupedTensor must have rowwise_data.")
+        if bias.num_tensors != num_tensors:
+            raise ValueError("Bias GroupedTensor must match num_tensors.")
+        if bias.rowwise_data.device != device:
+            raise ValueError("Bias GroupedTensor must be on the same device as output.")
 
     if alpha is None:
         alpha = torch.ones(num_tensors, dtype=torch.float32, device=device)
@@ -359,17 +368,17 @@ def general_grouped_gemm_for_grouped_tensor(
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
 
-    C = out
     return tex.te_general_grouped_gemm_for_grouped_tensor(
         A,
         transa,
         B,
         transb,
-        C,
         out,
+        bias,
         alpha,
         beta,
         workspace_setup,
         workspace_cublas,
+        use_split_accumulator,
         sm_count,
     )

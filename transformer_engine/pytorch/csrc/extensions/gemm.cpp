@@ -89,7 +89,7 @@ struct GroupedGemmConfig {
 GroupedGemmConfig prepare_grouped_gemm_config(at::Tensor alpha, at::Tensor beta,
                                               at::Tensor workspace_setup,
                                               at::Tensor workspace_cublas, size_t num_tensors,
-                                              int math_sm_count) {
+                                              int math_sm_count, bool use_split_accumulator) {
   NVTE_CHECK(alpha.numel() == static_cast<int64_t>(num_tensors),
              "Grouped GEMM expects alpha to have num_tensors elements.");
   NVTE_CHECK(beta.numel() == static_cast<int64_t>(num_tensors),
@@ -107,9 +107,12 @@ GroupedGemmConfig prepare_grouped_gemm_config(at::Tensor alpha, at::Tensor beta,
       std::nullopt,
   };
 
-  if (math_sm_count > 0) {
+  if (math_sm_count > 0 || use_split_accumulator) {
     grouped_gemm_config.matmul_config.emplace();
-    grouped_gemm_config.matmul_config->set_sm_count(math_sm_count);
+    if (math_sm_count > 0) {
+      grouped_gemm_config.matmul_config->set_sm_count(math_sm_count);
+    }
+    grouped_gemm_config.matmul_config->set_use_split_accumulator(use_split_accumulator);
   }
 
   return grouped_gemm_config;
@@ -607,12 +610,10 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   return bias;
 }
 
-py::object te_general_grouped_gemm_for_grouped_tensor(py::handle A, bool transa, py::handle B,
-                                                      bool transb, py::object C, py::handle D,
-                                                      at::Tensor alpha, at::Tensor beta,
-                                                      at::Tensor workspace_setup,
-                                                      at::Tensor workspace_cublas,
-                                                      int math_sm_count) {
+py::object te_general_grouped_gemm_for_grouped_tensor(
+    py::handle A, bool transa, py::handle B, bool transb, py::handle D, at::Tensor alpha,
+    at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
+    bool use_split_accumulator, int math_sm_count) {
   using namespace transformer_engine::pytorch::detail;
 
   init_extension();
@@ -626,28 +627,20 @@ py::object te_general_grouped_gemm_for_grouped_tensor(py::handle A, bool transa,
   auto grouped_B = GroupedTensorFromPyTorchGroupedTensor(B);
   auto grouped_D = GroupedTensorFromPyTorchGroupedTensor(D);
 
-  std::optional<GroupedTensorWrapper> grouped_C = std::nullopt;
-  if (!C.is_none()) {
-    grouped_C = GroupedTensorFromPyTorchGroupedTensor(C);
-  }
-
   const size_t num_tensors = grouped_A.num_tensors();
   NVTE_CHECK(num_tensors > 0, "Grouped GEMM requires non-empty inputs.");
   NVTE_CHECK(grouped_B.num_tensors() == num_tensors,
              "Grouped GEMM requires A and B to have the same num_tensors.");
   NVTE_CHECK(grouped_D.num_tensors() == num_tensors,
              "Grouped GEMM requires D to have the same num_tensors as inputs.");
-  if (grouped_C.has_value()) {
-    NVTE_CHECK(grouped_C->num_tensors() == num_tensors,
-               "Grouped GEMM requires C to have the same num_tensors as inputs.");
-  }
 
   auto gemm_config = prepare_grouped_gemm_config(alpha, beta, workspace_setup, workspace_cublas,
-                                                 num_tensors, math_sm_count);
+                                                 num_tensors, math_sm_count,
+                                                 use_split_accumulator);
 
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb,
-                      grouped_C.has_value() ? grouped_C->data() : nullptr, grouped_D.data(),
+    nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb, grouped_D.data(),
+                      grouped_D.data(),
                       gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
                       gemm_config.te_workspace_setup.data(), gemm_config.te_workspace_cublas.data(),
                       gemm_config.matmul_config.has_value()
@@ -655,6 +648,14 @@ py::object te_general_grouped_gemm_for_grouped_tensor(py::handle A, bool transa,
                           : nullptr,
                       at::cuda::getCurrentCUDAStream());
   });
+
+  if (!bias.is_none()) {
+    auto grouped_bias = GroupedTensorFromPyTorchGroupedTensor(bias);
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
+                            at::cuda::getCurrentCUDAStream());
+    });
+  }
 
   return py::reinterpret_borrow<py::object>(D);
 }

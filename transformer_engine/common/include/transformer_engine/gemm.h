@@ -82,8 +82,10 @@ enum NVTEGroupedMatmulConfigAttribute {
    * computed automatically from A's logical shape.
    */
   kNVTEGroupedMatmulConfigAvgK = 2,
+  /*! Whether to use split accumulator for FP8 GEMM. */
+  kNVTEGroupedMatmulConfigUseSplitAccumulator = 3,
   /*! Number of streaming multiprocessors to use in GEMM kernel. */
-  kNVTEGroupedMatmulConfigSMCount = 3,
+  kNVTEGroupedMatmulConfigSMCount = 4,
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
@@ -359,6 +361,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                        const NVTETensor beta, NVTETensor workspace_setup,
                        NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
                        cudaStream_t stream);
+void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                           cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -520,6 +524,13 @@ class GroupedMatmulConfigWrapper {
   void set_sm_count(int sm_count) {
     nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigSMCount, &sm_count,
                                              sizeof(int));
+  }
+
+  /*! \brief Set whether to use split accumulator for FP8 GEMM. */
+  void set_use_split_accumulator(bool use_split_accumulator) {
+    const auto val = static_cast<uint8_t>(use_split_accumulator);
+    nvte_set_grouped_matmul_config_attribute(
+        config_, kNVTEGroupedMatmulConfigUseSplitAccumulator, &val, sizeof(val));
   }
 
  private:

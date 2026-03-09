@@ -2797,15 +2797,6 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
 
 
-def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:
-    if grouped_tensor.rowwise_data is None:
-        raise RuntimeError("GroupedTensor rowwise_data is not initialized.")
-    offset = 0
-    for tensor in tensors:
-        numel = tensor.numel()
-        grouped_tensor.rowwise_data[offset : offset + numel].copy_(tensor.reshape(-1))
-        offset += numel
-
 
 def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:
     data = grouped_tensor.rowwise_data

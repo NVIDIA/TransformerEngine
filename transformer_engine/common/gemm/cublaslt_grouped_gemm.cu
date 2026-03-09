@@ -364,7 +364,7 @@ inline void init_matrix_layouts(cublasLtMatrixLayoutOpaque_t &descA,
 }
 
 inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOperation_t op_A,
-                             cublasOperation_t op_B) {
+                             cublasOperation_t op_B, bool use_split_accumulator, bool use_fp8) {
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescInit(&matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &op_A,
@@ -383,6 +383,12 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
                                                    CUBLASLT_MATMUL_DESC_BETA_BATCH_STRIDE,
                                                    &alphabeta_batch_stride, sizeof(int64_t)));
+
+  // Fast accumulation mode: 0 = split accumulator (more accurate), 1 = fast accumulator
+  int8_t fastAccuMode = use_split_accumulator ? 0 : use_fp8;
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
+                                                   &fastAccuMode, sizeof(fastAccuMode)));
+
 }
 
 inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
@@ -460,6 +466,33 @@ __forceinline__ __device__ int64_t compute_grouped_tensor_offset(const TensorSha
     return cumsum;
   } else {
     return static_cast<int64_t>(idx) * meta.uniform_first * meta.uniform_last;
+  }
+}
+
+template <typename T>
+__global__ void grouped_bias_add_kernel(char *d_base, const char *bias_base, TensorShapeInfo d_meta,
+                                        TensorShapeInfo bias_meta, size_t num_tensors) {
+  const size_t tensor_idx = blockIdx.x;
+  if (tensor_idx >= num_tensors) return;
+
+  const int64_t m = d_meta.first_dims ? d_meta.first_dims[tensor_idx] : d_meta.uniform_first;
+  const int64_t n = d_meta.last_dims ? d_meta.last_dims[tensor_idx] : d_meta.uniform_last;
+  if (m == 0 || n == 0) return;
+
+  const int64_t bias_n = bias_meta.last_dims ? bias_meta.last_dims[tensor_idx]
+                                             : bias_meta.uniform_last;
+
+  const int64_t d_offset = compute_grouped_tensor_offset(d_meta, tensor_idx);
+  const int64_t bias_offset = compute_grouped_tensor_offset(bias_meta, tensor_idx);
+
+  auto *d_ptr = reinterpret_cast<T *>(d_base + d_offset * sizeof(T));
+  const auto *bias_ptr = reinterpret_cast<const T *>(bias_base + bias_offset * sizeof(T));
+
+  for (int64_t linear = threadIdx.x; linear < m * n; linear += blockDim.x) {
+    const int64_t col = linear % n;
+    if (col < bias_n) {
+      d_ptr[linear] += bias_ptr[col];
+    }
   }
 }
 
@@ -631,7 +664,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
 
   // Create matmul descriptor
   cublasLtMatmulDescOpaque_t matmulDesc;
-  init_matmul_desc(matmulDesc, op_A, op_B);
+  const bool use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
+  init_matmul_desc(matmulDesc, op_A, op_B, config_.use_split_accumulator, use_fp8);
   set_fp8_scale_pointers(matmulDesc, A_sel, B_sel);
 
   // Compute average dimensions for heuristics
@@ -654,6 +688,47 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                                    kGroupedGemmCublasWorkspaceSize, stream));
 }
 
+void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                           cudaStream_t stream) {
+  NVTE_API_CALL(nvte_grouped_bias_add);
+  using namespace transformer_engine;
+
+  const GroupedTensor *outputD = convertNVTEGroupedTensorCheck(output);
+  const GroupedTensor *bias_tensor = convertNVTEGroupedTensorCheck(bias);
+
+  NVTE_CHECK(outputD->num_tensors >= 1, "Grouped bias add: number of tensors must be at least 1");
+  NVTE_CHECK(outputD->num_tensors == bias_tensor->num_tensors,
+             "Grouped bias add: output and bias must have the same number of tensors");
+  NVTE_CHECK(outputD->has_data(), "Grouped bias add: output is missing row-wise data");
+  NVTE_CHECK(bias_tensor->has_data(), "Grouped bias add: bias is missing row-wise data");
+  NVTE_CHECK(outputD->dtype() == bias_tensor->dtype(),
+             "Grouped bias add: output and bias must have matching dtypes");
+  NVTE_CHECK(bias_tensor->all_same_first_dim(),
+             "Grouped bias add: bias must have uniform first dim (expected 1)");
+  NVTE_CHECK(bias_tensor->get_common_first_dim() == 1,
+             "Grouped bias add: bias first dim must be 1");
+  if (outputD->all_same_last_dim() && bias_tensor->all_same_last_dim()) {
+    NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(),
+               "Grouped bias add: output and bias last dims must match");
+  }
+
+  const TensorShapeInfo d_meta = TensorShapeInfo::from_tensor(outputD);
+  const TensorShapeInfo bias_meta = TensorShapeInfo::from_tensor(bias_tensor);
+
+  const DType dtype = outputD->dtype();
+  constexpr int kThreads = 256;
+  const dim3 grid(outputD->num_tensors);
+  const dim3 block(kThreads);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
+    grouped_bias_add_kernel<T><<<grid, block, 0, stream>>>(
+        static_cast<char *>(outputD->data.dptr), static_cast<const char *>(bias_tensor->data.dptr),
+        d_meta, bias_meta, outputD->num_tensors);
+  });
+
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 #else  // CUBLAS_VERSION < 130200
 
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
@@ -662,6 +737,12 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                        NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
                        cudaStream_t stream) {
   NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.2+, but compile-time cuBLAS version is ",
+             CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+}
+
+void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                           cudaStream_t stream) {
+  NVTE_ERROR("nvte_grouped_bias_add requires cuBLAS 13.2+, but compile-time cuBLAS version is ",
              CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
 }
 
