@@ -449,8 +449,7 @@ get_tensor_base_offset(const size_t tensor_id, const ShapeRepresentation shape_r
 }
 
 __device__ __forceinline__ size_t get_nvfp4_scale_stride(const size_t block_scaled_dim) {
-  return DIVUP_TO_MULTIPLE(DIVUP(block_scaled_dim, static_cast<size_t>(SCALE_DIM)),
-                           static_cast<size_t>(4));
+  return DIVUP_TO_MULTIPLE(DIVUP(block_scaled_dim, static_cast<size_t>(SCALE_DIM)), 4);
 }
 
 __device__ __forceinline__ size_t get_grouped_scale_base_offset(
@@ -460,8 +459,7 @@ __device__ __forceinline__ size_t get_grouped_scale_base_offset(
     const int64_t *const __restrict__ last_dims_ptr, const bool rowwise) {
   size_t scale_base = 0;
   for (size_t t = 0; t < tensor_id; ++t) {
-    const size_t rows =
-        get_tensor_rows_num(t, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+    const size_t rows = get_tensor_rows_num(t, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
     const size_t cols = get_tensor_cols_num(t, shape_rep, last_logical_dim, last_dims_ptr);
 
     const size_t scale_rows = rowwise ? rows : cols;
@@ -502,8 +500,7 @@ __device__ __forceinline__ JobDescriptor decode_job(
   job.tensor_id = get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset,
                                         static_cast<size_t>(ctaid_Y), first_logical_dim,
                                         last_logical_dim, offsets_ptr);
-  job.rows =
-      get_tensor_rows_num(job.tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+  job.rows = get_tensor_rows_num(job.tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   job.cols = get_tensor_cols_num(job.tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
   return job;
 }
@@ -662,9 +659,6 @@ __device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tenso
 
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_TRANSPOSE>
 __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tuned_1D_kernel(
-    const __grid_constant__ CUtensorMap tensor_map_input_static,
-    const __grid_constant__ CUtensorMap tensor_map_output_static,
-    const __grid_constant__ CUtensorMap tensor_map_output_t_static,
     const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t first_logical_dim,
     const size_t last_logical_dim, const int64_t *const __restrict__ offsets_ptr,
     const int64_t *const __restrict__ first_dims_ptr,
@@ -673,10 +667,6 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     const float *const amax_colwise_ptr, const size_t work_blocks_X, const size_t work_blocks_Y,
     const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  (void)tensor_map_input_static;
-  (void)tensor_map_output_static;
-  (void)tensor_map_output_t_static;
-
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -730,14 +720,36 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
 
   constexpr int shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
 
-  const float S_enc_rowwise =
-      (amax_rowwise_ptr == nullptr)
-          ? 1.0f
-          : core::compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
-  const float S_enc_colwise =
-      (amax_colwise_ptr == nullptr)
-          ? S_enc_rowwise
-          : core::compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
+  const float S_enc_rowwise = (amax_rowwise_ptr == nullptr)
+                              ? 1.0f
+                              : core::compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
+  const float S_enc_colwise = (amax_colwise_ptr == nullptr)
+                              ? S_enc_rowwise
+                              : core::compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
+
+  __shared__ size_t rowwise_scale_base[MAX_SUPPORTED_TENSOR_DESCRIPTORS + 1];
+  __shared__ size_t colwise_scale_base[MAX_SUPPORTED_TENSOR_DESCRIPTORS + 1];
+  {
+    if (threadIdx.x <= MAX_SUPPORTED_TENSOR_DESCRIPTORS) {
+      rowwise_scale_base[threadIdx.x] = 0;
+      colwise_scale_base[threadIdx.x] = 0;
+    }
+    __syncthreads();
+    if (leading_thread) {
+      size_t rowwise_scale_base_acc = 0;
+      size_t colwise_scale_base_acc = 0;
+
+      for (size_t t = 0; t < num_tensors; ++t) { 
+        const size_t rows = get_tensor_rows_num(t, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+        const size_t cols = get_tensor_cols_num(t, shape_rep, last_logical_dim, last_dims_ptr);
+    
+        rowwise_scale_base_acc += rows * get_nvfp4_scale_stride(cols);
+        colwise_scale_base_acc += cols * get_nvfp4_scale_stride(rows);
+        rowwise_scale_base[t + 1] = rowwise_scale_base_acc;
+        colwise_scale_base[t + 1] = colwise_scale_base_acc;
+      }
+    }
+  }
 
   __shared__ uint64_t IN_buff_readable_mbar[BUFFS_NUM];
 
@@ -843,15 +855,10 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     const size_t scale_stride = get_nvfp4_scale_stride(cols);
     const size_t scale_stride_t = get_nvfp4_scale_stride(rows);
 
-    const size_t rowwise_scale_base = get_grouped_scale_base_offset(
-        current_job.tensor_id, shape_rep, first_logical_dim, last_logical_dim, num_tensors,
-        first_dims_ptr, last_dims_ptr, true);
-    const size_t colwise_scale_base = get_grouped_scale_base_offset(
-        current_job.tensor_id, shape_rep, first_logical_dim, last_logical_dim, num_tensors,
-        first_dims_ptr, last_dims_ptr, false);
-    nvfp4_scale_t *const scales_rowwise = scales_ptr + rowwise_scale_base;
-    nvfp4_scale_t *const scales_colwise =
-        RETURN_TRANSPOSE ? (scales_t_ptr + colwise_scale_base) : nullptr;
+    nvfp4_scale_t *const scales_rowwise = scales_ptr + rowwise_scale_base[current_job.tensor_id];
+    nvfp4_scale_t *const scales_colwise = RETURN_TRANSPOSE
+                                          ? (scales_t_ptr + colwise_scale_base[current_job.tensor_id])
+                                          : nullptr;
 
     const CUtensorMap &tensor_map_input = g_tensor_maps_input[current_job.tensor_id];
     const CUtensorMap &tensor_map_output = g_tensor_maps_output[current_job.tensor_id];
@@ -1198,7 +1205,7 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
             kernel<<<grid, block_size, dshmem_size, stream>>>(
-                tensor_map_input, tensor_map_output, tensor_map_output_transpose, shape_rep,
+                shape_rep,
                 num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
                 last_dims_ptr, scales_ptr, scales_t_ptr, noop_ptr, amax_rowwise_ptr,
                 amax_colwise_ptr, work_blocks_X, work_blocks_Y, rng_state);
