@@ -1355,9 +1355,16 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (auto &quantizer : quantizer_cpp_list) {
         nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
       }
-      bool contiguous_data_and_scale;
+      bool contiguous_data_and_scale = false;
       std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
+      if (!input_shape.empty() && input_shape.back() % 128 != 0) {
+        NVTE_WARN(
+            "Unfused NVFP4 quantization fallback is triggered because the input tensor inner "
+            "dimension is not a multiple of 128, disabling NVFP4 grouped kernel fusion. "
+            "NVFP4 might bring performance regressions for this input tensor shape.");
+        quantization_method = QuantizationMethod::UNFUSED;
+      }
       if (!contiguous_data_and_scale) {
         // Avoid fused quantize kernel if data is not contiguous
         quantization_method = QuantizationMethod::UNFUSED;
