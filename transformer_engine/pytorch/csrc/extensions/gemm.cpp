@@ -78,6 +78,43 @@ bool checkGemmShape(const std::vector<size_t>& expected, const NVTEShape& actual
   return true;
 }
 
+struct GroupedGemmConfig {
+  TensorWrapper te_alpha;
+  TensorWrapper te_beta;
+  TensorWrapper te_workspace_setup;
+  TensorWrapper te_workspace_cublas;
+  std::optional<transformer_engine::GroupedMatmulConfigWrapper> matmul_config;
+};
+
+GroupedGemmConfig prepare_grouped_gemm_config(at::Tensor alpha, at::Tensor beta,
+                                              at::Tensor workspace_setup,
+                                              at::Tensor workspace_cublas, size_t num_tensors,
+                                              int math_sm_count) {
+  NVTE_CHECK(alpha.numel() == static_cast<int64_t>(num_tensors),
+             "Grouped GEMM expects alpha to have num_tensors elements.");
+  NVTE_CHECK(beta.numel() == static_cast<int64_t>(num_tensors),
+             "Grouped GEMM expects beta to have num_tensors elements.");
+
+  GroupedGemmConfig grouped_gemm_config{
+      makeTransformerEngineTensor(alpha),
+      makeTransformerEngineTensor(beta),
+      makeTransformerEngineTensor(
+          workspace_setup.data_ptr(),
+          std::vector<size_t>{static_cast<size_t>(workspace_setup.numel())}, DType::kByte),
+      makeTransformerEngineTensor(
+          workspace_cublas.data_ptr(),
+          std::vector<size_t>{static_cast<size_t>(workspace_cublas.numel())}, DType::kByte),
+      std::nullopt,
+  };
+
+  if (math_sm_count > 0) {
+    grouped_gemm_config.matmul_config.emplace();
+    grouped_gemm_config.matmul_config->set_sm_count(math_sm_count);
+  }
+
+  return grouped_gemm_config;
+}
+
 }  // namespace detail
 
 std::pair<TensorWrapper, py::object> createOutputTensor(const std::vector<size_t>& shape,
@@ -605,33 +642,18 @@ py::object te_general_grouped_gemm_for_grouped_tensor(py::handle A, bool transa,
                "Grouped GEMM requires C to have the same num_tensors as inputs.");
   }
 
-  NVTE_CHECK(alpha.numel() == static_cast<int64_t>(num_tensors),
-             "Grouped GEMM expects alpha to have num_tensors elements.");
-  NVTE_CHECK(beta.numel() == static_cast<int64_t>(num_tensors),
-             "Grouped GEMM expects beta to have num_tensors elements.");
+  auto gemm_config = prepare_grouped_gemm_config(alpha, beta, workspace_setup, workspace_cublas,
+    num_tensors, math_sm_count);
 
-  auto te_alpha = makeTransformerEngineTensor(alpha);
-  auto te_beta = makeTransformerEngineTensor(beta);
-
-  auto te_workspace_setup = makeTransformerEngineTensor(
-      workspace_setup.data_ptr(), std::vector<size_t>{static_cast<size_t>(workspace_setup.numel())},
-      DType::kByte);
-  auto te_workspace_cublas = makeTransformerEngineTensor(
-      workspace_cublas.data_ptr(),
-      std::vector<size_t>{static_cast<size_t>(workspace_cublas.numel())}, DType::kByte);
-
-  std::optional<transformer_engine::GroupedMatmulConfigWrapper> config;
-  if (math_sm_count > 0) {
-    config.emplace();
-    config->set_sm_count(math_sm_count);
-  }
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb,
                       grouped_C.has_value() ? grouped_C->data() : nullptr, grouped_D.data(),
-                      te_alpha.data(), te_beta.data(), te_workspace_setup.data(),
-                      te_workspace_cublas.data(),
-                      config.has_value() ? static_cast<NVTEGroupedMatmulConfig>(*config) : nullptr,
+                      gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
+                      gemm_config.te_workspace_setup.data(), gemm_config.te_workspace_cublas.data(),
+                      gemm_config.matmul_config.has_value()
+                          ? static_cast<NVTEGroupedMatmulConfig>(*gemm_config.matmul_config)
+                          : nullptr,
                       at::cuda::getCurrentCUDAStream());
   });
 

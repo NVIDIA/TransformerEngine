@@ -11,7 +11,6 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
-#include <vector>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
@@ -139,6 +138,7 @@ struct GroupedGemmSetupWorkspace {
     offset += ptr_size;
     ws.beta_ptrs = reinterpret_cast<float **>(setup_ws_ptr + offset);
     offset += ptr_size;
+
     // Int arrays for storage dimensions (4-byte aligned)
     ws.a_rows = reinterpret_cast<int *>(setup_ws_ptr + offset);
     offset += int_size;

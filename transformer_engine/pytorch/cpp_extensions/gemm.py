@@ -302,7 +302,7 @@ def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
     int_size = num_tensors * int_bytes
     k_ptr_alignment = 16
     aligned_ptr_size = ((ptr_size + k_ptr_alignment - 1) // k_ptr_alignment) * k_ptr_alignment
-    size = 8 * aligned_ptr_size + 6 * int_size
+    size = 6 * aligned_ptr_size + 6 * int_size
     alignment = 256
     return ((size + alignment - 1) // alignment) * alignment
 
@@ -330,10 +330,6 @@ def general_grouped_gemm_for_grouped_tensor(
     transb = layout[1] == "T"
 
     num_tensors = A.num_tensors
-    assert A.num_tensors == B.num_tensors == out.num_tensors, (
-        f"GroupedTensor num_tensors must match: A={A.num_tensors}, B={B.num_tensors},"
-        f" out={out.num_tensors}"
-    )
 
     if out.data is not None:
         device = out.data.device

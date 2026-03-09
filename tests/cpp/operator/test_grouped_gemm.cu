@@ -247,8 +247,6 @@ void run_grouped_gemm_case(const TestParams& params) {
                     nullptr,  // config (use defaults)
                     0);
 
-  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-  // Compare results
   for (size_t i = 0; i < num_gemms; ++i) {
     Tensor grouped_split("grouped_D" + std::to_string(i),
                          std::vector<size_t>{static_cast<size_t>(std::get<0>(shapes[i])),
@@ -291,6 +289,7 @@ std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest
 // TestParams: {input_case, transa, transb, shape_case, use_null_c}
 const std::vector<TestParams> kTestParams = {
     // Basic tests
+    {InputCase::kFP8Current, true, false, ShapeCase::kAllDifferent, false},
     {InputCase::kFP8Current, false, true, ShapeCase::kAllDifferent, false},
     {InputCase::kFP8Current, false, false, ShapeCase::kAllSame, false},
     {InputCase::kBF16, true, false, ShapeCase::kSameFirst, false},
