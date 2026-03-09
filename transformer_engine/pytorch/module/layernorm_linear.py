@@ -548,6 +548,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.grad_input_quantizer = None
                 ctx.grad_weight_quantizer = None
                 ctx.grad_output_quantizer = None
+                ctx.reduce_and_update_bwd_fp8_tensors = False
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...

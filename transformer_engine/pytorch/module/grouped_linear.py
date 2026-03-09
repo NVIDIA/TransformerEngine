@@ -336,6 +336,7 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.grad_input_quantizer = None
                 ctx.grad_weight_quantizer = None
                 ctx.grad_output_quantizer = None
+                ctx.reduce_and_update_bwd_fp8_tensors = False
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
