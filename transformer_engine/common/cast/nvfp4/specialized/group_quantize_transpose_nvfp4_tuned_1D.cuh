@@ -1161,7 +1161,7 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
   const void *const output_dptr = output->data.dptr;
   const void *const output_t_dptr = return_transpose ? output->columnwise_data.dptr : nullptr;
 
-  update_tma_descriptors<IType><<<num_tensors, 32, 0, stream>>>(
+  update_tma_descriptors<IType><<<num_tensors, 1, 0, stream>>>(
       tensor_map_input, tensor_map_output, tensor_map_output_transpose, input_dptr, output_dptr,
       output_t_dptr, shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
       first_dims_ptr, last_dims_ptr, true, return_transpose);
