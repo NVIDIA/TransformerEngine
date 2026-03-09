@@ -805,9 +805,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
 
         # Initialize recipe state and quantizers
-        roles = self.get_quantizer_roles(
+        roles = self.get_quantizer_roles(  # pylint: disable=assignment-from-none
             fwd=fwd, num_quantizers=num_fp8_tensors
-        )  # pylint: disable=assignment-from-none
+        )
         if roles is not None:
             assert (
                 len(roles) == num_fp8_tensors
