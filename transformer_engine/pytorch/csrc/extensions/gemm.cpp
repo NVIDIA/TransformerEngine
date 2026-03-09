@@ -98,9 +98,9 @@ GroupedGemmConfig prepare_grouped_gemm_config(at::Tensor alpha, at::Tensor beta,
   GroupedGemmConfig grouped_gemm_config{
       makeTransformerEngineTensor(alpha),
       makeTransformerEngineTensor(beta),
-      makeTransformerEngineTensor(
-          workspace_setup.data_ptr(),
-          std::vector<size_t>{static_cast<size_t>(workspace_setup.numel())}, DType::kByte),
+      makeTransformerEngineTensor(workspace_setup.data_ptr(),
+                                  std::vector<size_t>{static_cast<size_t>(workspace_setup.numel())},
+                                  DType::kByte),
       makeTransformerEngineTensor(
           workspace_cublas.data_ptr(),
           std::vector<size_t>{static_cast<size_t>(workspace_cublas.numel())}, DType::kByte),
@@ -643,8 +643,7 @@ py::object te_general_grouped_gemm_for_grouped_tensor(py::handle A, bool transa,
   }
 
   auto gemm_config = prepare_grouped_gemm_config(alpha, beta, workspace_setup, workspace_cublas,
-    num_tensors, math_sm_count);
-
+                                                 num_tensors, math_sm_count);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb,
