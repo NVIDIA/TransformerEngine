@@ -113,8 +113,10 @@ struct GroupedGemmSetupWorkspace {
   void **D_ptrs;
   float **alpha_ptrs;
   float **beta_ptrs;
-  void **a_scale_inv_ptrs;  // Per-tensor FP8 scale pointers for A (float* for tensor scaling, E8M0* for MXFP8)
-  void **b_scale_inv_ptrs;  // Per-tensor FP8 scale pointers for B (float* for tensor scaling, E8M0* for MXFP8)
+  void **
+      a_scale_inv_ptrs;  // Per-tensor FP8 scale pointers for A (float* for tensor scaling, E8M0* for MXFP8)
+  void **
+      b_scale_inv_ptrs;  // Per-tensor FP8 scale pointers for B (float* for tensor scaling, E8M0* for MXFP8)
   // Storage dimensions for cuBLAS matrix layouts
   int *a_rows;
   int *a_cols;
@@ -255,7 +257,7 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
 struct GroupedOperandSelection {
   TensorShapeInfo shape;  // Shape info with dims already swapped for columnwise if needed
   char *dptr = nullptr;
-  void *scale_inv = nullptr;       // Contiguous array of scales (input)
+  void *scale_inv = nullptr;        // Contiguous array of scales (input)
   void **scale_inv_ptrs = nullptr;  // Array of pointers to scales (output, for cuBLAS)
   transformer_engine::DType dtype = transformer_engine::DType::kNumTypes;
   NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
@@ -478,20 +480,20 @@ inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
     NVTE_CHECK(A_sel.with_gemm_swizzled_scales,
                "MXFP8 grouped GEMM: A scales must be swizzled for GEMM");
     cublasLtMatmulMatrixScale_t scale_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        &matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode_a, sizeof(scale_mode_a)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
+                                                     &scale_mode_a, sizeof(scale_mode_a)));
   }
   if (mxfp8_b) {
     NVTE_CHECK(B_sel.with_gemm_swizzled_scales,
                "MXFP8 grouped GEMM: B scales must be swizzled for GEMM");
     cublasLtMatmulMatrixScale_t scale_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        &matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode_b, sizeof(scale_mode_b)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
+                                                     &scale_mode_b, sizeof(scale_mode_b)));
   }
 #else
-  NVTE_CHECK(!mxfp8_a && !mxfp8_b,
-             "MXFP8 grouped GEMM requires cuBLAS ", CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
-             "+, but compile-time cuBLAS version is ", CUBLAS_VERSION);
+  NVTE_CHECK(!mxfp8_a && !mxfp8_b, "MXFP8 grouped GEMM requires cuBLAS ",
+             CUBLAS_MXFP8_GROUPED_GEMM_VERSION, "+, but compile-time cuBLAS version is ",
+             CUBLAS_VERSION);
 #endif  // CUBLAS_VERSION >= CUBLAS_MXFP8_GROUPED_GEMM_VERSION
 
   if (is_fp8_a) {
@@ -594,8 +596,8 @@ __global__ void setup_grouped_gemm_kernel(
     size_t b_elem_size, size_t c_elem_size, size_t d_elem_size, float *alpha_ptr, float *beta_ptr,
     // Scale inputs: for tensor scaling, pass float* and set mxfp8_base to nullptr
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
-    float *a_tensor_scale, float *b_tensor_scale,
-    char *a_mxfp8_scale_base, char *b_mxfp8_scale_base, size_t num_tensors) {
+    float *a_tensor_scale, float *b_tensor_scale, char *a_mxfp8_scale_base,
+    char *b_mxfp8_scale_base, size_t num_tensors) {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_tensors) return;
 
@@ -695,12 +697,10 @@ inline void launch_grouped_gemm_setup(
 
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
-      ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs,
-      ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
-      A_sel.dptr, B_sel.dptr, c_base, d_base,
-      A_meta, B_meta, C_meta, D_meta, a_elem_size, b_elem_size, c_elem_size, d_elem_size,
-      static_cast<float *>(alpha_tensor->data.dptr), static_cast<float *>(beta_tensor->data.dptr),
-      a_tensor_scale, b_tensor_scale,
+      ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
+      A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size,
+      b_elem_size, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
+      static_cast<float *>(beta_tensor->data.dptr), a_tensor_scale, b_tensor_scale,
       a_mxfp8_scale_base, b_mxfp8_scale_base, num_tensors);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
