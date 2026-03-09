@@ -46,6 +46,7 @@ def _inject_router(request):
         fused_topk_with_score_function,
         fused_moe_aux_loss,
     )
+
     mod = sys.modules[__name__]
     mod.fused_topk_with_score_function = fused_topk_with_score_function
     mod.fused_moe_aux_loss = fused_moe_aux_loss

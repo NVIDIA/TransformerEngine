@@ -172,7 +172,7 @@ if not is_triton_extension_supported():
     raise RuntimeError(
         f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for "
         "transformer_engine.jax.triton_extensions. "
-        f"Triton kernel dispatch segfaults with older jaxlib. "
+        "Triton kernel dispatch segfaults with older jaxlib. "
         f"Current jax version: {jax.__version__}. "
         "Please upgrade: pip install --upgrade jax jaxlib. "
         "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."

@@ -89,8 +89,9 @@ class TestTimingPlugin:
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
-        "triton: mark test (or test class) as requiring JAX Triton kernel support (JAX >= 0.8.0). "
-        "Apply per test/class with @pytest.mark.triton so non-Triton tests in the same file run on old JAX.",
+        "triton: mark test (or test class) as requiring JAX Triton kernel support (JAX >= 0.8.0)."
+        " Apply per test/class with @pytest.mark.triton so non-Triton tests in the same file run on"
+        " old JAX.",
     )
     if os.getenv("NVTE_JAX_TEST_TIMING", "0") == "1":
         config.pluginmanager.register(TestTimingPlugin(), "test_timing")

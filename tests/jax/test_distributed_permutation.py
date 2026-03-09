@@ -43,6 +43,7 @@ def _inject_permutation(request):
         return
     import sys
     from transformer_engine.jax.permutation import token_dispatch, token_combine
+
     mod = sys.modules[__name__]
     mod.token_dispatch = token_dispatch
     mod.token_combine = token_combine
