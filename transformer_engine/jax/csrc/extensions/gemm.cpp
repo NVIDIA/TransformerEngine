@@ -562,11 +562,12 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
 // This FFI is EXPERIMENTAL and subject to change without deprecation, intended for use in JAX's internal implementation of grouped GEMM.
 Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                             Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
-                            Buffer_Type group_sizes, Buffer_Type alpha, Buffer_Type beta,
+                            Buffer_Type lhs_group_sizes, Buffer_Type rhs_group_sizes,
+                            Buffer_Type out_group_sizes, Buffer_Type alpha, Buffer_Type beta,
                             Result_Type output, Result_Type cublas_workspace,
-                            Result_Type setup_workspace, Result_Type int64_workspace, size_t m,
-                            size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
-                            JAXX_Scaling_Mode scaling_mode, bool is_grouped_dense_wgrad) {
+                            Result_Type setup_workspace, Result_Type int64_workspace,
+                            bool lhs_is_trans, bool rhs_is_trans,
+                            JAXX_Scaling_Mode scaling_mode) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -581,6 +582,40 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   //   C: column-major with size [m, n] --> row-major with size [n, m].
   // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
 
+  // out_group_sizes is the sentinel for the output tensor's ragged dimension; unused directly here
+  // as the output shape is inferred from lhs/rhs dims and passed to nvte_grouped_gemm implicitly.
+  (void)out_group_sizes;
+
+  // Determine which group_sizes buffer is active (non-empty sentinel = ragged dimension).
+  bool is_lhs_ragged = lhs_group_sizes.element_count() > 0;
+  bool is_rhs_ragged = rhs_group_sizes.element_count() > 0;
+  bool any_ragged = is_lhs_ragged || is_rhs_ragged;
+
+  size_t num_gemms;
+  if (is_lhs_ragged)
+    num_gemms = lhs_group_sizes.dimensions()[0];
+  else if (is_rhs_ragged)
+    num_gemms = rhs_group_sizes.dimensions()[0];
+  else if (out_group_sizes.element_count() > 0)
+    num_gemms = out_group_sizes.dimensions()[0];
+  else
+    num_gemms = alpha.element_count();  // batched: no ragged tensor
+  const Buffer_Type &active_group_sizes = is_lhs_ragged ? lhs_group_sizes : rhs_group_sizes;
+
+  // lhs_data and rhs_data are 2D; derive m, n, k from buffer dimensions.
+  NVTE_CHECK(lhs_data.dimensions().size() == 2, "lhs_data must be 2D.");
+  NVTE_CHECK(rhs_data.dimensions().size() == 2, "rhs_data must be 2D.");
+  size_t k = lhs_is_trans ? lhs_data.dimensions()[0] : lhs_data.dimensions()[1];
+  size_t m, n;
+  if (is_rhs_ragged) {
+    // wgrad: lhs shape [K_lhs, M]: lhs_is_trans=True, contracting is dim[0]=K_lhs, output is dim[1]=M
+    m = lhs_is_trans ? lhs_data.dimensions()[1] : lhs_data.dimensions()[0];
+    n = rhs_data.dimensions()[1];
+  } else {
+    m = lhs_data.dimensions()[0];  // total M (sum of group sizes)
+    n = rhs_is_trans ? rhs_data.dimensions()[0] / num_gemms : rhs_data.dimensions()[1];
+  }
+
   // Inputs
   auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_data.untyped_data());
   auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_data.untyped_data());
@@ -594,14 +629,15 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   auto bias_ptr = has_bias ? reinterpret_cast<uint8_t *>(bias.untyped_data()) : nullptr;
   auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
 
-  NVTE_CHECK(group_sizes.dimensions().size() == 1);
-  size_t num_gemms = group_sizes.dimensions()[0];
-
-  // Convert int32 group_sizes to int64 into the dedicated output buffer.
-  NVTE_CHECK(group_sizes.element_type() == xla::ffi::DataType::S32, "group_sizes must be int32.");
+  // Convert int32 group_sizes to int64 into the dedicated output buffer (ragged tensors only).
   auto *int64_sizes_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
-  nvte_convert_int32_to_int64(reinterpret_cast<const int32_t *>(group_sizes.untyped_data()),
-                              int64_sizes_ptr, num_gemms, stream);
+  if (any_ragged) {
+    NVTE_CHECK(active_group_sizes.element_type() == xla::ffi::DataType::S32,
+               "group_sizes must be int32.");
+    nvte_convert_int32_to_int64(
+        reinterpret_cast<const int32_t *>(active_group_sizes.untyped_data()), int64_sizes_ptr,
+        num_gemms, stream);
+  }
 
   NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
              "Only non-quantized grouped GEMM is supported in current implementation.");
@@ -656,14 +692,14 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
              "sizeof(lhs_sinv_dtype) != sizeof(rhs_sinv_dtype)");
 
   size_t expected_lhs_size = m * k;
-  size_t expected_rhs_size = is_grouped_dense_wgrad ? (k * n) : (num_gemms * k * n);
-  size_t expected_out_size = is_grouped_dense_wgrad ? (num_gemms * m * n) : (m * n);
+  size_t expected_rhs_size = is_rhs_ragged ? (k * n) : (num_gemms * k * n);
+  size_t expected_out_size = is_rhs_ragged ? (num_gemms * m * n) : (m * n);
   size_t actual_lhs_size = product(lhs_data.dimensions());
   size_t actual_rhs_size = product(rhs_data.dimensions());
   size_t actual_out_size = product(output->dimensions());
   NVTE_CHECK(expected_lhs_size == actual_lhs_size, "Unexpected lhs size! Expect ",
              expected_lhs_size, ", got ", actual_lhs_size);
-  if (!is_grouped_dense_wgrad) {
+  if (!is_rhs_ragged) {
     NVTE_CHECK(expected_rhs_size == actual_rhs_size,
                "Unexpected rhs size! Expect num_gemms * n * k = ", num_gemms, " * ", n, " * ", k,
                " = ", expected_rhs_size, ", got ", actual_rhs_size);
@@ -703,7 +739,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             std::vector<size_t>{num_gemms},
                             convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
-  if (is_grouped_dense_wgrad) {
+  if (is_rhs_ragged) {
     NVTE_CHECK(lhs_is_trans && !rhs_is_trans,
                "For grouped dense wgrad, only TN GEMM is supported in TE/JAX currently.");
 
@@ -732,7 +768,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
     return ffi_with_cuda_error_check();
   }
 
-  // Nominal case for FWD or DGRAD
+  // Nominal case for FWD, DGRAD, or batched GEMM
 
   //// RHS
   NVTEShape rhsShape{.data = {num_gemms * k, n}, .ndim = 2};
@@ -748,14 +784,18 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
     std::swap(lhsShape.data[0], lhsShape.data[1]);
   }
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms,
-                                  lhs_is_trans ? kNVTEGroupedLastDims : kNVTEGroupedFirstDims);
+  if (any_ragged) {
+    lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms,
+                                    lhs_is_trans ? kNVTEGroupedLastDims : kNVTEGroupedFirstDims);
+  }
 
   //// OUTPUT
   NVTEShape outShape{.data = {m, n}, .ndim = 2};
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,
                                         num_gemms, outShape);
-  out_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
+  if (any_ragged) {
+    out_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
+  }
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
@@ -769,33 +809,32 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // lhs_data
+                                  .Arg<Buffer_Type>()      // lhs_data (2D)
                                   .Arg<Buffer_Type>()      // lhs_sinv
-                                  .Arg<Buffer_Type>()      // rhs_data
+                                  .Arg<Buffer_Type>()      // rhs_data (2D)
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
-                                  .Arg<Buffer_Type>()      // group_sizes (int32)
+                                  .Arg<Buffer_Type>()      // lhs_group_sizes (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // rhs_group_sizes (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // out_group_sizes (G,) or empty (0,)
                                   .Arg<Buffer_Type>()      // alpha
                                   .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // cublas_workspace
                                   .Ret<Buffer_Type>()      // setup_workspace
                                   .Ret<Buffer_Type>()      // int64_workspace
-                                  .Attr<int64_t>("M")
-                                  .Attr<int64_t>("N")
-                                  .Attr<int64_t>("K")
                                   .Attr<bool>("lhs_is_trans")
                                   .Attr<bool>("rhs_is_trans")
-                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_grouped_dense_wgrad"),
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode"),
                               FFI_CudaGraph_Traits);
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
-                          Buffer_Type group_sizes, Buffer_Type group_offset, Result_Type output,
-                          Result_Type workspace, size_t m, size_t n, size_t k, bool lhs_is_trans,
+                          Buffer_Type lhs_group_sizes, Buffer_Type rhs_group_sizes,
+                          Buffer_Type out_group_sizes, Buffer_Type group_offset,
+                          Result_Type output, Result_Type workspace, bool lhs_is_trans,
                           bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode, bool has_bias,
-                          bool is_grouped_dense_wgrad, bool use_async_d2h_group_sizes) {
+                          bool use_async_d2h_group_sizes) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -812,6 +851,37 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   int num_streams = nvte_get_num_compute_streams();
 
+  // out_group_sizes is the sentinel for the output tensor's ragged dimension; unused directly here.
+  (void)out_group_sizes;
+
+  // Determine which group_sizes buffer is active (non-empty sentinel = ragged dimension).
+  bool is_lhs_ragged = lhs_group_sizes.element_count() > 0;
+  bool is_rhs_ragged = rhs_group_sizes.element_count() > 0;
+  bool any_ragged = is_lhs_ragged || is_rhs_ragged;
+
+  size_t num_gemms;
+  if (is_lhs_ragged)
+    num_gemms = lhs_group_sizes.dimensions()[0];
+  else if (is_rhs_ragged)
+    num_gemms = rhs_group_sizes.dimensions()[0];
+  else
+    num_gemms = 1;  // degenerate batched; legacy batched not a tested use case
+  const Buffer_Type &active_group_sizes = is_lhs_ragged ? lhs_group_sizes : rhs_group_sizes;
+
+  // lhs_data and rhs_data are 2D; derive m, n, k from buffer dimensions.
+  NVTE_CHECK(lhs_data.dimensions().size() == 2, "lhs_data must be 2D.");
+  NVTE_CHECK(rhs_data.dimensions().size() == 2, "rhs_data must be 2D.");
+  size_t k = lhs_is_trans ? lhs_data.dimensions()[0] : lhs_data.dimensions()[1];
+  size_t m, n;
+  if (is_rhs_ragged) {
+    // wgrad: lhs shape [K_lhs, M]: lhs_is_trans=True, contracting is dim[0]=K_lhs, output is dim[1]=M
+    m = lhs_is_trans ? lhs_data.dimensions()[1] : lhs_data.dimensions()[0];
+    n = rhs_data.dimensions()[1];
+  } else {
+    m = lhs_data.dimensions()[0];  // total M (sum of group sizes)
+    n = rhs_is_trans ? rhs_data.dimensions()[0] / num_gemms : rhs_data.dimensions()[1];
+  }
+
   // Inputs
   auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_data.untyped_data());
   auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_data.untyped_data());
@@ -823,9 +893,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto rhs_sinv_dtype = convert_ffi_datatype_to_te_dtype(rhs_sinv.element_type());
   auto bias_ptr = has_bias ? reinterpret_cast<uint8_t *>(bias.untyped_data()) : nullptr;
   auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
-
-  NVTE_CHECK(group_sizes.dimensions().size() == 1);
-  size_t num_gemms = group_sizes.dimensions()[0];
 
   // It is weird that TE/Common GEMM only use colwise for MXFP8
   const bool is_fp8_gemm = is_fp8_dtype(lhs_dtype);
@@ -893,14 +960,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
              "sizeof(lhs_sinv_dtype) != sizeof(rhs_sinv_dtype)");
 
   size_t expected_lhs_size = m * k;
-  size_t expected_rhs_size = is_grouped_dense_wgrad ? (k * n) : (num_gemms * k * n);
-  size_t expected_out_size = is_grouped_dense_wgrad ? (num_gemms * m * n) : (m * n);
+  size_t expected_rhs_size = is_rhs_ragged ? (k * n) : (num_gemms * k * n);
+  size_t expected_out_size = is_rhs_ragged ? (num_gemms * m * n) : (m * n);
   size_t actual_lhs_size = product(lhs_data.dimensions());
   size_t actual_rhs_size = product(rhs_data.dimensions());
   size_t actual_out_size = product(output->dimensions());
   NVTE_CHECK(expected_lhs_size == actual_lhs_size, "Unexpected lhs size! Expect ",
              expected_lhs_size, ", got ", actual_lhs_size);
-  if (!is_grouped_dense_wgrad) {
+  if (!is_rhs_ragged) {
     NVTE_CHECK(expected_rhs_size == actual_rhs_size,
                "Unexpected rhs size! Expect num_gemms * n * k = ", num_gemms, " * ", n, " * ", k,
                " = ", expected_rhs_size, ", got ", actual_rhs_size);
@@ -916,25 +983,28 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   size_t dim_list_bytes = sizeof(int32_t) * num_gemms;
   std::vector<int32_t> dim_list_host(num_gemms);
-  size_t host_num_gemms = 0;
-  if (use_async_d2h_group_sizes) {
-    host_num_gemms = GroupedGemmGetGroupSizes(stream, num_gemms, nullptr, dim_list_host.data());
-    NVTE_CHECK(host_num_gemms == num_gemms, "num_gemms ", num_gemms,
-               " does not match the return of GroupedGemmGetGroupSizes ", host_num_gemms, ".");
-  } else {
-    auto dim_list_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
-    cudaMemcpyAsync(dim_list_host.data(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
-                    stream);
-    // Note: This may break cudaGraph.
-    cudaStreamSynchronize(stream);
-  }
-  size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-  if (!is_grouped_dense_wgrad) {
-    NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
-               ", got sum(group_sizes)=", sum_group_sizes);
-  } else {
-    NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
-               ", got sum(group_sizes)=", sum_group_sizes);
+  if (any_ragged) {
+    size_t host_num_gemms = 0;
+    if (use_async_d2h_group_sizes) {
+      host_num_gemms = GroupedGemmGetGroupSizes(stream, num_gemms, nullptr, dim_list_host.data());
+      NVTE_CHECK(host_num_gemms == num_gemms, "num_gemms ", num_gemms,
+                 " does not match the return of GroupedGemmGetGroupSizes ", host_num_gemms, ".");
+    } else {
+      auto active_gs_ptr =
+          reinterpret_cast<const int32_t *>(active_group_sizes.untyped_data());
+      cudaMemcpyAsync(dim_list_host.data(), active_gs_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
+                      stream);
+      // Note: This may break cudaGraph.
+      cudaStreamSynchronize(stream);
+    }
+    size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
+    if (!is_rhs_ragged) {
+      NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
+                 ", got sum(group_sizes)=", sum_group_sizes);
+    } else {
+      NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
+                 ", got sum(group_sizes)=", sum_group_sizes);
+    }
   }
 
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
@@ -982,7 +1052,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     auto lhs_shape_i = std::vector<size_t>{m_i, k};
     auto rhs_shape_i = std::vector<size_t>{rhs_is_trans ? n : k, rhs_is_trans ? k : n};
     auto out_shape_i = std::vector<size_t>{m_i, n};
-    if (is_grouped_dense_wgrad) {
+    if (is_rhs_ragged) {
       size_t k_i = dim_list_host[i];
       lhs_shape_i[0] = lhs_is_trans ? k_i : m;
       lhs_shape_i[1] = lhs_is_trans ? m : k_i;
@@ -1172,23 +1242,21 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // lhs_data
+                                  .Arg<Buffer_Type>()      // lhs_data (2D)
                                   .Arg<Buffer_Type>()      // lhs_sinv
-                                  .Arg<Buffer_Type>()      // rhs_data
+                                  .Arg<Buffer_Type>()      // rhs_data (2D)
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
-                                  .Arg<Buffer_Type>()      // group_sizes
+                                  .Arg<Buffer_Type>()      // lhs_group_sizes (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // rhs_group_sizes (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // out_group_sizes (G,) or empty (0,)
                                   .Arg<Buffer_Type>()      // group_offset
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // workspace
-                                  .Attr<int64_t>("M")
-                                  .Attr<int64_t>("N")
-                                  .Attr<int64_t>("K")
                                   .Attr<bool>("lhs_is_trans")
                                   .Attr<bool>("rhs_is_trans")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("has_bias")
-                                  .Attr<bool>("is_grouped_dense_wgrad")
                                   .Attr<bool>("use_async_d2h_group_sizes"));
 
 }  // namespace jax

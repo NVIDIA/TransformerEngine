@@ -1787,13 +1787,16 @@ class TestGroupedDense:
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         # jitting grouped_gemm
+        empty_gs = jnp.empty((0,), jnp.int32)
         prim_out = jax.jit(
             tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
         )(
             lhs,
             rhs,
-            group_sizes,
-            contracting_dims,
+            lhs_group_sizes=group_sizes,
+            rhs_group_sizes=empty_gs,
+            out_group_sizes=group_sizes,
+            contracting_dims=contracting_dims,
             use_async_d2h_group_sizes=True,
         )
 
@@ -1825,8 +1828,15 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
+        empty_gs = jnp.empty((0,), jnp.int32)
         prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-            lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+            lhs,
+            rhs,
+            lhs_group_sizes=group_sizes,
+            rhs_group_sizes=empty_gs,
+            out_group_sizes=group_sizes,
+            contracting_dims=contracting_dims,
+            quantizer_set=quantizer_set,
         )
 
         allclose_dtype = jnp.float8_e4m3fn

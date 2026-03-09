@@ -523,15 +523,18 @@ def _grouped_dense_fwd_rule(
         # This is needed especially when kernel_fsdp_enabled == True AND FP8 enabled.
         quantizer_set.kernel.q_layout = original_quantizer_set_kernel_q_layout
 
+    empty_gs = jnp.empty((0,), jnp.int32)
     output = tex.grouped_gemm(
         grouped_gemm_x,
         grouped_gemm_kernel,
-        group_sizes,
-        contracting_dims,
-        bias,
-        precision,
-        preferred_element_type,
-        group_offset,
+        lhs_group_sizes=group_sizes,
+        rhs_group_sizes=empty_gs,
+        out_group_sizes=group_sizes,
+        contracting_dims=contracting_dims,
+        bias=bias,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        group_offset=group_offset,
     )
 
     ctx = (
@@ -615,11 +618,14 @@ def _grouped_dense_bwd_rule(
         wgrad_x_T = ctx_x
         wgrad_grad = casted_grad.get_tensor(usage=TensorUsage.RHS)
 
+    empty_gs = jnp.empty((0,), jnp.int32)
     dgrad = tex.grouped_gemm(
         dgrad_grad,
         dgrad_kernel_T,
-        group_sizes,
-        dgrad_contracting_dims,
+        lhs_group_sizes=group_sizes,
+        rhs_group_sizes=empty_gs,
+        out_group_sizes=group_sizes,
+        contracting_dims=dgrad_contracting_dims,
         precision=precision,
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
@@ -628,8 +634,10 @@ def _grouped_dense_bwd_rule(
     wgrad = tex.grouped_gemm(
         wgrad_x_T,
         wgrad_grad,
-        group_sizes,
-        wgrad_contracting_dims,
+        lhs_group_sizes=empty_gs,
+        rhs_group_sizes=group_sizes,
+        out_group_sizes=empty_gs,
+        contracting_dims=wgrad_contracting_dims,
         precision=precision,
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
