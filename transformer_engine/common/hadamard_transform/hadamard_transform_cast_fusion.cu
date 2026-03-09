@@ -436,11 +436,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
     const float global_decode_scale = 1.0f / global_encode_scale;
 
     // Scaling factor for fast math path
-    float global_encode_scale_multiplier = 1.0f;
-    if constexpr (kUseFastMath) {
-      static constexpr float fp4_max_inv = 1.0f / fp4_max;
-      global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-    }
+    static constexpr float fp4_max_inv = 1.0f / fp4_max;
+    float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
 
     do {
       for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n; ++k_tile) {
@@ -498,14 +495,7 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
           vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
         }
 
-        if constexpr (kUseFastMath) {
-          // Fast math: multiply with precomputed reciprocal
-          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, global_encode_scale_multiplier);
-        } else {
-          // Accurate math: perform division
-          pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
-          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(pvscales, global_encode_scale);
-        }
+        pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, global_encode_scale_multiplier);
         auto pvscales_cvted = cutlass::NumericArrayConverter<TSFC, ElementAccumulator, NumVecs>{}(pvscales);
 
         tC_rRowSFD_frg(_0{}) = pvscales_cvted;

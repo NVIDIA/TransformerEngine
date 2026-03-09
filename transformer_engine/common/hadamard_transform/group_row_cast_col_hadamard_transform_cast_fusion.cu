@@ -744,10 +744,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
         float global_decode_scale = 1.0f / global_encode_scale;
 
         // Scaling factor for fast math path
-        float global_encode_scale_multiplier = 1.0f;
-        if constexpr (kUseFastMath) {
-          global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-        }
+        float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
 
         do {
           scheduler.fetch_next_work(sched_pipeline, sched_pipeline_consumer_state);
@@ -770,9 +767,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                               cutlass::platform::numeric_limits<float>::max())
                                         : 1.0f;
               global_decode_scale = 1.0f / global_encode_scale;
-              if constexpr (kUseFastMath) {
-                global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-              }
+              global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
               cur_N = args.split_sections[group_idx];
               if constexpr (kEnableSwizzleSFOutput) {
                 sfd_layout =
@@ -862,17 +857,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
               vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
             }
 
-            if constexpr (kUseFastMath) {
-              // Fast math: multiply with precomputed reciprocal
-              pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-                  vec_maxs, global_encode_scale_multiplier);
-            } else {
-              // Accurate math: perform division
-              pvscales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs,
-                                                                                         fp4_max);
-              pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-                  pvscales, global_encode_scale);
-            }
+            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+                vec_maxs, global_encode_scale_multiplier);
             auto pvscales_cvted =
                 cutlass::NumericArrayConverter<TSFD, ElementAccumulator, NumVecs>{}(pvscales);
 
@@ -1006,10 +992,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                         : 1.0f;
 
         float global_decode_scale = 1.0f / global_encode_scale;
-        float global_encode_scale_multiplier = 1.0f;
-        if constexpr (kUseFastMath) {
-          global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-        }
+        float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
         auto sfa_converter = cutlass::NumericConverter<TSFA, ElementAccumulator>{};
         do {
           CUTLASS_PRAGMA_NO_UNROLL
@@ -1028,9 +1011,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                                               cutlass::platform::numeric_limits<float>::max())
                                         : 1.0f;
               global_decode_scale = 1.0f / global_encode_scale;
-              if constexpr (kUseFastMath) {
-                global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-              }
+              global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
             }
 
             auto tQAgSFA_mn =
@@ -1069,17 +1050,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                   cutlass::NumericArrayConverter<ElementAccumulator, TA, VectorSize>{}(
                       compute_frgs[v]);
               amax_view(_0{}, v) = amax_reduction(ElementAccumulator(0), compute_frgs_up);
-              if constexpr (kUseFastMath) {
-                // Fast math: multiply with precomputed reciprocal
-                pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
-                    amax_view(_0{}, v), global_encode_scale_multiplier);
-              } else {
-                // Accurate math: perform division
-                pvscales_view(_0{}, v) =
-                    cutlass::divides<ElementAccumulator>{}(amax_view(_0{}, v), fp4_max);
-                pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
-                    pvscales_view(_0{}, v), global_encode_scale);
-              }
+              pvscales_view(_0{}, v) = cutlass::multiplies<ElementAccumulator>{}(
+                  amax_view(_0{}, v), global_encode_scale_multiplier);
               filter(tQArSFA)(v) = sfa_converter(pvscales_view(_0{}, v));
               auto qpvscale_ups =
                   cutlass::NumericConverter<ElementAccumulator, TSFA>{}(filter(tQArSFA)(v));

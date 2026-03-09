@@ -514,10 +514,7 @@ __global__ static void group_rht_gemm_device(
       float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
 
       // Scaling factor for fast math path
-      float global_encode_scale_multiplier = 1.0f;
-      if constexpr (kUseFastMath) {
-        global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-      }
+      float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
 
       float global_decode_scale = 1.0f / global_encode_scale;
 
@@ -536,9 +533,7 @@ __global__ static void group_rht_gemm_device(
           if (tensor_id != new_tensor_id) {
             global_amax_val = *global_amax_ptr;
             global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
-            if constexpr (kUseFastMath) {
-              global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-            }
+            global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
             global_decode_scale = 1.0f / global_encode_scale;
             tensor_id = new_tensor_id;
             // went through the cute operations to update the local tensors
@@ -638,17 +633,8 @@ __global__ static void group_rht_gemm_device(
             vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
           }
 
-          if constexpr (kUseFastMath) {
-            // Fast math: multiply with precomputed reciprocal
-            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-                vec_maxs, global_encode_scale_multiplier);
-          } else {
-            // Accurate math: perform division
-            pvscales =
-                cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
-            pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-                pvscales, global_encode_scale);
-          }
+          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+              vec_maxs, global_encode_scale_multiplier);
           auto pvscales_cvted =
               cutlass::NumericArrayConverter<TSFC, ElementAccumulator, NumVecs>{}(pvscales);
 

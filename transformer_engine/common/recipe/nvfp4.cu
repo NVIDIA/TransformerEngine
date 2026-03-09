@@ -17,7 +17,7 @@
 namespace transformer_engine {
 namespace nvfp4_recipe {
 
-#if FP4_TYPE_SUPPORTED  
+#if FP4_TYPE_SUPPORTED
 /*
  * ---------------------------------------------------------------------------
  * NVFP4 2D PARTIAL-SHARD KERNEL DESIGN
