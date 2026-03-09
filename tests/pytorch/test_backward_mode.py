@@ -1636,3 +1636,163 @@ def test_quantize_op_respects_backward_mode(
 
     assert_close(y_override, y_ref, rtol=0, atol=0, check_dtype=True)
     assert_close(dx_override, dx_ref, rtol=0, atol=0, check_dtype=True)
+
+
+@pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
+@pytest.mark.parametrize("module_type", ("linear", "layernorm_linear"))
+def test_backward_mode_memory_peak_report(
+    recipe_name: str,
+    module_type: str,
+) -> None:
+    """Diagnostic-only memory report for default/unquant/dequant backward modes."""
+    reset_rng_states()
+    dtype = torch.bfloat16
+    input_shape = (2048, 2048)
+    out_features = 2048 * 4
+    in_features = input_shape[-1]
+    use_bias = True
+
+    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_unsupported_recipe_module_combo(recipe_name, module_type)
+    _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
+
+    base_module = _make_linear_like_module(
+        module_type,
+        in_features,
+        out_features,
+        dtype,
+        bias=use_bias,
+    )
+
+    x = torch.randn(*input_shape, dtype=dtype, device="cuda")
+    dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
+
+    modes = ("default", "unquant", "dequant")
+    mode_results: dict[str, dict[str, float] | str] = {}
+
+    for mode in modes:
+        try:
+            mode_recipe = make_recipe(recipe_name, backward_mode=mode)
+
+            # Keep params identical across modes for a cleaner apples-to-apples read.
+            module = _make_linear_like_module(
+                module_type,
+                in_features,
+                out_features,
+                dtype,
+                bias=use_bias,
+            )
+            _copy_named_parameters(base_module, module)
+
+            # Warmup run to reduce first-use kernel setup noise.
+            _run_single_step(module, x, dy, mode_recipe)
+
+            module.zero_grad(set_to_none=True)
+            x_run = x.detach().clone().requires_grad_(True)
+            autocast_ctx = te.autocast(enabled=True, recipe=mode_recipe)
+
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            fwd_start_mem = torch.cuda.memory_allocated()
+            with autocast_ctx:
+                y = module(x_run)
+                if isinstance(y, tuple):
+                    y = y[0]
+            torch.cuda.synchronize()
+            fwd_peak_alloc = float(torch.cuda.max_memory_allocated() - fwd_start_mem)
+            fwd_peak_reserved = float(torch.cuda.max_memory_reserved())
+
+            torch.cuda.reset_peak_memory_stats()
+            bwd_start_mem = torch.cuda.memory_allocated()
+            y.backward(dy)
+            torch.cuda.synchronize()
+            bwd_peak_alloc = float(torch.cuda.max_memory_allocated() - bwd_start_mem)
+            bwd_peak_reserved = float(torch.cuda.max_memory_reserved())
+
+            module.zero_grad(set_to_none=True)
+            x_run = x.detach().clone().requires_grad_(True)
+            autocast_ctx = te.autocast(enabled=True, recipe=mode_recipe)
+
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            e2e_start_mem = torch.cuda.memory_allocated()
+            with autocast_ctx:
+                y = module(x_run)
+                if isinstance(y, tuple):
+                    y = y[0]
+            y.backward(dy)
+            torch.cuda.synchronize()
+            e2e_peak_alloc = float(torch.cuda.max_memory_allocated() - e2e_start_mem)
+            e2e_peak_reserved = float(torch.cuda.max_memory_reserved())
+
+            mode_results[mode] = {
+                "fwd_peak_alloc_mb": fwd_peak_alloc / (1024**2),
+                "fwd_peak_reserved_mb": fwd_peak_reserved / (1024**2),
+                "bwd_peak_alloc_mb": bwd_peak_alloc / (1024**2),
+                "bwd_peak_reserved_mb": bwd_peak_reserved / (1024**2),
+                "e2e_peak_alloc_mb": e2e_peak_alloc / (1024**2),
+                "e2e_peak_reserved_mb": e2e_peak_reserved / (1024**2),
+            }
+        except Exception as exc:  # pragma: no cover - diagnostic reporting path
+            mode_results[mode] = f"{type(exc).__name__}: {exc}"
+
+    print(
+        "\n[backward_mode_memory_peak_report] "
+        f"recipe={recipe_name} module_type={module_type} "
+        f"dtype={dtype} input_shape={input_shape} out_features={out_features}"
+    )
+    print("  units=MB")
+    metric_col_width = 9
+    delta_col_width = 18
+    columns = (
+        ("mode", metric_col_width),
+        ("fwd_alloc", metric_col_width),
+        ("bwd_alloc", metric_col_width),
+        ("e2e_alloc", metric_col_width),
+        ("fwd_resrv", metric_col_width),
+        ("bwd_resrv", metric_col_width),
+        ("e2e_resrv", metric_col_width),
+        ("delta_fwd", delta_col_width),
+        ("delta_bwd", delta_col_width),
+        ("delta_e2e", delta_col_width),
+    )
+    print(" | ".join(f"{name:>{width}}" for name, width in columns))
+    print("-+-".join("-" * width for _, width in columns))
+
+    def _format_delta_with_pct(delta: float, base: float) -> str:
+        if math.isclose(base, 0.0, abs_tol=1e-12):
+            return f"{delta:+.2f} (n/a)"
+        pct = 100.0 * delta / base
+        return f"{delta:+.2f} ({pct:+.2f}%)"
+
+    default_metrics = mode_results.get("default")
+    for mode in modes:
+        metrics = mode_results[mode]
+        if isinstance(metrics, str):
+            print(f"{mode:>{metric_col_width}} | ERROR: {metrics}")
+            continue
+
+        if isinstance(default_metrics, dict):
+            delta_fwd = metrics["fwd_peak_alloc_mb"] - default_metrics["fwd_peak_alloc_mb"]
+            delta_bwd = metrics["bwd_peak_alloc_mb"] - default_metrics["bwd_peak_alloc_mb"]
+            delta_e2e = metrics["e2e_peak_alloc_mb"] - default_metrics["e2e_peak_alloc_mb"]
+            delta_fwd_str = _format_delta_with_pct(delta_fwd, default_metrics["fwd_peak_alloc_mb"])
+            delta_bwd_str = _format_delta_with_pct(delta_bwd, default_metrics["bwd_peak_alloc_mb"])
+            delta_e2e_str = _format_delta_with_pct(delta_e2e, default_metrics["e2e_peak_alloc_mb"])
+        else:
+            delta_fwd_str = "n/a"
+            delta_bwd_str = "n/a"
+            delta_e2e_str = "n/a"
+
+        print(
+            f"{mode:>{metric_col_width}} | "
+            f"{metrics['fwd_peak_alloc_mb']:{metric_col_width}.2f} | "
+            f"{metrics['bwd_peak_alloc_mb']:{metric_col_width}.2f} | "
+            f"{metrics['e2e_peak_alloc_mb']:{metric_col_width}.2f} | "
+            f"{metrics['fwd_peak_reserved_mb']:{metric_col_width}.2f} | "
+            f"{metrics['bwd_peak_reserved_mb']:{metric_col_width}.2f} | "
+            f"{metrics['e2e_peak_reserved_mb']:{metric_col_width}.2f} | "
+            f"{delta_fwd_str:>{delta_col_width}} | "
+            f"{delta_bwd_str:>{delta_col_width}} | "
+            f"{delta_e2e_str:>{delta_col_width}}"
+        )
