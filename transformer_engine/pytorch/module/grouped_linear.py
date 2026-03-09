@@ -793,9 +793,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             isinstance(grouped_weights, torch.Tensor)
             and (weight_quantizers[0] is None or not weight_quantizers[0].internal)
         ):
-            raise RuntimeError(
-                "Found internal quantizer with `single_grouped_parameter=True`."
-            )
+            raise RuntimeError("Found internal quantizer with `single_grouped_parameter=True`.")
         self.register_parameter(
             "weight",
             torch.nn.Parameter(grouped_weights),

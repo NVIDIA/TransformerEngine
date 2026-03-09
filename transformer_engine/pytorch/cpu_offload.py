@@ -163,9 +163,7 @@ class TensorGroupProcessor:
                 aux["views"].append((tensor.shape, tensor.stride(), tensor.storage_offset()))
                 tensor = tensor._base
                 if tensor is None:
-                    raise RuntimeError(
-                        "Cannot offload base tensor, if the tensor is not a view."
-                    )
+                    raise RuntimeError("Cannot offload base tensor, if the tensor is not a view.")
                 tensor_group.tensor_list[tensor_id] = tensor
             else:
                 aux["views"].append(None)
@@ -842,8 +840,8 @@ def get_cpu_offload_context(
     if not manual_synchronization:
         if num_layers > model_layers - 1:
             raise ValueError(
-                "Cannot offload all layers without manual synchronization - last layer is not offloaded."
-                f" Got num_layers={num_layers}, model_layers={model_layers}."
+                "Cannot offload all layers without manual synchronization - last layer is not"
+                f" offloaded. Got num_layers={num_layers}, model_layers={model_layers}."
             )
         if num_layers == model_layers - 1:
             warnings.warn(
@@ -852,9 +850,7 @@ def get_cpu_offload_context(
             )
 
     if offload_stream is not None and not manual_synchronization:
-        raise ValueError(
-            "offload_stream can be provided only if manual_synchronization is True"
-        )
+        raise ValueError("offload_stream can be provided only if manual_synchronization is True")
 
     if manual_synchronization:
         offload_synchronizer = ManualOffloadSynchronizer(

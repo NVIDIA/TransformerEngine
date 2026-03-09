@@ -183,10 +183,10 @@ def _make_graphed_callables(
         num_microbatches = len(_order_without_wgrad) // num_model_chunks // 2
         if num_model_chunks * num_microbatches * 2 != len(_order_without_wgrad):
             raise ValueError(
-                "Pipeline-parallel order dimension mismatch: "
-                f"num_model_chunks ({num_model_chunks}) * num_microbatches ({num_microbatches}) * 2 "
-                f"= {num_model_chunks * num_microbatches * 2}, "
-                f"but len(_order_without_wgrad) = {len(_order_without_wgrad)}"
+                f"Pipeline-parallel order dimension mismatch: num_model_chunks ({num_model_chunks})"
+                f" * num_microbatches ({num_microbatches}) * 2 ="
+                f" {num_model_chunks * num_microbatches * 2}, but len(_order_without_wgrad) ="
+                f" {len(_order_without_wgrad)}"
             )
 
         # When delay_wgrad_compute is enabled, each layer is treated as a model chunk, which
@@ -438,9 +438,7 @@ def _make_graphed_callables(
                     warmup_func.append(func)
                 fwd_idx[m_chunk] += 1
     if len(warmup_func) != len(sample_args):
-        raise ValueError(
-            f"Warmup runs {len(warmup_func)} don't match args {len(sample_args)}."
-        )
+        raise ValueError(f"Warmup runs {len(warmup_func)} don't match args {len(sample_args)}.")
     if len(warmup_func_idx) != len(set(warmup_func_idx)):
         raise RuntimeError(
             f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
@@ -862,7 +860,7 @@ def _make_graphed_callables(
                     fwd_graph.replay()
                 if not isinstance(static_outputs, tuple):
                     raise TypeError(
-                        f"Expected static_outputs to be a tuple, but got"
+                        "Expected static_outputs to be a tuple, but got"
                         f" {type(static_outputs).__name__}"
                     )
                 return tuple(o.detach() if o is not None else o for o in static_outputs)
@@ -903,7 +901,7 @@ def _make_graphed_callables(
                 # Input args that didn't require grad expect a None gradient.
                 if not isinstance(static_grad_inputs, tuple):
                     raise TypeError(
-                        f"Expected static_grad_inputs to be a tuple, but got"
+                        "Expected static_grad_inputs to be a tuple, but got"
                         f" {type(static_grad_inputs).__name__}"
                     )
                 return (None, None, None) + tuple(

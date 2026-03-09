@@ -385,9 +385,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
         """
         if self._quantizer is None or not self._quantizer.with_2d_quantization:
-            raise RuntimeError(
-                "Cannot create columnwise data without 2D quantization enabled."
-            )
+            raise RuntimeError("Cannot create columnwise data without 2D quantization enabled.")
         rowwise_data = self._rowwise_data
         if not rowwise_data.is_contiguous():
             rowwise_data = rowwise_data.contiguous()
@@ -395,9 +393,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         self._columnwise_data = tex.nvfp4_data_transpose(rowwise_data, out=self._columnwise_data)
         if self._columnwise_scale_inv is None:
             if self._quantizer is None:
-                raise RuntimeError(
-                    "Cannot create columnwise scale inverse: quantizer is None."
-                )
+                raise RuntimeError("Cannot create columnwise scale inverse: quantizer is None.")
             # Use logical shape (self.size()), not packed byte shape (rowwise_data.shape)
             # NVFP4 packs 2 elements per byte, so rowwise_data.shape[-1] is K/2
             logical_shape = self.size()
@@ -409,13 +405,13 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             )
         if len(self._rowwise_scale_inv.shape) != 2:
             raise ValueError(
-                f"Expected rowwise_scale_inv to be 2D, but got"
+                "Expected rowwise_scale_inv to be 2D, but got"
                 f" {len(self._rowwise_scale_inv.shape)}D with shape"
                 f" {self._rowwise_scale_inv.shape}."
             )
         if len(self._columnwise_scale_inv.shape) != 2:
             raise ValueError(
-                f"Expected columnwise_scale_inv to be 2D, but got"
+                "Expected columnwise_scale_inv to be 2D, but got"
                 f" {len(self._columnwise_scale_inv.shape)}D with shape"
                 f" {self._columnwise_scale_inv.shape}."
             )

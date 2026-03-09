@@ -39,7 +39,7 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         old_raw_data = tensor._data
         if old_raw_data.dtype != new_raw_data.dtype:
             raise ValueError(
-                f"The data types of raw data don't match: "
+                "The data types of raw data don't match: "
                 f"old dtype={old_raw_data.dtype}, new dtype={new_raw_data.dtype}"
             )
         new_raw_data.detach().copy_(old_raw_data)
@@ -49,7 +49,7 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         old_raw_data = tensor._rowwise_data
         if old_raw_data.dtype != new_raw_data.dtype:
             raise ValueError(
-                f"The data types of raw data don't match: "
+                "The data types of raw data don't match: "
                 f"old dtype={old_raw_data.dtype}, new dtype={new_raw_data.dtype}"
             )
         new_raw_data.detach().copy_(old_raw_data)
@@ -59,7 +59,8 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         old_rowwise = tensor._rowwise_data
         if old_rowwise.dtype != new_raw_data.dtype:
             raise ValueError(
-                f"The data types of raw data don't match: {old_rowwise.dtype} vs {new_raw_data.dtype}"
+                f"The data types of raw data don't match: {old_rowwise.dtype} vs"
+                f" {new_raw_data.dtype}"
             )
         new_raw_data.detach().copy_(old_rowwise)
         tensor._rowwise_data = new_raw_data
@@ -288,9 +289,7 @@ def _cast_master_weights_to_fp8_delayed_scaling(
 
         # If master weight is not None, start_offset must be a valid value.
         if start_offset is None:
-            raise ValueError(
-                "start_offset must not be None when master_weight is provided"
-            )
+            raise ValueError("start_offset must not be None when master_weight is provided")
         if start_offset < 0:
             raise ValueError(f"start_offset must be non-negative, got {start_offset}")
         end_offset = start_offset + master_weight.numel()
@@ -536,20 +535,20 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         scale = torch.empty(scale_shape, dtype=torch.float32, device=device)
         scale_inv = model_weight._rowwise_scale_inv
         if len(scale_shape) != 2:
-            raise ValueError(
-                f"scale_shape must be 2D, got {len(scale_shape)}D shape {scale_shape}"
-            )
+            raise ValueError(f"scale_shape must be 2D, got {len(scale_shape)}D shape {scale_shape}")
         if len(scale_inv.shape) != 2:
             raise ValueError(
                 f"scale_inv must be 2D, got {len(scale_inv.shape)}D shape {scale_inv.shape}"
             )
         if scale_inv.shape[0] != scale_shape[0]:
             raise ValueError(
-                f"scale_inv dim 0 mismatch: scale_inv.shape={scale_inv.shape}, scale_shape={scale_shape}"
+                f"scale_inv dim 0 mismatch: scale_inv.shape={scale_inv.shape},"
+                f" scale_shape={scale_shape}"
             )
         if scale_inv.shape[1] != scale_shape[1]:
             raise ValueError(
-                f"scale_inv dim 1 mismatch: scale_inv.shape={scale_inv.shape}, scale_shape={scale_shape}"
+                f"scale_inv dim 1 mismatch: scale_inv.shape={scale_inv.shape},"
+                f" scale_shape={scale_shape}"
             )
 
         amaxes.append(amax)
@@ -649,15 +648,11 @@ def _cast_master_weights_to_nvfp4_2d(
     for model_weight, _, _, _ in params:
         quantizer = model_weight._get_quantizer()
         if not isinstance(quantizer, NVFP4Quantizer):
-            raise TypeError(
-                f"Expected NVFP4Quantizer, got {type(quantizer).__name__}"
-            )
+            raise TypeError(f"Expected NVFP4Quantizer, got {type(quantizer).__name__}")
         if not quantizer.with_2d_quantization:
             raise ValueError("NVFP4 2D quantization must be enabled.")
         if len(model_weight.shape) != 2:
-            raise ValueError(
-                f"Expected 2D model weight, got {len(model_weight.shape)}D"
-            )
+            raise ValueError(f"Expected 2D model weight, got {len(model_weight.shape)}D")
         h, w = model_weight.shape
         tile_h = (h + block_len - 1) // block_len
         tile_w = (w + block_len - 1) // block_len
@@ -698,9 +693,7 @@ def _cast_master_weights_to_nvfp4_2d(
 
         if master_weight is not None and master_weight.numel() > 0:
             if len(model_weight.shape) != 2:
-                raise ValueError(
-                    f"Expected 2D model weight, got {len(model_weight.shape)}D"
-                )
+                raise ValueError(f"Expected 2D model weight, got {len(model_weight.shape)}D")
             h, w = model_weight.shape
             # Collect for batched processing
             master_weight_list.append(master_weight)
@@ -807,9 +800,7 @@ def _cast_master_weights_to_nvfp4_2d(
                 byte_end = (end_offset + 1) // 2
                 model_weight_fragment = rowwise_bytes[byte_start:byte_end]
             if len(model_weight.shape) != 2:
-                raise ValueError(
-                    f"Expected 2D model weight, got {len(model_weight.shape)}D"
-                )
+                raise ValueError(f"Expected 2D model weight, got {len(model_weight.shape)}D")
             h, w = model_weight.shape
 
             partial_cast_inp_list.append(master_weight)

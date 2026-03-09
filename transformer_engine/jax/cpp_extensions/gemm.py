@@ -179,11 +179,13 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 
     if isinstance(lhs_q, ScaledTensor2x):
         raise TypeError(
-            f"Expected lhs_q to not be ScaledTensor2x after quantization, but got type={type(lhs_q)}"
+            "Expected lhs_q to not be ScaledTensor2x after quantization, but got"
+            f" type={type(lhs_q)}"
         )
     if isinstance(rhs_q, ScaledTensor2x):
         raise TypeError(
-            f"Expected rhs_q to not be ScaledTensor2x after quantization, but got type={type(rhs_q)}"
+            "Expected rhs_q to not be ScaledTensor2x after quantization, but got"
+            f" type={type(rhs_q)}"
         )
 
     def has_rht_applied(q: AbstractBaseTensor) -> bool:
@@ -191,9 +193,9 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 
     if has_rht_applied(lhs_q) != has_rht_applied(rhs_q):
         raise ValueError(
-            "With NVFP4_1D_SCALING, if one operand is quantized with RHT, the other must be quantized"
-            " with RHT as well. This is to ensure the RHT is applied to both and will cancel out in the"
-            " GEMM."
+            "With NVFP4_1D_SCALING, if one operand is quantized with RHT, the other must be"
+            " quantized with RHT as well. This is to ensure the RHT is applied to both and will"
+            " cancel out in the GEMM."
         )
 
     return lhs_q, rhs_q
@@ -466,17 +468,17 @@ class GemmPrimitive(BasePrimitive):
         )
         if lhs_contracting_size != rhs_contracting_size:
             raise ValueError(
-                "cuBLAS GEMM operands have incompatible contracting dimensions: "
-                f"{lhs.shape} @ idx {lhs_contracting_dims} X {rhs.shape} @ idx {rhs_contracting_dims}."
+                f"cuBLAS GEMM operands have incompatible contracting dimensions: {lhs.shape} @ idx"
+                f" {lhs_contracting_dims} X {rhs.shape} @ idx {rhs_contracting_dims}."
             )
         assert_cublas_requirements(scaling_mode, lhs_contracting_size, "LHS")
         assert_cublas_requirements(scaling_mode, rhs_contracting_size, "RHS")
 
         lhs_is_transposed, rhs_is_transposed = _get_gemm_layout(operand_ndims, contracting_dims)
         if scaling_mode != ScalingMode.NO_SCALING:
-            if not (scaling_mode.is_nvfp4_scaling or _compatible_fp8_gemm_dtypes(
-                lhs.dtype, rhs.dtype
-            )):
+            if not (
+                scaling_mode.is_nvfp4_scaling or _compatible_fp8_gemm_dtypes(lhs.dtype, rhs.dtype)
+            ):
                 raise ValueError(
                     "cuBLAS GEMM quantized operands have incompatible data types: "
                     f"{lhs.dtype} x {rhs.dtype}."
@@ -860,9 +862,9 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim = tpsp_idx
             if not ((sequence_dim == 1) ^ transpose_batch_sequence):
                 raise ValueError(
-                    "CollectiveGEMM supports only (sequence_dim=1 and transpose_batch_sequence=False)"
-                    " or (sequence_dim=0 and transpose_batch_sequence=True). Received:"
-                    f" sequence_dim={sequence_dim},"
+                    "CollectiveGEMM supports only (sequence_dim=1 and"
+                    " transpose_batch_sequence=False) or (sequence_dim=0 and"
+                    f" transpose_batch_sequence=True). Received: sequence_dim={sequence_dim},"
                     f" transpose_batch_sequence={transpose_batch_sequence}."
                 )
 
@@ -926,13 +928,15 @@ class GemmPrimitive(BasePrimitive):
         if collective_op.is_all_gather:
             if sequence_dim > len(lhs_non_cspecs):
                 raise ValueError(
-                    f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
+                    f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs:"
+                    f" {lhs_non_cspecs}"
                 )
             out_specs = out_specs[:sequence_dim] + (None,) + out_specs[sequence_dim + 1 :]
         elif collective_op.is_reduce_scatter:
             if sequence_dim > len(lhs_non_cspecs):
                 raise ValueError(
-                    f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
+                    f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs:"
+                    f" {lhs_non_cspecs}"
                 )
             out_specs = (
                 out_specs[:sequence_dim] + (gsr.tpsp_resource,) + out_specs[sequence_dim + 1 :]
@@ -1427,21 +1431,13 @@ class GroupedGemmPrimitive(BasePrimitive):
                 )
             alpha_aval, beta_aval = additional_args
             if alpha_aval.shape != (num_groups,):
-                raise ValueError(
-                    f"Expected alpha shape {(num_groups,)}, got {alpha_aval.shape}"
-                )
+                raise ValueError(f"Expected alpha shape {(num_groups,)}, got {alpha_aval.shape}")
             if alpha_aval.dtype != jnp.float32:
-                raise ValueError(
-                    f"Expected alpha dtype float32, got {alpha_aval.dtype}"
-                )
+                raise ValueError(f"Expected alpha dtype float32, got {alpha_aval.dtype}")
             if beta_aval.shape != (num_groups,):
-                raise ValueError(
-                    f"Expected beta shape {(num_groups,)}, got {beta_aval.shape}"
-                )
+                raise ValueError(f"Expected beta shape {(num_groups,)}, got {beta_aval.shape}")
             if beta_aval.dtype != jnp.float32:
-                raise ValueError(
-                    f"Expected beta dtype float32, got {beta_aval.dtype}"
-                )
+                raise ValueError(f"Expected beta dtype float32, got {beta_aval.dtype}")
 
             return (out_aval, cublas_workspace_aval, setup_workspace_aval, int64_workspace_aval)
 
@@ -1646,7 +1642,8 @@ def _jax_scaled_matmul(
         ScalingMode.NVFP4_2D_SCALING,
     ):
         raise ValueError(
-            f"rhs does not have MXFP8 or NVFP4 scaling mode, got rhs.scaling_mode={rhs.scaling_mode}"
+            "rhs does not have MXFP8 or NVFP4 scaling mode, got"
+            f" rhs.scaling_mode={rhs.scaling_mode}"
         )
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
@@ -1655,13 +1652,13 @@ def _jax_scaled_matmul(
     expected_rhs_is_colwise = rhs_contract[-1] != rhs.data.ndim - 1
     if lhs.is_colwise is not expected_lhs_is_colwise:
         raise ValueError(
-            f"LHS with unexpected quantize dimension.\nExpect is_colwise={expected_lhs_is_colwise}, got"
-            f" {lhs.is_colwise}"
+            f"LHS with unexpected quantize dimension.\nExpect is_colwise={expected_lhs_is_colwise},"
+            f" got {lhs.is_colwise}"
         )
     if rhs.is_colwise is not expected_rhs_is_colwise:
         raise ValueError(
-            f"RHS with unexpected quantize dimension.\nExpect is_colwise={expected_rhs_is_colwise}, got"
-            f" {rhs.is_colwise}"
+            f"RHS with unexpected quantize dimension.\nExpect is_colwise={expected_rhs_is_colwise},"
+            f" got {rhs.is_colwise}"
         )
 
     if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
@@ -1702,9 +1699,7 @@ def _jax_scaled_matmul(
     )
     if lhs.scaling_mode.is_nvfp4_scaling:
         if lhs.amax is None or rhs.amax is None:
-            raise ValueError(
-                "NVFP4 scaling requires non-None amax for both LHS and RHS operands"
-            )
+            raise ValueError("NVFP4 scaling requires non-None amax for both LHS and RHS operands")
         lhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(lhs.amax)
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs.amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
@@ -1936,8 +1931,8 @@ def grouped_gemm(
     elif isinstance(lhs, GroupedScaledTensor1x):
         if not isinstance(rhs, GroupedScaledTensor1x):
             raise TypeError(
-                "Expected rhs to be GroupedScaledTensor1x when lhs is GroupedScaledTensor1x, but got"
-                f" type={type(rhs)}"
+                "Expected rhs to be GroupedScaledTensor1x when lhs is GroupedScaledTensor1x, but"
+                f" got type={type(rhs)}"
             )
         out_dtype = lhs.dq_dtype
         lhs_shape = lhs.original_shape
@@ -1989,7 +1984,8 @@ def grouped_gemm(
     ):
         if not isinstance(quantizer_set.x, GroupedQuantizer):
             raise TypeError(
-                f"Expected quantizer_set.x to be GroupedQuantizer, but got type={type(quantizer_set.x)}"
+                "Expected quantizer_set.x to be GroupedQuantizer, but got"
+                f" type={type(quantizer_set.x)}"
             )
         if type(quantizer_set.x) is not type(quantizer_set.kernel):
             raise TypeError(

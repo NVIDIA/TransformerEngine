@@ -78,9 +78,7 @@ def custom_gemm(
         if sw is None:
             raise ValueError("FPROP GEMM: weight scale (B.scale) is None")
         if A.original_shape is None:
-            raise ValueError(
-                "FPROP GEMM: A.original_shape is None, cannot determine output shape"
-            )
+            raise ValueError("FPROP GEMM: A.original_shape is None, cannot determine output shape")
 
         # Call quantizer's qgemm method
         result = quantizer.qgemm(
@@ -108,9 +106,7 @@ def custom_gemm(
         if sdy is None:
             raise ValueError("DGRAD GEMM: gradient scale (A.scale) is None")
         if qw_t is None:
-            raise ValueError(
-                "DGRAD GEMM: transposed quantized weight data (B.data_t) is None"
-            )
+            raise ValueError("DGRAD GEMM: transposed quantized weight data (B.data_t) is None")
         if sw_t is None:
             raise ValueError("DGRAD GEMM: transposed weight scale (B.scale_t) is None")
 
@@ -130,21 +126,13 @@ def custom_gemm(
         qdy_t, sdy_t = A.data_t, A.scale_t
         qx_t, sx_t = B.data_t, B.scale_t
         if qdy_t is None:
-            raise ValueError(
-                "WGRAD GEMM: transposed quantized gradient data (A.data_t) is None"
-            )
+            raise ValueError("WGRAD GEMM: transposed quantized gradient data (A.data_t) is None")
         if sdy_t is None:
-            raise ValueError(
-                "WGRAD GEMM: transposed gradient scale (A.scale_t) is None"
-            )
+            raise ValueError("WGRAD GEMM: transposed gradient scale (A.scale_t) is None")
         if qx_t is None:
-            raise ValueError(
-                "WGRAD GEMM: transposed quantized activation data (B.data_t) is None"
-            )
+            raise ValueError("WGRAD GEMM: transposed quantized activation data (B.data_t) is None")
         if sx_t is None:
-            raise ValueError(
-                "WGRAD GEMM: transposed activation scale (B.scale_t) is None"
-            )
+            raise ValueError("WGRAD GEMM: transposed activation scale (B.scale_t) is None")
 
         result = quantizer.qgemm(
             qdy_t,

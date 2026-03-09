@@ -327,9 +327,7 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         users expect, not the internal packed storage shape.
         """
         if self.original_shape is None:
-            raise RuntimeError(
-                "NVFP4TensorRef.size() called but original_shape has not been set"
-            )
+            raise RuntimeError("NVFP4TensorRef.size() called but original_shape has not been set")
         return torch.Size(self.original_shape)
 
 
@@ -379,9 +377,7 @@ class NVFP4QuantizerRef(Quantizer):
         Uses Sylvester construction to avoid SciPy dependency.
         """
         if (size & (size - 1)) != 0:
-            raise ValueError(
-                f"Hadamard size must be a power of two, got {size}"
-            )
+            raise ValueError(f"Hadamard size must be a power of two, got {size}")
         h = torch.ones((1, 1), device=device, dtype=torch.float32)
         while h.shape[0] < size:
             h = torch.cat(
@@ -456,7 +452,8 @@ class NVFP4QuantizerRef(Quantizer):
 
         if x.ndim != 2:
             raise ValueError(
-                f"_quantize_blockwise_reference expects a 2D tensor, got {x.ndim}D with shape {x.shape}"
+                f"_quantize_blockwise_reference expects a 2D tensor, got {x.ndim}D with shape"
+                f" {x.shape}"
             )
         using_2d_quantization = tile_len_x == 16 and tile_len_y == 16
         m, n = x.shape
@@ -538,7 +535,8 @@ class NVFP4QuantizerRef(Quantizer):
 
         if tensor.dim() != 2:
             raise ValueError(
-                f"_pad_tensor only supports 2D tensors, got {tensor.dim()}D tensor with shape {tensor.shape}"
+                f"_pad_tensor only supports 2D tensors, got {tensor.dim()}D tensor with shape"
+                f" {tensor.shape}"
             )
         M, N = tensor.shape
         padding_needed_rows = 0
@@ -569,7 +567,8 @@ class NVFP4QuantizerRef(Quantizer):
 
         if tensor.dim() != 2:
             raise ValueError(
-                f"_rm_pad_tensor only supports 2D tensors, got {tensor.dim()}D tensor with shape {tensor.shape}"
+                f"_rm_pad_tensor only supports 2D tensors, got {tensor.dim()}D tensor with shape"
+                f" {tensor.shape}"
             )
         M, N = original_size
         out = tensor[:M, :N].contiguous()
