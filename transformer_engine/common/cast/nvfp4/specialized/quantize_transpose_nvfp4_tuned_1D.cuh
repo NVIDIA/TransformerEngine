@@ -47,20 +47,20 @@ constexpr int ELTS_PER_THREAD = 16;
 constexpr int TILE_DIM_Y = 64;
 constexpr int TILE_DIM_X = 64;
 
-static_assert(ELTS_PER_THREAD == SCALE_DIM && "Hardcoded and fixed parameter\0");
+static_assert(ELTS_PER_THREAD == SCALE_DIM && "Hardcoded and fixed parameter");
 
-static_assert((THREADS_NUM * ELTS_PER_THREAD <= TILE_DIM_Y * TILE_DIM_X) &&
-              "Unbalanced threads workload\0");
+static_assert((THREADS_NUM * ELTS_PER_THREAD <= TILE_DIM_Y * TILE_DIM_X),
+              "Unbalanced threads workload");
 
-static_assert((TunableConfig::CHUNK_DIM_Y % TILE_DIM_Y == 0) &&
-              "Chunk size Y must be evenly divisible by the tile size Y\0");
-static_assert((TunableConfig::CHUNK_DIM_X % TILE_DIM_X == 0) &&
-              "Chunk size X must be evenly divisible by the tile size X\0");
+static_assert(TunableConfig::CHUNK_DIM_Y % TILE_DIM_Y == 0,
+              "Chunk size Y must be evenly divisible by the tile size Y");
+static_assert(TunableConfig::CHUNK_DIM_X % TILE_DIM_X == 0,
+              "Chunk size X must be evenly divisible by the tile size X");
 
-static_assert((TILE_DIM_Y % SCALE_DIM == 0) &&
-              "Tile size Y must be evenly divisible by the scale dim\0");
-static_assert((TILE_DIM_X % SCALE_DIM == 0) &&
-              "Tile size X must be evenly divisible by the scale dim\0");
+static_assert(TILE_DIM_Y % SCALE_DIM == 0,
+              "Tile size Y must be evenly divisible by the scale dim");
+static_assert(TILE_DIM_X % SCALE_DIM == 0,
+              "Tile size X must be evenly divisible by the scale dim");
 
 constexpr int TILES_Y = TunableConfig::CHUNK_DIM_Y / TILE_DIM_Y;
 constexpr int TILES_X = TunableConfig::CHUNK_DIM_X / TILE_DIM_X;
@@ -114,19 +114,19 @@ constexpr int THREADS_Y_TR = THREADS_NUM / THREADS_X_TR;
 
 constexpr int ITERATIONS_NORMAL = BUFF_DIM_Y / THREADS_Y_ROWWISE;
 constexpr int ITERATIONS_TR = SCALES_PER_TILE_Y / THREADS_Y_TR;
-static_assert(ITERATIONS_TR >= 1 && "Number of transpose iterations should be >=1\0");
-static_assert((SCALES_PER_TILE_Y % THREADS_Y_TR == 0) &&
-              "Partial transpose iterations are not supported\0");
+static_assert(ITERATIONS_TR >= 1, "Number of transpose iterations should be >=1");
+static_assert(SCALES_PER_TILE_Y % THREADS_Y_TR == 0,
+              "Partial transpose iterations are not supported");
 
 constexpr int BUFF_OUT_IT_OFFSET = BUFF_OUT_TR_DIM_X / ITERATIONS_TR / STAGES;
 
-static_assert(BUFF_DIM_Y >= SCALE_DIM &&
+static_assert(BUFF_DIM_Y >= SCALE_DIM,
               "Number of buffer rows must be greater or equal to the size of the columwise "
-              "scaling block\0");
+              "scaling block");
 static_assert(TunableConfig::CHUNK_DIM_Y >= BUFF_DIM_Y);
-static_assert(BUFF_DIM_Y >= THREADS_Y_ROWWISE &&
+static_assert(BUFF_DIM_Y >= THREADS_Y_ROWWISE,
               "Number of buffer rows must be greater or equal to the number of rowwise "
-              "processing threads in Y dimension\0");
+              "processing threads in Y dimension");
 
 // Number of 4-bit elements that span 32 banks (4-byte each) of shared memory
 constexpr int TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
