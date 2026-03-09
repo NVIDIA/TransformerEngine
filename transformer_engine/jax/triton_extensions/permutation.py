@@ -1666,10 +1666,19 @@ class SortChunksByMapPrimitive(BasePrimitive):
 
     @staticmethod
     def abstract(
-        inp_aval, row_id_map_aval, probs_aval, *, num_tokens, hidden_size, is_forward, with_probs
+        inp_aval,
+        row_id_map_aval,
+        probs_aval,
+        output_buf_aval=None,  # Pre-allocated output buffer (inner primitive only)
+        *,
+        num_tokens,
+        hidden_size,
+        is_forward,
+        with_probs,
     ):
         """Shape/dtype inference."""
         del row_id_map_aval, is_forward
+        del output_buf_aval  # Used for input_output_aliases only
 
         output_aval = jax.core.ShapedArray((num_tokens, hidden_size), inp_aval.dtype)
 
@@ -1684,10 +1693,14 @@ class SortChunksByMapPrimitive(BasePrimitive):
     def impl(inp, row_id_map, probs, num_tokens, hidden_size, is_forward, with_probs):
         """Forward to inner primitive."""
         assert SortChunksByMapPrimitive.inner_primitive is not None
+
+        output_buf = jnp.empty((num_tokens, hidden_size), dtype=inp.dtype)
+
         return SortChunksByMapPrimitive.inner_primitive.bind(
             inp,
             row_id_map,
             probs,
+            output_buf,
             num_tokens=num_tokens,
             hidden_size=hidden_size,
             is_forward=is_forward,
@@ -1695,7 +1708,9 @@ class SortChunksByMapPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def lowering(ctx, inp, row_id_map, probs, *, num_tokens, hidden_size, is_forward, with_probs):
+    def lowering(
+        ctx, inp, row_id_map, probs, output_buf, *, num_tokens, hidden_size, is_forward, with_probs
+    ):
         """MLIR lowering using triton_call_lowering."""
         # Compute strides
         inp_stride_token = hidden_size
@@ -1709,13 +1724,22 @@ class SortChunksByMapPrimitive(BasePrimitive):
         block_size = _get_min_block_size(_sort_chunks_by_map_kernel)
         grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
+        # Declare input_output_aliases so XLA knows output slot 0 is claimed by
+        # input 3 (output_buf). This prevents XLA from implicitly aliasing any
+        # other input (like output_grad in backward) to the output buffer.
+        # Input indices: 0=inp, 1=row_id_map, 2=probs, 3=output_buf
+        # Output indices: 0=output, 1=permuted_probs
+        input_output_aliases = {3: 0}
+
         return triton_call_lowering(
             ctx,
             _sort_chunks_by_map_kernel,
             inp,
             row_id_map,
             probs,
+            output_buf,
             grid=grid,
+            input_output_aliases=input_output_aliases,
             constexprs={
                 "stride_input_token": inp_stride_token,
                 "stride_input_hidden": inp_stride_hidden,

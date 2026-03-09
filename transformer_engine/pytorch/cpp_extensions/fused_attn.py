@@ -16,6 +16,7 @@ from transformer_engine_torch import (
     NVTE_Fused_Attn_Backend,
 )
 from ..quantized_tensor import Quantizer
+from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 
 
 __all__ = [
@@ -103,12 +104,12 @@ FusedAttnBackend = {
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
 
-META_QKV = tex.FP8FwdTensors.GEMM1_OUTPUT
-META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
-META_O = tex.FP8FwdTensors.GEMM2_INPUT
-META_DO = tex.FP8BwdTensors.GRAD_INPUT2
-META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
-META_DP = tex.FP8BwdTensors.GRAD_INPUT3
+META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
+META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
+META_O = FP8FwdTensorIdx.GEMM2_INPUT
+META_DO = FP8BwdTensorIdx.GRAD_INPUT2
+META_S = FP8FwdTensorIdx.GEMM3_OUTPUT
+META_DP = FP8BwdTensorIdx.GRAD_INPUT3
 
 
 def fused_attn_fwd(
@@ -270,20 +271,23 @@ def fused_attn_fwd(
         attn_scale = 1.0 / math.sqrt(d)
 
     if attn_bias_type not in ["no_bias", "alibi"]:
-        assert (
-            attn_bias is not None
-        ), f"attn_bias tensor cannot be None when attn_bias_type={attn_bias_type!r}."
-        assert attn_bias.dtype == q.dtype, (
-            "attn_bias tensor must have the same dtype as q and kv: "
-            f"attn_bias.dtype={attn_bias.dtype} but q.dtype={q.dtype}."
-        )
+        if attn_bias is None:
+            raise ValueError(
+                f"attn_bias tensor cannot be None when attn_bias_type={attn_bias_type!r}."
+            )
+        if attn_bias.dtype != q.dtype:
+            raise ValueError(
+                "attn_bias tensor must have the same dtype as q and kv: "
+                f"attn_bias.dtype={attn_bias.dtype} but q.dtype={q.dtype}."
+            )
 
-    assert fused_attention_backend != FusedAttnBackend["No_Backend"], (
-        "Fused attention does not support this input combination:"
-        f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
-        f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
-        f" q.dtype={q.dtype}, backend={fused_attention_backend}."
-    )
+    if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+        raise ValueError(
+            "Fused attention does not support this input combination:"
+            f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
+            f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
+            f" q.dtype={q.dtype}, backend={fused_attention_backend}."
+        )
 
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
@@ -299,14 +303,16 @@ def fused_attn_fwd(
             max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
         ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
 
-        assert s_quantizer is not None, (
-            "s_quantizer is required for FP8 fused attention forward"
-            f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-        )
-        assert o_quantizer is not None, (
-            "o_quantizer is required for FP8 fused attention forward"
-            f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-        )
+        if s_quantizer is None:
+            raise ValueError(
+                "s_quantizer is required for FP8 fused attention forward"
+                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
+            )
+        if o_quantizer is None:
+            raise ValueError(
+                "o_quantizer is required for FP8 fused attention forward"
+                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
+            )
     else:
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
@@ -495,38 +501,44 @@ def fused_attn_bwd(
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert fused_attention_backend != FusedAttnBackend["No_Backend"], (
-        "Fused attention backward does not support this input combination:"
-        f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
-        f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
-        f" q.dtype={q.dtype}, backend={fused_attention_backend}."
-    )
+    if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+        raise ValueError(
+            "Fused attention backward does not support this input combination:"
+            f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
+            f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
+            f" q.dtype={q.dtype}, backend={fused_attention_backend}."
+        )
 
     if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-        assert len(aux_ctx_tensors) >= 1, (
-            "aux_ctx_tensors must contain rng_state as its last element,"
-            f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
-            f" for backend={fused_attention_backend}."
-        )
+        if len(aux_ctx_tensors) < 1:
+            raise ValueError(
+                "aux_ctx_tensors must contain rng_state as its last element,"
+                f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
+                f" for backend={fused_attention_backend}."
+            )
 
     if fused_attention_backend == FusedAttnBackend["FP8"]:
-        assert s_quantizer is not None, (
-            "s_quantizer is required for FP8 fused attention backward"
-            f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-        )
-        assert dp_quantizer is not None, (
-            "dp_quantizer is required for FP8 fused attention backward"
-            f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-        )
-        assert dqkv_dtype is not None, (
-            "dqkv_dtype is required for FP8 fused attention backward"
-            f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-        )
-        assert len(aux_ctx_tensors) == 3, (
-            "aux_ctx_tensors must be [M, ZInv, rng_state] for FP8 fused attention,"
-            f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
-            f" (backend={fused_attention_backend})."
-        )
+        if s_quantizer is None:
+            raise ValueError(
+                "s_quantizer is required for FP8 fused attention backward"
+                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
+            )
+        if dp_quantizer is None:
+            raise ValueError(
+                "dp_quantizer is required for FP8 fused attention backward"
+                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
+            )
+        if dqkv_dtype is None:
+            raise ValueError(
+                "dqkv_dtype is required for FP8 fused attention backward"
+                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
+            )
+        if len(aux_ctx_tensors) != 3:
+            raise ValueError(
+                "aux_ctx_tensors must be [M, ZInv, rng_state] for FP8 fused attention,"
+                f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
+                f" (backend={fused_attention_backend})."
+            )
 
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
