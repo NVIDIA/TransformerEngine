@@ -146,7 +146,7 @@ void quantize_nvfp4(const InputType* const input,
                 fp4e2m1x2 casted_to_e2m1_pair(scaled_elt_pair);
                 output[idx_pair] = casted_to_e2m1_pair;
 
-                const double2 truncated_pair = cvt_fp4x2_to_double2(casted_to_e2m1_pair);
+                // const double2 truncated_pair = cvt_fp4x2_to_double2(casted_to_e2m1_pair);
             }
         }
     }
@@ -207,130 +207,34 @@ void compare_nvfp4_tensors(const std::string& name,
         }
     }
 
-    // Always report summary - either success or failure
-    std::cout << "=== SUMMARY for tensor " << name << " ===" << std::endl;
-    std::cout << "Total elements checked: " << (rows * cols) << std::endl;
+    constexpr bool print_detailed_summary = false;
+    if (print_detailed_summary) {
+        // Always report summary - either success or failure
+        std::cout << "=== SUMMARY for tensor " << name << " ===" << std::endl;
+        std::cout << "Total elements checked: " << (rows * cols) << std::endl;
 
-    if (total_mismatches > 0) {
-        std::cout << "STATUS: FAILED for output" << std::endl;
-        std::cout << "Total mismatches found: " << total_mismatches << std::endl;
-        std::cout << "Mismatch rate: " << (100.0 * total_mismatches) / (rows * cols) << "%" << std::endl;
-        if (mismatch_messages.size() > max_mismatches_to_print) {
-            std::cout << "... and " << (mismatch_messages.size() - max_mismatches_to_print)
-            << " more mismatches (showing first " << max_mismatches_to_print << ")" << std::endl;
-        }
-        std::cout << "============================" << std::endl;
-
-        GTEST_FAIL() << "Found " << total_mismatches << " mismatches in tensor " << name;
-    } else {
-        std::cout << "STATUS: PASSED for output" << std::endl;
-        std::cout << "All elements match within tolerance!" << std::endl;
-        std::cout << "Tensor " << name << " is IDENTICAL to reference" << std::endl;
-        std::cout << "============================" << std::endl;
-    }
-}
-
-// Optional: Function to dump tensor data to files for detailed analysis
-void dump_nvfp4_tensor_data(const std::string& prefix,
-                            const fp4e2m1 *test_data, const fp4e2m1 *ref_data,
-                            const int rows, const int cols) {
-    std::string test_file = prefix + "_test.txt";
-    std::string ref_file = prefix + "_ref.txt";
-    std::string diff_file = prefix + "_diff.txt";
-
-    std::ofstream test_out(test_file);
-    std::ofstream ref_out(ref_file);
-    std::ofstream diff_out(diff_file);
-
-    if (test_out.is_open() && ref_out.is_open() && diff_out.is_open()) {
-        for (int i = 0; i < rows; ++i) {
-            for (int j = 0; j < cols; j += 2) {
-                const int idx = i * cols + j;
-                double2 test_data_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&test_data[idx/2]));
-                double2 ref_data_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&ref_data[idx/2]));
-
-                for (int k = 0; k < 2; ++k) {
-                    const double t = (k == 0 ? test_data_pair.x : test_data_pair.y);
-                    const double r = (k == 0 ? ref_data_pair.x : ref_data_pair.y);
-                    const int pos = idx + k;
-
-                    test_out << "pos[" << pos << "] = " << t << std::endl;
-                    ref_out << "pos[" << pos << "] = " << r << std::endl;
-                    diff_out << "pos[" << pos << "] test=" << t << " ref=" << r
-                            << " abs_diff=" << fabs(t - r)
-                            << " rel_diff=" << (r == 0 ? 0.0 : fabs((t - r) / r)) << std::endl;
-                }
+        if (total_mismatches > 0) {
+            std::cout << "STATUS: FAILED for output" << std::endl;
+            std::cout << "Total mismatches found: " << total_mismatches << std::endl;
+            std::cout << "Mismatch rate: " << (100.0 * total_mismatches) / (rows * cols) << "%" << std::endl;
+            if (mismatch_messages.size() > max_mismatches_to_print) {
+                std::cout << "... and " << (mismatch_messages.size() - max_mismatches_to_print)
+                << " more mismatches (showing first " << max_mismatches_to_print << ")" << std::endl;
             }
+            std::cout << "============================" << std::endl;
+
+            GTEST_FAIL() << "Found " << total_mismatches << " mismatches in tensor " << name;
+        } else {
+            std::cout << "STATUS: PASSED for output" << std::endl;
+            std::cout << "All elements match within tolerance!" << std::endl;
+            std::cout << "Tensor " << name << " is IDENTICAL to reference" << std::endl;
+            std::cout << "============================" << std::endl;
         }
-        std::cout << "DEBUG: Dumped tensor data to files: " << test_file << ", " << ref_file << ", " << diff_file << std::endl;
     } else {
-        std::cout << "WARNING: Could not open files for tensor data dump" << std::endl;
-    }
-}
-
-void print_detailed_tensor_comparison(const std::string& name,
-                                     const fp4e2m1 *test_data, const fp4e2m1 *ref_data,
-                                     const int rows, const int cols) {
-    printf("\n=== DETAILED COMPARISON for %s (%d×%d = %d elements) ===\n",
-           name.c_str(), rows, cols, rows * cols);
-
-    const int total_elements = rows * cols;
-    const int check_count = 128;
-
-    printf("--- FIRST %d ELEMENTS ---\n", check_count);
-    printf("Index | Test_Value    | Ref_Value     | Match\n");
-    printf("------|---------------|---------------|-------\n");
-    for (int i = 0; i < std::min(check_count, total_elements); ++i) {
-        double2 test_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&test_data[i/2]));
-        double2 ref_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&ref_data[i/2]));
-
-        double t = (i % 2 == 0) ? test_pair.x : test_pair.y;
-        double r = (i % 2 == 0) ? ref_pair.x : ref_pair.y;
-        bool match = (fabs(t - r) < 1e-6);
-
-        printf("%5d | %13.6f | %13.6f | %s\n", i, t, r, match ? "✓" : "✗");
-    }
-
-    if (total_elements > 2 * check_count) {
-        printf("\n--- LAST %d ELEMENTS ---\n", check_count);
-        printf("Index | Test_Value    | Ref_Value     | Match\n");
-        printf("------|---------------|---------------|-------\n");
-        for (int i = total_elements - check_count; i < total_elements; ++i) {
-            double2 test_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&test_data[i/2]));
-            double2 ref_pair = cvt_fp4x2_to_double2(*reinterpret_cast<const fp4e2m1x2*>(&ref_data[i/2]));
-
-            double t = (i % 2 == 0) ? test_pair.x : test_pair.y;
-            double r = (i % 2 == 0) ? ref_pair.x : ref_pair.y;
-            bool match = (fabs(t - r) < 1e-6);
-
-            printf("%5d | %13.6f | %13.6f | %s\n", i, t, r, match ? "✓" : "✗");
+        if (total_mismatches > 0) {
+            GTEST_FAIL() << "Found " << total_mismatches << " mismatches in tensor " << name;
         }
     }
-    printf("==================================\n");
-}
-
-void compareResults_nvfp4(const Tensor &test,
-                          const void *ref, const void *ref_t, const int rows, const int cols,
-                          double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true, bool dump_data = false) {
-    if (if_on_gpus) test.to_cpu();
-
-    const fp4e2m1 *test_data = test.rowwise_cpu_dptr<fp4e2m1>();
-    const fp4e2m1 *test_data_t = test.columnwise_cpu_dptr<fp4e2m1>();
-    const fp4e2m1 *ref_data = reinterpret_cast<const fp4e2m1*>(ref);
-    const fp4e2m1 *ref_data_t = reinterpret_cast<const fp4e2m1*>(ref_t);
-
-    // Print detailed element-by-element comparison
-    // print_detailed_tensor_comparison("output", test_data, ref_data, rows, cols);
-    // print_detailed_tensor_comparison("output_t", test_data_t, ref_data_t, cols, rows);
-
-    // Optionally dump tensor data to files for detailed analysis
-    if (dump_data) {
-        dump_nvfp4_tensor_data("output", test_data, ref_data, rows, cols);
-        dump_nvfp4_tensor_data("output_t", test_data_t, ref_data_t, cols, rows);
-    }
-
-    compare_nvfp4_tensors("output", test_data, ref_data, rows, cols, atol, rtol);
-    compare_nvfp4_tensors("output_t", test_data_t, ref_data_t, cols, rows, atol, rtol);
 }
 
 template <typename InputType>
