@@ -97,7 +97,9 @@ jobs:
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: pip install cmake==3.21.0 pybind11[global]
+        run: |
+          pip install cmake==3.21.0 pybind11[global]
+          apt-get update && apt-get install -y ccache
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
