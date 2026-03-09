@@ -1090,19 +1090,18 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
       reinterpret_cast<nvfp4_scale_t *>(output->columnwise_scale_inv.dptr);
 
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
-  const float *const amax_rowwise_ptr = reinterpret_cast<const float *>(output->amax.dptr);
-  const float *const amax_colwise_ptr =
-      reinterpret_cast<const float *>(output->columnwise_amax.dptr);
-  const size_t amax_rowwise_numel = output->amax.has_data() ? output->amax.numel() : 0;
+  const float *const amax_rowwise_ptr = reinterpret_cast<const float *>(input->amax.dptr);
+  const float *const amax_colwise_ptr = reinterpret_cast<const float *>(input->columnwise_amax.dptr);
+  const size_t amax_rowwise_numel = input->amax.has_data() ? input->amax.numel() : 0;
   const size_t amax_colwise_numel =
-      output->columnwise_amax.has_data() ? output->columnwise_amax.numel() : 0;
+      input->columnwise_amax.has_data() ? input->columnwise_amax.numel() : 0;
 
-  if (output->amax.has_data()) {
+  if (input->amax.has_data()) {
     NVTE_CHECK(amax_rowwise_numel == 1 || amax_rowwise_numel == num_tensors,
                "Rowwise amax must contain either 1 value or num_tensors values, found ",
                amax_rowwise_numel, " values for num_tensors=", num_tensors, ".");
   }
-  if (output->columnwise_amax.has_data()) {
+  if (input->columnwise_amax.has_data()) {
     NVTE_CHECK(amax_colwise_numel == 1 || amax_colwise_numel == num_tensors,
                "Columnwise amax must contain either 1 value or num_tensors values, found ",
                amax_colwise_numel, " values for num_tensors=", num_tensors, ".");

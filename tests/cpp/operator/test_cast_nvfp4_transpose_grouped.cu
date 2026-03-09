@@ -461,9 +461,9 @@ void performTest(const ShapeRepresentation shape_rep,
     nvte_set_grouped_tensor_param(out_group_tensor,
                                   NVTEGroupedTensorParam::kNVTEGroupedColumnwiseScaleInv,
                                   &out_scales_colwise_tensor, sizeof(out_scales_colwise_tensor));
-    nvte_set_grouped_tensor_param(out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedAmax,
+    nvte_set_grouped_tensor_param(in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedAmax,
                                   &out_amax_rowwise_tensor, sizeof(out_amax_rowwise_tensor));
-    nvte_set_grouped_tensor_param(out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseAmax,
+    nvte_set_grouped_tensor_param(in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseAmax,
                                   &out_amax_colwise_tensor, sizeof(out_amax_colwise_tensor));
 
     if ((shape_rep == VARYING_FIRST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
