@@ -15,11 +15,6 @@ from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-
-try:
-    from ..tensor.storage.grouped_tensor import GroupedTensor
-except ModuleNotFoundError:  # Backward compatibility with old import paths
-    from ..tensor.grouped_tensor import GroupedTensor
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
