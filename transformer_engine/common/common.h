@@ -667,7 +667,7 @@ struct TypeInfo {
       SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)                              \
     default:                                                                 \
       NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
-                 ". Expected one of: Byte, Int32, Int64, Float32, "          \
+                 ". Expected one of: Byte, Int16, Int32, Int64, Float32, "   \
                  "Float16, BFloat16, Float8E4M3, Float8E5M2, "               \
                  "Float8E8M0, Float4E2M1.");                                 \
   }

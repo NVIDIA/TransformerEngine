@@ -600,6 +600,7 @@ class NVFP4QuantizerRef(Quantizer):
             - sx_t: scale tensor for qx_t (if columnwise_usage), None otherwise
             - global_amax_row, global_amax_col: global amax tensors
         """
+        global_amax_col = None
         if self.pow_2_scales:
             if self.quant_tile_shape != (1, 32):
                 raise ValueError(

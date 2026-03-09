@@ -873,7 +873,7 @@ def get_cpu_offload_context(
             self.inside_context = False
 
         def __enter__(self):
-            if self.inside_context is not False:
+            if self.inside_context:
                 raise RuntimeError(
                     "Offloading context was entered without synchronization function being called."
                 )
@@ -898,7 +898,7 @@ def get_cpu_offload_context(
             """
             This function is used to catch the backward pass of the model.
             """
-            if tensor.requires_grad is not True:
+            if not tensor.requires_grad:
                 raise ValueError(
                     "Tensor passed to synchronization_function must require grad to "
                     "register backward hooks, but got requires_grad=False for tensor "
@@ -911,7 +911,7 @@ def get_cpu_offload_context(
                     f"offload_synchronizer num_layers={self.offload_synchronizer.num_layers}"
                 )
             cur_layer = self.current_layer
-            if self.inside_context is not False:
+            if self.inside_context:
                 raise RuntimeError(
                     "Synchronization function was called without offloading context being entered."
                 )

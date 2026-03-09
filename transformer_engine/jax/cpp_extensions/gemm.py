@@ -300,7 +300,7 @@ def collective_gemm_bootstrap(
             f"Invalid num_total_devices={num_total_devices},"
             f" num_devices_per_process={num_devices_per_process}"
         )
-    if not (0 <= process_id < num_total_devices):
+    if not 0 <= process_id < num_total_devices:
         raise ValueError(f"Invalid process_id={process_id}")
     initialize_cgemm_communicator(
         num_total_devices,
@@ -505,7 +505,7 @@ class GemmPrimitive(BasePrimitive):
                 )
 
         # Determine output shape and dtype
-        if not (dtypes.canonicalize_dtype(out_dtype).itemsize > 1):
+        if not dtypes.canonicalize_dtype(out_dtype).itemsize > 1:
             raise ValueError("cuBLAS GEMM custom op does not support 8-bit quantized output types.")
         lhs_non_contracting_shape, rhs_non_contracting_shape = map(
             lambda shape, dims: [shape[dim] for dim in range(len(shape)) if dim not in dims],
@@ -860,7 +860,7 @@ class GemmPrimitive(BasePrimitive):
                     " Please check your sharding configuration."
                 ) from exc
             sequence_dim = tpsp_idx
-            if not ((sequence_dim == 1) ^ transpose_batch_sequence):
+            if not (sequence_dim == 1) ^ transpose_batch_sequence:
                 raise ValueError(
                     "CollectiveGEMM supports only (sequence_dim=1 and"
                     " transpose_batch_sequence=False) or (sequence_dim=0 and"

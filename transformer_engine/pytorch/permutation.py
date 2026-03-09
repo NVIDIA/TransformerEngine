@@ -500,6 +500,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 fp8_dtype = None
                 fp8_scale = None
 
+            permuted_scale = None
             if ctx.with_probs:
                 if fp8:
                     raise TypeError(
