@@ -117,5 +117,5 @@ def setup_jax_extension(
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
         libraries=["nccl"],
-        library_dirs=library_dirs,
+        library_dirs=[str(path) for path in library_dirs],
     )
