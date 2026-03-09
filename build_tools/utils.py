@@ -250,6 +250,7 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
         if subdir.is_dir() and (subdir / "include").is_dir()
     ]
 
+
 @functools.lru_cache(maxsize=None)
 def get_cuda_library_dirs() -> Tuple[str, str]:
     """Returns the CUDA library directory."""
@@ -275,7 +276,6 @@ def get_cuda_library_dirs() -> Tuple[str, str]:
         for subdir in cuda_root.iterdir()
         if subdir.is_dir() and (subdir / "lib").is_dir()
     ]
-
 
 
 @functools.lru_cache(maxsize=None)
