@@ -7,7 +7,9 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from utils import assert_allclose, pytest_parametrize_wrapper
+from utils import assert_allclose, pytest_parametrize_wrapper, require_triton
+
+require_triton()
 
 import triton
 import triton.language as tl
@@ -23,6 +25,7 @@ def init():
     yield
 
 
+@pytest.mark.triton
 class TestTritonBinding:
     """Test Triton binding primitive."""
 

@@ -5,18 +5,31 @@
 """Tests for permutation Triton kernels and high-level APIs"""
 
 import functools
+import sys
 
 import jax
 import jax.numpy as jnp
 import pytest
 
-# High-level API with VJP support
-from transformer_engine.jax.permutation import (
-    token_dispatch,
-    token_combine,
-    sort_chunks_by_index,
-)
 from utils import assert_allclose, pytest_parametrize_wrapper
+
+
+@pytest.fixture(autouse=True, scope="function")
+def _inject_permutation(request):
+    """Lazy-load permutation API only for tests marked 'triton'. Other tests run without importing."""
+    if not request.node.get_closest_marker("triton"):
+        yield
+        return
+    from transformer_engine.jax.permutation import (
+        token_dispatch,
+        token_combine,
+        sort_chunks_by_index,
+    )
+    mod = sys.modules[__name__]
+    mod.token_dispatch = token_dispatch
+    mod.token_combine = token_combine
+    mod.sort_chunks_by_index = sort_chunks_by_index
+    yield
 
 
 ALL_DISPATCH_COMBINE_CASES = [
@@ -449,6 +462,7 @@ def reference_sort_chunks_by_map(
     return output, permuted_probs
 
 
+@pytest.mark.triton
 class TestHighLevelPermutationAPI:
     """Test high-level permutation APIs (token_dispatch, token_combine, etc.)
 

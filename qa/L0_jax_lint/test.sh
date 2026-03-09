@@ -4,7 +4,7 @@
 
 set -e
 
-: "${TE_PATH:=/opt/transformerengine}"
+: "${TE_PATH:=/Users/tdophung/Repos/TransformerEngine}"
 
 pip3 install cpplint==1.6.0 pylint==3.3.1
 if [ -z "${PYTHON_ONLY}" ]

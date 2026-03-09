@@ -42,6 +42,11 @@ from jax import core
 import jax
 import jax.numpy as jnp
 
+from ..version_utils import (
+    TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_extension_supported,
+)
+
 
 # Placeholder package version on PyPI that should never be used
 _PYTORCH_TRITON_PLACEHOLDER_VERSION = "0.0.1"
@@ -162,23 +167,19 @@ except ImportError as e:
         "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
     ) from e
 
-# Minimum jaxlib version required for Triton kernel dispatch to work correctly.
-# jaxlib < 0.8.0.dev20250924 segfaults in pxla.py during Triton kernel execution
-# (bisected: last known segfault = jax-2025-09-23, first known pass = jax-2025-09-24).
-_JAXLIB_MIN_VERSION = "0.8.0.dev20250924"
-import jaxlib  # noqa: E402
-
-if version.parse(jaxlib.__version__) < version.parse(_JAXLIB_MIN_VERSION):
+# Enforce minimum JAX version for Triton kernel dispatch (segfaults on jaxlib < 0.8.0).
+if not is_triton_extension_supported():
     raise RuntimeError(
-        f"jaxlib {jaxlib.__version__} is too old for transformer_engine.jax.triton_extensions.\n"
-        f"Triton kernel dispatch segfaults with jaxlib < {_JAXLIB_MIN_VERSION}.\n"
-        "Please upgrade: pip install --upgrade jax jaxlib\n"
-        "Or use a JAX nightly container dated 2025-09-24 or later.\n"
+        f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for "
+        "transformer_engine.jax.triton_extensions. "
+        f"Triton kernel dispatch segfaults with older jaxlib. "
+        f"Current jax version: {jax.__version__}. "
+        "Please upgrade: pip install --upgrade jax jaxlib. "
         "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
     )
 
 
-__all__ = ["triton_call_lowering", "get_triton_info"]
+__all__ = ["triton_call_lowering", "get_triton_info", "is_triton_extension_supported"]
 
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
