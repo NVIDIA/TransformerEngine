@@ -237,8 +237,8 @@ void compare_nvfp4_tensors(const std::string& name,
             std::cout << "STATUS: FAILED for output" << std::endl;
             std::cout << "Total mismatches found: " << total_mismatches << std::endl;
             std::cout << "Mismatch rate: " << (100.0 * total_mismatches) / (rows * cols) << "%" << std::endl;
-            if (mismatch_messages.size() > max_mismatches_to_print) {
-                std::cout << "... and " << (mismatch_messages.size() - max_mismatches_to_print)
+            if (total_mismatches > max_mismatches_to_print) {
+                std::cout << "... and " << (total_mismatches - max_mismatches_to_print)
                 << " more mismatches (showing first " << max_mismatches_to_print << ")" << std::endl;
             }
             std::cout << "============================" << std::endl;
