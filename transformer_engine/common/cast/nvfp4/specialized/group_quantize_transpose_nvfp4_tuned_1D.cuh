@@ -1091,7 +1091,8 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
 
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   const float *const amax_rowwise_ptr = reinterpret_cast<const float *>(input->amax.dptr);
-  const float *const amax_colwise_ptr = reinterpret_cast<const float *>(input->columnwise_amax.dptr);
+  const float *const amax_colwise_ptr =
+      reinterpret_cast<const float *>(input->columnwise_amax.dptr);
   const size_t amax_rowwise_numel = input->amax.has_data() ? input->amax.numel() : 0;
   const size_t amax_colwise_numel =
       input->columnwise_amax.has_data() ? input->columnwise_amax.numel() : 0;
