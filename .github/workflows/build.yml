@@ -63,6 +63,7 @@ jobs:
             echo $CUDA_PATH
             ln -s $CUDA_PATH/lib/libcudart.so.13 $CUDA_PATH/lib/libcudart.so
             ln -s $CUDA_PATH/lib/libcublas.so.13 $CUDA_PATH/lib/libcublas.so
+            ln -s $CUDA_PATH/../nccl/lib/libnccl.so.2 $CUDA_PATH/../nccl/lib/libnccl.so
             ln -s $CUDA_PATH/lib $CUDA_PATH/lib64
 
       - name: "Disk space check after dependencies"
@@ -144,6 +145,7 @@ jobs:
             echo $CUDA_PATH
             ln -s $CUDA_PATH/lib/libcudart.so.13 $CUDA_PATH/lib/libcudart.so
             ln -s $CUDA_PATH/lib/libcublas.so.13 $CUDA_PATH/lib/libcublas.so
+            ln -s $CUDA_PATH/../nccl/lib/libnccl.so.2 $CUDA_PATH/../nccl/lib/libnccl.so
             ln -s $CUDA_PATH/lib $CUDA_PATH/lib64
 
       - name: "Disk space check after dependencies"

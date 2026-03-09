@@ -9,7 +9,8 @@ from packaging import version
 
 import setuptools
 
-from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
+from .utils import (get_cuda_include_dirs, all_files_in_dir,
+                    debug_build_enabled, get_cuda_library_dirs)
 from typing import List
 
 
@@ -92,6 +93,9 @@ def setup_jax_extension(
         ]
     )
 
+    # Library dirs
+    library_dirs = get_cuda_library_dirs()
+
     # Compile flags
     cxx_flags = ["-O3"]
     if debug_build_enabled():
@@ -109,4 +113,5 @@ def setup_jax_extension(
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
         libraries=["nccl"],
+        library_dirs=library_dirs,
     )

@@ -250,6 +250,33 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
         if subdir.is_dir() and (subdir / "include").is_dir()
     ]
 
+@functools.lru_cache(maxsize=None)
+def get_cuda_library_dirs() -> Tuple[str, str]:
+    """Returns the CUDA library directory."""
+
+    force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
+    # If cuda is installed via toolkit, all necessary headers
+    # are bundled inside the top level cuda directory.
+    if not force_wheels and cuda_toolkit_include_path() is not None:
+        return []
+
+    # Use pip wheels to include all headers.
+    try:
+        import nvidia
+    except ModuleNotFoundError as e:
+        raise RuntimeError("CUDA not found.")
+
+    if nvidia.__file__ is not None:
+        cuda_root = Path(nvidia.__file__).parent
+    else:
+        cuda_root = Path(nvidia.__path__[0])  # namespace
+    return [
+        subdir / "lib"
+        for subdir in cuda_root.iterdir()
+        if subdir.is_dir() and (subdir / "lib").is_dir()
+    ]
+
+
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
