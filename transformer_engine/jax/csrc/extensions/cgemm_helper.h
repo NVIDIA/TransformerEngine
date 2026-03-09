@@ -7,6 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CGEMM_HELPER_H_
 #define TRANSFORMER_ENGINE_JAX_CGEMM_HELPER_H_
 
+#include <nccl.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -16,8 +17,6 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
-
-#include <nccl.h>
 
 #include "../extensions.h"
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
