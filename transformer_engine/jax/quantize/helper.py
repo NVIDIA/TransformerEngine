@@ -14,11 +14,9 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 from typing import Optional, Tuple, Dict, Union, Sequence, Type, List
-from functools import reduce, lru_cache
+from functools import reduce
 import operator
-from importlib.metadata import version as get_pkg_version
 import warnings
-from packaging.version import Version as PkgVersion
 
 import jax
 import jax.numpy as jnp
@@ -40,6 +38,7 @@ from transformer_engine.jax.sharding import (
     get_all_mesh_axes,
     with_sharding_constraint,
 )
+from transformer_engine.jax.version_utils import _jax_version_meet_requirement
 
 from .metadata import QuantizeMeta
 from .scaling_modes import ScalingMode
@@ -66,16 +65,6 @@ _reason_for_no_scaling_mode = ""
 Collection = Union[Dict, FrozenDict]
 
 NVTE_FP8_COLLECTION_NAME = "fp8_metas"
-
-
-@lru_cache(maxsize=None)
-def _jax_version_meet_requirement(version: str):
-    """
-    Helper function checking if required JAX version is available
-    """
-    jax_version = PkgVersion(get_pkg_version("jax"))
-    jax_version_required = PkgVersion(version)
-    return jax_version >= jax_version_required
 
 
 def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
