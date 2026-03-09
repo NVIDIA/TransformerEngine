@@ -54,16 +54,12 @@ std::vector<InputType> create_transpose(const InputType* const input, const size
 }
 
 // Compute the global encode scale factor for a given global amax
-float compute_global_encode_scaling_factor_FP4(const float global_amax, const bool use_fast_math) {
+float compute_global_encode_scaling_factor_FP4(const float global_amax) {
   constexpr float fp8_max = 448.0f;     // 448.0f;
   constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
-  // If scale is infinity, return the max normalized value
-  const float max_norm_clamp = use_fast_math
-                               ? Numeric_Traits<bf16>::maxNorm
-                               : Numeric_Traits<float>::maxNorm;
 
-  global_encode_scale = fminf(global_encode_scale, max_norm_clamp);
+  global_encode_scale = fminf(global_encode_scale, Numeric_Traits<float>::maxNorm);
   // If global amax is 0 or infinity, return 1
   if (global_amax == 0.0f || global_encode_scale == 0.0f) {
     return 1.0f;
@@ -84,7 +80,7 @@ void quantize_nvfp4_1d(float (*OP)(const float),
                        const bool use_fast_math) {
 
     // Compute a global encoding/decoding scaling factor for all S_dec_b
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
 
     constexpr size_t block_size_X = 16;
     const size_t blocks_X = divide_round_up(cols, block_size_X);
@@ -163,7 +159,7 @@ void compute_2d_mathematical_scales(float (*OP)(const float),
                                    std::vector<std::vector<fp8e4m3>>& math_scales,
                                    const bool use_fast_math) {
 
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
     const size_t blocks_Y = divide_round_up(rows, block_size_Y);
@@ -214,7 +210,7 @@ void quantize_nvfp4_2d(float (*OP)(const float),
     std::vector<std::vector<fp8e4m3>> math_scales;
     compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales, use_fast_math);
 
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
     const size_t blocks_Y = divide_round_up(rows, block_size_Y);

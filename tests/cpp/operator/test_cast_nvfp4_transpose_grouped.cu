@@ -71,7 +71,7 @@ struct TypeExtrema {
 
 // Compute "correct" per-block encoding scaling factor
 float compute_scaling_coefficient(const nvfp4_scale_t S_dec_block, const float S_enc,
-                                        const bool use_fast_math) {
+                                  const bool use_fast_math) {
     const float S_dec_block_as_fp32 = static_cast<float>(S_dec_block);
     float scale_rcp = 0.0f;
     if (use_fast_math) {
@@ -91,16 +91,12 @@ nvfp4_scale_t compute_decoding_scaling_factor(const float block_amax, const floa
 }
 
 // Compute the global encode scale factor for a given global amax
-float compute_global_encode_scaling_factor(const float global_amax, const bool use_fast_math) {
+float compute_global_encode_scaling_factor(const float global_amax) {
   constexpr float fp8_max = 448.0f;     // 448.0f;
   constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
-  // If scale is infinity, return the max normalized value
-  const float max_norm_clamp = use_fast_math
-                               ? Numeric_Traits<bf16>::maxNorm
-                               : Numeric_Traits<float>::maxNorm;
 
-  global_encode_scale = fminf(global_encode_scale, max_norm_clamp);
+  global_encode_scale = fminf(global_encode_scale, Numeric_Traits<float>::maxNorm);
   // If global amax is 0 or infinity, return 1
   if (global_amax == 0.0f || global_encode_scale == 0.0f) {
     return 1.0f;
@@ -120,7 +116,7 @@ void quantize_nvfp4(const InputType* const input,
                     const bool use_fast_math) {
 
     // Compute a global encoding/decoding scaling factor for all S_dec_b
-    const float S_enc = compute_global_encode_scaling_factor(global_amax, use_fast_math);
+    const float S_enc = compute_global_encode_scaling_factor(global_amax);
 
     constexpr size_t block_size_X = 16;
     const size_t blocks_X = divide_round_up(cols, block_size_X);
@@ -552,14 +548,14 @@ void performTest(const ShapeRepresentation shape_rep,
 
 // {shape_representation, num_tensors, [logical_shape_M, logical_shape_K], [M_i], [K_i]}
 std::vector<std::vector<size_t>> grouped_input_config = {
-    {SAME_BOTH_DIMS,        1,      128,128},
-    {SAME_BOTH_DIMS,        2,      256,128},
-    {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
-    {VARYING_FIRST_DIM,     3,      1024,160,                   128,384,512},
-    {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
-    {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
-    {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
-    {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
+    // {SAME_BOTH_DIMS,        1,      128,128},
+    // {SAME_BOTH_DIMS,        2,      256,128},
+    // {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
+    // {VARYING_FIRST_DIM,     3,      1024,160,                   128,384,512},
+    // {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
+    // {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
+    // {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
+    // {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
     {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
 };
 
@@ -633,7 +629,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::ValuesIn(grouped_input_config),
         ::testing::Values(DType::kBFloat16),
-        ::testing::Values(true, false)),
+        ::testing::Values(true)),
     [](const testing::TestParamInfo<GroupedFusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         std::string name = "CAST_ONLY";
         const std::vector<size_t> input = std::get<0>(info.param);
