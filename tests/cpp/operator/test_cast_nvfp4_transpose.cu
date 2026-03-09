@@ -738,7 +738,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(tensor_dims),
         ::testing::Values(DType::kBFloat16),
-        ::testing::Values(false)),
+        ::testing::Values(true, false)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param));
       const auto& shape = std::get<1>(info.param);

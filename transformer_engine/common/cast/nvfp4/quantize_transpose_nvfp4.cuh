@@ -225,13 +225,13 @@ __global__ void __launch_bounds__(THREADS_NUM)
   // Compute a global encoding/decoding scaling factors for all S_dec_b
   const float S_enc_rowwise = (amax_rowwise_ptr == nullptr)
                                   ? 1.0f
-                                  : compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
+                                  : compute_global_encode_scaling_factor(*amax_rowwise_ptr);
   // NOTE: This is to match with how emulation code was written.
   const float S_dec_rowwise = 1.0 / S_enc_rowwise;
 
   const float S_enc_colwise = (amax_colwise_ptr == nullptr)
                                   ? S_enc_rowwise
-                                  : compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
+                                  : compute_global_encode_scaling_factor(*amax_colwise_ptr);
   const float S_dec_colwise = 1.0 / S_enc_colwise;
 
   float thread_amax = 0.0f;
@@ -737,13 +737,13 @@ __global__ void __launch_bounds__(THREADS_NUM)
   // Compute a global encoding/decoding scaling factors for all S_dec_b
   const float S_enc_rowwise = (amax_rowwise_ptr == nullptr)
                                   ? 1.0f
-                                  : compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
+                                  : compute_global_encode_scaling_factor(*amax_rowwise_ptr);
   // NOTE: This is to match with how emulation code was written.
   const float S_dec_rowwise = 1.0 / S_enc_rowwise;
 
   const float S_enc_colwise = (amax_colwise_ptr == nullptr)
                                   ? S_enc_rowwise
-                                  : compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
+                                  : compute_global_encode_scaling_factor(*amax_colwise_ptr);
   const float S_dec_colwise = 1.0 / S_enc_colwise;
 
   const size_t warp_id = threadIdx.x / 32;

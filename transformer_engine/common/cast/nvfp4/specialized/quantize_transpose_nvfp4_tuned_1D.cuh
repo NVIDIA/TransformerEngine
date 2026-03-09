@@ -159,30 +159,6 @@ __device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
   return static_cast<float>(__hmax(__habs(pair.x), __habs(pair.y)));
 }
 
-// Compute "correct" per-block encoding scaling factor
-template <typename SF_TYPE>
-__device__ __forceinline__ SF_TYPE
-compute_nvfp4_scaling_coefficient(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  NVTE_DEVICE_ERROR("Unsupported scaling-factor type. Only FP32 and BF16 are supported.");
-}
-
-template <>
-__device__ __forceinline__ float compute_nvfp4_scaling_coefficient<float>(
-    const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float S_dec = 1.0f / S_enc;
-  const float scale_rcp =
-      fminf(1.0f / (static_cast<float>(S_dec_block) * S_dec), detail::TypeExtrema<float>::max);
-  return scale_rcp;
-}
-
-template <>
-__device__ __forceinline__ bf16
-compute_nvfp4_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float scale_rcp =
-      fminf(S_enc / (static_cast<float>(S_dec_block)), detail::TypeExtrema<bf16>::max);
-  return static_cast<bf16>(scale_rcp);
-}
-
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH>
 __device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_ptr,
                                                 fp4e2m1x2 *__restrict__ sOut_tr_ptr,
@@ -236,7 +212,7 @@ __device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_pt
     sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
 
     const scaling_coeff_type SFcoefficient =
-        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
+        core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
 
     // Scale elements
     __align__(8) uint32_t rOut[SCALE_DIM / 8];
@@ -316,7 +292,7 @@ __device__ __forceinline__ void rowwise_scaling(const IType *__restrict__ sIn_pt
 
     const nvfp4_scale_t S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
     const scaling_coeff_type SFcoefficient =
-        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
+        core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
 
     // Store scaling factors to SMEM buffer (R2S)
     if (SF_storing_thread) {
@@ -417,12 +393,12 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   const float S_enc_rowwise =
       (amax_rowwise_ptr == nullptr)
           ? 1.0f
-          : core::compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
+          : core::compute_global_encode_scaling_factor(*amax_rowwise_ptr);
 
   const float S_enc_colwise =
       (amax_colwise_ptr == nullptr)
           ? S_enc_rowwise
-          : core::compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
+          : core::compute_global_encode_scaling_factor(*amax_colwise_ptr);
 
   __shared__ uint64_t workID_mbar;
   __shared__ __uint128_t workID_response;

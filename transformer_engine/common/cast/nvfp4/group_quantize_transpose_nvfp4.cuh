@@ -87,7 +87,7 @@ __device__ __forceinline__ int GetTensorIdAndBoundary(
 __device__ __forceinline__ void UpdateEncodeDecodeScaleFP32(float *amax_ptr, float *s_enc_ptr,
                                                             float *s_dec_ptr) {
   float s_env_value =
-      (amax_ptr == nullptr) ? 1.0f : compute_global_encode_scaling_factor_FP4(*amax_ptr);
+      (amax_ptr == nullptr) ? 1.0f : compute_global_encode_scaling_factor(*amax_ptr);
   float s_dec_value = 1.0 / s_env_value;
   *s_enc_ptr = s_env_value;
   *s_dec_ptr = s_dec_value;

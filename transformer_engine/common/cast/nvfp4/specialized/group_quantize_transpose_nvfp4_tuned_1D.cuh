@@ -179,30 +179,6 @@ __device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
   return static_cast<float>(__hmax(__habs(pair.x), __habs(pair.y)));
 }
 
-// Compute "correct" per-block encoding scaling factor
-template <typename SF_TYPE>
-__device__ __forceinline__ SF_TYPE
-compute_nvfp4_scaling_coefficient(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  NVTE_DEVICE_ERROR("Unsupported scaling-factor type. Only FP32 and BF16 are supported.");
-}
-
-template <>
-__device__ __forceinline__ float compute_nvfp4_scaling_coefficient<float>(
-    const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float S_dec = 1.0f / S_enc;
-  const float scale_rcp =
-      fminf(1.0f / (static_cast<float>(S_dec_block) * S_dec), detail::TypeExtrema<float>::max);
-  return scale_rcp;
-}
-
-template <>
-__device__ __forceinline__ bf16
-compute_nvfp4_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float scale_rcp =
-      fminf(S_enc / (static_cast<float>(S_dec_block)), detail::TypeExtrema<bf16>::max);
-  return static_cast<bf16>(scale_rcp);
-}
-
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH>
 __device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_ptr,
                                                 fp4e2m1x2 *__restrict__ sOut_tr_ptr,
@@ -256,7 +232,7 @@ __device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_pt
     sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
 
     const scaling_coeff_type SFcoefficient =
-        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
+        core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
 
     // Scale elements
     __align__(8) uint32_t rOut[SCALE_DIM / 8];
@@ -335,8 +311,8 @@ __device__ __forceinline__ void rowwise_scaling(const IType *__restrict__ sIn_pt
     const float block_amax = get_amax_of_pair(thread_amax_2x);
 
     const nvfp4_scale_t S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
-    const scaling_coeff_type SFcoefficient =
-        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
+    const scaling_coeff_type SFcoefficient = 
+        core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
 
     // Store scaling factors to SMEM buffer (R2S)
     if (SF_storing_thread) {
@@ -450,24 +426,6 @@ get_tensor_base_offset(const size_t tensor_id, const ShapeRepresentation shape_r
 
 __device__ __forceinline__ size_t get_nvfp4_scale_stride(const size_t block_scaled_dim) {
   return DIVUP_TO_MULTIPLE(DIVUP(block_scaled_dim, static_cast<size_t>(SCALE_DIM)), 4);
-}
-
-__device__ __forceinline__ size_t get_grouped_scale_base_offset(
-    const size_t tensor_id, const ShapeRepresentation shape_rep, const size_t first_logical_dim,
-    const size_t last_logical_dim, const size_t num_tensors,
-    const int64_t *const __restrict__ first_dims_ptr,
-    const int64_t *const __restrict__ last_dims_ptr, const bool rowwise) {
-  size_t scale_base = 0;
-  for (size_t t = 0; t < tensor_id; ++t) {
-    const size_t rows = get_tensor_rows_num(t, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
-    const size_t cols = get_tensor_cols_num(t, shape_rep, last_logical_dim, last_dims_ptr);
-
-    const size_t scale_rows = rowwise ? rows : cols;
-    const size_t stride_dim = rowwise ? cols : rows;
-    const size_t scale_stride = get_nvfp4_scale_stride(stride_dim);
-    scale_base += scale_rows * scale_stride;
-  }
-  return scale_base;
 }
 
 struct JobDescriptor {
@@ -664,7 +622,8 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, nvfp4_scale_t *const scales_ptr,
     nvfp4_scale_t *const scales_t_ptr, const float *noop, const float *const amax_rowwise_ptr,
-    const float *const amax_colwise_ptr, const size_t work_blocks_X, const size_t work_blocks_Y,
+    const float *const amax_colwise_ptr, const size_t amax_rowwise_numel,
+    const size_t amax_colwise_numel, const size_t work_blocks_X, const size_t work_blocks_Y,
     const size_t *rng_state) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
@@ -719,13 +678,6 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   auto &sSFcolwise = *reinterpret_cast<ScalesTypeTr2D *>(sSFcolwise_ptr);
 
   constexpr int shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
-
-  const float S_enc_rowwise = (amax_rowwise_ptr == nullptr)
-                              ? 1.0f
-                              : core::compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
-  const float S_enc_colwise = (amax_colwise_ptr == nullptr)
-                              ? S_enc_rowwise
-                              : core::compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
 
   __shared__ size_t rowwise_scale_base[MAX_SUPPORTED_TENSOR_DESCRIPTORS + 1];
   __shared__ size_t colwise_scale_base[MAX_SUPPORTED_TENSOR_DESCRIPTORS + 1];
@@ -854,6 +806,15 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
 
     const size_t scale_stride = get_nvfp4_scale_stride(cols);
     const size_t scale_stride_t = get_nvfp4_scale_stride(rows);
+
+    const size_t amax_rowwise_idx = (amax_rowwise_numel > 1) ? current_job.tensor_id : 0;
+    const float S_enc_rowwise = (amax_rowwise_ptr == nullptr || amax_rowwise_numel == 0)
+                                ? 1.0f
+                                : core::compute_global_encode_scaling_factor(amax_rowwise_ptr[amax_rowwise_idx]);
+    const size_t amax_colwise_idx = (amax_colwise_numel > 1) ? current_job.tensor_id : 0;
+    const float S_enc_colwise = (amax_colwise_ptr == nullptr || amax_colwise_numel == 0)
+                                ? S_enc_rowwise
+                                : core::compute_global_encode_scaling_factor(amax_colwise_ptr[amax_colwise_idx]);
 
     nvfp4_scale_t *const scales_rowwise = scales_ptr + rowwise_scale_base[current_job.tensor_id];
     nvfp4_scale_t *const scales_colwise = RETURN_TRANSPOSE
@@ -1131,6 +1092,19 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
   const float *const amax_rowwise_ptr = reinterpret_cast<const float *>(output->amax.dptr);
   const float *const amax_colwise_ptr =
       reinterpret_cast<const float *>(output->columnwise_amax.dptr);
+  const size_t amax_rowwise_numel = output->amax.has_data() ? output->amax.numel() : 0;
+  const size_t amax_colwise_numel = output->columnwise_amax.has_data() ? output->columnwise_amax.numel() : 0;
+
+  if (output->amax.has_data()) {
+    NVTE_CHECK(amax_rowwise_numel == 1 || amax_rowwise_numel == num_tensors,
+               "Rowwise amax must contain either 1 value or num_tensors values, found ",
+               amax_rowwise_numel, " values for num_tensors=", num_tensors, ".");
+  }
+  if (output->columnwise_amax.has_data()) {
+    NVTE_CHECK(amax_colwise_numel == 1 || amax_colwise_numel == num_tensors,
+               "Columnwise amax must contain either 1 value or num_tensors values, found ",
+               amax_colwise_numel, " values for num_tensors=", num_tensors, ".");
+  }
 
   const NVTETensor rng_state_tensor = (quant_config != nullptr) ? quant_config->rng_state : nullptr;
   const size_t *rng_state = nullptr;
@@ -1208,7 +1182,8 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
                 shape_rep,
                 num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
                 last_dims_ptr, scales_ptr, scales_t_ptr, noop_ptr, amax_rowwise_ptr,
-                amax_colwise_ptr, work_blocks_X, work_blocks_Y, rng_state);
+                amax_colwise_ptr, amax_rowwise_numel, amax_colwise_numel, work_blocks_X,
+                work_blocks_Y, rng_state);
             NVTE_CHECK_CUDA(cudaGetLastError());
           });););
 #else
