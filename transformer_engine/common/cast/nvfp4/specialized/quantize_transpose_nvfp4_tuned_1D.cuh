@@ -57,10 +57,8 @@ static_assert(TunableConfig::CHUNK_DIM_Y % TILE_DIM_Y == 0,
 static_assert(TunableConfig::CHUNK_DIM_X % TILE_DIM_X == 0,
               "Chunk size X must be evenly divisible by the tile size X");
 
-static_assert(TILE_DIM_Y % SCALE_DIM == 0,
-              "Tile size Y must be evenly divisible by the scale dim");
-static_assert(TILE_DIM_X % SCALE_DIM == 0,
-              "Tile size X must be evenly divisible by the scale dim");
+static_assert(TILE_DIM_Y % SCALE_DIM == 0, "Tile size Y must be evenly divisible by the scale dim");
+static_assert(TILE_DIM_X % SCALE_DIM == 0, "Tile size X must be evenly divisible by the scale dim");
 
 constexpr int TILES_Y = TunableConfig::CHUNK_DIM_Y / TILE_DIM_Y;
 constexpr int TILES_X = TunableConfig::CHUNK_DIM_X / TILE_DIM_X;
@@ -390,15 +388,13 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   constexpr int shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
 
   // Compute a global encoding/decoding scaling factors for all S_dec_b
-  const float S_enc_rowwise =
-      (amax_rowwise_ptr == nullptr)
-          ? 1.0f
-          : core::compute_global_encode_scaling_factor(*amax_rowwise_ptr);
+  const float S_enc_rowwise = (amax_rowwise_ptr == nullptr)
+                                  ? 1.0f
+                                  : core::compute_global_encode_scaling_factor(*amax_rowwise_ptr);
 
-  const float S_enc_colwise =
-      (amax_colwise_ptr == nullptr)
-          ? S_enc_rowwise
-          : core::compute_global_encode_scaling_factor(*amax_colwise_ptr);
+  const float S_enc_colwise = (amax_colwise_ptr == nullptr)
+                                  ? S_enc_rowwise
+                                  : core::compute_global_encode_scaling_factor(*amax_colwise_ptr);
 
   __shared__ uint64_t workID_mbar;
   __shared__ __uint128_t workID_response;

@@ -77,10 +77,8 @@ static_assert(CHUNK_DIM_Y % TILE_DIM_Y == 0,
 static_assert(CHUNK_DIM_X % TILE_DIM_X == 0,
               "Chunk size X must be evenly divisible by the tile size X");
 
-static_assert(TILE_DIM_Y % SCALE_DIM == 0,
-              "Tile size Y must be evenly divisible by the scale dim");
-static_assert(TILE_DIM_X % SCALE_DIM == 0,
-              "Tile size X must be evenly divisible by the scale dim");
+static_assert(TILE_DIM_Y % SCALE_DIM == 0, "Tile size Y must be evenly divisible by the scale dim");
+static_assert(TILE_DIM_X % SCALE_DIM == 0, "Tile size X must be evenly divisible by the scale dim");
 
 constexpr int TILES_Y = CHUNK_DIM_Y / TILE_DIM_Y;
 constexpr int TILES_X = CHUNK_DIM_X / TILE_DIM_X;
@@ -311,7 +309,7 @@ __device__ __forceinline__ void rowwise_scaling(const IType *__restrict__ sIn_pt
     const float block_amax = get_amax_of_pair(thread_amax_2x);
 
     const nvfp4_scale_t S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
-    const scaling_coeff_type SFcoefficient = 
+    const scaling_coeff_type SFcoefficient =
         core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
 
     // Store scaling factors to SMEM buffer (R2S)
@@ -458,7 +456,8 @@ __device__ __forceinline__ JobDescriptor decode_job(
   job.tensor_id = get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset,
                                         static_cast<size_t>(ctaid_Y), first_logical_dim,
                                         last_logical_dim, offsets_ptr);
-  job.rows = get_tensor_rows_num(job.tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+  job.rows =
+      get_tensor_rows_num(job.tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   job.cols = get_tensor_cols_num(job.tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
   return job;
 }
@@ -691,10 +690,11 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
       size_t rowwise_scale_base_acc = 0;
       size_t colwise_scale_base_acc = 0;
 
-      for (size_t t = 0; t < num_tensors; ++t) { 
-        const size_t rows = get_tensor_rows_num(t, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+      for (size_t t = 0; t < num_tensors; ++t) {
+        const size_t rows =
+            get_tensor_rows_num(t, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
         const size_t cols = get_tensor_cols_num(t, shape_rep, last_logical_dim, last_dims_ptr);
-    
+
         rowwise_scale_base_acc += rows * get_nvfp4_scale_stride(cols);
         colwise_scale_base_acc += cols * get_nvfp4_scale_stride(rows);
         rowwise_scale_base[t + 1] = rowwise_scale_base_acc;
@@ -808,18 +808,19 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     const size_t scale_stride_t = get_nvfp4_scale_stride(rows);
 
     const size_t amax_rowwise_idx = (amax_rowwise_numel > 1) ? current_job.tensor_id : 0;
-    const float S_enc_rowwise = (amax_rowwise_ptr == nullptr || amax_rowwise_numel == 0)
-                                ? 1.0f
-                                : core::compute_global_encode_scaling_factor(amax_rowwise_ptr[amax_rowwise_idx]);
+    const float S_enc_rowwise =
+        (amax_rowwise_ptr == nullptr || amax_rowwise_numel == 0)
+            ? 1.0f
+            : core::compute_global_encode_scaling_factor(amax_rowwise_ptr[amax_rowwise_idx]);
     const size_t amax_colwise_idx = (amax_colwise_numel > 1) ? current_job.tensor_id : 0;
-    const float S_enc_colwise = (amax_colwise_ptr == nullptr || amax_colwise_numel == 0)
-                                ? S_enc_rowwise
-                                : core::compute_global_encode_scaling_factor(amax_colwise_ptr[amax_colwise_idx]);
+    const float S_enc_colwise =
+        (amax_colwise_ptr == nullptr || amax_colwise_numel == 0)
+            ? S_enc_rowwise
+            : core::compute_global_encode_scaling_factor(amax_colwise_ptr[amax_colwise_idx]);
 
     nvfp4_scale_t *const scales_rowwise = scales_ptr + rowwise_scale_base[current_job.tensor_id];
-    nvfp4_scale_t *const scales_colwise = RETURN_TRANSPOSE
-                                          ? (scales_t_ptr + colwise_scale_base[current_job.tensor_id])
-                                          : nullptr;
+    nvfp4_scale_t *const scales_colwise =
+        RETURN_TRANSPOSE ? (scales_t_ptr + colwise_scale_base[current_job.tensor_id]) : nullptr;
 
     const CUtensorMap &tensor_map_input = g_tensor_maps_input[current_job.tensor_id];
     const CUtensorMap &tensor_map_output = g_tensor_maps_output[current_job.tensor_id];
@@ -1093,7 +1094,8 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
   const float *const amax_colwise_ptr =
       reinterpret_cast<const float *>(output->columnwise_amax.dptr);
   const size_t amax_rowwise_numel = output->amax.has_data() ? output->amax.numel() : 0;
-  const size_t amax_colwise_numel = output->columnwise_amax.has_data() ? output->columnwise_amax.numel() : 0;
+  const size_t amax_colwise_numel =
+      output->columnwise_amax.has_data() ? output->columnwise_amax.numel() : 0;
 
   if (output->amax.has_data()) {
     NVTE_CHECK(amax_rowwise_numel == 1 || amax_rowwise_numel == num_tensors,
@@ -1179,9 +1181,8 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
             kernel<<<grid, block_size, dshmem_size, stream>>>(
-                shape_rep,
-                num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                last_dims_ptr, scales_ptr, scales_t_ptr, noop_ptr, amax_rowwise_ptr,
+                shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
+                first_dims_ptr, last_dims_ptr, scales_ptr, scales_t_ptr, noop_ptr, amax_rowwise_ptr,
                 amax_colwise_ptr, amax_rowwise_numel, amax_colwise_numel, work_blocks_X,
                 work_blocks_Y, rng_state);
             NVTE_CHECK_CUDA(cudaGetLastError());

@@ -124,7 +124,6 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
 void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
                       const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
-
 /*! \brief Casts input tensor to quantized output tensor, with advanced quantization options.
  *
  *  \param[in]      input            Input grouped tensor to be cast.
