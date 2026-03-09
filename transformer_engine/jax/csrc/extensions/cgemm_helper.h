@@ -17,6 +17,8 @@
 #include <thread>
 #include <unordered_map>
 
+#include <nccl.h>
+
 #include "../extensions.h"
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 #include "common/util/cuda_runtime.h"
