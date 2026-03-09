@@ -50,7 +50,8 @@ def require_triton():
         pytest.skip(
             f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for Triton kernel support. "
             "Triton kernel dispatch segfaults with older jaxlib. "
-            "Upgrade with: pip install --upgrade jax jaxlib"
+            "Upgrade with: pip install --upgrade jax jaxlib",
+            allow_module_level=True,
         )
 
 

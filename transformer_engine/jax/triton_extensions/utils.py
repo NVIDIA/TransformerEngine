@@ -179,7 +179,7 @@ if not is_triton_extension_supported():
     )
 
 
-__all__ = ["triton_call_lowering", "get_triton_info", "is_triton_extension_supported"]
+__all__ = ["triton_call_lowering", "get_triton_info"]
 
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
