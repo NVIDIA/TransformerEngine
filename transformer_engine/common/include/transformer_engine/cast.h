@@ -124,6 +124,17 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
 void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
                       const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
+
+/*! \brief Casts input tensor to quantized output tensor, with advanced quantization options.
+ *
+ *  \param[in]      input            Input grouped tensor to be cast.
+ *  \param[in,out]  output           Output grouped quantized tensor.
+ *  \param[in]      quant_config     Quantization configuration.
+ *  \param[in]      stream           CUDA stream used for the operation.
+ */
+void nvte_group_quantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                            const NVTEQuantizationConfig quant_config, cudaStream_t stream);
+
 /*! \brief Casts input tensor to MXFP8. Additionally, reduces the input along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.

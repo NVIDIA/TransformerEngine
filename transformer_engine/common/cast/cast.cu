@@ -56,6 +56,15 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
+void nvte_group_quantize_v2(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                            const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_quantize_v2);
+  using namespace transformer_engine;
+
+  constexpr bool IS_ACT = false;
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
+}
+
 void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor dbias,
                          NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize_dbias);

@@ -227,7 +227,7 @@ void compare_nvfp4_tensors(const std::string& name,
         }
     }
 
-    constexpr bool print_detailed_summary = true;
+    bool print_detailed_summary = false;
     if (print_detailed_summary) {
         // Always report summary - either success or failure
         std::cout << "=== SUMMARY for tensor " << name << " ===" << std::endl;
@@ -492,7 +492,11 @@ void performTest(const ShapeRepresentation shape_rep,
                                       &offsets_tensor, sizeof(offsets_tensor));
     }
 
-    nvte_group_quantize(in_group_tensor, out_group_tensor, 0);
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_use_fast_math(use_fast_math);
+    quant_config.set_stochastic_rounding(false);
+
+    nvte_group_quantize_v2(in_group_tensor, out_group_tensor, quant_config, 0);
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -548,14 +552,14 @@ void performTest(const ShapeRepresentation shape_rep,
 
 // {shape_representation, num_tensors, [logical_shape_M, logical_shape_K], [M_i], [K_i]}
 std::vector<std::vector<size_t>> grouped_input_config = {
-    // {SAME_BOTH_DIMS,        1,      128,128},
-    // {SAME_BOTH_DIMS,        2,      256,128},
-    // {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
-    // {VARYING_FIRST_DIM,     3,      1024,160,                   128,384,512},
-    // {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
-    // {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
-    // {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
-    // {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
+    {SAME_BOTH_DIMS,        1,      128,128},
+    {SAME_BOTH_DIMS,        2,      256,128},
+    {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
+    {VARYING_FIRST_DIM,     3,      1024,160,                   128,384,512},
+    {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
+    {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
+    {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
+    {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
     {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
 };
 
