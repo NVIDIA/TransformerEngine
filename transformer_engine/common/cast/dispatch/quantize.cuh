@@ -21,9 +21,9 @@
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
-#include "../nvfp4/specialized/group_quantize_transpose_nvfp4_tuned_1D.cuh"
 #include "../nvfp4/quantize_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
+#include "../nvfp4/specialized/group_quantize_transpose_nvfp4_tuned_1D.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -422,8 +422,8 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
       const bool is_2D_quantization = quant_config_cpp.nvfp4_2d_quantization;
       NVTE_CHECK(!is_2D_quantization, "2D quantization is not supported for group quantize.");
 
-      nvfp4::group_quantize_transpose(input_tensor, noop_tensor, output_tensor,
-                                      &quant_config_cpp, stream);
+      nvfp4::group_quantize_transpose(input_tensor, noop_tensor, output_tensor, &quant_config_cpp,
+                                      stream);
       break;
     }
     default:
@@ -475,9 +475,9 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
 
       const bool is_2D_quantization = quant_config_cpp.nvfp4_2d_quantization;
       NVTE_CHECK(!is_2D_quantization, "2D quantization is not supported for group quantize.");
-      
-      nvfp4::group_quantize_transpose(grad_tensor, noop_tensor, output_tensor,
-                                      &quant_config_cpp, stream);
+
+      nvfp4::group_quantize_transpose(grad_tensor, noop_tensor, output_tensor, &quant_config_cpp,
+                                      stream);
       break;
     }
     default:
