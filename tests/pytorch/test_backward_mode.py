@@ -307,6 +307,7 @@ _quantized_numerics_recipe_list = [
 _shape_test_cases = [
     pytest.param((1, 64), 64, id="2d_m1_k64_n64"),
     pytest.param((32, 64), 64, id="2d_m32_k64_n64"),
+    pytest.param((32, 96), 96, id="2d_m32_k96_n96"),
     pytest.param((32, 1, 64), 64, id="3d_m32_s1_k64_n64"),
     pytest.param((8, 4, 64), 128, id="3d_m32_k64_n128"),
     pytest.param((16, 2, 128), 64, id="3d_m32_k128_n64"),
@@ -317,10 +318,12 @@ _shape_test_cases = [
     # Intentionally unaligned token dimensions to exercise skip/support logic.
     pytest.param((3, 64), 64, id="2d_m3_k64_n64_unaligned"),
     pytest.param((3, 10, 64), 64, id="3d_m30_k64_n64_unaligned"),
+    pytest.param((3, 10, 96), 96, id="3d_m30_k96_n96_unaligned"),
 ]
 
 _bias_activation_shape_cases = [
     pytest.param((32, 64), id="2d_m32_k64"),
+    pytest.param((32, 96), id="2d_m32_k96"),
     pytest.param((8, 4, 64), id="3d_m32_k64"),
     pytest.param((160, 64), id="2d_m160_k64"),
     pytest.param((5, 64, 64), id="3d_m320_k64"),
@@ -328,6 +331,30 @@ _bias_activation_shape_cases = [
     # Intentionally unaligned token dimensions to exercise skip/support logic.
     pytest.param((3, 64), id="2d_m3_k64_unaligned"),
     pytest.param((3, 10, 64), id="3d_m30_k64_unaligned"),
+    pytest.param((3, 10, 96), id="3d_m30_k96_unaligned"),
+]
+
+_grouped_m_split_cases = [
+    pytest.param([32, 32, 32, 32], id="uniform_splits"),
+    pytest.param([64, 0, 32, 32], id="with_empty_split"),
+    pytest.param([1, 31, 0, 96], id="small_and_empty_splits"),
+]
+
+_linear_feature_cases = [
+    pytest.param(64, 64, id="k64_n64"),
+    pytest.param(64, 128, id="k64_n128"),
+    pytest.param(128, 64, id="k128_n64"),
+    pytest.param(96, 96, id="k96_n96"),
+    pytest.param(64, 96, id="k64_n96"),
+    pytest.param(96, 64, id="k96_n64"),
+    pytest.param(128, 96, id="k128_n96"),
+    pytest.param(96, 128, id="k96_n128"),
+]
+
+_output_feature_cases = [
+    pytest.param(64, id="n64"),
+    pytest.param(96, id="n96"),
+    pytest.param(128, id="n128"),
 ]
 
 
@@ -624,6 +651,120 @@ def _run_quantize_op_single_step(
     return y.detach().clone(), x_run.grad.detach().clone()
 
 
+def _snapshot_backward_ctx_state(
+    output: torch.Tensor,
+) -> tuple[str, bool, object, bool]:
+    if output.grad_fn is None:
+        raise RuntimeError("Output tensor has no grad_fn; cannot inspect backward context state.")
+    required_attrs = (
+        "backward_mode",
+        "fp8",
+        "grad_output_quantizer",
+        "reduce_and_update_bwd_fp8_tensors",
+    )
+    missing_attrs = [attr for attr in required_attrs if not hasattr(output.grad_fn, attr)]
+    if missing_attrs:
+        raise RuntimeError(
+            "grad_fn does not expose required backward context attributes: "
+            f"{', '.join(missing_attrs)}."
+        )
+    return (
+        getattr(output.grad_fn, "backward_mode"),
+        bool(getattr(output.grad_fn, "fp8")),
+        getattr(output.grad_fn, "grad_output_quantizer"),
+        bool(getattr(output.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
+    )
+
+
+def _run_single_step_with_ctx_state(
+    module: torch.nn.Module,
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    fp8_recipe: Optional[recipe.Recipe],
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    Optional[torch.Tensor],
+    tuple[str, bool, object, bool],
+]:
+    module.zero_grad(set_to_none=True)
+    x_run = x.detach().clone().requires_grad_(True)
+    autocast_ctx = (
+        te.autocast(enabled=True, recipe=fp8_recipe) if fp8_recipe is not None else nullcontext()
+    )
+    with autocast_ctx:
+        y = module(x_run)
+        if isinstance(y, tuple):
+            y = y[0]
+        ctx_state = _snapshot_backward_ctx_state(y)
+    y.backward(dy)
+    assert x_run.grad is not None
+    assert module.weight.grad is not None
+    bias = getattr(module, "bias", None)
+    bgrad = None if bias is None or bias.grad is None else bias.grad.detach().clone()
+    return (
+        y.detach().clone(),
+        x_run.grad.detach().clone(),
+        module.weight.grad.detach().clone(),
+        bgrad,
+        ctx_state,
+    )
+
+
+def _run_grouped_linear_single_step_with_ctx_state(
+    module: te.GroupedLinear,
+    x: torch.Tensor,
+    m_splits: list[int],
+    dy: torch.Tensor,
+    fp8_recipe: Optional[recipe.Recipe],
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    list[torch.Tensor],
+    list[Optional[torch.Tensor]],
+    tuple[str, bool, bool],
+]:
+    module.zero_grad(set_to_none=True)
+    x_run = x.detach().clone().requires_grad_(True)
+    autocast_ctx = (
+        te.autocast(enabled=True, recipe=fp8_recipe) if fp8_recipe is not None else nullcontext()
+    )
+    with autocast_ctx:
+        y = module(x_run, m_splits)
+        if y.grad_fn is None:
+            raise RuntimeError(
+                "Output tensor has no grad_fn; cannot inspect grouped backward state."
+            )
+        required_attrs = (
+            "backward_mode",
+            "fp8",
+            "reduce_and_update_bwd_fp8_tensors",
+        )
+        missing_attrs = [attr for attr in required_attrs if not hasattr(y.grad_fn, attr)]
+        if missing_attrs:
+            raise RuntimeError(
+                "Grouped grad_fn does not expose required backward context attributes: "
+                f"{', '.join(missing_attrs)}."
+            )
+        ctx_state = (
+            getattr(y.grad_fn, "backward_mode"),
+            bool(getattr(y.grad_fn, "fp8")),
+            bool(getattr(y.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
+        )
+    y.backward(dy)
+    assert x_run.grad is not None
+
+    dw = [getattr(module, f"weight{i}").grad.detach().clone() for i in range(module.num_gemms)]
+    db: list[Optional[torch.Tensor]] = []
+    for i in range(module.num_gemms):
+        if module.use_bias:
+            db.append(getattr(module, f"bias{i}").grad.detach().clone())
+        else:
+            db.append(None)
+    return y.detach().clone(), x_run.grad.detach().clone(), dw, db, ctx_state
+
+
 # --------------------------
 # Tests
 # --------------------------
@@ -822,15 +963,14 @@ def test_linear_like_backward_mode_matches_reference(
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
+@pytest.mark.parametrize("in_features,out_features", _linear_feature_cases)
 @pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
-@pytest.mark.parametrize(
-    "m_splits",
-    ([32, 32, 32, 32], [64, 0, 32, 32], [1, 31, 0, 96]),
-    ids=("uniform_splits", "with_empty_split", "small_and_empty_splits"),
-)
+@pytest.mark.parametrize("m_splits", _grouped_m_split_cases)
 @pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
 def test_grouped_linear_backward_mode_matches_reference(
     recipe_name: str,
+    in_features: int,
+    out_features: int,
     use_bias: bool,
     m_splits: list[int],
     dtype: torch.dtype,
@@ -842,9 +982,6 @@ def test_grouped_linear_backward_mode_matches_reference(
     reset_rng_states()
     _maybe_skip_recipe_dtype(recipe_name, dtype)
     _maybe_skip_unsupported_grouped_splits(recipe_name, m_splits)
-
-    in_features = 64
-    out_features = 64
     num_gemms = len(m_splits)
     num_tokens = sum(m_splits)
 
@@ -987,6 +1124,145 @@ def test_grouped_linear_backward_mode_matches_reference(
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
+@pytest.mark.parametrize("module_type", ("linear", "layernorm_linear"))
+@pytest.mark.parametrize("input_shape,out_features", _shape_test_cases)
+@pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
+@pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
+def test_linear_like_runtime_backward_mode_switch_updates_ctx(
+    recipe_name: str,
+    module_type: str,
+    input_shape: tuple[int, ...],
+    out_features: int,
+    use_bias: bool,
+    dtype: torch.dtype,
+    backward_mode: str,
+) -> None:
+    reset_rng_states()
+    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_unsupported_recipe_module_combo(recipe_name, module_type)
+    _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
+
+    module = _make_linear_like_module(
+        module_type,
+        input_shape[-1],
+        out_features,
+        dtype,
+        bias=use_bias,
+    )
+    x = torch.randn(*input_shape, dtype=dtype, device="cuda")
+    dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
+
+    default_recipe = make_recipe(recipe_name, backward_mode="default")
+    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+
+    *_, default_ctx = _run_single_step_with_ctx_state(module, x, dy, default_recipe)
+    (
+        default_mode,
+        default_fp8,
+        default_grad_output_quantizer,
+        default_reduce_and_update,
+    ) = default_ctx
+    assert default_mode == "default"
+    assert default_fp8
+    assert default_grad_output_quantizer is not None
+    assert default_reduce_and_update
+
+    *_, switched_ctx = _run_single_step_with_ctx_state(module, x, dy, mode_recipe)
+    switched_mode, switched_fp8, switched_grad_output_quantizer, switched_reduce_and_update = (
+        switched_ctx
+    )
+    assert switched_mode == backward_mode
+    assert not switched_fp8
+    assert switched_grad_output_quantizer is None
+    assert not switched_reduce_and_update
+
+    *_, default_ctx_after = _run_single_step_with_ctx_state(module, x, dy, default_recipe)
+    (
+        default_mode_after,
+        default_fp8_after,
+        default_grad_output_quantizer_after,
+        default_reduce_and_update_after,
+    ) = default_ctx_after
+    assert default_mode_after == "default"
+    assert default_fp8_after
+    assert default_grad_output_quantizer_after is not None
+    assert default_reduce_and_update_after
+
+
+@pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
+@pytest.mark.parametrize("in_features,out_features", _linear_feature_cases)
+@pytest.mark.parametrize("m_splits", _grouped_m_split_cases)
+@pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
+@pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
+def test_grouped_linear_runtime_backward_mode_switch_updates_ctx(
+    recipe_name: str,
+    in_features: int,
+    out_features: int,
+    m_splits: list[int],
+    use_bias: bool,
+    dtype: torch.dtype,
+    backward_mode: str,
+) -> None:
+    if recipe_name == "nvfp4":
+        pytest.skip("NVFP4 not supported for grouped linear")
+
+    reset_rng_states()
+    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_unsupported_grouped_splits(recipe_name, m_splits)
+
+    num_tokens = sum(m_splits)
+    module = te.GroupedLinear(
+        len(m_splits),
+        in_features,
+        out_features,
+        bias=use_bias,
+        params_dtype=dtype,
+        device="cuda",
+    )
+    x = torch.randn(num_tokens, in_features, dtype=dtype, device="cuda")
+    dy = torch.randn(num_tokens, out_features, dtype=dtype, device="cuda")
+
+    default_recipe = make_recipe(recipe_name, backward_mode="default")
+    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+
+    *_, default_ctx = _run_grouped_linear_single_step_with_ctx_state(
+        module,
+        x,
+        m_splits,
+        dy,
+        default_recipe,
+    )
+    default_mode, default_fp8, default_reduce_and_update = default_ctx
+    assert default_mode == "default"
+    assert default_fp8
+    assert default_reduce_and_update
+
+    *_, switched_ctx = _run_grouped_linear_single_step_with_ctx_state(
+        module,
+        x,
+        m_splits,
+        dy,
+        mode_recipe,
+    )
+    switched_mode, switched_fp8, switched_reduce_and_update = switched_ctx
+    assert switched_mode == backward_mode
+    assert not switched_fp8
+    assert not switched_reduce_and_update
+
+    *_, default_ctx_after = _run_grouped_linear_single_step_with_ctx_state(
+        module,
+        x,
+        m_splits,
+        dy,
+        default_recipe,
+    )
+    default_mode_after, default_fp8_after, default_reduce_and_update_after = default_ctx_after
+    assert default_mode_after == "default"
+    assert default_fp8_after
+    assert default_reduce_and_update_after
+
+
+@pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
 @pytest.mark.parametrize(
     "fused_pattern,expected_fused_op",
     (
@@ -994,23 +1270,24 @@ def test_grouped_linear_backward_mode_matches_reference(
         ("scale_add", ForwardLinearScaleAdd),
     ),
 )
+@pytest.mark.parametrize("in_features,out_features", _linear_feature_cases)
 @pytest.mark.parametrize("m", (1, 32), ids=("m1", "m32"))
 @pytest.mark.parametrize("dtype", _fused_dtypes, ids=str)
 def test_fused_linear_paths_match_backward_mode_reference(
     recipe_name: str,
     fused_pattern: str,
     expected_fused_op: type,
+    in_features: int,
+    out_features: int,
     m: int,
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
     _maybe_skip_recipe_dtype(recipe_name, dtype)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
-    _maybe_skip_unsupported_recipe_shape(recipe_name, (m, 64), "ops_linear")
+    _maybe_skip_unsupported_recipe_shape(recipe_name, (m, in_features), "ops_linear")
 
     reset_rng_states()
-    in_features = 64
-    out_features = 64
 
     quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
     mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
@@ -1137,10 +1414,12 @@ def test_fused_linear_paths_match_backward_mode_reference(
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
 @pytest.mark.parametrize("input_shape", _bias_activation_shape_cases)
+@pytest.mark.parametrize("out_features", _output_feature_cases)
 @pytest.mark.parametrize("dtype", _fused_dtypes, ids=str)
 def test_fused_bias_activation_matches_masked_linear_backward(
     recipe_name: str,
     input_shape: tuple[int, ...],
+    out_features: int,
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
@@ -1150,7 +1429,6 @@ def test_fused_bias_activation_matches_masked_linear_backward(
 
     reset_rng_states()
     in_features = input_shape[-1]
-    out_features = 64
 
     quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
     mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
@@ -1273,9 +1551,12 @@ def test_fused_bias_activation_matches_masked_linear_backward(
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
+@pytest.mark.parametrize("in_features,out_features", _linear_feature_cases)
 @pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
 def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
     recipe_name: str,
+    in_features: int,
+    out_features: int,
     dtype: torch.dtype,
     backward_mode: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -1294,8 +1575,6 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
 
     # Build a Userbuffers-eligible fuser and representative inputs.
-    in_features = 64
-    out_features = 64
     linear = te_ops.BasicLinear(
         in_features,
         out_features,
