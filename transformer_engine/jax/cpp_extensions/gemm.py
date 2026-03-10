@@ -1528,8 +1528,8 @@ class GroupedGemmPrimitive(BasePrimitive):
             out_shape = (num_groups, M, N)
         else:
             # lhs shape [M_total, K] (lhs_is_trans=False) or [K, M_total] (lhs_is_trans=True)
-            # dim[0] is always total M for fwd/dgrad
-            M = lhs_data_aval.shape[0]
+            # M is the non-contracting (output) dim
+            M = lhs_data_aval.shape[1] if lhs_is_trans else lhs_data_aval.shape[0]
             N = rhs_data_aval.shape[1] if not rhs_is_trans else rhs_data_aval.shape[0] // num_groups
             out_shape = (M, N)
 
@@ -2270,6 +2270,13 @@ def grouped_gemm(
     lhs_data_2d = _flatten_to_2d(lhs_data, lhs_flatten_axis)
     rhs_data_2d = _flatten_to_2d(rhs_data, rhs_flatten_axis)
 
+    # Validate contracting dim size
+    k_lhs = lhs_data_2d.shape[0] if lhs_is_trans else lhs_data_2d.shape[1]
+    k_rhs = rhs_data_2d.shape[1] if rhs_is_trans else rhs_data_2d.shape[0] // num_gemms
+    assert k_lhs == k_rhs, (
+        f"Contracting dimension mismatch: LHS K={k_lhs}, RHS K={k_rhs}"
+    )
+
     num_gemms = (
         lhs_first_dims.size
         or lhs_last_dims.size
@@ -2278,6 +2285,12 @@ def grouped_gemm(
         or out_first_dims.size
         or out_last_dims.size
     )
+    if num_gemms == 0:
+        raise ValueError(
+            "grouped_gemm requires at least one non-empty dimension array "
+            "(lhs_first_dims, lhs_last_dims, rhs_first_dims, rhs_last_dims, "
+            "out_first_dims, or out_last_dims)."
+        )
 
     has_bias = bias is not None
     if has_bias:
