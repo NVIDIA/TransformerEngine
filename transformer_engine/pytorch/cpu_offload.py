@@ -685,7 +685,7 @@ def get_cpu_offload_context(
     offload_stream: Optional[torch.cuda.Stream] = None,
 ):
     """
-    CPU Offloading feature for seqeuences of layers. Can be used for arbitrary layers, not necessarily
+    CPU Offloading feature for sequences of layers. Can be used for arbitrary layers, not necessarily
     for these provided by the TE.
 
     Usage:
@@ -710,7 +710,7 @@ def get_cpu_offload_context(
             Number of layers in the model that will be used under this context.
     offload_activations : bool, default = True
             Deprecated.
-    offload_weights : bool, default = True
+    offload_weights : bool, default = False
             Deprecated.
     double_buffering : bool, default = False
             Deprecated.

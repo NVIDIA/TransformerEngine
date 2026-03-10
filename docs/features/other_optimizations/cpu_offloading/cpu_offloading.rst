@@ -56,7 +56,7 @@ A model is considered sequential if it satisfies the following conditions:
 1. The model is a sequence of layers: ``x₁ = Layer₁(x₀)``, ``x₂ = Layer₂(x₁)``, ..., ``xₙ = Layerₙ(xₙ₋₁)``.
    **The layers may be any PyTorch modules**, not just TE layers.
 2. Each intermediate tensor ``xᵢ`` is used only as input to the next layer (not elsewhere in the model).
-3. Computing the gradient of ``xᵢ`` requires all backward operations within ``Layerᵢ₊₁`` to complete first.
+3. ``xᵢ`` is only needed as input to ``Layerᵢ₊₁``'s backward pass and can be freed once that pass completes.
 
 Most LLM architectures (stacked Transformer blocks) satisfy these conditions.
 
@@ -92,7 +92,7 @@ Let's take a look at the API in detail:
               model_layers: int = 1,
               manual_synchronization: bool = False,
               offload_stream: Optional[torch.cuda.Stream] = None,
-              # ... (legacy parameters omitted, see API reference)
+              # ... (legacy parameters omitted, see :func:`get_cpu_offload_context`)
           ) -> Union[Tuple[ContextManager, Callable], Tuple[ContextManager, Callable, ManualOffloadSynchronizer]]:
               ...
 
@@ -154,14 +154,14 @@ and offload/reload. The following two scenarios illustrate this — one with ful
 .. raw:: html
    :file: img/scheduling.svg
 
-*Figure 3. With* ``num_layers=2`` *and* ``model_layers=5``\ *, at most 3 sets of activations are on GPU. Layer 1 offloading starts during its forward pass (when the first tensor is saved for backward). Offloading fully overlaps with forward, reloading fully overlaps with backward.*
+*Figure 3. With* ``num_layers=2``\ *and* ``model_layers=5``\ *, at most 3 sets of activations are on GPU. Layer 1 offloading starts during its forward pass (when the first tensor is saved for backward). Offloading fully overlaps with forward, reloading fully overlaps with backward.*
 
 When ``num_layers`` is too high, the GPU memory limit forces stalls:
 
 .. raw:: html
    :file: img/scheduling_stall.svg
 
-*Figure 4. With* ``num_layers=3`` *and* ``model_layers=5``\ *, at most 2 sets of activations can be on GPU (5-3=2), which causes stalls. In forward, Layer 4 cannot start until Layer 2 is offloaded, otherwise there would be 3 sets of activations on GPU (Layers 2, 3, 4). In backward, Layer 3 cannot start immediately — its activations are still on CPU and must be reloaded first. Some tensors may finish reloading earlier, allowing parts of the layer (e.g., a sublayer) to run while the rest waits. The same applies to Layers 2 and 1.*
+*Figure 4. With* ``num_layers=3``\ *and* ``model_layers=5``\ *, at most 2 sets of activations can be on GPU (5-3=2), which causes stalls. In forward, Layer 4 cannot start until Layer 2 is offloaded, otherwise there would be 3 sets of activations on GPU (Layers 2, 3, 4). In backward, Layer 3 cannot start immediately — its activations are still on CPU and must be reloaded first. Some tensors may finish reloading earlier, allowing parts of the layer (e.g., a sublayer) to run while the rest waits. The same applies to Layers 2 and 1.*
 
 
 Manual Synchronization
@@ -230,6 +230,16 @@ pinned CPU memory (via PCIe DMA, without CPU involvement).
          :language: python
          :start-after: # START_CUDA_GRAPHS_EXAMPLE
          :end-before: # END_CUDA_GRAPHS_EXAMPLE
+
+.. note::
+
+   In PyTorch versions prior to 2.11, CPU offloading with CUDA graphs required passing
+   ``retain_pinned_cpu_buffers=True`` to :func:`get_cpu_offload_context`. The root cause
+   was that ``torch.empty`` with pinned CPU memory was not supported inside CUDA graph
+   capture — buffers had to be pre-allocated and reused across iterations to avoid
+   invalidating DMA addresses captured in the graph. This was fixed in
+   `pytorch#167507 <https://github.com/pytorch/pytorch/pull/167507>`_ (merged December 2025,
+   shipping in PyTorch 2.11). On PyTorch 2.11+, ``retain_pinned_cpu_buffers`` is no longer needed.
 
 Caveats
 -------
