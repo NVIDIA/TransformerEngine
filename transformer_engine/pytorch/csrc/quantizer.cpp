@@ -283,10 +283,6 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     scale_inv = at::reciprocal(scale);
   }
   py::object scale_inv_py = py::cast(*scale_inv);
-  at::Device device =
-      with_data ? data->device()
-                : (with_transpose ? transpose->device()
-                                  : at::Device(torch::kCUDA, c10::cuda::current_device()));
   // Construct Python FP8 tensor
   py::object out_py;
   if (internal) {
@@ -604,10 +600,6 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
         at::TensorOptions().dtype(torch::kFloat32).device(device).pinned_memory(pin_memory);
     scale_inv_tensor = at::empty(scale_inv_shape, opts);
   }
-  at::Device device =
-      with_data ? data_tensor.device()
-                : (with_transpose ? transpose_tensor.device()
-                                  : at::Device(torch::kCUDA, c10::cuda::current_device()));
   // Construct Python FP8 tensor
   py::object out_py;
   py::object scale_inv_py = py::cast(scale_inv_tensor);
@@ -1021,6 +1013,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
+    kwargs["device"] = py::cast(device);
 
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass),
@@ -1427,6 +1420,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["device"] = py::cast(device);
 
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass),
@@ -1845,6 +1839,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     kwargs["fp4_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["device"] = py::cast(device);
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass),
                                      args.ptr(), kwargs.ptr());
