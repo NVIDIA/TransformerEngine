@@ -298,7 +298,7 @@ def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
     int_size = num_tensors * int_bytes
     k_ptr_alignment = 16
     aligned_ptr_size = ((ptr_size + k_ptr_alignment - 1) // k_ptr_alignment) * k_ptr_alignment
-    size = 6 * aligned_ptr_size + 6 * int_size
+    size = 8 * aligned_ptr_size + 6 * int_size
     alignment = 256
     return ((size + alignment - 1) // alignment) * alignment
 
@@ -312,6 +312,7 @@ def general_grouped_gemm_for_grouped_tensor(
     accumulate: bool = False,
     use_split_accumulator: bool = False,
     bias=None,
+    grad: bool = False,
     alpha: Optional[torch.Tensor] = None,
     beta: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -324,24 +325,24 @@ def general_grouped_gemm_for_grouped_tensor(
     underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
     """
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+    if grad:
+        raise NotImplementedError("grad is not supported for grouped_tensor GEMM yet.")
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-
-    num_tensors = A.num_tensors
-
-    if out.rowwise_data is not None:
-        device = out.data.device
-    elif out.columnwise_data is not None:
-        device = out.columnwise_data.device
+    is_discrete_out = isinstance(out, list)
+    is_discrete_in = isinstance(A, list)
+    if is_discrete_out:
+        # wgrad case.
+        grouped_gemm_impl = tex.te_general_grouped_gemm_for_discrete_out
+    elif is_discrete_in:
+        # Use-case: forward pass with list of weights.
+        grouped_gemm_impl = tex.te_general_grouped_gemm_for_discrete_in
     else:
-        raise ValueError("Output GroupedTensor must have allocated data.")
-    if bias is not None:
-        if bias.rowwise_data is None:
-            raise ValueError("Bias GroupedTensor must have rowwise_data.")
-        if bias.num_tensors != num_tensors:
-            raise ValueError("Bias GroupedTensor must match num_tensors.")
-        if bias.rowwise_data.device != device:
-            raise ValueError("Bias GroupedTensor must be on the same device as output.")
+        # Use-case: Single Grouped Parameter for Weight/ Weight Grads.
+        grouped_gemm_impl = tex.te_general_grouped_gemm_for_grouped_tensor
+
+    num_tensors = B.num_tensors
+    device = B.rowwise_data.device if B.has_data() else B.columnwise_data.device
 
     if alpha is None:
         alpha = torch.ones(num_tensors, dtype=torch.float32, device=device)
@@ -368,7 +369,7 @@ def general_grouped_gemm_for_grouped_tensor(
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
 
-    return tex.te_general_grouped_gemm_for_grouped_tensor(
+    return grouped_gemm_impl(
         A,
         transa,
         B,

@@ -540,6 +540,7 @@ struct GroupedBuffers {
   CudaPtr<int64_t> last_dims_dev;
   CudaPtr<int64_t> offsets_dev;
   CudaPtr<> columnwise_data;
+  CudaPtr<> columnwise_scale_inv;
   NVTEShape logical_shape{};
   std::vector<int64_t> offsets_host;
   std::vector<size_t> tensor_bytes;
