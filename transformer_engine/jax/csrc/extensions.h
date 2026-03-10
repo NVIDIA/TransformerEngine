@@ -45,6 +45,20 @@ struct ActivationConfig {
   ClampedSwigluConfig clamped_swiglu;
 };
 
+struct GroupedGemmV2Config {
+  bool lhs_is_trans;
+  bool rhs_is_trans;
+  JAXX_Scaling_Mode scaling_mode;
+};
+
+struct GroupedGemmConfig {
+  bool lhs_is_trans;
+  bool rhs_is_trans;
+  JAXX_Scaling_Mode scaling_mode;
+  bool has_bias;
+  bool use_async_d2h_group_sizes;
+};
+
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
 // Activation
@@ -169,6 +183,20 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(transformer_engine::jax::ClampedSwigluConf
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::ActivationConfig,
     ::xla::ffi::StructMember<transformer_engine::jax::ClampedSwigluConfig>("clamped_swiglu"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::GroupedGemmV2Config,
+    ::xla::ffi::StructMember<bool>("lhs_is_trans"),
+    ::xla::ffi::StructMember<bool>("rhs_is_trans"),
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::GroupedGemmConfig,
+    ::xla::ffi::StructMember<bool>("lhs_is_trans"),
+    ::xla::ffi::StructMember<bool>("rhs_is_trans"),
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"),
+    ::xla::ffi::StructMember<bool>("has_bias"),
+    ::xla::ffi::StructMember<bool>("use_async_d2h_group_sizes"));
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
