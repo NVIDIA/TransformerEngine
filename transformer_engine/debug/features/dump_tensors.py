@@ -210,7 +210,7 @@ class DumpTensors(TEConfigAPIMapper):
             and columnwise_quantized_tensor is not None
             and rowwise_quantized_tensor is not columnwise_quantized_tensor
         ):
-            raise AssertionError(
+            raise ValueError(
                 "[NVTORCH INSPECT ERROR] DumpTensors expects rowwise_quantized_tensor and "
                 "columnwise_quantized_tensor to be the same object when both are provided."
             )
