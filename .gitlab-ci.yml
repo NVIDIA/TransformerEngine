@@ -9,10 +9,10 @@ variables:
     # framework containers
     CORE_AMD64_IMAGE:
       description: Base Docker container for core AMD64 build
-      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:13.1-devel-ubuntu24.04--main-amd64  # Last build with main branch
+      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:13.2-devel-ubuntu24.04--main-amd64  # Last build with main branch
     CORE_ARM64_IMAGE:
       description: Base Docker container for core ARM64 build
-      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:13.1-devel-ubuntu24.04--main-arm64  # Last build with main branch
+      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:13.2-devel-ubuntu24.04--main-arm64  # Last build with main branch
     PYTORCH_AMD64_IMAGE:
       description: Base Docker container for PyTorch AMD64 build
       value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel-amd64  # Last build with main branch (nightly build)
