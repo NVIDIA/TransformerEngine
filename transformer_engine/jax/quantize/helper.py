@@ -52,6 +52,7 @@ __all__ = [
     "is_fp8_available",
     "is_scaling_mode_supported",
     "is_quantize_recipe_supported",
+    "get_quantization_recipe",
     "get_supported_scaling_modes",
     "get_supported_quantization_recipes",
     "update_collections",
@@ -187,6 +188,34 @@ def is_quantize_recipe_supported(recipe_name: str, gpu_id=None) -> Tuple[bool, s
         valid = list(_RECIPE_NAME_TO_SCALING_MODE)
         return False, f"Unknown quantization recipe '{recipe_name}'. Valid options: {valid}"
     return is_scaling_mode_supported(scaling_mode, gpu_id)
+
+
+_RECIPE_NAME_TO_RECIPE = {
+    "DelayedScaling": DelayedScaling,
+    "Float8CurrentScaling": Float8CurrentScaling,
+    "MXFP8BlockScaling": MXFP8BlockScaling,
+    "NVFP4BlockScaling": NVFP4BlockScaling,
+}
+
+
+def get_quantization_recipe(name: str) -> Recipe:
+    """Return a recipe object from a recipe name string.
+
+    Args:
+        name: Recipe name. One of "DelayedScaling", "Float8CurrentScaling",
+            "MXFP8BlockScaling", or "NVFP4BlockScaling".
+
+    Returns:
+        A new instance of the corresponding recipe class.
+
+    Raises:
+        ValueError: If ``name`` does not match any known recipe.
+    """
+    recipe_cls = _RECIPE_NAME_TO_RECIPE.get(name)
+    if recipe_cls is None:
+        valid = list(_RECIPE_NAME_TO_RECIPE)
+        raise ValueError(f"Invalid quantization recipe '{name}'. Valid options: {valid}")
+    return recipe_cls()
 
 
 def is_fp8_available(

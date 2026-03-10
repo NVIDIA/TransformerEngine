@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 """Collective Dense Gradient test on multi-GPU with tensor parallelism"""
-import argparse
 import unittest
 import os
 
@@ -20,7 +19,6 @@ from common import (
     DP_AXIS,
     TPSP_AXIS,
     cgemm_parser,
-    get_quantization_recipe_from_name_string,
 )
 
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
@@ -28,6 +26,7 @@ from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 from transformer_engine.jax.quantize import (
     autocast,
     is_quantize_recipe_supported,
+    get_quantization_recipe,
     QuantizerFactory,
     noop_quantizer_set,
 )
@@ -127,7 +126,7 @@ def _value_and_grad_layernorm_mlp(
 
 
 def run_layernorm_mlp_grad_tests(args, mesh=None):
-    """Execute Dense Gradient tests."""
+    """Execute LayerNorm MLP Gradient tests."""
     print(args)
 
     # Initialize distributed with provided arguments
@@ -161,7 +160,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
 
     use_quantization = args.quantize_recipe is not None
     recipe = (
-        get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
+        get_quantization_recipe(args.quantize_recipe) if use_quantization else None
     )
     with mesh, autocast(
         enabled=use_quantization,
@@ -237,7 +236,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
 
 
 class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
-    """Collective Dense Gradient unittests"""
+    """Collective LayerNorm MLP Gradient unittests"""
 
     def setUp(self):
         self.args = cgemm_parser(
@@ -320,6 +319,6 @@ if __name__ == "__main__":
 
     args = cgemm_parser(
         "Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism"
-    ).parse_args([])
+    ).parse_args()
     _initialize_distributed(args)
     run_layernorm_mlp_grad_tests(args, mesh=None)

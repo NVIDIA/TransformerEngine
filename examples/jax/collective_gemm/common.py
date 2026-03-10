@@ -10,7 +10,6 @@ import jax.numpy as jnp
 import numpy as np
 from jax.experimental import mesh_utils
 
-from transformer_engine.common import recipe as te_recipe
 from transformer_engine.jax.cpp_extensions.gemm import collective_gemm_bootstrap
 
 
@@ -160,21 +159,6 @@ def _create_mesh(args):
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
     mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DP_AXIS, TPSP_AXIS))
     return mesh
-
-
-def get_quantization_recipe_from_name_string(name: str):
-    """Return a recipe object from a recipe name string."""
-    match name:
-        case "DelayedScaling":
-            return te_recipe.DelayedScaling()
-        case "Float8CurrentScaling":
-            return te_recipe.Float8CurrentScaling()
-        case "MXFP8BlockScaling":
-            return te_recipe.MXFP8BlockScaling()
-        case "NVFP4BlockScaling":
-            return te_recipe.NVFP4BlockScaling()
-        case _:
-            raise ValueError(f"Invalid quantization_recipe, got {name}")
 
 
 def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor parallelism"):

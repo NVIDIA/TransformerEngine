@@ -29,13 +29,13 @@ from common import (
     DP_AXIS,
     TPSP_AXIS,
     cgemm_parser,
-    get_quantization_recipe_from_name_string,
 )
 
 import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax.quantize import (
     autocast,
     is_quantize_recipe_supported,
+    get_quantization_recipe,
     QuantizerFactory,
     noop_quantizer_set,
 )
@@ -58,23 +58,6 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
         output_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, TPSP_AXIS, None))
 
     return x_sharding, weight_sharding, bias_sharding, output_sharding
-
-
-def _get_dp_and_tp_sizes(args):
-    num_gpu = args.num_processes * args.num_devices_per_process
-    if args.tensor_parallel_size is None:
-        num_gpu_dp = 2 if args.enable_data_parallel else 1
-        assert (
-            num_gpu > 1 and num_gpu % num_gpu_dp == 0
-        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-        num_gpu_tp = num_gpu // num_gpu_dp
-    else:
-        num_gpu_tp = args.tensor_parallel_size
-        assert (
-            num_gpu > 1 and num_gpu % num_gpu_tp == 0
-        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-        num_gpu_dp = num_gpu // num_gpu_tp
-    return num_gpu_dp, num_gpu_tp
 
 
 @partial(jax.jit, static_argnames=("contracting_dims", "collective_op", "output_sharding"))
@@ -116,7 +99,7 @@ def run_gemm_tests(args, mesh=None):
 
     use_quantization = args.quantize_recipe is not None
     recipe = (
-        get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
+        get_quantization_recipe(args.quantize_recipe) if use_quantization else None
     )
 
     # autocast sets the global recipe (fwd/bwd dtypes) AND the global MeshResource
