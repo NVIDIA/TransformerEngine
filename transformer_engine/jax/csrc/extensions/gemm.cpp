@@ -562,8 +562,10 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
 // This FFI is EXPERIMENTAL and subject to change without deprecation, intended for use in JAX's internal implementation of grouped GEMM.
 Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                             Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
-                            Buffer_Type lhs_group_sizes, Buffer_Type rhs_group_sizes,
-                            Buffer_Type out_group_sizes, Buffer_Type alpha, Buffer_Type beta,
+                            Buffer_Type lhs_first_dims, Buffer_Type lhs_last_dims,
+                            Buffer_Type rhs_first_dims, Buffer_Type rhs_last_dims,
+                            Buffer_Type out_first_dims, Buffer_Type out_last_dims,
+                            Buffer_Type alpha, Buffer_Type beta,
                             Result_Type output, Result_Type cublas_workspace,
                             Result_Type setup_workspace, Result_Type int64_workspace,
                             bool lhs_is_trans, bool rhs_is_trans,
@@ -582,25 +584,31 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   //   C: column-major with size [m, n] --> row-major with size [n, m].
   // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
 
-  // out_group_sizes is the sentinel for the output tensor's ragged dimension; unused directly here
-  // as the output shape is inferred from lhs/rhs dims and passed to nvte_grouped_gemm implicitly.
-  (void)out_group_sizes;
-
-  // Determine which group_sizes buffer is active (non-empty sentinel = ragged dimension).
-  bool is_lhs_ragged = lhs_group_sizes.element_count() > 0;
-  bool is_rhs_ragged = rhs_group_sizes.element_count() > 0;
-  bool any_ragged = is_lhs_ragged || is_rhs_ragged;
+  // Determine which group_sizes buffers are active (non-empty = ragged dimension).
+  bool is_lhs_first_ragged = lhs_first_dims.element_count() > 0;
+  bool is_lhs_last_ragged  = lhs_last_dims.element_count() > 0;
+  bool is_rhs_first_ragged = rhs_first_dims.element_count() > 0;
+  bool is_rhs_last_ragged  = rhs_last_dims.element_count() > 0;
+  bool is_out_first_ragged = out_first_dims.element_count() > 0;
+  bool is_out_last_ragged  = out_last_dims.element_count() > 0;
+  bool is_lhs_ragged = is_lhs_first_ragged || is_lhs_last_ragged;
+  bool is_rhs_ragged = is_rhs_first_ragged || is_rhs_last_ragged;
+  bool any_ragged    = is_lhs_ragged || is_rhs_ragged;
 
   size_t num_gemms;
-  if (is_lhs_ragged)
-    num_gemms = lhs_group_sizes.dimensions()[0];
-  else if (is_rhs_ragged)
-    num_gemms = rhs_group_sizes.dimensions()[0];
-  else if (out_group_sizes.element_count() > 0)
-    num_gemms = out_group_sizes.dimensions()[0];
-  else
-    num_gemms = alpha.element_count();  // batched: no ragged tensor
-  const Buffer_Type &active_group_sizes = is_lhs_ragged ? lhs_group_sizes : rhs_group_sizes;
+  if      (is_lhs_first_ragged) num_gemms = lhs_first_dims.dimensions()[0];
+  else if (is_lhs_last_ragged)  num_gemms = lhs_last_dims.dimensions()[0];
+  else if (is_rhs_first_ragged) num_gemms = rhs_first_dims.dimensions()[0];
+  else if (is_rhs_last_ragged)  num_gemms = rhs_last_dims.dimensions()[0];
+  else if (is_out_first_ragged) num_gemms = out_first_dims.dimensions()[0];
+  else if (is_out_last_ragged)  num_gemms = out_last_dims.dimensions()[0];
+  else                          num_gemms = alpha.element_count();  // batched: no ragged tensor
+
+  const Buffer_Type *active_gs_ptr = nullptr;
+  if      (is_lhs_first_ragged) active_gs_ptr = &lhs_first_dims;
+  else if (is_lhs_last_ragged)  active_gs_ptr = &lhs_last_dims;
+  else if (is_rhs_first_ragged) active_gs_ptr = &rhs_first_dims;
+  else if (is_rhs_last_ragged)  active_gs_ptr = &rhs_last_dims;
 
   // lhs_data and rhs_data are 2D; derive m, n, k from buffer dimensions.
   NVTE_CHECK(lhs_data.dimensions().size() == 2, "lhs_data must be 2D.");
@@ -632,10 +640,11 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   // Convert int32 group_sizes to int64 into the dedicated output buffer (ragged tensors only).
   auto *int64_sizes_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
   if (any_ragged) {
-    NVTE_CHECK(active_group_sizes.element_type() == xla::ffi::DataType::S32,
+    NVTE_CHECK(active_gs_ptr != nullptr, "active_gs_ptr is null but any_ragged is true.");
+    NVTE_CHECK(active_gs_ptr->element_type() == xla::ffi::DataType::S32,
                "group_sizes must be int32.");
     nvte_convert_int32_to_int64(
-        reinterpret_cast<const int32_t *>(active_group_sizes.untyped_data()), int64_sizes_ptr,
+        reinterpret_cast<const int32_t *>(active_gs_ptr->untyped_data()), int64_sizes_ptr,
         num_gemms, stream);
   }
 
@@ -746,13 +755,19 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
     //// RHS
     NVTEShape rhsShape{.data = {k, n}, .ndim = 2};
     auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
-    rhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
+    if (is_rhs_first_ragged)
+      rhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
+    if (is_rhs_last_ragged)
+      rhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
 
     //// LHS
     NVTEShape lhsShape{.data = {k, m}, .ndim = 2};
     lhs_is_trans = true;
     auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-    lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
+    if (is_lhs_first_ragged)
+      lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
+    if (is_lhs_last_ragged)
+      lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
 
     //// OUTPUT
     NVTEShape outShape{.data = {num_gemms * m, n}, .ndim = 2};
@@ -784,18 +799,19 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
     std::swap(lhsShape.data[0], lhsShape.data[1]);
   }
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  if (any_ragged) {
-    lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms,
-                                    lhs_is_trans ? kNVTEGroupedLastDims : kNVTEGroupedFirstDims);
-  }
+  if (is_lhs_first_ragged)
+    lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
+  if (is_lhs_last_ragged)
+    lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
 
   //// OUTPUT
   NVTEShape outShape{.data = {m, n}, .ndim = 2};
   auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,
                                         num_gemms, outShape);
-  if (any_ragged) {
+  if (is_out_first_ragged)
     out_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
-  }
+  if (is_out_last_ragged)
+    out_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
@@ -814,9 +830,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Arg<Buffer_Type>()      // rhs_data (2D)
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
-                                  .Arg<Buffer_Type>()      // lhs_group_sizes (G,) or empty (0,)
-                                  .Arg<Buffer_Type>()      // rhs_group_sizes (G,) or empty (0,)
-                                  .Arg<Buffer_Type>()      // out_group_sizes (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // lhs_first_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // lhs_last_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // rhs_first_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // rhs_last_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // out_first_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // out_last_dims (G,) or empty (0,)
                                   .Arg<Buffer_Type>()      // alpha
                                   .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output
@@ -830,8 +849,10 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
-                          Buffer_Type lhs_group_sizes, Buffer_Type rhs_group_sizes,
-                          Buffer_Type out_group_sizes, Buffer_Type group_offset,
+                          Buffer_Type lhs_first_dims, Buffer_Type lhs_last_dims,
+                          Buffer_Type rhs_first_dims, Buffer_Type rhs_last_dims,
+                          Buffer_Type out_first_dims, Buffer_Type out_last_dims,
+                          Buffer_Type group_offset,
                           Result_Type output, Result_Type workspace, bool lhs_is_trans,
                           bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode, bool has_bias,
                           bool use_async_d2h_group_sizes) {
@@ -851,22 +872,27 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   int num_streams = nvte_get_num_compute_streams();
 
-  // out_group_sizes is the sentinel for the output tensor's ragged dimension; unused directly here.
-  (void)out_group_sizes;
-
-  // Determine which group_sizes buffer is active (non-empty sentinel = ragged dimension).
-  bool is_lhs_ragged = lhs_group_sizes.element_count() > 0;
-  bool is_rhs_ragged = rhs_group_sizes.element_count() > 0;
-  bool any_ragged = is_lhs_ragged || is_rhs_ragged;
+  // Determine which group_sizes buffers are active (non-empty = ragged dimension).
+  bool is_lhs_first_ragged = lhs_first_dims.element_count() > 0;
+  bool is_lhs_last_ragged  = lhs_last_dims.element_count() > 0;
+  bool is_rhs_first_ragged = rhs_first_dims.element_count() > 0;
+  bool is_rhs_last_ragged  = rhs_last_dims.element_count() > 0;
+  bool is_lhs_ragged = is_lhs_first_ragged || is_lhs_last_ragged;
+  bool is_rhs_ragged = is_rhs_first_ragged || is_rhs_last_ragged;
+  bool any_ragged    = is_lhs_ragged || is_rhs_ragged;
 
   size_t num_gemms;
-  if (is_lhs_ragged)
-    num_gemms = lhs_group_sizes.dimensions()[0];
-  else if (is_rhs_ragged)
-    num_gemms = rhs_group_sizes.dimensions()[0];
-  else
-    num_gemms = 1;  // degenerate batched; legacy batched not a tested use case
-  const Buffer_Type &active_group_sizes = is_lhs_ragged ? lhs_group_sizes : rhs_group_sizes;
+  if      (is_lhs_first_ragged) num_gemms = lhs_first_dims.dimensions()[0];
+  else if (is_lhs_last_ragged)  num_gemms = lhs_last_dims.dimensions()[0];
+  else if (is_rhs_first_ragged) num_gemms = rhs_first_dims.dimensions()[0];
+  else if (is_rhs_last_ragged)  num_gemms = rhs_last_dims.dimensions()[0];
+  else                          num_gemms = 1;  // degenerate batched; legacy batched not a tested use case
+
+  const Buffer_Type *active_gs_ptr = nullptr;
+  if      (is_lhs_first_ragged) active_gs_ptr = &lhs_first_dims;
+  else if (is_lhs_last_ragged)  active_gs_ptr = &lhs_last_dims;
+  else if (is_rhs_first_ragged) active_gs_ptr = &rhs_first_dims;
+  else if (is_rhs_last_ragged)  active_gs_ptr = &rhs_last_dims;
 
   // lhs_data and rhs_data are 2D; derive m, n, k from buffer dimensions.
   NVTE_CHECK(lhs_data.dimensions().size() == 2, "lhs_data must be 2D.");
@@ -990,9 +1016,10 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       NVTE_CHECK(host_num_gemms == num_gemms, "num_gemms ", num_gemms,
                  " does not match the return of GroupedGemmGetGroupSizes ", host_num_gemms, ".");
     } else {
-      auto active_gs_ptr =
-          reinterpret_cast<const int32_t *>(active_group_sizes.untyped_data());
-      cudaMemcpyAsync(dim_list_host.data(), active_gs_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
+      NVTE_CHECK(active_gs_ptr != nullptr, "active_gs_ptr is null but any_ragged is true.");
+      auto gs_data_ptr =
+          reinterpret_cast<const int32_t *>(active_gs_ptr->untyped_data());
+      cudaMemcpyAsync(dim_list_host.data(), gs_data_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
                       stream);
       // Note: This may break cudaGraph.
       cudaStreamSynchronize(stream);
@@ -1247,9 +1274,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Arg<Buffer_Type>()      // rhs_data (2D)
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
-                                  .Arg<Buffer_Type>()      // lhs_group_sizes (G,) or empty (0,)
-                                  .Arg<Buffer_Type>()      // rhs_group_sizes (G,) or empty (0,)
-                                  .Arg<Buffer_Type>()      // out_group_sizes (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // lhs_first_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // lhs_last_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // rhs_first_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // rhs_last_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // out_first_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // out_last_dims (G,) or empty (0,)
                                   .Arg<Buffer_Type>()      // group_offset
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // workspace

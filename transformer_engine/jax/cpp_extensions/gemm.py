@@ -1446,12 +1446,13 @@ class GroupedGemmPrimitive(BasePrimitive):
     Primitive for grouped GEMM using nvte_multi_tensor_gemm (supports all scaling modes) or nvte_grouped_gemm (supporting BF16).
     """
 
-    # args = lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, lhs_group_sizes, rhs_group_sizes, out_group_sizes, group_offset, unused_placeholder
     name = "te_grouped_gemm_ffi"
-    # args = lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, lhs_group_sizes, rhs_group_sizes, out_group_sizes, alpha, beta
+    # args = lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias,
+    #        lhs_first_dims, lhs_last_dims, rhs_first_dims, rhs_last_dims,
+    #        out_first_dims, out_last_dims, alpha, beta
     name_graph_safe = "te_grouped_gemm_v2_ffi"
     multiple_results = True
-    impl_static_args = (10, 11, 12, 13, 14, 15, 16)
+    impl_static_args = (13, 14, 15, 16, 17, 18, 19)
     inner_primitive = None
     outer_primitive = None
 
@@ -1462,9 +1463,12 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_data_aval,
         rhs_scale_inv_aval,
         bias_aval,
-        lhs_group_sizes_aval,
-        rhs_group_sizes_aval,
-        out_group_sizes_aval,
+        lhs_first_dims_aval,
+        lhs_last_dims_aval,
+        rhs_first_dims_aval,
+        rhs_last_dims_aval,
+        out_first_dims_aval,
+        out_last_dims_aval,
         *additional_args,  # group_offset_aval, unused_placeholder OR alpha_aval, beta_aval
         lhs_is_trans,
         rhs_is_trans,
@@ -1504,11 +1508,11 @@ class GroupedGemmPrimitive(BasePrimitive):
         del has_bias, use_async_d2h_group_sizes
 
         # Determine mode from which group_sizes buffer is non-empty
-        is_wgrad = rhs_group_sizes_aval.size > 0
+        is_wgrad = rhs_first_dims_aval.size > 0 or rhs_last_dims_aval.size > 0
         num_groups = (
-            lhs_group_sizes_aval.size
-            or rhs_group_sizes_aval.size
-            or out_group_sizes_aval.size
+            lhs_first_dims_aval.size or lhs_last_dims_aval.size
+            or rhs_first_dims_aval.size or rhs_last_dims_aval.size
+            or out_first_dims_aval.size or out_last_dims_aval.size
             or additional_args[0].size  # alpha (V2) has size G; group_offset (legacy) has size >= 1
         )
 
@@ -1650,9 +1654,12 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_data,
         rhs_scale_inv,
         bias,
-        lhs_group_sizes,
-        rhs_group_sizes,
-        out_group_sizes,
+        lhs_first_dims,
+        lhs_last_dims,
+        rhs_first_dims,
+        rhs_last_dims,
+        out_first_dims,
+        out_last_dims,
         additional_arg_0,  # group_offset (non-graph-safe) OR alpha (graph-safe)
         additional_arg_1,  # unused placeholder (non-graph-safe) OR beta (graph-safe)
         lhs_is_trans,
@@ -1674,9 +1681,12 @@ class GroupedGemmPrimitive(BasePrimitive):
             rhs_data,
             rhs_scale_inv,
             bias,
-            lhs_group_sizes,
-            rhs_group_sizes,
-            out_group_sizes,
+            lhs_first_dims,
+            lhs_last_dims,
+            rhs_first_dims,
+            rhs_last_dims,
+            out_first_dims,
+            out_last_dims,
             *additional_args,
             lhs_is_trans=lhs_is_trans,
             rhs_is_trans=rhs_is_trans,
@@ -2038,9 +2048,12 @@ def _flatten_to_2d(data, flatten_axis):
 def grouped_gemm(
     lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
     rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
-    lhs_group_sizes: jnp.ndarray = None,   # (G,) int32 if lhs first-dim is ragged, else None/(0,)
-    rhs_group_sizes: jnp.ndarray = None,   # (G,) int32 if rhs first-dim is ragged (wgrad), else None/(0,)
-    out_group_sizes: jnp.ndarray = None,   # (G,) int32 if output first-dim is ragged, else None/(0,)
+    lhs_first_dims: jnp.ndarray = None,   # (G,) int32 if LHS squashed first dim varies, else None/(0,)
+    lhs_last_dims: jnp.ndarray = None,    # (G,) int32 if LHS squashed last dim varies, else None/(0,)
+    rhs_first_dims: jnp.ndarray = None,   # (G,) int32 if RHS squashed first dim varies, else None/(0,)
+    rhs_last_dims: jnp.ndarray = None,    # (G,) int32 if RHS squashed last dim varies, else None/(0,)
+    out_first_dims: jnp.ndarray = None,   # (G,) int32 if output first dim varies, else None/(0,)
+    out_last_dims: jnp.ndarray = None,    # (G,) int32 if output last dim varies, else None/(0,)
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (2,)),
     bias: jnp.ndarray = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
@@ -2055,9 +2068,12 @@ def grouped_gemm(
     Args:
         lhs: Left-hand side input matrix, can be a jnp.ndarray or GroupedScaledTensor1x
         rhs: Right-hand side input matrix, can be a jnp.ndarray or GroupedScaledTensor1x
-        lhs_group_sizes: (G,) int32 if lhs first-dim is ragged, else None or empty (0,) sentinel
-        rhs_group_sizes: (G,) int32 if rhs first-dim is ragged (wgrad mode), else None/(0,)
-        out_group_sizes: (G,) int32 if output first-dim is ragged, else None/(0,)
+        lhs_first_dims: (G,) int32 if LHS squashed first dim varies per group, else None/(0,)
+        lhs_last_dims: (G,) int32 if LHS squashed last dim varies per group, else None/(0,)
+        rhs_first_dims: (G,) int32 if RHS squashed first dim varies per group (wgrad), else None/(0,)
+        rhs_last_dims: (G,) int32 if RHS squashed last dim varies per group, else None/(0,)
+        out_first_dims: (G,) int32 if output first dim varies per group, else None/(0,)
+        out_last_dims: (G,) int32 if output last dim varies per group, else None/(0,)
         contracting_dims: Tuple of two sequences representing the contracting dimensions
         bias: Bias tensor of shape (G, N)
         precision: JAX precision for the GEMM operation
@@ -2079,12 +2095,12 @@ def grouped_gemm(
 
     # Replace None sentinels with empty (0,) int32 arrays.
     empty_gs = jnp.empty((0,), jnp.int32)
-    if lhs_group_sizes is None:
-        lhs_group_sizes = empty_gs
-    if rhs_group_sizes is None:
-        rhs_group_sizes = empty_gs
-    if out_group_sizes is None:
-        out_group_sizes = empty_gs
+    lhs_first_dims = empty_gs if lhs_first_dims is None else lhs_first_dims
+    lhs_last_dims = empty_gs if lhs_last_dims is None else lhs_last_dims
+    rhs_first_dims = empty_gs if rhs_first_dims is None else rhs_first_dims
+    rhs_last_dims = empty_gs if rhs_last_dims is None else rhs_last_dims
+    out_first_dims = empty_gs if out_first_dims is None else out_first_dims
+    out_last_dims = empty_gs if out_last_dims is None else out_last_dims
 
     if isinstance(lhs, jnp.ndarray):
         assert isinstance(rhs, jnp.ndarray)
@@ -2128,7 +2144,7 @@ def grouped_gemm(
 
     # TODO(Hua): these are for fp16 dense wgrad, any better way to handle this?
     if (
-        rhs_group_sizes.size > 0          # wgrad mode: rhs first-dim is ragged
+        (rhs_first_dims.size > 0 or rhs_last_dims.size > 0)   # wgrad mode: rhs dim is ragged
         and not isinstance(lhs, ScaledTensor)
         and not isinstance(rhs, ScaledTensor)
     ):
@@ -2140,7 +2156,7 @@ def grouped_gemm(
     # For MXFP8 block-scaling wgrad with pre-quantized inputs: rhs is colwise quantized,
     # so rhs_use_colwise = (is_mxfp8 && !rhs_is_trans) must be True → rhs_is_trans=False.
     if (
-        rhs_group_sizes.size > 0          # wgrad mode: rhs first-dim is ragged
+        (rhs_first_dims.size > 0 or rhs_last_dims.size > 0)   # wgrad mode: rhs dim is ragged
         and isinstance(lhs, GroupedScaledTensor1x)
         and scaling_mode.is_1d_block_scaling()
     ):
@@ -2168,7 +2184,11 @@ def grouped_gemm(
         quantizer_set.kernel.q_layout = (
             QuantizeLayout.ROWWISE if rhs_is_rowwise else QuantizeLayout.COLWISE
         )
-        active_group_sizes = lhs_group_sizes if lhs_group_sizes.size > 0 else rhs_group_sizes
+        active_group_sizes = next(
+            (gs for gs in [lhs_first_dims, lhs_last_dims, rhs_first_dims, rhs_last_dims]
+             if gs.size > 0),
+            empty_gs,
+        )
         lhs_q = grouped_quantize(lhs, quantizer_set.x, active_group_sizes, lhs_flatten_axis)
         rhs_q = grouped_quantize(
             rhs, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
@@ -2222,7 +2242,7 @@ def grouped_gemm(
             lhs_contract_dim = tuple((lhs_ndim - 1 - i) % lhs_ndim for i in lhs_contract_dim)
         if rhs_layout_is_T:
             # For rhs [G, K, N], need to exclude the G dim from contract_dim
-            if lhs_group_sizes.size > 0:  # fwd/dgrad: rhs has G as first dim
+            if lhs_first_dims.size > 0 or lhs_last_dims.size > 0:  # fwd/dgrad: rhs has G as first dim
                 rhs_contract_dim = tuple(
                     (rhs_ndim - 1 - i) % (rhs_ndim - 1) + 1 for i in rhs_contract_dim
                 )
@@ -2233,7 +2253,11 @@ def grouped_gemm(
     lhs_data_2d = _flatten_to_2d(lhs_data, lhs_flatten_axis)
     rhs_data_2d = _flatten_to_2d(rhs_data, rhs_flatten_axis)
 
-    num_gemms = lhs_group_sizes.size or rhs_group_sizes.size or out_group_sizes.size
+    num_gemms = (
+        lhs_first_dims.size or lhs_last_dims.size
+        or rhs_first_dims.size or rhs_last_dims.size
+        or out_first_dims.size or out_last_dims.size
+    )
 
     has_bias = bias is not None
     if has_bias:
@@ -2264,9 +2288,12 @@ def grouped_gemm(
         rhs_data_2d,
         rhs_scale_inv,
         bias,
-        lhs_group_sizes,
-        rhs_group_sizes,
-        out_group_sizes,
+        lhs_first_dims,
+        lhs_last_dims,
+        rhs_first_dims,
+        rhs_last_dims,
+        out_first_dims,
+        out_last_dims,
         additional_arg_0,
         additional_arg_1,
         lhs_is_trans=lhs_is_trans,

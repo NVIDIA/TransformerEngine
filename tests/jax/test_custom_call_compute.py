@@ -1793,9 +1793,12 @@ class TestGroupedDense:
         )(
             lhs,
             rhs,
-            lhs_group_sizes=group_sizes,
-            rhs_group_sizes=empty_gs,
-            out_group_sizes=group_sizes,
+            lhs_first_dims=group_sizes,
+            lhs_last_dims=empty_gs,
+            rhs_first_dims=empty_gs,
+            rhs_last_dims=empty_gs,
+            out_first_dims=group_sizes,
+            out_last_dims=empty_gs,
             contracting_dims=contracting_dims,
             use_async_d2h_group_sizes=True,
         )
@@ -1832,9 +1835,12 @@ class TestGroupedDense:
         prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
             lhs,
             rhs,
-            lhs_group_sizes=group_sizes,
-            rhs_group_sizes=empty_gs,
-            out_group_sizes=group_sizes,
+            lhs_first_dims=group_sizes,
+            lhs_last_dims=empty_gs,
+            rhs_first_dims=empty_gs,
+            rhs_last_dims=empty_gs,
+            out_first_dims=group_sizes,
+            out_last_dims=empty_gs,
             contracting_dims=contracting_dims,
             quantizer_set=quantizer_set,
         )
