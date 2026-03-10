@@ -2798,7 +2798,6 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
 
 
-
 def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:
     data = grouped_tensor.rowwise_data
     if data is None:

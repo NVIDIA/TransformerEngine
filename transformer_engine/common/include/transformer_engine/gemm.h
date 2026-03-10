@@ -529,8 +529,8 @@ class GroupedMatmulConfigWrapper {
   /*! \brief Set whether to use split accumulator for FP8 GEMM. */
   void set_use_split_accumulator(bool use_split_accumulator) {
     const auto val = static_cast<uint8_t>(use_split_accumulator);
-    nvte_set_grouped_matmul_config_attribute(
-        config_, kNVTEGroupedMatmulConfigUseSplitAccumulator, &val, sizeof(val));
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigUseSplitAccumulator,
+                                             &val, sizeof(val));
   }
 
  private:

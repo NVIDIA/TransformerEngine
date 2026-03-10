@@ -635,13 +635,11 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
              "Grouped GEMM requires D to have the same num_tensors as inputs.");
 
   auto gemm_config = prepare_grouped_gemm_config(alpha, beta, workspace_setup, workspace_cublas,
-                                                 num_tensors, math_sm_count,
-                                                 use_split_accumulator);
+                                                 num_tensors, math_sm_count, use_split_accumulator);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb, grouped_D.data(),
-                      grouped_D.data(),
-                      gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
+                      grouped_D.data(), gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
                       gemm_config.te_workspace_setup.data(), gemm_config.te_workspace_cublas.data(),
                       gemm_config.matmul_config.has_value()
                           ? static_cast<NVTEGroupedMatmulConfig>(*gemm_config.matmul_config)

@@ -389,7 +389,6 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
   int8_t fastAccuMode = use_split_accumulator ? 0 : use_fp8;
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
                                                    &fastAccuMode, sizeof(fastAccuMode)));
-
 }
 
 inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
@@ -480,8 +479,8 @@ __global__ void grouped_bias_add_kernel(char *d_base, const char *bias_base, Ten
   const int64_t n = d_meta.last_dims ? d_meta.last_dims[tensor_idx] : d_meta.uniform_last;
   if (m == 0 || n == 0) return;
 
-  const int64_t bias_n = bias_meta.last_dims ? bias_meta.last_dims[tensor_idx]
-                                             : bias_meta.uniform_last;
+  const int64_t bias_n =
+      bias_meta.last_dims ? bias_meta.last_dims[tensor_idx] : bias_meta.uniform_last;
 
   const int64_t d_offset = compute_grouped_tensor_offset(d_meta, tensor_idx);
   const int64_t bias_offset = compute_grouped_tensor_offset(bias_meta, tensor_idx);
