@@ -12,9 +12,7 @@ import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
-def get_reduction_params(
-    tensor_name: str, tp_group: torch.distributed.ProcessGroup, tp_size: int
-):
+def get_reduction_params(tensor_name: str, tp_group: torch.distributed.ProcessGroup, tp_size: int):
     """
     Returns the statistics reduction parameters for the tensor.
     """
