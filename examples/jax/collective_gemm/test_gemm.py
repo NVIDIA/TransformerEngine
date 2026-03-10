@@ -22,6 +22,7 @@ from jax.sharding import PartitionSpec, NamedSharding
 
 from common import (
     assert_allclose,
+    get_tolerance_dtype,
     _initialize_distributed,
     _get_dp_and_tp_sizes,
     _create_mesh,
@@ -169,7 +170,7 @@ def run_gemm_tests(args, mesh=None):
         jax.block_until_ready(gathered_output)
 
     if args.enable_result_check and args.process_id == 0:
-        assert_allclose(gathered_ref_output, gathered_output)
+        assert_allclose(gathered_ref_output, gathered_output, dtype=get_tolerance_dtype(quantizer_set))
 
 
 class TestCollectiveGemmWithDP(unittest.TestCase):

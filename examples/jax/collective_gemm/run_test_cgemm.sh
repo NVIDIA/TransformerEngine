@@ -35,7 +35,7 @@ TEST_CASES=(
 # "test_gemm.py::TestCollectiveGemmWithDP::test_te_current_scaling_fp8_all_gather_with_dp"
 # "test_gemm.py::TestCollectiveGemmWithDP::test_te_current_scaling_fp8_reduce_scatter_with_dp"
 # # TODO(Phuong): Enable when supported
-# "test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_all_gather_with_dp"
+"test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_all_gather_with_dp"
 "test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_reduce_scatter_with_dp"
 # # "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_all_gather_with_dp"
 # # "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_reduce_scatter_with_dp"

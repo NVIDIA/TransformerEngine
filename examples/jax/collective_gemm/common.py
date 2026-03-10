@@ -21,8 +21,22 @@ def dtype_tols(dtype, rtol=None, atol=None):
         return {"rtol": 1e-3, "atol": 1e-6}
     elif dtype in [jnp.bfloat16, "bfloat16"]:
         return {"rtol": 1e-2, "atol": 1e-5}
+    elif dtype in [jnp.float8_e4m3fn, "float8_e4m3fn", jnp.float8_e5m2, "float8_e5m2"]:
+        # FP8 quantization introduces ~1% error; match C++ getTolerances for fp8 types
+        return {"rtol": 1e-2, "atol": 1e-2}
     else:
         return {"rtol": 1e-5, "atol": 1e-8}
+
+
+def get_tolerance_dtype(quantizer_set):
+    """Return the dtype used to select numerical tolerances based on the active quantizer.
+
+    Reads q_dtype from quantizer_set.x; falls back to bfloat16 when no quantizer is
+    active (NO_SCALING / noop path, where quantizer_set.x is None).
+    """
+    if quantizer_set.x is not None:
+        return quantizer_set.x.q_dtype
+    return jnp.bfloat16
 
 
 def assert_allclose(

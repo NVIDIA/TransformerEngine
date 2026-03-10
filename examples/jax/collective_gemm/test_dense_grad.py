@@ -13,6 +13,7 @@ import flax
 
 from common import (
     assert_allclose,
+    get_tolerance_dtype,
     _initialize_distributed,
     _get_dp_and_tp_sizes,
     _create_mesh,
@@ -167,9 +168,10 @@ def run_dense_grad_tests(args, mesh=None):
         jax.block_until_ready(gathered_ref_grads)
 
     if args.enable_result_check and args.process_id == 0:
-        assert_allclose(ref_output, output, dtype=jnp.bfloat16)
+        tol_dtype = get_tolerance_dtype(quantizer_set)
+        assert_allclose(ref_output, output, dtype=tol_dtype)
         for ref_grad, gathered_grad in zip(gathered_ref_grads, gathered_grads):
-            assert_allclose(ref_grad, gathered_grad, dtype=jnp.bfloat16)
+            assert_allclose(ref_grad, gathered_grad, dtype=tol_dtype)
 
 
 class TestCollectiveDenseGradient(unittest.TestCase):
