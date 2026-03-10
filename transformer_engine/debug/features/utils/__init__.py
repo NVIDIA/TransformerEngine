@@ -12,7 +12,9 @@ import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
-def get_reduction_params(tensor_name: str, tp_group: torch.distributed.ProcessGroup):
+def get_reduction_params(
+    tensor_name: str, tp_group: torch.distributed.ProcessGroup, tp_size: int
+):
     """
     Returns the statistics reduction parameters for the tensor.
     """
@@ -20,7 +22,7 @@ def get_reduction_params(tensor_name: str, tp_group: torch.distributed.ProcessGr
     reduction_group = debug_api.get_tensor_reduction_group()
     reduce_within_microbatch = tensor_name != "weight"
     if tensor_name == "weight":
-        if TEDebugState.weight_tensor_tp_group_reduce:
+        if TEDebugState.weight_tensor_tp_group_reduce and tp_size > 1:
             # Do not overwrite with `None`: in torch.distributed collectives
             # group=None means the default/world process group.
             if tp_group is not None:
