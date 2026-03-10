@@ -1113,10 +1113,11 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
   };
 
   const bool need_offsets = !same_first || !same_last;
+  const bool use_random_padding = need_offsets && scaling_mode != NVTE_MXFP8_1D_SCALING;
   if (need_offsets) {
     offsets[0] = 0;
     for (size_t i = 1; i < num_tensors; ++i) {
-      offsets[i] = offsets[i - 1] + numel(i - 1) + random_padding();
+      offsets[i] = offsets[i - 1] + numel(i - 1) + (use_random_padding ? random_padding() : 0);
     }
   } else {
     for (size_t i = 0; i < num_tensors; ++i) {
