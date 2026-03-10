@@ -201,11 +201,10 @@ __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t
-get_rbits(
+__device__ __forceinline__ uint32_t get_rbits(
     transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>&
         rng,  // NVTE_BUILD_NUM_PHILOX_ROUNDS rounds of philox4x32
-          uint4& random_uint4, int& rnd_idx) {
+    uint4& random_uint4, int& rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
     random_uint4 = rng.generate4();
