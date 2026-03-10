@@ -557,7 +557,7 @@ std::vector<std::vector<size_t>> grouped_input_config = {
     {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
     {VARYING_FIRST_DIM,     3,      1024,160,                   128,384,512},
     {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
-    {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
+    {VARYING_FIRST_DIM,     5,      4096,256,                   128,256,384,1024,2304},
     {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
     {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
     {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
@@ -633,7 +633,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::ValuesIn(grouped_input_config),
         ::testing::Values(DType::kBFloat16),
-        ::testing::Values(true)),
+        ::testing::Values(true, false)),
     [](const testing::TestParamInfo<GroupedFusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         std::string name = "CAST_ONLY";
         const std::vector<size_t> input = std::get<0>(info.param);
