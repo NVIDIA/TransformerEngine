@@ -261,7 +261,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   const auto logical_first_dim = logical_shape_py[0].cast<size_t>();
   const auto logical_last_dim = logical_shape_py[1].cast<size_t>();
   const std::vector<size_t> logical_shape = {logical_first_dim, logical_last_dim};
-  const auto& quantizer = convert_quantizer(input.attr("quantizer"));
+  const auto &quantizer = convert_quantizer(input.attr("quantizer"));
 
   // Extract optional tensor attributes.
   auto get_optional_tensor = [&input](const char *name) -> std::optional<at::Tensor> {
