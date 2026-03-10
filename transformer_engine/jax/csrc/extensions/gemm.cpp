@@ -892,7 +892,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     m = lhs_is_trans ? lhs_data.dimensions()[1] : lhs_data.dimensions()[0];
     n = rhs_data.dimensions()[1];
   } else {
-    m = lhs_data.dimensions()[0];  // total M (sum of group sizes)
+    m = lhs_is_trans ? lhs_data.dimensions()[1] : lhs_data.dimensions()[0];  // total M (sum of group sizes)
     n = rhs_is_trans ? rhs_data.dimensions()[0] / num_gemms : rhs_data.dimensions()[1];
   }
 

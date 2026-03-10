@@ -1441,6 +1441,45 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
 register_primitive(GroupedGemmCopySizesPrimitive)
 
 
+def _grouped_gemm_lhs_M(lhs_shape_2d: Tuple[int, int], lhs_is_trans: bool) -> int:
+    """Non-contracting output size M from the 2-D LHS buffer."""
+    return lhs_shape_2d[1] if lhs_is_trans else lhs_shape_2d[0]
+
+
+def _grouped_gemm_rhs_N(rhs_shape_2d: Tuple[int, int], rhs_is_trans: bool, num_groups: int) -> int:
+    """Non-contracting output size N from the 2-D RHS buffer."""
+    return rhs_shape_2d[0] // num_groups if rhs_is_trans else rhs_shape_2d[1]
+
+
+def _assert_grouped_gemm_dims_shapes(
+    lhs_first_dims_aval,
+    lhs_last_dims_aval,
+    rhs_first_dims_aval,
+    rhs_last_dims_aval,
+    out_first_dims_aval,
+    out_last_dims_aval,
+    num_groups: int,
+) -> None:
+    """Assert that all non-empty *_dims arrays have exactly num_groups elements.
+
+    rhs_first_dims / rhs_last_dims describe the ragged contracting K dimension.
+    K totals need not fill the entire buffer (padding is allowed), so only the
+    array length is checked, not the per-group sum.
+    """
+    for name, aval in [
+        ("lhs_first_dims", lhs_first_dims_aval),
+        ("lhs_last_dims", lhs_last_dims_aval),
+        ("out_first_dims", out_first_dims_aval),
+        ("out_last_dims", out_last_dims_aval),
+        ("rhs_first_dims", rhs_first_dims_aval),
+        ("rhs_last_dims", rhs_last_dims_aval),
+    ]:
+        if aval.size > 0:
+            assert aval.size == num_groups, (
+                f"grouped GEMM {name} has size {aval.size}, expected num_groups={num_groups}"
+            )
+
+
 class GroupedGemmPrimitive(BasePrimitive):
     """
     Primitive for grouped GEMM using nvte_multi_tensor_gemm (supports all scaling modes) or nvte_grouped_gemm (supporting BF16).
@@ -1507,8 +1546,6 @@ class GroupedGemmPrimitive(BasePrimitive):
         del bias_aval
         del has_bias, use_async_d2h_group_sizes
 
-        # Determine mode from which group_sizes buffer is non-empty
-        is_wgrad = rhs_first_dims_aval.size > 0 or rhs_last_dims_aval.size > 0
         num_groups = (
             lhs_first_dims_aval.size
             or lhs_last_dims_aval.size
@@ -1519,18 +1556,28 @@ class GroupedGemmPrimitive(BasePrimitive):
             or additional_args[0].size  # alpha (V2) has size G; group_offset (legacy) has size >= 1
         )
 
-        # lhs_data_aval and rhs_data_aval are now 2D; derive output shape from buffer dims
-        if is_wgrad:
-            # lhs shape [K_lhs, M] (lhs_is_trans=True) or [M, K_lhs] (lhs_is_trans=False)
-            # M is the non-contracting (output) dim
-            M = lhs_data_aval.shape[1] if lhs_is_trans else lhs_data_aval.shape[0]
-            N = rhs_data_aval.shape[1]
+        _assert_grouped_gemm_dims_shapes(
+            lhs_first_dims_aval,
+            lhs_last_dims_aval,
+            rhs_first_dims_aval,
+            rhs_last_dims_aval,
+            out_first_dims_aval,
+            out_last_dims_aval,
+            num_groups,
+        )
+
+        # lhs_data_aval and rhs_data_aval are 2D; derive output shape from buffer dims.
+        # lhs shape: [M, K] (lhs_is_trans=False) or [K, M] (lhs_is_trans=True)
+        # rhs shape: [G*K, N] or [K, N] (rhs_is_trans=False) or [G*N, K] (rhs_is_trans=True)
+        M = _grouped_gemm_lhs_M(lhs_data_aval.shape, lhs_is_trans)
+        N = _grouped_gemm_rhs_N(rhs_data_aval.shape, rhs_is_trans, num_groups)
+        # When rhs has a ragged (contracting) K dimension, M and N are fixed per group
+        # and the output has a leading group axis.
+        # K validation is intentionally skipped: per-group K values may not fill the
+        # entire buffer (padding is allowed), so sum(rhs_*_dims) != buffer K is acceptable.
+        if rhs_first_dims_aval.size > 0 or rhs_last_dims_aval.size > 0:
             out_shape = (num_groups, M, N)
         else:
-            # lhs shape [M_total, K] (lhs_is_trans=False) or [K, M_total] (lhs_is_trans=True)
-            # M is the non-contracting (output) dim
-            M = lhs_data_aval.shape[1] if lhs_is_trans else lhs_data_aval.shape[0]
-            N = rhs_data_aval.shape[1] if not rhs_is_trans else rhs_data_aval.shape[0] // num_groups
             out_shape = (M, N)
 
         cublas_workspace_aval = jax.core.ShapedArray(
@@ -2150,29 +2197,11 @@ def grouped_gemm(
     lhs_is_trans = lhs_contract_dim[-1] != len(lhs_shape) - 1
     lhs_flatten_axis = len(lhs_contract_dim) * (1 if lhs_is_trans else -1)
 
-    # rhs_shape [G, K, N]
-    rhs_is_trans = rhs_contract_dim[0] != 1
+    # rhs_is_trans: K is the last dim of rhs (i.e., rhs is in "T" layout).
+    # This formula handles both standard rhs [G, K, N] (G-prefixed) and wgrad
+    # rhs [K_total, N] (no G prefix) without needing a separate wgrad override.
+    rhs_is_trans = rhs_contract_dim[-1] == len(rhs_shape) - 1
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
-
-    # TODO(Hua): these are for fp16 dense wgrad, any better way to handle this?
-    if (
-        (rhs_first_dims.size > 0 or rhs_last_dims.size > 0)  # wgrad mode: rhs dim is ragged
-        and not isinstance(lhs, ScaledTensor)
-        and not isinstance(rhs, ScaledTensor)
-    ):
-        lhs_is_trans = True
-        rhs_is_trans = False
-        lhs_flatten_axis = 1
-        rhs_flatten_axis = 1
-
-    # For MXFP8 block-scaling wgrad with pre-quantized inputs: rhs is colwise quantized,
-    # so rhs_use_colwise = (is_mxfp8 && !rhs_is_trans) must be True → rhs_is_trans=False.
-    if (
-        (rhs_first_dims.size > 0 or rhs_last_dims.size > 0)  # wgrad mode: rhs dim is ragged
-        and isinstance(lhs, GroupedScaledTensor1x)
-        and scaling_mode.is_1d_block_scaling()
-    ):
-        rhs_is_trans = False
 
     if (
         not isinstance(lhs, ScaledTensor)
@@ -2269,13 +2298,6 @@ def grouped_gemm(
     # Reshape inputs to 2D using the already-computed flatten_axes.
     lhs_data_2d = _flatten_to_2d(lhs_data, lhs_flatten_axis)
     rhs_data_2d = _flatten_to_2d(rhs_data, rhs_flatten_axis)
-
-    # Validate contracting dim size
-    k_lhs = lhs_data_2d.shape[0] if lhs_is_trans else lhs_data_2d.shape[1]
-    k_rhs = rhs_data_2d.shape[1] if rhs_is_trans else rhs_data_2d.shape[0] // num_gemms
-    assert k_lhs == k_rhs, (
-        f"Contracting dimension mismatch: LHS K={k_lhs}, RHS K={k_rhs}"
-    )
 
     num_gemms = (
         lhs_first_dims.size
