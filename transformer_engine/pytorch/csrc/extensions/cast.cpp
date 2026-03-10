@@ -261,6 +261,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   const auto logical_first_dim = logical_shape_py[0].cast<size_t>();
   const auto logical_last_dim = logical_shape_py[1].cast<size_t>();
   const std::vector<size_t> logical_shape = {logical_first_dim, logical_last_dim};
+  const auto& quantizer = convert_quantizer(input.attr("quantizer"));
 
   // Extract optional tensor attributes.
   auto get_optional_tensor = [&input](const char *name) -> std::optional<at::Tensor> {
@@ -285,7 +286,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   }
 
   // Build input GroupedTensorWrapper.
-  auto input_cpp = GroupedTensorWrapper(num_tensors, logical_shape, NVTE_MXFP8_1D_SCALING);
+  auto input_cpp = GroupedTensorWrapper(num_tensors, logical_shape, quantizer->get_scaling_mode());
   if (rowwise_data.has_value()) {
     input_cpp.set_rowwise_data(rowwise_data->data_ptr(),
                                GetTransformerEngineDType(rowwise_data->scalar_type()),
