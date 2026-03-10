@@ -445,9 +445,6 @@ def test_nvfp4_numeric(feature_dirs):
     log_nvfp4_config = LOG_NVFP4_CONFIG_BASE.format(stats="underflows%, mse")
 
     with debug_session(log_nvfp4_config, feature_dirs) as log_dir:
-        from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
-        from transformer_engine.pytorch.quantization import RecipeState
-
         recipe_state = RecipeState.create(
             recipe.NVFP4BlockScaling(),
             mode="forward",
@@ -699,6 +696,8 @@ def test_dump_tensors_sanity(feature_dirs):
 
         # Load and verify structure
         dump_file = os.path.join(dump_dir, dump_files[0])
+        # weights_only=False is required because the dump may contain QuantizedTensor objects,
+        # which are custom Python classes incompatible with the safe weights_only=True path.
         data = torch.load(dump_file, weights_only=False)
 
         assert isinstance(data, dict), "Dump should be a dictionary"

@@ -63,7 +63,7 @@ class TensorLogger:
     @staticmethod
     def _sanitize_name(name: str) -> str:
         """Sanitize layer/tensor names for use in file paths."""
-        for char in ["/", "\\", ":", "*", "?", '"', "<", ">", "|", " "]:
+        for char in ["/", "\\", ":", "*", "?", '"', "<", ">", "|", " ", "."]:
             name = name.replace(char, "_")
         return name
 
@@ -163,6 +163,11 @@ class DumpTensors(TEConfigAPIMapper):
     Dictionary keys:
         - ``high_precision``: pre-quantization tensor (if high_precision_tensor=True)
         - ``quantized``: quantized tensor object (if quantized_tensor=True)
+
+    .. note::
+        The ``quantized`` value is a pickled ``QuantizedTensor`` object. Loading it
+        (with ``weights_only=False``) requires the same version of TransformerEngine
+        to be installed. For maximum portability, dequantize the tensor before saving.
     """
 
     @api_method
