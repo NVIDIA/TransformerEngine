@@ -615,8 +615,8 @@ TEST_P(GroupedFusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
         }
         offsets[t + 1] = offsets[t] + first_dims[t] * last_dims[t];
 
-        // FP4 kernels in this test assume 16-wide chunks and packed pairs.
-        if ((first_dims[t] % 16 != 0) || (last_dims[t] % 16 != 0)) {
+        // FP4 kernels requires 16-Byte data alignment (TMA)
+        if ((first_dims[t] % 32 != 0) || (last_dims[t] % 32 != 0)) {
             GTEST_SKIP();
         }
     }
