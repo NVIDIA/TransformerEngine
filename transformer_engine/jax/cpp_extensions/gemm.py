@@ -681,12 +681,26 @@ class GemmPrimitive(BasePrimitive):
             lhs_flatten_axis = max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims)
             rhs_flatten_axis = min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1
 
-            lhs_scale_inv = apply_padding_to_scale_inv(
-                lhs_scale_inv, scaling_mode, lhs.shape, lhs_transposed, lhs_flatten_axis
-            )
-            rhs_scale_inv = apply_padding_to_scale_inv(
-                rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
-            )
+            if not collective_op.is_none and not is_outer:
+                # MXFP8 + Collective AG/RS: both sides of flatten_axis must be multiples of 128.
+                # No padding is needed in this case
+                lhs_first, lhs_last = math.prod(lhs.shape[:lhs_flatten_axis]), math.prod(lhs.shape[lhs_flatten_axis:])
+                assert lhs_first % 128 == 0 and lhs_last % 128 == 0, (
+                    f"MXFP8 + Collective AG requires LHS dimensions before and after the flatten axis to be multiples of 128. "
+                    f"Got lhs.shape={lhs.shape}, lhs_flatten_axis={lhs_flatten_axis}"
+                )
+                # The scale needs to be in good shape for reordering
+                assert lhs_scale_inv.shape[sequence_dim] % tpsp_axis_size() == 0, (
+                    f"MXFP8 + Collective AG/RS requires LHS scale inv sequence dimension to be multiples of tpsp_axis_size. "
+                    f"Got lhs_scale_inv.shape={lhs_scale_inv.shape}, tpsp_axis_size={tpsp_axis_size()}, sequence_dim={sequence_dim}"
+                )
+            else:
+                lhs_scale_inv = apply_padding_to_scale_inv(
+                    lhs_scale_inv, scaling_mode, lhs.shape, lhs_transposed, lhs_flatten_axis,
+                )
+                rhs_scale_inv = apply_padding_to_scale_inv(
+                    rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
+                )
 
         # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
         if scaling_mode.is_mxfp8_scaling:
@@ -963,9 +977,6 @@ class GemmPrimitive(BasePrimitive):
                 lhs_scale_specs = tuple(None if i == sequence_dim else s for i, s in enumerate(lhs_specs))
             else:
                 lhs_scale_specs = lhs_specs
-        print(lhs_scale_specs)
-        print(rhs_scale_specs)
-
 
         if not collective_op.is_none:
             if sequence_dim < 0:
