@@ -180,8 +180,11 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
   py::tuple args(0);
-  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                                                  static_cast<int64_t>(logical_last_dim)});
+  const std::vector<int64_t> grouped_shape = {static_cast<int64_t>(logical_first_dim),
+                                              static_cast<int64_t>(logical_last_dim)};
+  const std::vector<int64_t> grouped_stride = stride_from_shape(grouped_shape);
+  kwargs["shape"] = py::cast(grouped_shape);
+  kwargs["stride"] = py::cast(grouped_stride);
   kwargs["dtype"] = py::cast(GetATenDType(dtype));
   kwargs["num_tensors"] = py::cast(num_tensors);
   kwargs["quantizer"] = quantizer;
@@ -386,8 +389,11 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
   py::tuple args(0);
-  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                                                  static_cast<int64_t>(logical_last_dim)});
+  const std::vector<int64_t> grouped_shape = {static_cast<int64_t>(logical_first_dim),
+                                              static_cast<int64_t>(logical_last_dim)};
+  const std::vector<int64_t> grouped_stride = stride_from_shape(grouped_shape);
+  kwargs["shape"] = py::cast(grouped_shape);
+  kwargs["stride"] = py::cast(grouped_stride);
   kwargs["dtype"] = py::cast(GetATenDType(dtype));
   kwargs["num_tensors"] = py::cast(num_tensors);
   kwargs["quantizer"] = quantizer;
@@ -704,8 +710,11 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
   py::tuple args(0);
-  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                                                  static_cast<int64_t>(logical_last_dim)});
+  const std::vector<int64_t> grouped_shape = {static_cast<int64_t>(logical_first_dim),
+                                              static_cast<int64_t>(logical_last_dim)};
+  const std::vector<int64_t> grouped_stride = stride_from_shape(grouped_shape);
+  kwargs["shape"] = py::cast(grouped_shape);
+  kwargs["stride"] = py::cast(grouped_stride);
   kwargs["dtype"] = py::cast(GetATenDType(dtype));
   kwargs["num_tensors"] = py::cast(num_tensors);
   kwargs["quantizer"] = quantizer;
@@ -1062,8 +1071,11 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
   py::tuple args(0);
-  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                                                  static_cast<int64_t>(logical_last_dim)});
+  const std::vector<int64_t> grouped_shape = {static_cast<int64_t>(logical_first_dim),
+                                              static_cast<int64_t>(logical_last_dim)};
+  const std::vector<int64_t> grouped_stride = stride_from_shape(grouped_shape);
+  kwargs["shape"] = py::cast(grouped_shape);
+  kwargs["stride"] = py::cast(grouped_stride);
   kwargs["dtype"] = py::cast(GetATenDType(dtype));
   kwargs["num_tensors"] = py::cast(num_tensors);
   kwargs["quantizer"] = quantizer;
@@ -1478,8 +1490,11 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
   py::tuple args(0);
-  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                                                  static_cast<int64_t>(logical_last_dim)});
+  const std::vector<int64_t> grouped_shape = {static_cast<int64_t>(logical_first_dim),
+                                              static_cast<int64_t>(logical_last_dim)};
+  const std::vector<int64_t> grouped_stride = stride_from_shape(grouped_shape);
+  kwargs["shape"] = py::cast(grouped_shape);
+  kwargs["stride"] = py::cast(grouped_stride);
   kwargs["dtype"] = py::cast(GetATenDType(dtype));
   kwargs["num_tensors"] = py::cast(num_tensors);
   kwargs["quantizer"] = quantizer;
@@ -1906,8 +1921,11 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
   py::tuple args(0);
-  kwargs["shape"] = py::cast(std::vector<int64_t>{static_cast<int64_t>(logical_first_dim),
-                                                  static_cast<int64_t>(logical_last_dim)});
+  const std::vector<int64_t> grouped_shape = {static_cast<int64_t>(logical_first_dim),
+                                              static_cast<int64_t>(logical_last_dim)};
+  const std::vector<int64_t> grouped_stride = stride_from_shape(grouped_shape);
+  kwargs["shape"] = py::cast(grouped_shape);
+  kwargs["stride"] = py::cast(grouped_stride);
   kwargs["dtype"] = py::cast(GetATenDType(dtype));
   kwargs["num_tensors"] = py::cast(num_tensors);
   kwargs["quantizer"] = quantizer;
