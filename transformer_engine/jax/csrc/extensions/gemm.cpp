@@ -559,6 +559,70 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
   return std::move(grouped_tensor_wrapper);
 }
 
+// V2 variant: derives data shape from the 2D XLA buffer directly, converts group_sizes
+// int32→int64 per-tensor into int64_workspace, and wires first_dims/last_dims.
+// Only NO_SCALING is supported.
+JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
+                                              Buffer_Type const &first_dims,
+                                              Buffer_Type const &last_dims,
+                                              Result_Type int64_workspace,
+                                              size_t num_gemms,
+                                              cudaStream_t stream) {
+  auto dims = data.dimensions();
+  NVTE_CHECK(dims.size() >= 2, "grouped GEMM data buffer must be at least 2D.");
+  // Flatten all leading dimensions into the first axis to produce a 2D NVTE shape.
+  // Input buffers (lhs, rhs) are already 2D from the Python side.  Output buffers may be ND
+  // (e.g. [G, K, N] for wgrad), so we collapse dims[0..N-2] → rows and keep dims[N-1] → cols.
+  NVTEShape dataShape{.data = {product(dims, 0, dims.size() - 1), dims[dims.size() - 1]},
+                      .ndim = 2};
+  JAXX_GroupedTensorWrapper wrapper(JAXX_Scaling_Mode::NO_SCALING, num_gemms, dataShape);
+  wrapper.set_rowwise(data, std::nullopt);
+  auto *int64_sizes_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
+  if (first_dims.element_count() > 0) {
+    NVTE_CHECK(first_dims.element_type() == xla::ffi::DataType::S32,
+               "group_sizes must be int32.");
+    nvte_convert_int32_to_int64(
+        reinterpret_cast<const int32_t *>(first_dims.untyped_data()),
+        int64_sizes_ptr, num_gemms, stream);
+    wrapper.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
+  }
+  if (last_dims.element_count() > 0) {
+    NVTE_CHECK(last_dims.element_type() == xla::ffi::DataType::S32,
+               "group_sizes must be int32.");
+    nvte_convert_int32_to_int64(
+        reinterpret_cast<const int32_t *>(last_dims.untyped_data()),
+        int64_sizes_ptr, num_gemms, stream);
+    wrapper.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
+  }
+  return wrapper;
+}
+
+// Returns num_gemms from the first non-empty per-tensor group_sizes buffer,
+// falling back to the element count of alpha for the uniform-batch case.
+size_t grouped_gemm_num_gemms(Buffer_Type const &lhs_first_dims,
+                              Buffer_Type const &lhs_last_dims,
+                              Buffer_Type const &rhs_first_dims,
+                              Buffer_Type const &rhs_last_dims,
+                              Buffer_Type const &out_first_dims,
+                              Buffer_Type const &out_last_dims,
+                              Buffer_Type const &alpha) {
+  if (lhs_first_dims.element_count() > 0) {
+    return lhs_first_dims.dimensions()[0];
+  } else if (lhs_last_dims.element_count() > 0) {
+    return lhs_last_dims.dimensions()[0];
+  } else if (rhs_first_dims.element_count() > 0) {
+    return rhs_first_dims.dimensions()[0];
+  } else if (rhs_last_dims.element_count() > 0) {
+    return rhs_last_dims.dimensions()[0];
+  } else if (out_first_dims.element_count() > 0) {
+    return out_first_dims.dimensions()[0];
+  } else if (out_last_dims.element_count() > 0) {
+    return out_last_dims.dimensions()[0];
+  } else {
+    return alpha.element_count();  // uniform batch: no ragged tensor
+  }
+}
+
 // Config structs for grouped GEMM FFI static attributes.
 // Consolidating all static attributes into a single dict attribute makes it easy to add new
 // attributes in the future with backwards-compatible defaults: if old HLO was generated without a
@@ -679,181 +743,19 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             Result_Type cublas_workspace, Result_Type setup_workspace,
                             Result_Type int64_workspace, GroupedGemmV2Config config) {
   auto [lhs_is_trans, rhs_is_trans, scaling_mode] = config;
-  // Notes on matrix layouts and transpose:
-  // Jax uses row-major data_layout, on entering this function, each input matrix pair:
-  //   A: row-major [m, k] for N - [k, m] for T
-  //   B: row-major [k, n] for N - [n, k] for T
-  // on exiting this function, JAX expect:
-  //   C: row-major with size [m, n].
-  // cuBLAS uses column-major data_layout, in this view, each input matrix pair:
-  //   A: column-major with size [k, m] for T - [m, k] for N
-  //   B: column-major with size [n, k] for T - [k, n] for N
-  //
-  // If we call cuBLAS GEMM for A * B, the output will be:
-  //   C: column-major with size [m, n] --> row-major with size [n, m].
-  // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
-
-  // Determine which group_sizes buffers are active (non-empty = ragged dimension).
-  bool is_lhs_first_ragged = lhs_first_dims.element_count() > 0;
-  bool is_lhs_last_ragged = lhs_last_dims.element_count() > 0;
-  bool is_rhs_first_ragged = rhs_first_dims.element_count() > 0;
-  bool is_rhs_last_ragged = rhs_last_dims.element_count() > 0;
-  bool is_out_first_ragged = out_first_dims.element_count() > 0;
-  bool is_out_last_ragged = out_last_dims.element_count() > 0;
-  bool is_lhs_ragged = is_lhs_first_ragged || is_lhs_last_ragged;
-  bool is_rhs_ragged = is_rhs_first_ragged || is_rhs_last_ragged;
-  bool any_ragged = is_lhs_ragged || is_rhs_ragged;
-
-  size_t num_gemms;
-  if (is_lhs_first_ragged)
-    num_gemms = lhs_first_dims.dimensions()[0];
-  else if (is_lhs_last_ragged)
-    num_gemms = lhs_last_dims.dimensions()[0];
-  else if (is_rhs_first_ragged)
-    num_gemms = rhs_first_dims.dimensions()[0];
-  else if (is_rhs_last_ragged)
-    num_gemms = rhs_last_dims.dimensions()[0];
-  else if (is_out_first_ragged)
-    num_gemms = out_first_dims.dimensions()[0];
-  else if (is_out_last_ragged)
-    num_gemms = out_last_dims.dimensions()[0];
-  else
-    num_gemms = alpha.element_count();  // batched: no ragged tensor
-
-  const Buffer_Type *active_gs_ptr = nullptr;
-  if (is_lhs_first_ragged)
-    active_gs_ptr = &lhs_first_dims;
-  else if (is_lhs_last_ragged)
-    active_gs_ptr = &lhs_last_dims;
-  else if (is_rhs_first_ragged)
-    active_gs_ptr = &rhs_first_dims;
-  else if (is_rhs_last_ragged)
-    active_gs_ptr = &rhs_last_dims;
-
-  // lhs_data and rhs_data are 2D; derive m, n, k from buffer dimensions.
-  NVTE_CHECK(lhs_data.dimensions().size() == 2, "lhs_data must be 2D.");
-  NVTE_CHECK(rhs_data.dimensions().size() == 2, "rhs_data must be 2D.");
-  size_t k = lhs_is_trans ? lhs_data.dimensions()[0] : lhs_data.dimensions()[1];
-  size_t m, n;
-  if (is_rhs_ragged) {
-    // wgrad: lhs shape [K_lhs, M]: lhs_is_trans=True, contracting is dim[0]=K_lhs, output is dim[1]=M
-    m = lhs_is_trans ? lhs_data.dimensions()[1] : lhs_data.dimensions()[0];
-    n = rhs_data.dimensions()[1];
-  } else {
-    m = lhs_data.dimensions()[0];  // total M (sum of group sizes)
-    n = rhs_is_trans ? rhs_data.dimensions()[0] / num_gemms : rhs_data.dimensions()[1];
-  }
-
-  // Inputs
-  auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_data.untyped_data());
-  auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_data.untyped_data());
-  auto lhs_sinv_ptr = reinterpret_cast<uint8_t *>(lhs_sinv.untyped_data());
-  auto rhs_sinv_ptr = reinterpret_cast<uint8_t *>(rhs_sinv.untyped_data());
-  auto lhs_dtype = convert_ffi_datatype_to_te_dtype(lhs_data.element_type());
-  auto rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs_data.element_type());
-  auto lhs_sinv_dtype = convert_ffi_datatype_to_te_dtype(lhs_sinv.element_type());
-  auto rhs_sinv_dtype = convert_ffi_datatype_to_te_dtype(rhs_sinv.element_type());
-  bool has_bias = product(bias.dimensions()) > 0;
-  auto bias_ptr = has_bias ? reinterpret_cast<uint8_t *>(bias.untyped_data()) : nullptr;
-  auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
-
-  // Convert int32 group_sizes to int64 into the dedicated output buffer (ragged tensors only).
-  auto *int64_sizes_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
-  if (any_ragged) {
-    NVTE_CHECK(active_gs_ptr != nullptr, "active_gs_ptr is null but any_ragged is true.");
-    NVTE_CHECK(active_gs_ptr->element_type() == xla::ffi::DataType::S32,
-               "group_sizes must be int32.");
-    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t *>(active_gs_ptr->untyped_data()),
-                                int64_sizes_ptr, num_gemms, stream);
-  }
 
   NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
              "Only non-quantized grouped GEMM is supported in current implementation.");
 
-  // It is weird that TE/Common GEMM only use colwise for MXFP8
-  const bool is_fp8_gemm = is_fp8_dtype(lhs_dtype);
-  const bool is_tensor_scaling = scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
-                                 scaling_mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING;
-  const bool is_mxfp8_scaling = scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING;
-  const bool rhs_use_colwise = is_mxfp8_scaling && !rhs_is_trans;
-  const bool lhs_use_colwise = is_mxfp8_scaling && lhs_is_trans;
+  size_t num_gemms = grouped_gemm_num_gemms(lhs_first_dims, lhs_last_dims,
+                                            rhs_first_dims, rhs_last_dims,
+                                            out_first_dims, out_last_dims, alpha);
 
-  // Outputs
-  auto out_ptr = reinterpret_cast<uint8_t *>(output->untyped_data());
-  auto out_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
+  // Workspaces.
   auto setup_workspace_ptr = reinterpret_cast<uint8_t *>(setup_workspace->untyped_data());
-  // Here we clear the lower 8 bits of the buffer address to ensure the buffer is 256-aligned
   auto cublas_workspace_ptr = reinterpret_cast<uint8_t *>(cublas_workspace->untyped_data());
   cublas_workspace_ptr = move_ptr_to_next_256B_aligned(cublas_workspace_ptr);
-  auto workspace_total_size = product(cublas_workspace->dimensions());
-
-  auto lhs_sinv_size = product(lhs_sinv.dimensions());
-  auto rhs_sinv_size = product(rhs_sinv.dimensions());
-  const size_t workspace_alignment_padding = 256;
-  const size_t tensor_scaling_sinv_aligment = 16;
-  const size_t mxfp8_scaling_sinv_alignment_padding = 256;
-  auto workspace_size = workspace_total_size - workspace_alignment_padding;
-  if (is_mxfp8_scaling) {
-    // For MXFP8 swizzled scale_inv buffers, only the first pointer needs to be with 256B alignment padding. Later pointers are guaranteed to be 256-aligned as the scale_inv shapes are padded by 128x4.
-    workspace_size -= (lhs_sinv_size + rhs_sinv_size + 2 * mxfp8_scaling_sinv_alignment_padding);
-  } else if (is_tensor_scaling) {
-    // For tensor scaling, each matrix has a single scale value, and all scales need to be aligned
-    // by 16 bytes to meet the requirement of CUDA 12.9.1 and later.
-    workspace_size -= tensor_scaling_sinv_aligment * (lhs_sinv_size + rhs_sinv_size);
-  }
-  auto swizzled_lhs_sinv_ptr = cublas_workspace_ptr + workspace_size;
-  swizzled_lhs_sinv_ptr = move_ptr_to_next_256B_aligned(swizzled_lhs_sinv_ptr);
-  auto swizzled_rhs_sinv_ptr = swizzled_lhs_sinv_ptr + lhs_sinv_size;
-  swizzled_rhs_sinv_ptr = move_ptr_to_next_256B_aligned(swizzled_rhs_sinv_ptr);
-  auto lhs_scatter_aligned_ptr = swizzled_lhs_sinv_ptr;  // Already 256B aligned
-  auto rhs_scatter_aligned_ptr = lhs_scatter_aligned_ptr + num_gemms * tensor_scaling_sinv_aligment;
-
-  size_t lhs_dtype_bytes = te_dtype_bytes(lhs_dtype);
-  size_t rhs_dtype_bytes = te_dtype_bytes(rhs_dtype);
-  size_t lhs_sinv_dtype_bytes = te_dtype_bytes(lhs_sinv_dtype);
-  size_t rhs_sinv_dtype_bytes = te_dtype_bytes(rhs_sinv_dtype);
-  size_t bias_dtype_bytes = te_dtype_bytes(bias_dtype);
-  size_t out_dtype_bytes = te_dtype_bytes(out_dtype);
-
-  NVTE_CHECK(lhs_dtype_bytes == rhs_dtype_bytes, "sizeof(lhs_dtype) != sizeof(rhs_dtype)");
-  NVTE_CHECK(lhs_sinv_dtype_bytes == rhs_sinv_dtype_bytes,
-             "sizeof(lhs_sinv_dtype) != sizeof(rhs_sinv_dtype)");
-
-  size_t expected_lhs_size = m * k;
-  size_t expected_rhs_size = is_rhs_ragged ? (k * n) : (num_gemms * k * n);
-  size_t expected_out_size = is_rhs_ragged ? (num_gemms * m * n) : (m * n);
-  size_t actual_lhs_size = product(lhs_data.dimensions());
-  size_t actual_rhs_size = product(rhs_data.dimensions());
-  size_t actual_out_size = product(output->dimensions());
-  NVTE_CHECK(expected_lhs_size == actual_lhs_size, "Unexpected lhs size! Expect ",
-             expected_lhs_size, ", got ", actual_lhs_size);
-  if (!is_rhs_ragged) {
-    NVTE_CHECK(expected_rhs_size == actual_rhs_size,
-               "Unexpected rhs size! Expect num_gemms * n * k = ", num_gemms, " * ", n, " * ", k,
-               " = ", expected_rhs_size, ", got ", actual_rhs_size);
-    NVTE_CHECK(expected_out_size == actual_out_size, "Unexpected output size! Expect m * n = ", m,
-               " * ", n, " = ", expected_out_size, ", got ", actual_out_size);
-  } else {
-    NVTE_CHECK(expected_rhs_size == actual_rhs_size, "Unexpected rhs size! Expect k * n = ", k,
-               " * ", n, " = ", expected_rhs_size, ", got ", actual_rhs_size);
-    NVTE_CHECK(expected_out_size == actual_out_size,
-               "Unexpected output size! Expect num_gemms * m * n = ", num_gemms, " * ", m, " * ", n,
-               " = ", expected_out_size, ", got ", actual_out_size);
-  }
-
-  auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
-  bool grad = false;
-  bool accumulate = false;
-  bool use_split_accumulator = false;
-  auto bias_shape = std::vector<size_t>{has_bias ? n : 0};
-  const int arch = cuda::sm_arch();
-
-  if (arch < 100 && is_fp8_gemm) {
-    NVTE_CHECK(!lhs_is_trans && rhs_is_trans,
-               "For SM90 or older archs and FP8 input, only NT (row-major) GEMM is supported, ",
-               "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
-  }
-
+  auto workspace_size = product(cublas_workspace->dimensions()) - 256;
   TensorWrapper workspace_setup(setup_workspace_ptr,
                                 std::vector<size_t>{product(setup_workspace->dimensions())},
                                 DType::kByte);
@@ -867,70 +769,14 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             std::vector<size_t>{num_gemms},
                             convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
-  if (is_rhs_ragged) {
-    NVTE_CHECK(lhs_is_trans && !rhs_is_trans,
-               "For grouped dense wgrad, only TN GEMM is supported in TE/JAX currently.");
-
-    //// RHS
-    NVTEShape rhsShape{.data = {k, n}, .ndim = 2};
-    auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
-    if (is_rhs_first_ragged)
-      rhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
-    if (is_rhs_last_ragged)
-      rhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
-
-    //// LHS
-    NVTEShape lhsShape{.data = {k, m}, .ndim = 2};
-    lhs_is_trans = true;
-    auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-    if (is_lhs_first_ragged)
-      lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
-    if (is_lhs_last_ragged)
-      lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
-
-    //// OUTPUT
-    NVTEShape outShape{.data = {num_gemms * m, n}, .ndim = 2};
-    auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,
-                                          num_gemms, outShape);
-
-    nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
-                      alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
-                      workspace_cublas.data(),
-                      nullptr,  // config (use defaults)
-                      stream);
-
-    return ffi_with_cuda_error_check();
-  }
-
-  // Nominal case for FWD, DGRAD, or batched GEMM
-
-  //// RHS
-  NVTEShape rhsShape{.data = {num_gemms * k, n}, .ndim = 2};
-  if (rhs_is_trans) {
-    rhsShape.data[0] = num_gemms * n;
-    rhsShape.data[1] = k;
-  }
-  auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, num_gemms, rhsShape);
-
-  //// LHS
-  NVTEShape lhsShape{.data = {m, k}, .ndim = 2};
-  if (lhs_is_trans) {
-    std::swap(lhsShape.data[0], lhsShape.data[1]);
-  }
-  auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, num_gemms, lhsShape);
-  if (is_lhs_first_ragged)
-    lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
-  if (is_lhs_last_ragged)
-    lhs_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
-
-  //// OUTPUT
-  NVTEShape outShape{.data = {m, n}, .ndim = 2};
-  auto out_tensor = make_grouped_tensor(*output, std::nullopt, JAXX_Scaling_Mode::NO_SCALING,
-                                        num_gemms, outShape);
-  if (is_out_first_ragged)
-    out_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
-  if (is_out_last_ragged)
-    out_tensor.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
+  // Build grouped tensors from XLA buffer shapes and group_sizes — no m/n/k derivation needed.
+  // int32→int64 conversion for group_sizes is handled per-tensor inside make_grouped_tensor.
+  auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims,
+                                        int64_workspace, num_gemms, stream);
+  auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims,
+                                        int64_workspace, num_gemms, stream);
+  auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims,
+                                        int64_workspace, num_gemms, stream);
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
