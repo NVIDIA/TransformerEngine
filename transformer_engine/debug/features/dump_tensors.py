@@ -52,7 +52,8 @@ class TensorLogger:
 
     def _expected_root_dir(self, root_log_dir: str) -> str:
         """Return the rank-specific dump directory for the provided root log path."""
-        return os.path.join(root_log_dir, "tensor_dumps", f"rank_{self.rank}")
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        return os.path.join(root_log_dir, "tensor_dumps", f"rank_{rank}")
 
     def ensure_initialized(self, root_log_dir: str) -> None:
         """Reinitialize logger if debug session log directory changed."""
