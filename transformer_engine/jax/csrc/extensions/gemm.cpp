@@ -58,6 +58,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
     std::vector<size_t> scale_shape = {1};
     auto is_nvfp4 = is_nvfp4_scaling(scaling_mode);
     auto scale_dtype = convert_ffi_datatype_to_te_dtype(scale_inv.element_type());
+
     if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING || is_nvfp4) {
       // Block scaling also needs to be collapsed to match 2D data
       scale_shape = {product(scale_inv.dimensions(), 0, axis_boundary),
@@ -73,7 +74,8 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
         input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       }
       input.set_with_gemm_swizzled_scales(true);
-    } else if (is_nvfp4) {  // Swizzle for NVFP4
+    }
+    else if (is_nvfp4) {  // Swizzle for NVFP4
       NVTE_CHECK(rowwise, "NVFP4 GEMM expects rowwise for both LHS and RHS");
       input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       // Create tensor to hold swizzled scale factor
@@ -202,6 +204,7 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
   workspace_ptr = move_ptr_to_next_256B_aligned(workspace_ptr);
   size_t workspace_size = static_cast<size_t>(workspace->element_count()) - 256;
+
   if (is_nvfp4_scaling(config.scaling_mode)) {
     auto lhs_scale_size = product(lhs_scale_inv.dimensions());
     auto rhs_scale_size = product(rhs_scale_inv.dimensions());

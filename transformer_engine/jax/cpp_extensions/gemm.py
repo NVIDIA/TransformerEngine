@@ -681,6 +681,34 @@ class GemmPrimitive(BasePrimitive):
             reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
             lhs = reordered.reshape(original_shape)
 
+        if (
+            collective_op.is_all_gather
+            and not transpose_batch_sequence
+            and not is_outer
+            and not lhs_scale_inv.shape[0] == 1
+            and scaling_mode.is_1d_block_scaling()
+        ):
+
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            original_shape = lhs_scale_inv.shape
+            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+                f"Original_shape[0]={original_shape[0]} is not divisible by"
+                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+            )
+            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+                f"Original_shape[1]={original_shape[1]} is not divisible by"
+                f" tpsp_axis_size()={tpsp_axis_size()}"
+            )
+            reshaped = lhs_scale_inv.reshape(
+                dp_or_fsdp_axis_size(),
+                int(original_shape[0] / dp_or_fsdp_axis_size()),
+                tpsp_axis_size(),
+                int(original_shape[1] / tpsp_axis_size()),
+                *original_shape[2:],
+            )
+            reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
+            lhs_scale_inv = reordered.reshape(original_shape)
+
         (output, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
             lhs_scale_inv,
@@ -812,6 +840,7 @@ class GemmPrimitive(BasePrimitive):
         contracting_dims,
         transpose_batch_sequence,
         collective_op,
+        scaling_mode,
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
@@ -955,12 +984,24 @@ class GemmPrimitive(BasePrimitive):
         # Bias sharding is based on GEMM output before any scatter
         bias_specs = rhs_non_cspecs if arg_infos[4].size > 0 else (None,)  # bias is operand index 4
 
+        # Scale shardings are based on the scaling_mode and collective_op
+        lhs_scale_specs = rhs_scale_specs = (None,)
+        if scaling_mode.is_1d_block_scaling():
+            rhs_scale_specs = rhs_specs
+            if collective_op.is_all_gather:
+                lhs_scale_specs = tuple(None if i == sequence_dim else s for i, s in enumerate(lhs_specs))
+            else:
+                lhs_scale_specs = lhs_specs
+        print(lhs_scale_specs)
+        print(rhs_scale_specs)
+
+
         if not collective_op.is_none:
             if sequence_dim < 0:
                 raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
 
         return (
-            (lhs_specs, rhs_specs, bias_specs),
+            (lhs_specs, lhs_scale_specs, rhs_specs, rhs_scale_specs, bias_specs),
             out_specs,
             reduce_spec,
             sequence_dim,
@@ -982,7 +1023,6 @@ class GemmPrimitive(BasePrimitive):
     ):
         del (
             out_dtype,
-            scaling_mode,
             use_split_accumulator,
             result_infos,
             is_outer,
@@ -990,7 +1030,7 @@ class GemmPrimitive(BasePrimitive):
         )
 
         (_, out_specs, *_) = GemmPrimitive._parse_operand_output_specs(
-            arg_infos, contracting_dims, transpose_batch_sequence, collective_op
+            arg_infos, contracting_dims, transpose_batch_sequence, collective_op, scaling_mode,
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -1013,7 +1053,7 @@ class GemmPrimitive(BasePrimitive):
         del result_infos, is_outer, sequence_dim
 
         (
-            (lhs_specs, rhs_specs, bias_input_specs),
+            (lhs_specs, lhs_scale_specs, rhs_specs, rhs_scale_specs, bias_input_specs),
             out_specs,
             reduce_spec,
             inferred_sequence_dim,
@@ -1022,17 +1062,21 @@ class GemmPrimitive(BasePrimitive):
             contracting_dims,
             transpose_batch_sequence,
             collective_op,
+            scaling_mode,
         )
 
         # Block scale inverses match their operands, but tensor scale inverses are unsharded.
         none_sharding = NamedSharding(mesh, PartitionSpec(None))
         lhs_sharding = NamedSharding(mesh, PartitionSpec(*lhs_specs))
+        lhs_scale_sharding = NamedSharding(mesh, PartitionSpec(*lhs_scale_specs))
         rhs_sharding = NamedSharding(mesh, PartitionSpec(*rhs_specs))
+        rhs_scale_sharding = NamedSharding(mesh, PartitionSpec(*rhs_scale_specs))
+
         arg_shardings = (
             lhs_sharding,
-            lhs_sharding if scaling_mode.is_1d_block_scaling() else none_sharding,
+            lhs_scale_sharding,
             rhs_sharding,
-            rhs_sharding if scaling_mode.is_1d_block_scaling() else none_sharding,
+            rhs_scale_sharding,
         )
 
         # Bias
@@ -1247,8 +1291,8 @@ def _te_gemm(
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs_amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
 
-    if not collective_op.is_none and scaling_mode.is_1d_block_scaling():
-        raise ValueError(
+    if not collective_op.is_none:
+        assert not scaling_mode.is_nvfp4_scaling, (
             f"Collective GEMM is not yet supported with {scaling_mode} quantization. "
             "Only DELAYED_TENSOR_SCALING and CURRENT_TENSOR_SCALING are supported."
         )

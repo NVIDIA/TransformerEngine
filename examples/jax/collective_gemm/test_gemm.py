@@ -253,16 +253,15 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.collective_type = "reduce_scatter"
         run_gemm_tests(self.args, self.mesh)
 
-    # TODO: Enable when MXFP8BlockScaling + Collective GEMM is supported
-    # def test_te_mxfp8_all_gather_with_dp(self):
-    #     """Test Collective GEMM with MXFP8BlockScaling + AllGather"""
-    #     self.args.quantize_recipe = "MXFP8BlockScaling"
-    #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
-    #     if not is_supported:
-    #         self.skipTest(reason)
-    #     self.args.use_fp8 = True
-    #     self.args.collective_type = "all_gather"
-    #     run_gemm_tests(self.args, self.mesh)
+    def test_te_mxfp8_all_gather_with_dp(self):
+        """Test Collective GEMM with MXFP8BlockScaling + AllGather"""
+        self.args.quantize_recipe = "MXFP8BlockScaling"
+        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        if not is_supported:
+            self.skipTest(reason)
+        self.args.use_fp8 = True
+        self.args.collective_type = "all_gather"
+        run_gemm_tests(self.args, self.mesh)
 
     # TODO: Enable when MXFP8BlockScaling + Collective GEMM is supported
     # def test_te_mxfp8_reduce_scatter_with_dp(self):

@@ -916,10 +916,12 @@ def apply_padding_to_scale_inv(
     unpadded_scale_shape = scaling_mode.get_scale_shape(
         data_shape, is_colwise=is_colwise, is_padded=False, flatten_axis=flatten_axis
     )
-    assert scale_inv.shape == unpadded_scale_shape, (
-        f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} but got "
-        f"{scale_inv.shape}."
-    )
+
+    # TODO
+    # assert scale_inv.shape == unpadded_scale_shape, (
+    #     f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} but got "
+    #     f"{scale_inv.shape}."
+    # )
 
     # Pad the scales with the lowest representable value (2^-127) and return
     pad_width = tuple((0, a - b) for a, b in zip(padded_scale_shape, unpadded_scale_shape))

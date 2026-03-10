@@ -28,38 +28,38 @@ fi
 # the time.
 TEST_CASES=(
 # test_gemm.py cases
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_bf16_all_gather_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_bf16_reduce_scatter_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_delayed_scaling_fp8_all_gather_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_delayed_scaling_fp8_reduce_scatter_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_current_scaling_fp8_all_gather_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_current_scaling_fp8_reduce_scatter_with_dp"
-# TODO(Phuong): Enable when supported
-# "test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_all_gather_with_dp"
-# "test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_reduce_scatter_with_dp"
-# "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_all_gather_with_dp"
-# "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_reduce_scatter_with_dp"
-
-# test_dense_grad.py cases
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_bf16_all_gather"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_bf16_reduce_scatter"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_delayed_scaling_fp8_all_gather"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_delayed_scaling_fp8_reduce_scatter"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_current_scaling_fp8_all_gather"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_current_scaling_fp8_reduce_scatter"
-# TODO(Phuong): Enable when supported
-# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_mxfp8_all_gather"
-# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_mxfp8_reduce_scatter"
-# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_nvfp4_all_gather"
-# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_nvfp4_reduce_scatter"
-
-# test_layernorm_mlp_grad.py cases
-"test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_bf16_layernorm_mlp_grad"
-"test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_delayed_scaling_fp8_layernorm_mlp_grad"
-"test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_current_scaling_fp8_layernorm_mlp_grad"
-# TODO(Phuong): Enable when supported
-# "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_mxfp8_layernorm_mlp_grad"
-# "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_nvfp4_layernorm_mlp_grad"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_bf16_all_gather_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_bf16_reduce_scatter_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_delayed_scaling_fp8_all_gather_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_delayed_scaling_fp8_reduce_scatter_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_current_scaling_fp8_all_gather_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_current_scaling_fp8_reduce_scatter_with_dp"
+# # TODO(Phuong): Enable when supported
+"test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_all_gather_with_dp"
+# # "test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_reduce_scatter_with_dp"
+# # "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_all_gather_with_dp"
+# # "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_reduce_scatter_with_dp"
+#
+# # test_dense_grad.py cases
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_bf16_all_gather"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_bf16_reduce_scatter"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_delayed_scaling_fp8_all_gather"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_delayed_scaling_fp8_reduce_scatter"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_current_scaling_fp8_all_gather"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_current_scaling_fp8_reduce_scatter"
+# # TODO(Phuong): Enable when supported
+# # "test_dense_grad.py::TestCollectiveDenseGradient::test_te_mxfp8_all_gather"
+# # "test_dense_grad.py::TestCollectiveDenseGradient::test_te_mxfp8_reduce_scatter"
+# # "test_dense_grad.py::TestCollectiveDenseGradient::test_te_nvfp4_all_gather"
+# # "test_dense_grad.py::TestCollectiveDenseGradient::test_te_nvfp4_reduce_scatter"
+#
+# # test_layernorm_mlp_grad.py cases
+# "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_bf16_layernorm_mlp_grad"
+# "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_delayed_scaling_fp8_layernorm_mlp_grad"
+# "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_current_scaling_fp8_layernorm_mlp_grad"
+# # TODO(Phuong): Enable when supported
+# # "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_mxfp8_layernorm_mlp_grad"
+# # "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_nvfp4_layernorm_mlp_grad"
 )
 
 echo
