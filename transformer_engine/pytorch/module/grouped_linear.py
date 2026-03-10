@@ -357,7 +357,7 @@ class _GroupedLinear(torch.autograd.Function):
                         origin_weights[i] = ctx.weight_objects[i]
                         ctx.weight_objects[i] = None
 
-            if ctx.fuse_wgrad_accumulation:
+            if ctx.fuse_wgrad_accumulation and ctx.etp_size == 1:
                 for i in range(N):
                     origin_weights[i].main_grad = main_grads[i]
 

@@ -575,6 +575,10 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma,
             ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
 
+            if ctx.etp_size > 1:
+                weight = origin_weight.all_gather_and_prefetch_bwd(
+                    nvtx_label=nvtx_label)
+
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
@@ -716,10 +720,6 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: Gradient w.r.t. GEMM input (i.e. norm output).
             # --------------------------------------------------
 
-            # Make sure required data is available
-            if ctx.etp_size > 1:
-                weight = origin_weight.all_gather_and_prefetch_bwd(
-                    nvtx_label=nvtx_label)
 
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)

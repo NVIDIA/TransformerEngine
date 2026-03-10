@@ -410,6 +410,7 @@ class ETPShardedParam(torch.nn.Parameter):
 
     def batched_all_gather_and_prefetch_bwd(self, nvtx_label=None):
         """Batched backward all-gather + prefetch. Wrapper around all_gather_and_prefetch_bwd."""
+        assert self.is_routed_expert and self.weight_list is not None
         return self.all_gather_and_prefetch_bwd(nvtx_label=nvtx_label)
 
     def all_gather_and_prefetch(
@@ -453,6 +454,7 @@ class ETPShardedParam(torch.nn.Parameter):
 
     def batched_all_gather_and_prefetch(self, **kwargs):
         """Batched all-gather + prefetch for expert weights. Wrapper around all_gather_and_prefetch."""
+        assert self.is_routed_expert and self.weight_list is not None
         return self.all_gather_and_prefetch(**kwargs)
 
     def get_wgrad_tensor(self):
@@ -467,44 +469,30 @@ class ETPShardedParam(torch.nn.Parameter):
         self._grad_accum_node = grad_accum_node
         self._grad_accum_hook = hook
 
-    @classmethod
-    def _resolve_pending_rs(cls, expected_next):
-        """Finish any pending reduce-scatter from a previous weight."""
-        if cls._pending_rs_weight is not None:
-            assert cls._pending_rs_weight is expected_next
-            cls._pending_rs_weight.finish_wgrad_reduce_scatter()
-            cls._pending_rs_weight = None
-
     @staticmethod
-    def _apply_fused_wgrad(param, wgrad_rs):
-        """Apply fuse_wgrad_accumulation logic to a single param and return a dummy grad."""
-        
-        # the last rank in the etp group pads the param, so need to remove the padding here
-        if param.group.rank() == param.group.size() - 1:
+    def _finalize_wgrad(param, wgrad_rs, fuse_wgrad_accumulation):
+        """Post-RS per-param processing: strip padding, accumulate, call hook.
+
+        Returns None for fused (grad already accumulated into main_grad),
+        or the stripped wgrad for unfused (to be returned to autograd).
+        """
+        # 1. Strip padding
+        if param.is_padded_last_rank:
             wgrad_rs = param._strip_padding(wgrad_rs)
 
-        param.main_grad.add_(wgrad_rs)
-        # Handle mcore grad accum fusion
-        if hasattr(param, "grad_added_to_main_grad"):
-            param.grad_added_to_main_grad = True
-        param.grad = get_dummy_wgrad(list(param.main_grad.shape), param.dtype)
+        # 2. Accumulate
+        if fuse_wgrad_accumulation:
+            param.main_grad.add_(wgrad_rs)
+            if hasattr(param, "grad_added_to_main_grad"):
+                param.grad_added_to_main_grad = True
+            dummy_grad = get_dummy_wgrad(list(param.main_grad.shape), param.dtype)
+
+        # 3. Post hook
         if param._grad_accum_hook is not None:
+            param.grad = dummy_grad if fuse_wgrad_accumulation else wgrad_rs
             param._grad_accum_hook(param)
 
-    def finish_wgrad_reduce_scatter(self):
-        if self.wgrad_rs_handle is not None:
-            self.wgrad_rs_handle.wait()
-            self.wgrad_rs_handle = None
-
-        for param, wgrad_rs in zip(self._weights, self.wgrad_rs):
-            if self.fuse_wgrad_accumulation:
-                self._apply_fused_wgrad(param, wgrad_rs)
-            else:
-                if param.is_padded_last_rank:
-                    wgrad_rs = param._strip_padding(wgrad_rs)
-                param.grad = wgrad_rs
-            # Finally call the grad accum node
-            param._grad_accum_node(param.grad)
+        return dummy_grad if fuse_wgrad_accumulation else wgrad_rs
 
     def _reduce_scatter(self, wgrads, async_op):
         """Reduce-scatter one or more wgrads. Returns (outputs, handle).
@@ -546,29 +534,33 @@ class ETPShardedParam(torch.nn.Parameter):
         wgrads = list(wgrad) if batched else [wgrad]
         weights = self._weights
 
-        self._resolve_pending_rs(self.next_w)
+        # Wait for last reduce scatter if it was async
+        if ETPShardedParam._pending_rs_weight is not None:
+            param = ETPShardedParam._pending_rs_weight
+            assert param is self.next_w
+            param.wgrad_rs_handle.wait()
+            param.wgrad_rs_handle = None
+
+            for p, g in zip(param._weights, param.wgrad_rs):
+                self._finalize_wgrad(p, g, param.fuse_wgrad_accumulation)
+            ETPShardedParam._pending_rs_weight = None
 
         if self.prev_w is None:
             # Sync reduce-scatter (last weight in chain)
             sharded, _ = self._reduce_scatter(wgrads, async_op=False)
-            if fuse_wgrad_accumulation:
-                [self._apply_fused_wgrad(p, g) for p, g in zip(weights, sharded)]
-                result = [None] * len(weights)
-            else:
-                result = [
-                    p._strip_padding(g) if p.is_padded_last_rank else g
-                    for p, g in zip(weights, sharded)
-                ]
+            result = [self._finalize_wgrad(p, g, fuse_wgrad_accumulation)
+                      for p, g in zip(weights, sharded)]
             return result if batched else result[0]
         else:
             # Async reduce-scatter (not last weight — deferred finish)
             self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             self.wgrad_rs, self.wgrad_rs_handle = self._reduce_scatter(wgrads, async_op=True)
-            type(self)._pending_rs_weight = self
+            ETPShardedParam._pending_rs_weight = self
             return tuple([None] * len(wgrads)) if batched else None
 
     def batched_wgrad_reduce_scatter(self, wgrad_list, fuse_wgrad_accumulation):
         """Batched version of wgrad_reduce_scatter."""
+        assert self.is_routed_expert and self.weight_list is not None
         return self.wgrad_reduce_scatter(wgrad_list, fuse_wgrad_accumulation)
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
