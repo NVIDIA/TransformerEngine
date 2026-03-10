@@ -47,20 +47,18 @@ constexpr int ELTS_PER_THREAD = 16;
 constexpr int TILE_DIM_Y = 64;
 constexpr int TILE_DIM_X = 64;
 
-static_assert(ELTS_PER_THREAD == SCALE_DIM && "Hardcoded and fixed parameter\0");
+static_assert(ELTS_PER_THREAD == SCALE_DIM && "Hardcoded and fixed parameter");
 
-static_assert((THREADS_NUM * ELTS_PER_THREAD <= TILE_DIM_Y * TILE_DIM_X) &&
-              "Unbalanced threads workload\0");
+static_assert((THREADS_NUM * ELTS_PER_THREAD <= TILE_DIM_Y * TILE_DIM_X),
+              "Unbalanced threads workload");
 
-static_assert((TunableConfig::CHUNK_DIM_Y % TILE_DIM_Y == 0) &&
-              "Chunk size Y must be evenly divisible by the tile size Y\0");
-static_assert((TunableConfig::CHUNK_DIM_X % TILE_DIM_X == 0) &&
-              "Chunk size X must be evenly divisible by the tile size X\0");
+static_assert(TunableConfig::CHUNK_DIM_Y % TILE_DIM_Y == 0,
+              "Chunk size Y must be evenly divisible by the tile size Y");
+static_assert(TunableConfig::CHUNK_DIM_X % TILE_DIM_X == 0,
+              "Chunk size X must be evenly divisible by the tile size X");
 
-static_assert((TILE_DIM_Y % SCALE_DIM == 0) &&
-              "Tile size Y must be evenly divisible by the scale dim\0");
-static_assert((TILE_DIM_X % SCALE_DIM == 0) &&
-              "Tile size X must be evenly divisible by the scale dim\0");
+static_assert(TILE_DIM_Y % SCALE_DIM == 0, "Tile size Y must be evenly divisible by the scale dim");
+static_assert(TILE_DIM_X % SCALE_DIM == 0, "Tile size X must be evenly divisible by the scale dim");
 
 constexpr int TILES_Y = TunableConfig::CHUNK_DIM_Y / TILE_DIM_Y;
 constexpr int TILES_X = TunableConfig::CHUNK_DIM_X / TILE_DIM_X;
@@ -114,19 +112,19 @@ constexpr int THREADS_Y_TR = THREADS_NUM / THREADS_X_TR;
 
 constexpr int ITERATIONS_NORMAL = BUFF_DIM_Y / THREADS_Y_ROWWISE;
 constexpr int ITERATIONS_TR = SCALES_PER_TILE_Y / THREADS_Y_TR;
-static_assert(ITERATIONS_TR >= 1 && "Number of transpose iterations should be >=1\0");
-static_assert((SCALES_PER_TILE_Y % THREADS_Y_TR == 0) &&
-              "Partial transpose iterations are not supported\0");
+static_assert(ITERATIONS_TR >= 1, "Number of transpose iterations should be >=1");
+static_assert(SCALES_PER_TILE_Y % THREADS_Y_TR == 0,
+              "Partial transpose iterations are not supported");
 
 constexpr int BUFF_OUT_IT_OFFSET = BUFF_OUT_TR_DIM_X / ITERATIONS_TR / STAGES;
 
-static_assert(BUFF_DIM_Y >= SCALE_DIM &&
+static_assert(BUFF_DIM_Y >= SCALE_DIM,
               "Number of buffer rows must be greater or equal to the size of the columwise "
-              "scaling block\0");
+              "scaling block");
 static_assert(TunableConfig::CHUNK_DIM_Y >= BUFF_DIM_Y);
-static_assert(BUFF_DIM_Y >= THREADS_Y_ROWWISE &&
+static_assert(BUFF_DIM_Y >= THREADS_Y_ROWWISE,
               "Number of buffer rows must be greater or equal to the number of rowwise "
-              "processing threads in Y dimension\0");
+              "processing threads in Y dimension");
 
 // Number of 4-bit elements that span 32 banks (4-byte each) of shared memory
 constexpr int TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
@@ -157,30 +155,6 @@ struct SCALING_COEFFICIENT_TYPE<true> {
 
 __device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
   return static_cast<float>(__hmax(__habs(pair.x), __habs(pair.y)));
-}
-
-// Compute "correct" per-block encoding scaling factor
-template <typename SF_TYPE>
-__device__ __forceinline__ SF_TYPE
-compute_nvfp4_scaling_coefficient(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  NVTE_DEVICE_ERROR("Unsupported scaling-factor type. Only FP32 and BF16 are supported.");
-}
-
-template <>
-__device__ __forceinline__ float compute_nvfp4_scaling_coefficient<float>(
-    const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float S_dec = 1.0f / S_enc;
-  const float scale_rcp =
-      fminf(1.0f / (static_cast<float>(S_dec_block) * S_dec), detail::TypeExtrema<float>::max);
-  return scale_rcp;
-}
-
-template <>
-__device__ __forceinline__ bf16
-compute_nvfp4_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  const float scale_rcp =
-      fminf(S_enc / (static_cast<float>(S_dec_block)), detail::TypeExtrema<bf16>::max);
-  return static_cast<bf16>(scale_rcp);
 }
 
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH>
@@ -236,7 +210,7 @@ __device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_pt
     sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
 
     const scaling_coeff_type SFcoefficient =
-        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
+        core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
 
     // Scale elements
     __align__(8) uint32_t rOut[SCALE_DIM / 8];
@@ -316,7 +290,7 @@ __device__ __forceinline__ void rowwise_scaling(const IType *__restrict__ sIn_pt
 
     const nvfp4_scale_t S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
     const scaling_coeff_type SFcoefficient =
-        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
+        core::compute_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
 
     // Store scaling factors to SMEM buffer (R2S)
     if (SF_storing_thread) {
@@ -414,15 +388,13 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   constexpr int shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
 
   // Compute a global encoding/decoding scaling factors for all S_dec_b
-  const float S_enc_rowwise =
-      (amax_rowwise_ptr == nullptr)
-          ? 1.0f
-          : core::compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
+  const float S_enc_rowwise = (amax_rowwise_ptr == nullptr)
+                                  ? 1.0f
+                                  : core::compute_global_encode_scaling_factor(*amax_rowwise_ptr);
 
-  const float S_enc_colwise =
-      (amax_colwise_ptr == nullptr)
-          ? S_enc_rowwise
-          : core::compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
+  const float S_enc_colwise = (amax_colwise_ptr == nullptr)
+                                  ? S_enc_rowwise
+                                  : core::compute_global_encode_scaling_factor(*amax_colwise_ptr);
 
   __shared__ uint64_t workID_mbar;
   __shared__ __uint128_t workID_response;
