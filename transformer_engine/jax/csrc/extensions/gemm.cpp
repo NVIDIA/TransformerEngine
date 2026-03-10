@@ -559,6 +559,117 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
   return std::move(grouped_tensor_wrapper);
 }
 
+// Config structs for grouped GEMM FFI static attributes.
+// Consolidating all static attributes into a single dict attribute makes it easy to add new
+// attributes in the future with backwards-compatible defaults: if old HLO was generated without a
+// newer attribute, DecodeAttrOrDefault leaves the field at its struct default value.
+struct GroupedGemmV2Config {
+  bool lhs_is_trans = false;
+  bool rhs_is_trans = false;
+  JAXX_Scaling_Mode scaling_mode = JAXX_Scaling_Mode::NO_SCALING;
+};
+
+struct GroupedGemmConfig {
+  bool lhs_is_trans = false;
+  bool rhs_is_trans = false;
+  JAXX_Scaling_Mode scaling_mode = JAXX_Scaling_Mode::NO_SCALING;
+  bool has_bias = false;
+  bool use_async_d2h_group_sizes = false;
+};
+
+}  // namespace jax
+}  // namespace transformer_engine
+
+// Register AttrsBinding and AttrDecoding for grouped GEMM config structs.
+// Uses a custom AttrDecoding (instead of XLA_FFI_REGISTER_STRUCT_ATTR_DECODING) that supports
+// optional struct fields with default values, so old HLO without newer attributes still decodes.
+namespace xla::ffi {
+
+namespace {
+
+// Finds an attribute by name. Returns its index or std::nullopt if absent.
+std::optional<int64_t> FindAttrByName(const XLA_FFI_Attrs* attrs, std::string_view name) {
+  for (int64_t i = 0; i < attrs->size; ++i) {
+    if (std::string_view{attrs->names[i]->ptr, attrs->names[i]->len} == name) return i;
+  }
+  return std::nullopt;
+}
+
+// Decodes a named attribute into `field` if present; leaves `field` at its default if absent.
+// Returns false only when the attribute is present but fails to decode.
+template <typename T>
+bool DecodeAttrOrDefault(const XLA_FFI_Attrs* attrs, std::string_view name, T& field,
+                         DiagnosticEngine& diagnostic) {
+  auto idx = FindAttrByName(attrs, name);
+  if (!idx.has_value()) return true;  // absent → keep default
+  auto decoded = AttrDecoding<T>::Decode(attrs->types[*idx], attrs->attrs[*idx], diagnostic);
+  if (!decoded.has_value()) return false;
+  field = *decoded;
+  return true;
+}
+
+}  // namespace
+
+template <>
+struct AttrsBinding<transformer_engine::jax::GroupedGemmV2Config> {
+  using Attrs = transformer_engine::jax::GroupedGemmV2Config;
+};
+
+template <>
+struct AttrDecoding<transformer_engine::jax::GroupedGemmV2Config> {
+  using Type = transformer_engine::jax::GroupedGemmV2Config;
+  static std::optional<Type> Decode(XLA_FFI_AttrType type, void* attr,
+                                    DiagnosticEngine& diagnostic) {
+    if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_AttrType_DICTIONARY)) {
+      return diagnostic.Emit("Expected dictionary attribute for GroupedGemmV2Config");
+    }
+    auto* attrs = reinterpret_cast<const XLA_FFI_Attrs*>(attr);
+    Type config;
+    if (!DecodeAttrOrDefault(attrs, "lhs_is_trans", config.lhs_is_trans, diagnostic))
+      return std::nullopt;
+    if (!DecodeAttrOrDefault(attrs, "rhs_is_trans", config.rhs_is_trans, diagnostic))
+      return std::nullopt;
+    if (!DecodeAttrOrDefault(attrs, "scaling_mode", config.scaling_mode, diagnostic))
+      return std::nullopt;
+    return config;
+  }
+};
+
+template <>
+struct AttrsBinding<transformer_engine::jax::GroupedGemmConfig> {
+  using Attrs = transformer_engine::jax::GroupedGemmConfig;
+};
+
+template <>
+struct AttrDecoding<transformer_engine::jax::GroupedGemmConfig> {
+  using Type = transformer_engine::jax::GroupedGemmConfig;
+  static std::optional<Type> Decode(XLA_FFI_AttrType type, void* attr,
+                                    DiagnosticEngine& diagnostic) {
+    if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_AttrType_DICTIONARY)) {
+      return diagnostic.Emit("Expected dictionary attribute for GroupedGemmConfig");
+    }
+    auto* attrs = reinterpret_cast<const XLA_FFI_Attrs*>(attr);
+    Type config;
+    if (!DecodeAttrOrDefault(attrs, "lhs_is_trans", config.lhs_is_trans, diagnostic))
+      return std::nullopt;
+    if (!DecodeAttrOrDefault(attrs, "rhs_is_trans", config.rhs_is_trans, diagnostic))
+      return std::nullopt;
+    if (!DecodeAttrOrDefault(attrs, "scaling_mode", config.scaling_mode, diagnostic))
+      return std::nullopt;
+    if (!DecodeAttrOrDefault(attrs, "has_bias", config.has_bias, diagnostic))
+      return std::nullopt;
+    if (!DecodeAttrOrDefault(attrs, "use_async_d2h_group_sizes",
+                             config.use_async_d2h_group_sizes, diagnostic))
+      return std::nullopt;
+    return config;
+  }
+};
+
+}  // namespace xla::ffi
+
+namespace transformer_engine {
+namespace jax {
+
 // This FFI is EXPERIMENTAL and subject to change without deprecation, intended for use in JAX's internal implementation of grouped GEMM.
 Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                             Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
@@ -568,8 +679,8 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             Buffer_Type alpha, Buffer_Type beta,
                             Result_Type output, Result_Type cublas_workspace,
                             Result_Type setup_workspace, Result_Type int64_workspace,
-                            bool lhs_is_trans, bool rhs_is_trans,
-                            JAXX_Scaling_Mode scaling_mode) {
+                            GroupedGemmV2Config config) {
+  auto [lhs_is_trans, rhs_is_trans, scaling_mode] = config;
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -842,9 +953,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Ret<Buffer_Type>()      // cublas_workspace
                                   .Ret<Buffer_Type>()      // setup_workspace
                                   .Ret<Buffer_Type>()      // int64_workspace
-                                  .Attr<bool>("lhs_is_trans")
-                                  .Attr<bool>("rhs_is_trans")
-                                  .Attr<JAXX_Scaling_Mode>("scaling_mode"),
+                                  .Attrs<GroupedGemmV2Config>(),
                               FFI_CudaGraph_Traits);
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
@@ -853,9 +962,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                           Buffer_Type rhs_first_dims, Buffer_Type rhs_last_dims,
                           Buffer_Type out_first_dims, Buffer_Type out_last_dims,
                           Buffer_Type group_offset,
-                          Result_Type output, Result_Type workspace, bool lhs_is_trans,
-                          bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode, bool has_bias,
-                          bool use_async_d2h_group_sizes) {
+                          Result_Type output, Result_Type workspace,
+                          GroupedGemmConfig config) {
+  auto [lhs_is_trans, rhs_is_trans, scaling_mode, has_bias, use_async_d2h_group_sizes] = config;
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -1283,11 +1392,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Arg<Buffer_Type>()      // group_offset
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // workspace
-                                  .Attr<bool>("lhs_is_trans")
-                                  .Attr<bool>("rhs_is_trans")
-                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("has_bias")
-                                  .Attr<bool>("use_async_d2h_group_sizes"));
+                                  .Attrs<GroupedGemmConfig>());
 
 }  // namespace jax
 }  // namespace transformer_engine
