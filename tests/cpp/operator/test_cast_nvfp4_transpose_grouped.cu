@@ -278,7 +278,7 @@ void performTest(const ShapeRepresentation shape_rep,
         expected_total_elts = logical_shape[0]
                               * std::accumulate(last_dims.begin(), last_dims.end(), static_cast<size_t>(0));
     }
-    ASSERT_EQ(expected_total_elts, total_elts);
+    ASSERT_GE(expected_total_elts, total_elts);
 
     Tensor grouped_input_tensor("grouped_input", std::vector<size_t>{total_elts}, itype);
     fillCase<fp32>(&grouped_input_tensor, InputsFillCase::uniform);
@@ -558,6 +558,7 @@ std::vector<std::vector<size_t>> grouped_input_config = {
     {VARYING_FIRST_DIM,     3,      1024,160,                   128,384,512},
     {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
     {VARYING_FIRST_DIM,     5,      4096,256,                   128,256,384,1024,2304},
+    {VARYING_FIRST_DIM,     5,      8192,256,                   128,256,384,1024,2304},
     {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
     {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
     {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
@@ -615,9 +616,14 @@ TEST_P(GroupedFusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
         }
         offsets[t + 1] = offsets[t] + first_dims[t] * last_dims[t];
 
-        // FP4 kernels requires 16-Byte data alignment (TMA)
-        if ((first_dims[t] % 32 != 0) || (last_dims[t] % 32 != 0)) {
+        if (first_dims[t] % 128 != 0) {
             GTEST_SKIP();
+        }
+
+        if (shape_rep == VARYING_LAST_DIM || shape_rep == VARYING_BOTH_DIMS) {
+            if (last_dims[t] % 128 != 0) {
+                GTEST_SKIP();
+            }
         }
     }
 

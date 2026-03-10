@@ -383,6 +383,9 @@ __device__ __forceinline__ size_t get_tensor_rows_num(
       rows_num = static_cast<size_t>(first_dims_ptr[tensor_id]);
       break;
   }
+  if (rows_num % 128 != 0) {
+    NVTE_DEVICE_ERROR("First dimension of each tensor in a group must be divisible by 128.");
+  }
   return rows_num;
 }
 
@@ -398,6 +401,11 @@ __device__ __forceinline__ size_t get_tensor_cols_num(
     case ShapeRepresentation::VARYING_LAST_DIM:
     case ShapeRepresentation::VARYING_BOTH_DIMS:
       cols_num = static_cast<size_t>(last_dims_ptr[tensor_id]);
+      if (cols_num % 128 != 0) {
+        NVTE_DEVICE_ERROR(
+            "For non-single tensors, the last dimension of each tensor in a group "
+            "must be divisible by 128.");
+      }
       break;
   }
   return cols_num;
@@ -1045,9 +1053,31 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
   NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
              "Number of tensors in a group is larger than the MAX number of supported "
              "descriptors (64).");
-  if (shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS) {
-    NVTE_CHECK(first_logical_dim % 128 == 0,
-               "First logical dimension of a grouped tensor must be divisible by 128.");
+  switch (shape_rep) {
+    case ShapeRepresentation::SAME_BOTH_DIMS: {
+      NVTE_CHECK(first_logical_dim % num_tensors == 0, 
+                 "First logical dimension of a grouped tensor must be divisible by the number of tensors.");
+      NVTE_CHECK((first_logical_dim / num_tensors) % 128 == 0, 
+                 "First dimension of each tensor in a group must be divisible by 128.");
+      break;
+    }
+    case ShapeRepresentation::VARYING_FIRST_DIM: {
+      NVTE_CHECK(first_logical_dim % 128 == 0, 
+                 "First logical dimension of a grouped tensor must be divisible by 128.");
+      break;
+    }
+    case ShapeRepresentation::VARYING_LAST_DIM: {
+      NVTE_CHECK(first_logical_dim % 128 == 0, 
+                 "First logical dimension of a grouped tensor must be divisible by 128.");
+      NVTE_CHECK(last_logical_dim % 128 == 0, 
+                 "Last logical dimension of a grouped tensor must be divisible by 128.");
+      break;
+    }
+    case ShapeRepresentation::VARYING_BOTH_DIMS: {
+      NVTE_CHECK(last_logical_dim % ELTS_PER_CHUNK == 0,
+                 "Last logical dimension of a grouped tensor must be divisible by 128x128.");
+      break;
+    }
   }
 
   size_t work_blocks_X = 0;
