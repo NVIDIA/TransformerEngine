@@ -37,7 +37,6 @@ def is_triton_extension_supported() -> bool:
 
 
 __all__ = [
-    "_jax_version_meet_requirement",
     "is_triton_extension_supported",
     "TRITON_EXTENSION_MIN_JAX_VERSION",
 ]
