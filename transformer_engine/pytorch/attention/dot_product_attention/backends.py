@@ -942,11 +942,15 @@ class FlashAttention(torch.nn.Module):
                     cu_seqlens_kv,
                     max_seqlen_q,
                     max_seqlen_kv,
-                    cu_seqlens_q_padded if pad_between_seqs else (
-                        cu_seqlens_q if qkv_format == "thd" else None
+                    (
+                        cu_seqlens_q_padded
+                        if pad_between_seqs
+                        else (cu_seqlens_q if qkv_format == "thd" else None)
                     ),
-                    cu_seqlens_kv_padded if pad_between_seqs else (
-                        cu_seqlens_kv if qkv_format == "thd" else None
+                    (
+                        cu_seqlens_kv_padded
+                        if pad_between_seqs
+                        else (cu_seqlens_kv if qkv_format == "thd" else None)
                     ),
                     self.attention_dropout if self.training else 0.0,
                     cp_group,
