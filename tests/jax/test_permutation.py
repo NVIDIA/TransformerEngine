@@ -32,6 +32,7 @@ def _inject_permutation(request):
         token_combine,
         sort_chunks_by_index,
     )
+
     mod = sys.modules[__name__]
     mod.token_dispatch = token_dispatch
     mod.token_combine = token_combine
