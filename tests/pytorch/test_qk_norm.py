@@ -11,7 +11,8 @@ import torch
 @pytest.mark.parametrize("qk_norm_type", [None, "L2Normalization", "RMSNorm", "LayerNorm"])
 @pytest.mark.parametrize("attention_type", ["self", "cross"])
 @pytest.mark.parametrize("qk_norm_eps", [1e-6, 1e-5])
-def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> None:
+@pytest.mark.parametrize("params_dtype", [torch.float32, torch.bfloat16])
+def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps, params_dtype) -> None:
     """Test QK normalization functionality, module structure, and numerical behavior."""
     hidden_size = 256
     num_attention_heads = 8
@@ -26,6 +27,7 @@ def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> Non
         qk_norm_eps=qk_norm_eps,
         bias=False,
         device="cuda",
+        params_dtype=params_dtype,
     ).cuda()
 
     # Check module structure based on qk_norm_type parameter
@@ -78,13 +80,11 @@ def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> Non
 
     # Create input tensors
     batch_size = 2  # Use a fixed batch size for testing
-    hidden_states = torch.randn(
-        seq_len, batch_size, hidden_size, device="cuda", dtype=torch.float32
-    )
+    hidden_states = torch.randn(seq_len, batch_size, hidden_size, device="cuda", dtype=params_dtype)
 
     if attention_type == "cross":
         encoder_output = torch.randn(
-            seq_len, batch_size, hidden_size, device="cuda", dtype=torch.float32
+            seq_len, batch_size, hidden_size, device="cuda", dtype=params_dtype
         )
     else:
         encoder_output = None
@@ -109,7 +109,7 @@ def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> Non
     if attention_type == "self":
         head_dim = hidden_size // num_attention_heads
         rotary_dim = head_dim // 2
-        rotary_pos_emb = torch.randn(seq_len, 1, 1, rotary_dim, device="cuda", dtype=torch.float32)
+        rotary_pos_emb = torch.randn(seq_len, 1, 1, rotary_dim, device="cuda", dtype=params_dtype)
 
         with torch.no_grad():
             output_with_rope = mha(hidden_states, rotary_pos_emb=rotary_pos_emb)

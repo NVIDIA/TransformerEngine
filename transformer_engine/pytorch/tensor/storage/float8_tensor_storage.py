@@ -170,6 +170,15 @@ class Float8TensorStorage(QuantizedTensorStorage):
         size = self._transpose.size(*args, **kwargs)
         return torch.Size([size[-1], math.prod(size[:-1])])
 
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._data is not None:
+            return self._data.device
+        if self._transpose is not None:
+            return self._transpose.device
+        raise RuntimeError("Float8TensorStorage has no data!")
+
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
         out_data = self._data.view(shape)

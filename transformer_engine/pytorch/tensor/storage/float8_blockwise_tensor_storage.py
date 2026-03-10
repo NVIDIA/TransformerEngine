@@ -290,6 +290,15 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         reordered.append(dims[0])
         return torch.Size(reordered)
 
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("Float8BlockwiseQTensorStorage has no data!")
+
     def _create_columnwise(self):
         """
         Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.

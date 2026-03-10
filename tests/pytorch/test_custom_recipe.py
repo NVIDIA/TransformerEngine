@@ -8,6 +8,7 @@ import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common import recipe
+from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 from transformer_engine.pytorch import (
     autocast,
     Linear,
@@ -169,11 +170,11 @@ def test_custom_recipe_matches_current_scaling():
     with autocast(enabled=True, recipe=ref_recipe):
         out_ref = model_ref(inp_ref)
     # Assert dtypes for reference quantizers: HYBRID = E4M3 (fwd), E5M2 (bwd)
-    ref_fwd_in = model_ref.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-    ref_fwd_w = model_ref.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-    ref_fwd_out = model_ref.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
-    ref_bwd_go = model_ref.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
-    ref_bwd_gi = model_ref.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+    ref_fwd_in = model_ref.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
+    ref_fwd_w = model_ref.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
+    ref_fwd_out = model_ref.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_OUTPUT]
+    ref_bwd_go = model_ref.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT1]
+    ref_bwd_gi = model_ref.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
     assert ref_fwd_in.dtype == tex.DType.kFloat8E4M3
     assert ref_fwd_w.dtype == tex.DType.kFloat8E4M3
     assert ref_fwd_out.dtype == tex.DType.kFloat8E4M3
@@ -200,11 +201,11 @@ def test_custom_recipe_matches_current_scaling():
     with autocast(enabled=True, recipe=custom_recipe):
         out_custom = model_custom(inp_custom)
     # Assert dtypes for custom quantizers match reference mapping
-    cus_fwd_in = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-    cus_fwd_w = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-    cus_fwd_out = model_custom.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
-    cus_bwd_go = model_custom.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
-    cus_bwd_gi = model_custom.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+    cus_fwd_in = model_custom.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
+    cus_fwd_w = model_custom.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
+    cus_fwd_out = model_custom.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_OUTPUT]
+    cus_bwd_go = model_custom.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT1]
+    cus_bwd_gi = model_custom.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
     assert cus_fwd_in.dtype == tex.DType.kFloat8E4M3
     assert cus_fwd_w.dtype == tex.DType.kFloat8E4M3
     assert cus_fwd_out.dtype == tex.DType.kFloat8E4M3

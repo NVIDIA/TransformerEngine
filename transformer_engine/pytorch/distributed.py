@@ -1100,6 +1100,9 @@ def _start_all_gather_fp8_blockwise(
 
     # Fall back to high-precision all-gather if FP8 is not supported
     if not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
+        warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
+        if isinstance(inp, QuantizedTensorStorage):
+            inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
         out = torch.empty(out_shape, dtype=dtype, device=device)
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
         out = quantizer(out)
@@ -1115,7 +1118,7 @@ def _start_all_gather_fp8_blockwise(
             "Input and quantizer do not have matching usages. "
             "Dequantizing and requantizing to Float8BlockwiseQTensor."
         )
-        inp = quantizer(inp.dequantize())
+        inp = quantizer(inp.dequantize(dtype=dtype))
 
     # Construct Float8BlockwiseQTensor output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
@@ -1338,6 +1341,9 @@ def _all_gather_nvfp4(
         and quantizer is not None
         and not quantizer.is_quantizable(inp)
     ):
+        warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
+        if isinstance(inp, QuantizedTensorStorage):
+            inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
         out = torch.empty(
             out_shape,
             dtype=dtype,
@@ -1358,7 +1364,7 @@ def _all_gather_nvfp4(
             "Input and quantizer do not have matching usages. "
             "Dequantizing and requantizing to NVFP4."
         )
-        inp = quantizer(inp.dequantize())
+        inp = quantizer(inp.dequantize(dtype=dtype))
 
     # Construct NVFP4 output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
@@ -1505,6 +1511,9 @@ def _all_gather_mxfp8(
         and quantizer is not None
         and not quantizer.is_quantizable(inp)
     ):
+        warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
+        if isinstance(inp, QuantizedTensorStorage):
+            inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
         out = torch.empty(
             out_shape,
             dtype=dtype,
@@ -1525,7 +1534,7 @@ def _all_gather_mxfp8(
             "Input and quantizer do not have matching usages. "
             "Dequantizing and requantizing to MXFP8."
         )
-        inp = quantizer(inp.dequantize())
+        inp = quantizer(inp.dequantize(dtype=dtype))
 
     # Construct MXFP8 output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)

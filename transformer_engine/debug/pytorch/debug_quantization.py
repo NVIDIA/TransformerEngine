@@ -697,3 +697,12 @@ class DebugQuantizedTensor(QuantizedTensorStorage):
             raise RuntimeError(
                 "Cannot recreate columnwise tensor from rowwise tensor is debug mode."
             )
+
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self.rowwise_gemm_tensor is not None:
+            return self.rowwise_gemm_tensor.device
+        if self.columnwise_gemm_tensor is not None:
+            return self.columnwise_gemm_tensor.device
+        raise RuntimeError("DebugQuantizedTensor has no data!")

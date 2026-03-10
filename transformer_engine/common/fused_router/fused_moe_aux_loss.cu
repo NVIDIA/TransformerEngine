@@ -16,9 +16,7 @@
 #include "utils.h"
 
 namespace transformer_engine {
-
-// Using Double to hanld all the calculations
-using CompType = double;
+namespace fused_router {
 
 template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
@@ -98,7 +96,7 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
                     * Section: Compute the aux_loss
                     */
         float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
-        aux_loss[0] = static_cast<DataType>(static_cast<double>(intermediate_result) * C_coeff);
+        aux_loss[0] = static_cast<DataType>(intermediate_result * C_coeff);
         Const_buf[0] = C_coeff;
       }
     }
@@ -154,7 +152,7 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
              * Section: Compute the aux_loss
              */
       float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
-      aux_loss[0] = static_cast<DataType>(static_cast<double>(intermediate_result) * C_coeff);
+      aux_loss[0] = static_cast<DataType>(intermediate_result * C_coeff);
       Const_buf[0] = C_coeff;
     }
   }
@@ -229,8 +227,8 @@ __global__ void fused_moe_aux_loss_backward_kernel(const float* Const_buf,
   // Loop: for all positions in each row
   for (int i = lane_id; i < num_cols; i += kThreadsPerWarp) {
     float C_coeff = Const_buf[0];
-    double tokens_per_expert_i = static_cast<double>(tokens_per_expert[i]);
-    double grad_aux_loss_value = static_cast<double>(grad_aux_loss[0]);
+    CompType tokens_per_expert_i = static_cast<CompType>(tokens_per_expert[i]);
+    CompType grad_aux_loss_value = static_cast<CompType>(grad_aux_loss[0]);
     // Loop: for all rows
     for (int j = global_warp_id; j < num_rows; j += global_warp_num) {
       grad_probs[j * num_cols + i] = C_coeff * tokens_per_expert_i * grad_aux_loss_value;
@@ -265,6 +263,7 @@ void fused_moe_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_p
               reinterpret_cast<DataType*>(grad_probs.data.dptr), stream);););
 }
 
+}  // namespace fused_router
 }  // namespace transformer_engine
 
 void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
@@ -273,7 +272,7 @@ void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor to
                                      NVTETensor Const_buf, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_moe_aux_loss_forward);
   using namespace transformer_engine;
-  fused_moe_aux_loss_forward(
+  fused_router::fused_moe_aux_loss_forward(
       *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert), total_num_tokens,
       num_experts, num_rows, num_cols, topk, coeff, *convertNVTETensorCheck(aux_loss),
       *convertNVTETensorCheck(Const_buf), stream);
@@ -285,8 +284,8 @@ void nvte_fused_moe_aux_loss_backward(const NVTETensor Const_buf,
                                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_moe_aux_loss_backward);
   using namespace transformer_engine;
-  fused_moe_aux_loss_backward(*convertNVTETensorCheck(Const_buf),
-                              *convertNVTETensorCheck(tokens_per_expert), num_rows, num_cols,
-                              *convertNVTETensorCheck(grad_aux_loss),
-                              *convertNVTETensorCheck(grad_probs), stream);
+  fused_router::fused_moe_aux_loss_backward(*convertNVTETensorCheck(Const_buf),
+                                            *convertNVTETensorCheck(tokens_per_expert), num_rows,
+                                            num_cols, *convertNVTETensorCheck(grad_aux_loss),
+                                            *convertNVTETensorCheck(grad_probs), stream);
 }

@@ -32,7 +32,7 @@ void nvte_group_dgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor inpu
                       NVTEGroupedTensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_dgelu);
   using namespace transformer_engine;
-  NVTETensor dbias = nullptr;
+  NVTEGroupedTensor dbias = nullptr;
   NVTETensor workspace = nullptr;
 
   constexpr bool IS_DBIAS = false;
@@ -57,7 +57,7 @@ void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor activati
 
 void nvte_group_quantize_dbias_dgelu(const NVTEGroupedTensor input,
                                      const NVTEGroupedTensor activation_input,
-                                     NVTEGroupedTensor output, NVTETensor dbias,
+                                     NVTEGroupedTensor output, NVTEGroupedTensor dbias,
                                      NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize_dbias_dgelu);
   using namespace transformer_engine;
@@ -110,7 +110,7 @@ void nvte_group_dqgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor inp
                        NVTEGroupedTensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_dqgelu);
   using namespace transformer_engine;
-  NVTETensor dbias = nullptr;
+  NVTEGroupedTensor dbias = nullptr;
   NVTETensor workspace = nullptr;
 
   constexpr bool IS_DBIAS = false;
@@ -135,7 +135,7 @@ void nvte_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor activat
 
 void nvte_group_quantize_dbias_dqgelu(const NVTEGroupedTensor input,
                                       const NVTEGroupedTensor activation_input,
-                                      NVTEGroupedTensor output, NVTETensor dbias,
+                                      NVTEGroupedTensor output, NVTEGroupedTensor dbias,
                                       NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize_dbias_dqgelu);
   using namespace transformer_engine;

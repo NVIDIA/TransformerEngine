@@ -5,7 +5,7 @@
 """Multi-head Attention."""
 import os
 import collections
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
@@ -355,7 +355,7 @@ class MultiheadAttention(torch.nn.Module):
         }
 
         self.q_norm, self.k_norm = self._create_qk_norm_modules(
-            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size
+            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size, params_dtype
         )
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
@@ -478,6 +478,10 @@ class MultiheadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """Fast attribute set for non-parameter fields."""
+        self.__dict__[name] = value
+
     def _create_qk_norm_modules(
         self,
         qk_norm_type: Optional[str],
@@ -485,6 +489,7 @@ class MultiheadAttention(torch.nn.Module):
         device: Union[torch.device, str],
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
+        params_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[Optional[torch.nn.Module], Optional[torch.nn.Module]]:
         """
         Create query and key normalization modules based on the specified normalization type.
@@ -501,6 +506,8 @@ class MultiheadAttention(torch.nn.Module):
             Sequence length for L2Normalization optimization
         micro_batch_size : Optional[int], default = None
             Micro batch size for L2Normalization optimization
+        params_dtype : Optional[torch.dtype], default = None
+            Data type for the normalization modules
 
         Returns
         -------
@@ -524,11 +531,13 @@ class MultiheadAttention(torch.nn.Module):
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             k_norm = RMSNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             return q_norm, k_norm
 
@@ -537,11 +546,13 @@ class MultiheadAttention(torch.nn.Module):
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             k_norm = LayerNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             return q_norm, k_norm
 

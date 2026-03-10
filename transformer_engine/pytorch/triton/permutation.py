@@ -427,6 +427,7 @@ def sort_chunks_by_map(
         inp,
         row_id_map,
         probs,
+        output,  # no use in Pytorch side, serves as WAR for JAX side
         inp.stride(0),
         inp.stride(1),
         output.stride(0),

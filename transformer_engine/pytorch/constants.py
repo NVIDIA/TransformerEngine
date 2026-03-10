@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Enums for e2e transformer"""
+from types import SimpleNamespace
 import torch
 import torch.distributed
 import transformer_engine_torch as tex
@@ -39,6 +40,25 @@ TE_DType_To_Torch = {
     tex.DType.kFloat16: torch.half,
     tex.DType.kBFloat16: torch.bfloat16,
 }
+
+# Cache enum -> int conversions to avoid repeated PyObject lookups.
+FP8FwdTensorIdx = SimpleNamespace(
+    GEMM1_INPUT=int(tex.FP8FwdTensors.GEMM1_INPUT),
+    GEMM1_WEIGHT=int(tex.FP8FwdTensors.GEMM1_WEIGHT),
+    GEMM1_OUTPUT=int(tex.FP8FwdTensors.GEMM1_OUTPUT),
+    GEMM2_INPUT=int(tex.FP8FwdTensors.GEMM2_INPUT),
+    GEMM2_WEIGHT=int(tex.FP8FwdTensors.GEMM2_WEIGHT),
+    GEMM2_OUTPUT=int(tex.FP8FwdTensors.GEMM2_OUTPUT),
+    GEMM3_OUTPUT=int(tex.FP8FwdTensors.GEMM3_OUTPUT),
+)
+FP8BwdTensorIdx = SimpleNamespace(
+    GRAD_INPUT1=int(tex.FP8BwdTensors.GRAD_INPUT1),
+    GRAD_INPUT2=int(tex.FP8BwdTensors.GRAD_INPUT2),
+    GRAD_INPUT3=int(tex.FP8BwdTensors.GRAD_INPUT3),
+    GRAD_OUTPUT1=int(tex.FP8BwdTensors.GRAD_OUTPUT1),
+    GRAD_OUTPUT2=int(tex.FP8BwdTensors.GRAD_OUTPUT2),
+    GRAD_OUTPUT3=int(tex.FP8BwdTensors.GRAD_OUTPUT3),
+)
 
 AttnMaskTypes = (
     "no_mask",

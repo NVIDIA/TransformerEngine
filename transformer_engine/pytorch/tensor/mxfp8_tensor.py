@@ -842,6 +842,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 )
                 # pylint: disable=unnecessary-dunder-call
                 super(MXFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
+
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
             self._quantizer = tensor._quantizer.copy()
@@ -860,6 +861,33 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     # Cast to FP8 when setting MXFP8Tensor.data
     data = property(_get_data, _set_data)
+
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("MXFP8Tensor has no data!")
+
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.shape
+        if self._columnwise_data is not None:
+            return self._columnwise_data.shape
+        raise RuntimeError("MXFP8Tensor has no data!")
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.is_cuda
+        if self._columnwise_data is not None:
+            return self._columnwise_data.is_cuda
+        raise RuntimeError("MXFP8Tensor has no data!")
 
 
 class _ViewFunc(torch.autograd.Function):

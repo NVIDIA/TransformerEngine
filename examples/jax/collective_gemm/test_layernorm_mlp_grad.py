@@ -119,8 +119,6 @@ def _value_and_grad_layernorm_mlp(
 def run_layernorm_mlp_grad_tests(args, mesh=None):
     """Execute Dense Gradient tests."""
     print(args)
-    # Collective GEMM requires Shardy partitioner to be disabled
-    jax.config.update("jax_use_shardy_partitioner", False)
 
     # Initialize distributed with provided arguments
     _initialize_distributed(args)

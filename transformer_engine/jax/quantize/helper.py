@@ -274,9 +274,6 @@ class BaseQuantizeConfig(ABC):
         COLLECTION_NAME: Name of the collection for quantization metadata
         FWD_DTYPE: Forward pass data type
         BWD_DTYPE: Backward pass data type
-        FP8_2X_ACC_FPROP: Whether to use 2x accumulation for forward pass
-        FP8_2X_ACC_DGRAD: Whether to use 2x accumulation for data gradients
-        FP8_2X_ACC_WGRAD: Whether to use 2x accumulation for weight gradients
         INFERENCE_MODE: Whether to enable optimization for inference
         AMAX_HISTORY_LEN: Length of AMAX history for delayed scaling
         AMAX_COMPUTE_ALGO: Algorithm for AMAX computation
@@ -287,9 +284,6 @@ class BaseQuantizeConfig(ABC):
     COLLECTION_NAME: str = NVTE_FP8_COLLECTION_NAME
     FWD_DTYPE: DType = None
     BWD_DTYPE: DType = None
-    FP8_2X_ACC_FPROP: bool = False
-    FP8_2X_ACC_DGRAD: bool = False
-    FP8_2X_ACC_WGRAD: bool = False
     INFERENCE_MODE: bool = False
 
     # DelayedScaling
@@ -434,9 +428,6 @@ class DelayedScalingQuantizeConfig(BaseQuantizeConfig):
             "most_recent": AmaxComputeAlgo.MOST_RECENT,
         }
         self.AMAX_COMPUTE_ALGO = string_to_amax_compute_algo[fp8_recipe.amax_compute_algo]
-
-        self.FP8_2X_ACC_DGRAD = True
-        self.FP8_2X_ACC_WGRAD = True
 
     def get_scaling_mode(self, tensor_source: TensorSource) -> ScalingMode:
         """Gets the scaling mode for a specific tensor's usage type."""

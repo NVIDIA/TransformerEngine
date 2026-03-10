@@ -293,6 +293,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             bool(int(os.getenv("NVTE_APPLY_QK_LAYER_SCALING", "0"))) and layer_number is not None
         )
 
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """Fast attribute set for non-parameter fields."""
+        self.__dict__[name] = value
+
     def forward(
         self,
         _alibi_cache: Dict[str, Any],

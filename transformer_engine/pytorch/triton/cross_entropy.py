@@ -49,7 +49,7 @@ def cross_entropy_forward(
     n_non_ignore = torch.zeros(1, dtype=torch.int64, device=_input.device)
 
     # ensure _input and target are contiguous in the last dimension
-    if _input.stride(-1) != 1:
+    if _input.stride(-1) != 1 or _input.stride(-2) != _input.shape[-1]:
         _input = _input.contiguous()
     if target.stride(-1) != 1:
         target = target.contiguous()
