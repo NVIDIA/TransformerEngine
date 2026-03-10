@@ -31,6 +31,7 @@ def generate_input_shapes(
     config: ModelConfig,
     world_size: int,
     kernel_backend: str,
+    pad_between_seqs: str = "False",
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -99,9 +100,9 @@ def generate_input_shapes(
         ).cuda()
         cu_seqlens_q = torch.clone(cu_seqlens_q_padded)
 
-        # Since FlashAttention doesn't support pad b/w sequences, and FusedAttention does,
-        # cu_seqlens_q is updated to reflect non-padded lengths for FusedAttention only.
-        if kernel_backend == "FusedAttention":
+        # When pad_between_seqs is True, or for FusedAttention, cu_seqlens_q reflects
+        # non-padded (actual) lengths. FA3 handles this via seqused_q/seqused_k.
+        if kernel_backend == "FusedAttention" or pad_between_seqs == "True":
             cu_seqlens_q[1:] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
 
         # NOTE: In case of Cross-Attention, `cu_seqlens_kv` and `cu_seqlens_kv_padded`
@@ -180,6 +181,7 @@ def run_dpa_with_cp(
     scaling_mode="delayed",
     f16_O="False",
     is_training="True",
+    pad_between_seqs="False",
     log_level=logging.WARNING,
 ):
     """Test DotProductAttention module with context parallelism"""
@@ -275,7 +277,7 @@ def run_dpa_with_cp(
         cu_seqlens_kv,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
-    ) = generate_input_shapes(qkv_format, config, world_size, kernel_backend)
+    ) = generate_input_shapes(qkv_format, config, world_size, kernel_backend, pad_between_seqs)
     q_orig = torch.clamp(torch.randn(q_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     k_orig = torch.clamp(torch.randn(k_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
     v_orig = torch.clamp(torch.randn(v_input_shape, dtype=dtypes[dtype]), min=-1, max=1).cuda()
@@ -494,6 +496,7 @@ def run_dpa_with_cp(
 
     # get outputs
     tensors = [out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_]
+    tensor_names = ["out", "dq", "dk", "dv", "dbias", "out_", "dq_", "dk_", "dv_", "dbias_"]
     if fp8_mha:
         tensors_to_deq = [out, out_] if not fp8_bwd else tensors
         for i, tensor in enumerate(tensors_to_deq):
@@ -502,11 +505,14 @@ def run_dpa_with_cp(
                 tensors_to_deq[i] = tensor.dequantize()
         if not fp8_bwd:
             tensors[0], tensors[5] = tensors_to_deq
-    for tensor in tensors:
+    if pad_between_seqs == "True":
+        # FA3 backward may produce NaN at padding positions; replace with 0
+        tensors = [t.detach().nan_to_num(nan=0.0) if t is not None else t for t in tensors]
+    for tensor, name in zip(tensors, tensor_names):
         # dbias/dbias_ could be None, so skip check for it
         if tensor is not None:
-            assert torch.all(~torch.isnan(tensor))
-            assert torch.all(~torch.isinf(tensor))
+            assert torch.all(~torch.isnan(tensor)), f"NaN in {name}"
+            assert torch.all(~torch.isinf(tensor)), f"Inf in {name}"
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############
@@ -567,19 +573,26 @@ def run_dpa_with_cp(
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
             for x in [dq, out, dq_, out_]:
-                assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
-                for b in range(config.batch_size):
-                    assert (
-                        num_pads_q[b] == 0
-                        or torch.count_nonzero(
-                            x[
-                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
-                                    b + 1
+                if pad_between_seqs == "True":
+                    # FA3 doesn't guarantee zeros at padding positions; zero them explicitly
+                    x[cu_seqlens_q_padded[-1] :] = 0.0
+                    for b in range(config.batch_size):
+                        if num_pads_q[b] > 0:
+                            x[(cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[b + 1]] = 0.0
+                else:
+                    assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
+                    for b in range(config.batch_size):
+                        assert (
+                            num_pads_q[b] == 0
+                            or torch.count_nonzero(
+                                x[
+                                    (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
+                                        b + 1
+                                    ]
                                 ]
-                            ]
-                        ).item()
-                        == 0
-                    )
+                            ).item()
+                            == 0
+                        )
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
@@ -587,19 +600,25 @@ def run_dpa_with_cp(
             cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
             num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
             for x in [dk, dv, dk_, dv_]:
-                assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
-                for b in range(config.batch_size):
-                    assert (
-                        num_pads_kv[b] == 0
-                        or torch.count_nonzero(
-                            x[
-                                (
-                                    cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
-                                ) : cu_seqlens_kv_padded[b + 1]
-                            ]
-                        ).item()
-                        == 0
-                    )
+                if pad_between_seqs == "True":
+                    x[cu_seqlens_kv_padded[-1] :] = 0.0
+                    for b in range(config.batch_size):
+                        if num_pads_kv[b] > 0:
+                            x[(cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]) : cu_seqlens_kv_padded[b + 1]] = 0.0
+                else:
+                    assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
+                    for b in range(config.batch_size):
+                        assert (
+                            num_pads_kv[b] == 0
+                            or torch.count_nonzero(
+                                x[
+                                    (
+                                        cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
+                                    ) : cu_seqlens_kv_padded[b + 1]
+                                ]
+                            ).item()
+                            == 0
+                        )
         else:
             # Forward-only: reshape only out/out_ for comparison
             out = out.index_select(0, seq_idx_q).contiguous()
