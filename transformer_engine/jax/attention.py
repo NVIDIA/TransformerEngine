@@ -746,16 +746,12 @@ class SequenceDescriptor:
                     extra_flat_batch_size_kv, *kv_segment_ids.shape[n_extra_batch_dims_kv:]
                 )
 
-                def single_extra_batch(seg_id_q, seg_id_kv, seg_pos_q, seg_pos_kv):
-                    return _segment_ids_pos_to_seqlens_offsets(
-                        seg_id_q,
-                        seg_id_kv,
-                        seg_pos_q,
-                        seg_pos_kv,
-                        attn_mask_type,
-                        window_size,
-                        max_segments_per_seq,
-                    )
+                single_extra_batch = partial(
+                    _segment_ids_pos_to_seqlens_offsets,
+                    attn_mask_type=attn_mask_type,
+                    window_size=window_size,
+                    max_segments_per_seq=max_segments_per_seq,
+                )
 
                 q_sl, kv_sl, q_off, kv_off = jax.vmap(
                     single_extra_batch, in_axes=(0, 0, None, None)
