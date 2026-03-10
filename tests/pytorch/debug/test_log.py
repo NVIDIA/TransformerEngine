@@ -707,9 +707,9 @@ def test_dump_tensors_sanity(feature_dirs):
         assert isinstance(data, dict), "Dump should be a dictionary"
         assert "high_precision" in data, "Missing high_precision tensor"
         assert "quantized" in data, "Missing quantized tensor"
-        assert isinstance(data["quantized"], QuantizedTensor), (
-            f"Expected QuantizedTensor, got {type(data['quantized'])}"
-        )
+        assert isinstance(
+            data["quantized"], QuantizedTensor
+        ), f"Expected QuantizedTensor, got {type(data['quantized'])}"
 
         # Verify tensor shapes match
         assert data["high_precision"].shape == tensor.shape, "high_precision shape mismatch"
