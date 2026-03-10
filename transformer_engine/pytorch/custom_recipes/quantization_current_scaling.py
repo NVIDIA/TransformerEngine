@@ -218,6 +218,12 @@ class CurrentScalingQuantizerRef(Quantizer):
         self.with_amax_reduction = False
         self.amax_reduction_group = None
 
+    def __getstate__(self):
+        """Exclude unpicklable process group from serialized state."""
+        state = self.__dict__.copy()
+        state["amax_reduction_group"] = None
+        return state
+
     @property
     def custom(self) -> bool:
         """Flag to indicate this quantizer is custom."""

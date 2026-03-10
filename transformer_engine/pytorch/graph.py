@@ -442,13 +442,13 @@ def _make_graphed_callables(
                     else:
                         visited_te_modules[func_idx].update(modules)
 
+            if pre_warmup_hook is not None:
+                pre_warmup_hook()
             for warmup_iter in range(num_warmup_iters):
                 hooks = []
                 for module in func.modules():
                     hook = module.register_forward_hook(hook_fn)
                     hooks.append(hook)
-                if pre_warmup_hook is not None:
-                    pre_warmup_hook()
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:
                     hook.remove()
@@ -511,13 +511,8 @@ def _make_graphed_callables(
                 else:
                     grad_inputs = None
                 del outputs, grad_inputs
-                if post_warmup_hook is not None:
-                    post_warmup_hook()
-            # The following code is added specifically for MCore's special requirements,
-            # aimed at preventing warmup from altering the control flow.
-            for module in func.modules():
-                if hasattr(module, "is_first_microbatch"):
-                    module.is_first_microbatch = True
+            if post_warmup_hook is not None:
+                post_warmup_hook()
     torch.cuda.synchronize()
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
@@ -805,10 +800,16 @@ def _make_graphed_callables(
                         static_input_surface[i].copy_(inputs[i])
 
                 # Replay forward graph
-                cuda_graph_stream.wait_stream(torch.cuda.current_stream())
-                with cuda_graph_stream:
+                if cuda_graph_stream != torch.cuda.current_stream():
+                    cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                    with cuda_graph_stream:
+                        fwd_graph.replay()
+                    if cuda_graph_event is not None:
+                        torch.cuda.current_stream().wait_event(cuda_graph_event)
+                    else:
+                        torch.cuda.current_stream().wait_stream(cuda_graph_stream)
+                else:
                     fwd_graph.replay()
-                torch.cuda.current_stream().wait_event(cuda_graph_event)
                 assert isinstance(static_outputs, tuple)
                 return tuple(o.detach() if o is not None else o for o in static_outputs)
 
@@ -825,10 +826,16 @@ def _make_graphed_callables(
                         # incoming grad is already in the right place
                         if g.data_ptr() != grad.data_ptr():
                             g.copy_(grad)
-                ctx.cuda_graph_stream.wait_stream(torch.cuda.current_stream())
-                with ctx.cuda_graph_stream:
+                if ctx.cuda_graph_stream != torch.cuda.current_stream():
+                    ctx.cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                    with ctx.cuda_graph_stream:
+                        bwd_graph.replay()
+                    if ctx.cuda_graph_event is not None:
+                        torch.cuda.current_stream().wait_event(ctx.cuda_graph_event)
+                    else:
+                        torch.cuda.current_stream().wait_stream(ctx.cuda_graph_stream)
+                else:
                     bwd_graph.replay()
-                torch.cuda.current_stream().wait_event(ctx.cuda_graph_event)
 
                 # Update FP8 scale factors if needed
                 if ctx.is_first_module:
@@ -851,6 +858,13 @@ def _make_graphed_callables(
 
                 skip_fp8_weight_update = not user_kwargs["is_first_microbatch"]
 
+            # The cuda_graph_stream and cuda_graph_event are used in the TE CUDA graph replay.
+            # When replaying the graph in the cuda graph stream, the graph replay could overlap
+            # with the work on main stream.
+            # When cuda_graph_event is given, it should be an external event recorded
+            # in the cuda graph and is used to sync-back to the main stream.
+            # If cuda_graph_event is not given, it will be None and the graph replay will block
+            # the main stream until it is finished.
             if "cuda_graph_stream" in user_kwargs:
                 cuda_graph_stream = user_kwargs["cuda_graph_stream"]
                 user_kwargs.pop("cuda_graph_stream")
@@ -860,7 +874,7 @@ def _make_graphed_callables(
                 cuda_graph_event = user_kwargs["cuda_graph_event"]
                 user_kwargs.pop("cuda_graph_event")
             else:
-                cuda_graph_event = torch.cuda.Event()
+                cuda_graph_event = None
             # Check that required kwargs are provided
             for key in kwargs_keys:
                 if key not in user_kwargs:
@@ -1107,6 +1121,10 @@ def make_graphed_callables(
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
+    pre_warmup_hook: callable, default = None
+                      A hook function that will be called before the warmup iterations.
+    post_warmup_hook: callable, default = None
+                      A hook function that will be called after the warmup iterations.
 
     Quantization parameters
     -----------------------

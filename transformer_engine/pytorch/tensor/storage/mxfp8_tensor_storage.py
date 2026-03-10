@@ -33,9 +33,9 @@ class _FromMXFP8Func(torch.autograd.Function):
         dtype = torch_to_transformer_engine_dtype[dtype]
 
         # Make sure FP8 data is in expected format
-        if tensor._rowwise_data is not None:
+        if tensor._rowwise_data is not None or tensor._columnwise_data is not None:
             return tex.dequantize(tensor, dtype)
-        raise NotImplementedError("Casting back from the transpose not implemented yet!")
+        raise ValueError("Cannot dequantize MXFP8 tensor with no data")
 
     @staticmethod
     def backward(
@@ -184,6 +184,15 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
         return self._columnwise_data.size(*args, **kwargs)
+
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("MXFP8TensorStorage has no data!")
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
