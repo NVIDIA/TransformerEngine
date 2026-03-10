@@ -256,12 +256,12 @@ def get_cuda_library_dirs() -> Tuple[str, str]:
     """Returns the CUDA library directory."""
 
     force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
-    # If cuda is installed via toolkit, all necessary headers
+    # If cuda is installed via toolkit, all libraries
     # are bundled inside the top level cuda directory.
     if not force_wheels and cuda_toolkit_include_path() is not None:
         return []
 
-    # Use pip wheels to include all headers.
+    # Use pip wheels to include all libraries.
     try:
         import nvidia
     except ModuleNotFoundError as e:
