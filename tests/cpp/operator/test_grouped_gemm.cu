@@ -123,10 +123,10 @@ void run_grouped_gemm_case(const TestParams& params) {
 
   for (size_t i = 0; i < num_gemms; ++i) {
     const auto [M, N, K] = shapes[i];
-    const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{M, K}
-                                                      : std::vector<size_t>{K, M};
-    const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{K, N}
-                                                      : std::vector<size_t>{N, K};
+    const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{N, K}
+                                                      : std::vector<size_t>{K, N};
+    const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{K, M}
+                                                      : std::vector<size_t>{M, K};
     switch (params.input_case) {
       case InputCase::kFP8Current: {
         A_tensors.emplace_back(make_fp8_operand("A" + std::to_string(i), a_shape));

@@ -385,28 +385,41 @@ void performTest(const ProcessingMethod processing_method,
 
     NVTEBasicTensor grad_data_tensor = {grad_data_d, static_cast<NVTEDType>(itype), logical_shape_};
     NVTEBasicTensor in_data_tensor = {in_data_d, static_cast<NVTEDType>(itype), logical_shape_};
-    nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &in_data_tensor);
-    nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &grad_data_tensor);
+    nvte_set_grouped_tensor_param(in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData,
+                                  &in_data_tensor, sizeof(in_data_tensor));
+    nvte_set_grouped_tensor_param(grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData,
+                                  &grad_data_tensor, sizeof(grad_data_tensor));
 
     if ((shape_rep == VARYING_FIRST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
         NVTEBasicTensor first_dims_tensor = {first_dims_d, kNVTEInt64, first_dims_shape_};
-        nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims, &first_dims_tensor);
-        nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims, &first_dims_tensor);
-        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims, &first_dims_tensor);
+        nvte_set_grouped_tensor_param(grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims,
+                                      &first_dims_tensor, sizeof(first_dims_tensor));
+        nvte_set_grouped_tensor_param(in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims,
+                                      &first_dims_tensor, sizeof(first_dims_tensor));
+        nvte_set_grouped_tensor_param(out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedFirstDims,
+                                      &first_dims_tensor, sizeof(first_dims_tensor));
     }
 
     if ((shape_rep == VARYING_LAST_DIM) || (shape_rep == VARYING_BOTH_DIMS)) {
         NVTEBasicTensor last_dims_tensor = {last_dims_d, kNVTEInt64, last_dims_shape_};
-        nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims, &last_dims_tensor);
-        nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims, &last_dims_tensor);
-        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims, &last_dims_tensor);
+        nvte_set_grouped_tensor_param(grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims,
+                                      &last_dims_tensor, sizeof(last_dims_tensor));
+        nvte_set_grouped_tensor_param(in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims,
+                                      &last_dims_tensor, sizeof(last_dims_tensor));
+        nvte_set_grouped_tensor_param(out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedLastDims,
+                                      &last_dims_tensor, sizeof(last_dims_tensor));
     }
 
     if (shape_rep != SAME_BOTH_DIMS) {
         NVTEBasicTensor offsets_tensor = {offsets_d, kNVTEInt64, offsets_shape_};
-        nvte_set_grouped_tensor_param(&grad_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets, &offsets_tensor);
-        nvte_set_grouped_tensor_param(&in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets, &offsets_tensor);
-        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets, &offsets_tensor);
+        nvte_set_grouped_tensor_param(grad_group_tensor,
+                                      NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets,
+                                      &offsets_tensor, sizeof(offsets_tensor));
+        nvte_set_grouped_tensor_param(in_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets,
+                                      &offsets_tensor, sizeof(offsets_tensor));
+        nvte_set_grouped_tensor_param(out_group_tensor,
+                                      NVTEGroupedTensorParam::kNVTEGroupedTensorOffsets,
+                                      &offsets_tensor, sizeof(offsets_tensor));
     }
 
     if (rowwise) {
@@ -417,8 +430,11 @@ void performTest(const ProcessingMethod processing_method,
         NVTEBasicTensor out_data_rowwise_tensor = {out_data_rowwise_d, static_cast<NVTEDType>(otype), logical_shape_};
         NVTEShape scales_rowwise_shape_ = nvte_make_shape(scales_rowwise_shape.data(), scales_rowwise_shape.size());
         NVTEBasicTensor out_scales_rowwise_tensor = {out_scales_rowwise_d, NVTEDType::kNVTEFloat8E8M0, scales_rowwise_shape_};
-        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData, &out_data_rowwise_tensor);
-        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseScaleInv, &out_scales_rowwise_tensor);
+        nvte_set_grouped_tensor_param(out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedRowwiseData,
+                                      &out_data_rowwise_tensor, sizeof(out_data_rowwise_tensor));
+        nvte_set_grouped_tensor_param(out_group_tensor,
+                                      NVTEGroupedTensorParam::kNVTEGroupedRowwiseScaleInv,
+                                      &out_scales_rowwise_tensor, sizeof(out_scales_rowwise_tensor));
     }
 
     if (colwise) {
@@ -429,8 +445,12 @@ void performTest(const ProcessingMethod processing_method,
         NVTEBasicTensor out_data_colwise_tensor = {out_data_colwise_d, static_cast<NVTEDType>(otype), logical_shape_};
         NVTEShape scales_colwise_shape_ = nvte_make_shape(scales_colwise_shape.data(), scales_colwise_shape.size());
         NVTEBasicTensor out_scales_colwise_tensor = {out_scales_colwise_d, NVTEDType::kNVTEFloat8E8M0, scales_colwise_shape_};
-        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseData, &out_data_colwise_tensor);
-        nvte_set_grouped_tensor_param(&out_group_tensor, NVTEGroupedTensorParam::kNVTEGroupedColumnwiseScaleInv, &out_scales_colwise_tensor);
+        nvte_set_grouped_tensor_param(out_group_tensor,
+                                      NVTEGroupedTensorParam::kNVTEGroupedColumnwiseData,
+                                      &out_data_colwise_tensor, sizeof(out_data_colwise_tensor));
+        nvte_set_grouped_tensor_param(out_group_tensor,
+                                      NVTEGroupedTensorParam::kNVTEGroupedColumnwiseScaleInv,
+                                      &out_scales_colwise_tensor, sizeof(out_scales_colwise_tensor));
     }
 
     Tensor output_dbias("output_dbias", std::vector<size_t>{ cols }, itype);
@@ -695,7 +715,10 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
         }
         offsets[t+1] = offsets[t] + first_dims[t] * last_dims[t];
         // Skips tests if tensor shape is not as required by the kernel
-        if ((first_dims[t] % 128 != 0) || (last_dims[t] % 32 != 0)) {
+        if (first_dims[t] % 128 != 0) {
+            GTEST_SKIP();
+        }
+        if (!is_single_tensor && (last_dims[t] % 128 != 0)) {
             GTEST_SKIP();
         }
     }
