@@ -111,16 +111,16 @@ def run_dense_grad_tests(args, mesh=None):
     )
     collective_op_set = CollectiveOpSet.create(forward_collective_op=collective_op)
 
-    use_fp8 = getattr(args, "use_fp8", False)
-    recipe = get_quantization_recipe_from_name_string(args.quantize_recipe) if use_fp8 else None
+    use_quantization = args.quantize_recipe is not None
+    recipe = get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
     with mesh, autocast(
-        enabled=use_fp8,
+        enabled=use_quantization,
         recipe=recipe,
         mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
         # Build quantizer_set inside autocast so create_set() reads the global recipe
         # for correct fwd/bwd dtypes.
-        quantizer_set = QuantizerFactory.create_set() if use_fp8 else noop_quantizer_set
+        quantizer_set = QuantizerFactory.create_set() if use_quantization else noop_quantizer_set
         # Get the base axis rules and extend them with TE's rules. This must be done inside autocast
         axis_rules = flax.linen.get_logical_axis_rules()
         axis_rules += ((TPSP_AXIS, TPSP_AXIS), (DP_AXIS, DP_AXIS))
@@ -216,7 +216,7 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         )
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "all_gather"
         run_dense_grad_tests(self.args, self.mesh)
 
@@ -228,7 +228,7 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         )
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "reduce_scatter"
         run_dense_grad_tests(self.args, self.mesh)
 
@@ -240,7 +240,7 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         )
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "all_gather"
         run_dense_grad_tests(self.args, self.mesh)
 
@@ -252,7 +252,7 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         )
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "reduce_scatter"
         run_dense_grad_tests(self.args, self.mesh)
 
@@ -263,7 +263,6 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
     #     if not is_supported:
     #         self.skipTest(reason)
-    #     self.args.use_fp8 = True
     #     self.args.collective_type = "all_gather"
     #     run_dense_grad_tests(self.args, self.mesh)
 
@@ -274,7 +273,6 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
     #     if not is_supported:
     #         self.skipTest(reason)
-    #     self.args.use_fp8 = True
     #     self.args.collective_type = "reduce_scatter"
     #     run_dense_grad_tests(self.args, self.mesh)
 
@@ -285,7 +283,6 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
     #     if not is_supported:
     #         self.skipTest(reason)
-    #     self.args.use_fp8 = True
     #     self.args.collective_type = "all_gather"
     #     run_dense_grad_tests(self.args, self.mesh)
 
@@ -296,7 +293,6 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
     #     if not is_supported:
     #         self.skipTest(reason)
-    #     self.args.use_fp8 = True
     #     self.args.collective_type = "reduce_scatter"
     #     run_dense_grad_tests(self.args, self.mesh)
 

@@ -275,19 +275,17 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
         help="Type of collective operation",
     )
     parser.add_argument(
-        "--quantize-recipe", type=str, default="DelayedScaling", help="Quantization recipe to use"
+        "--quantize-recipe",
+        type=str,
+        default=None,
+        choices=["DelayedScaling", "Float8CurrentScaling", "MXFP8BlockScaling", "NVFP4BlockScaling"],
+        help="Quantization recipe to use. Omit for BF16 (no quantization).",
     )
     parser.add_argument(
         "--enable-data-parallel", action="store_true", help="Enable data parallelism"
     )
     parser.add_argument(
         "--enable-result-check", action="store_true", default=True, help="Enable result checking"
-    )
-    parser.add_argument(
-        "--use-fp8",
-        action="store_true",
-        default=False,
-        help="Enable FP8 quantization",
     )
 
     return parser

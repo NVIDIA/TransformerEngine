@@ -116,20 +116,20 @@ def run_gemm_tests(args, mesh=None):
         else CollectiveOp.REDUCE_SCATTER
     )
 
-    use_fp8 = getattr(args, "use_fp8", False)
-    recipe = get_quantization_recipe_from_name_string(args.quantize_recipe) if use_fp8 else None
+    use_quantization = args.quantize_recipe is not None
+    recipe = get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
 
     # autocast sets the global recipe (fwd/bwd dtypes) AND the global MeshResource
     # (via global_shard_guard) required for collective GEMM sharding axis resolution.
     with mesh, autocast(
-        enabled=use_fp8,
+        enabled=use_quantization,
         recipe=recipe,
         mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
         # Build quantizer_set inside autocast so create_set() can read the global recipe
         # for correct fwd/bwd dtypes. autocast does not inject quantizers into raw
         # tex.gemm() calls, so we must pass quantizer_set explicitly.
-        quantizer_set = QuantizerFactory.create_set() if use_fp8 else noop_quantizer_set
+        quantizer_set = QuantizerFactory.create_set() if use_quantization else noop_quantizer_set
         print(f"Device mesh: {mesh}")
 
         x_sharding, weight_sharding, bias_sharding, output_sharding = _get_operand_sharding(
@@ -214,7 +214,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         )
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "all_gather"
         run_gemm_tests(self.args, self.mesh)
 
@@ -226,7 +226,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         )
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "reduce_scatter"
         run_gemm_tests(self.args, self.mesh)
 
@@ -238,7 +238,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         )
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "all_gather"
         run_gemm_tests(self.args, self.mesh)
 
@@ -250,7 +250,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         )
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "reduce_scatter"
         run_gemm_tests(self.args, self.mesh)
 
@@ -260,7 +260,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "all_gather"
         run_gemm_tests(self.args, self.mesh)
 
@@ -270,7 +270,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
         if not is_supported:
             self.skipTest(reason)
-        self.args.use_fp8 = True
+
         self.args.collective_type = "reduce_scatter"
         run_gemm_tests(self.args, self.mesh)
 
@@ -281,7 +281,6 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
     #     if not is_supported:
     #         self.skipTest(reason)
-    #     self.args.use_fp8 = True
     #     self.args.collective_type = "all_gather"
     #     run_gemm_tests(self.args, self.mesh)
 
@@ -292,7 +291,6 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
     #     if not is_supported:
     #         self.skipTest(reason)
-    #     self.args.use_fp8 = True
     #     self.args.collective_type = "reduce_scatter"
     #     run_gemm_tests(self.args, self.mesh)
 
