@@ -239,7 +239,7 @@ class DumpTensors(TEConfigAPIMapper):
         dump_dict: Dict[str, torch.Tensor] = {}
 
         if dump_hp and tensor is not None:
-            dump_dict["high_precision"] = tensor
+            dump_dict["high_precision"] = tensor.detach()
         elif dump_hp and tensor is None:
             debug_api.log_message(
                 f"Feature={self.__class__.__name__}: high_precision_tensor is True but "
@@ -248,7 +248,7 @@ class DumpTensors(TEConfigAPIMapper):
             )
 
         if dump_quant and quantized_tensor is not None:
-            dump_dict["quantized"] = quantized_tensor
+            dump_dict["quantized"] = quantized_tensor.detach()
         elif dump_quant and quantized_tensor is None:
             debug_api.log_message(
                 f"Feature={self.__class__.__name__}: quantized_tensor is True but "
