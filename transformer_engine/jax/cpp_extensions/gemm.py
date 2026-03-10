@@ -704,6 +704,16 @@ class GemmPrimitive(BasePrimitive):
             lhs = _reorder_tpsp_leading(lhs, lhs.shape)
 
         if (
+            collective_op.is_reduce_scatter
+            and not transpose_batch_sequence
+            and not is_outer
+            and not lhs_scale_inv.shape[0] == 1
+            and scaling_mode.is_1d_block_scaling()
+        ):
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            lhs_scale_inv = _reorder_tpsp_leading(lhs_scale_inv, lhs_scale_inv.shape)
+
+        if (
             collective_op.is_all_gather
             and not transpose_batch_sequence
             and not is_outer
