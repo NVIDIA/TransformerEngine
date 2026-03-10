@@ -1510,9 +1510,12 @@ class GroupedGemmPrimitive(BasePrimitive):
         # Determine mode from which group_sizes buffer is non-empty
         is_wgrad = rhs_first_dims_aval.size > 0 or rhs_last_dims_aval.size > 0
         num_groups = (
-            lhs_first_dims_aval.size or lhs_last_dims_aval.size
-            or rhs_first_dims_aval.size or rhs_last_dims_aval.size
-            or out_first_dims_aval.size or out_last_dims_aval.size
+            lhs_first_dims_aval.size
+            or lhs_last_dims_aval.size
+            or rhs_first_dims_aval.size
+            or rhs_last_dims_aval.size
+            or out_first_dims_aval.size
+            or out_last_dims_aval.size
             or additional_args[0].size  # alpha (V2) has size G; group_offset (legacy) has size >= 1
         )
 
@@ -1527,11 +1530,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             # lhs shape [M_total, K] (lhs_is_trans=False) or [K, M_total] (lhs_is_trans=True)
             # dim[0] is always total M for fwd/dgrad
             M = lhs_data_aval.shape[0]
-            N = (
-                rhs_data_aval.shape[1]
-                if not rhs_is_trans
-                else rhs_data_aval.shape[0] // num_groups
-            )
+            N = rhs_data_aval.shape[1] if not rhs_is_trans else rhs_data_aval.shape[0] // num_groups
             out_shape = (M, N)
 
         cublas_workspace_aval = jax.core.ShapedArray(
@@ -2048,12 +2047,12 @@ def _flatten_to_2d(data, flatten_axis):
 def grouped_gemm(
     lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
     rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
-    lhs_first_dims: jnp.ndarray = None,   # (G,) int32 if LHS squashed first dim varies, else None/(0,)
-    lhs_last_dims: jnp.ndarray = None,    # (G,) int32 if LHS squashed last dim varies, else None/(0,)
-    rhs_first_dims: jnp.ndarray = None,   # (G,) int32 if RHS squashed first dim varies, else None/(0,)
-    rhs_last_dims: jnp.ndarray = None,    # (G,) int32 if RHS squashed last dim varies, else None/(0,)
-    out_first_dims: jnp.ndarray = None,   # (G,) int32 if output first dim varies, else None/(0,)
-    out_last_dims: jnp.ndarray = None,    # (G,) int32 if output last dim varies, else None/(0,)
+    lhs_first_dims: jnp.ndarray = None,  # (G,) int32 if LHS squashed first dim varies, else None/(0,)
+    lhs_last_dims: jnp.ndarray = None,  # (G,) int32 if LHS squashed last dim varies, else None/(0,)
+    rhs_first_dims: jnp.ndarray = None,  # (G,) int32 if RHS squashed first dim varies, else None/(0,)
+    rhs_last_dims: jnp.ndarray = None,  # (G,) int32 if RHS squashed last dim varies, else None/(0,)
+    out_first_dims: jnp.ndarray = None,  # (G,) int32 if output first dim varies, else None/(0,)
+    out_last_dims: jnp.ndarray = None,  # (G,) int32 if output last dim varies, else None/(0,)
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (2,)),
     bias: jnp.ndarray = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
@@ -2118,12 +2117,8 @@ def grouped_gemm(
         rhs_shape = rhs.original_shape
         lhs_fa = lhs.flatten_axis
         rhs_fa = rhs.flatten_axis
-        lhs_data = lhs.data.reshape(
-            math.prod(lhs_shape[:lhs_fa]), math.prod(lhs_shape[lhs_fa:])
-        )
-        rhs_data = rhs.data.reshape(
-            math.prod(rhs_shape[:rhs_fa]), math.prod(rhs_shape[rhs_fa:])
-        )
+        lhs_data = lhs.data.reshape(math.prod(lhs_shape[:lhs_fa]), math.prod(lhs_shape[lhs_fa:]))
+        rhs_data = rhs.data.reshape(math.prod(rhs_shape[:rhs_fa]), math.prod(rhs_shape[rhs_fa:]))
         lhs_scale_inv = lhs.scale_inv
         rhs_scale_inv = rhs.scale_inv
         assert lhs.scaling_mode == rhs.scaling_mode
@@ -2144,7 +2139,7 @@ def grouped_gemm(
 
     # TODO(Hua): these are for fp16 dense wgrad, any better way to handle this?
     if (
-        (rhs_first_dims.size > 0 or rhs_last_dims.size > 0)   # wgrad mode: rhs dim is ragged
+        (rhs_first_dims.size > 0 or rhs_last_dims.size > 0)  # wgrad mode: rhs dim is ragged
         and not isinstance(lhs, ScaledTensor)
         and not isinstance(rhs, ScaledTensor)
     ):
@@ -2156,7 +2151,7 @@ def grouped_gemm(
     # For MXFP8 block-scaling wgrad with pre-quantized inputs: rhs is colwise quantized,
     # so rhs_use_colwise = (is_mxfp8 && !rhs_is_trans) must be True → rhs_is_trans=False.
     if (
-        (rhs_first_dims.size > 0 or rhs_last_dims.size > 0)   # wgrad mode: rhs dim is ragged
+        (rhs_first_dims.size > 0 or rhs_last_dims.size > 0)  # wgrad mode: rhs dim is ragged
         and isinstance(lhs, GroupedScaledTensor1x)
         and scaling_mode.is_1d_block_scaling()
     ):
@@ -2185,8 +2180,11 @@ def grouped_gemm(
             QuantizeLayout.ROWWISE if rhs_is_rowwise else QuantizeLayout.COLWISE
         )
         active_group_sizes = next(
-            (gs for gs in [lhs_first_dims, lhs_last_dims, rhs_first_dims, rhs_last_dims]
-             if gs.size > 0),
+            (
+                gs
+                for gs in [lhs_first_dims, lhs_last_dims, rhs_first_dims, rhs_last_dims]
+                if gs.size > 0
+            ),
             empty_gs,
         )
         lhs_q = grouped_quantize(lhs, quantizer_set.x, active_group_sizes, lhs_flatten_axis)
@@ -2242,7 +2240,9 @@ def grouped_gemm(
             lhs_contract_dim = tuple((lhs_ndim - 1 - i) % lhs_ndim for i in lhs_contract_dim)
         if rhs_layout_is_T:
             # For rhs [G, K, N], need to exclude the G dim from contract_dim
-            if lhs_first_dims.size > 0 or lhs_last_dims.size > 0:  # fwd/dgrad: rhs has G as first dim
+            if (
+                lhs_first_dims.size > 0 or lhs_last_dims.size > 0
+            ):  # fwd/dgrad: rhs has G as first dim
                 rhs_contract_dim = tuple(
                     (rhs_ndim - 1 - i) % (rhs_ndim - 1) + 1 for i in rhs_contract_dim
                 )
@@ -2254,9 +2254,12 @@ def grouped_gemm(
     rhs_data_2d = _flatten_to_2d(rhs_data, rhs_flatten_axis)
 
     num_gemms = (
-        lhs_first_dims.size or lhs_last_dims.size
-        or rhs_first_dims.size or rhs_last_dims.size
-        or out_first_dims.size or out_last_dims.size
+        lhs_first_dims.size
+        or lhs_last_dims.size
+        or rhs_first_dims.size
+        or rhs_last_dims.size
+        or out_first_dims.size
+        or out_last_dims.size
     )
 
     has_bias = bias is not None

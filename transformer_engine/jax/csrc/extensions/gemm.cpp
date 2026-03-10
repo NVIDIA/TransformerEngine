@@ -588,7 +588,7 @@ namespace xla::ffi {
 namespace {
 
 // Finds an attribute by name. Returns its index or std::nullopt if absent.
-std::optional<int64_t> FindAttrByName(const XLA_FFI_Attrs* attrs, std::string_view name) {
+std::optional<int64_t> FindAttrByName(const XLA_FFI_Attrs *attrs, std::string_view name) {
   for (int64_t i = 0; i < attrs->size; ++i) {
     if (std::string_view{attrs->names[i]->ptr, attrs->names[i]->len} == name) return i;
   }
@@ -598,8 +598,8 @@ std::optional<int64_t> FindAttrByName(const XLA_FFI_Attrs* attrs, std::string_vi
 // Decodes a named attribute into `field` if present; leaves `field` at its default if absent.
 // Returns false only when the attribute is present but fails to decode.
 template <typename T>
-bool DecodeAttrOrDefault(const XLA_FFI_Attrs* attrs, std::string_view name, T& field,
-                         DiagnosticEngine& diagnostic) {
+bool DecodeAttrOrDefault(const XLA_FFI_Attrs *attrs, std::string_view name, T &field,
+                         DiagnosticEngine &diagnostic) {
   auto idx = FindAttrByName(attrs, name);
   if (!idx.has_value()) return true;  // absent → keep default
   auto decoded = AttrDecoding<T>::Decode(attrs->types[*idx], attrs->attrs[*idx], diagnostic);
@@ -618,12 +618,12 @@ struct AttrsBinding<transformer_engine::jax::GroupedGemmV2Config> {
 template <>
 struct AttrDecoding<transformer_engine::jax::GroupedGemmV2Config> {
   using Type = transformer_engine::jax::GroupedGemmV2Config;
-  static std::optional<Type> Decode(XLA_FFI_AttrType type, void* attr,
-                                    DiagnosticEngine& diagnostic) {
+  static std::optional<Type> Decode(XLA_FFI_AttrType type, void *attr,
+                                    DiagnosticEngine &diagnostic) {
     if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_AttrType_DICTIONARY)) {
       return diagnostic.Emit("Expected dictionary attribute for GroupedGemmV2Config");
     }
-    auto* attrs = reinterpret_cast<const XLA_FFI_Attrs*>(attr);
+    auto *attrs = reinterpret_cast<const XLA_FFI_Attrs *>(attr);
     Type config;
     if (!DecodeAttrOrDefault(attrs, "lhs_is_trans", config.lhs_is_trans, diagnostic))
       return std::nullopt;
@@ -643,12 +643,12 @@ struct AttrsBinding<transformer_engine::jax::GroupedGemmConfig> {
 template <>
 struct AttrDecoding<transformer_engine::jax::GroupedGemmConfig> {
   using Type = transformer_engine::jax::GroupedGemmConfig;
-  static std::optional<Type> Decode(XLA_FFI_AttrType type, void* attr,
-                                    DiagnosticEngine& diagnostic) {
+  static std::optional<Type> Decode(XLA_FFI_AttrType type, void *attr,
+                                    DiagnosticEngine &diagnostic) {
     if (XLA_FFI_PREDICT_FALSE(type != XLA_FFI_AttrType_DICTIONARY)) {
       return diagnostic.Emit("Expected dictionary attribute for GroupedGemmConfig");
     }
-    auto* attrs = reinterpret_cast<const XLA_FFI_Attrs*>(attr);
+    auto *attrs = reinterpret_cast<const XLA_FFI_Attrs *>(attr);
     Type config;
     if (!DecodeAttrOrDefault(attrs, "lhs_is_trans", config.lhs_is_trans, diagnostic))
       return std::nullopt;
@@ -656,10 +656,9 @@ struct AttrDecoding<transformer_engine::jax::GroupedGemmConfig> {
       return std::nullopt;
     if (!DecodeAttrOrDefault(attrs, "scaling_mode", config.scaling_mode, diagnostic))
       return std::nullopt;
-    if (!DecodeAttrOrDefault(attrs, "has_bias", config.has_bias, diagnostic))
-      return std::nullopt;
-    if (!DecodeAttrOrDefault(attrs, "use_async_d2h_group_sizes",
-                             config.use_async_d2h_group_sizes, diagnostic))
+    if (!DecodeAttrOrDefault(attrs, "has_bias", config.has_bias, diagnostic)) return std::nullopt;
+    if (!DecodeAttrOrDefault(attrs, "use_async_d2h_group_sizes", config.use_async_d2h_group_sizes,
+                             diagnostic))
       return std::nullopt;
     return config;
   }
@@ -676,10 +675,9 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             Buffer_Type lhs_first_dims, Buffer_Type lhs_last_dims,
                             Buffer_Type rhs_first_dims, Buffer_Type rhs_last_dims,
                             Buffer_Type out_first_dims, Buffer_Type out_last_dims,
-                            Buffer_Type alpha, Buffer_Type beta,
-                            Result_Type output, Result_Type cublas_workspace,
-                            Result_Type setup_workspace, Result_Type int64_workspace,
-                            GroupedGemmV2Config config) {
+                            Buffer_Type alpha, Buffer_Type beta, Result_Type output,
+                            Result_Type cublas_workspace, Result_Type setup_workspace,
+                            Result_Type int64_workspace, GroupedGemmV2Config config) {
   auto [lhs_is_trans, rhs_is_trans, scaling_mode] = config;
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
@@ -697,29 +695,40 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
 
   // Determine which group_sizes buffers are active (non-empty = ragged dimension).
   bool is_lhs_first_ragged = lhs_first_dims.element_count() > 0;
-  bool is_lhs_last_ragged  = lhs_last_dims.element_count() > 0;
+  bool is_lhs_last_ragged = lhs_last_dims.element_count() > 0;
   bool is_rhs_first_ragged = rhs_first_dims.element_count() > 0;
-  bool is_rhs_last_ragged  = rhs_last_dims.element_count() > 0;
+  bool is_rhs_last_ragged = rhs_last_dims.element_count() > 0;
   bool is_out_first_ragged = out_first_dims.element_count() > 0;
-  bool is_out_last_ragged  = out_last_dims.element_count() > 0;
+  bool is_out_last_ragged = out_last_dims.element_count() > 0;
   bool is_lhs_ragged = is_lhs_first_ragged || is_lhs_last_ragged;
   bool is_rhs_ragged = is_rhs_first_ragged || is_rhs_last_ragged;
-  bool any_ragged    = is_lhs_ragged || is_rhs_ragged;
+  bool any_ragged = is_lhs_ragged || is_rhs_ragged;
 
   size_t num_gemms;
-  if      (is_lhs_first_ragged) num_gemms = lhs_first_dims.dimensions()[0];
-  else if (is_lhs_last_ragged)  num_gemms = lhs_last_dims.dimensions()[0];
-  else if (is_rhs_first_ragged) num_gemms = rhs_first_dims.dimensions()[0];
-  else if (is_rhs_last_ragged)  num_gemms = rhs_last_dims.dimensions()[0];
-  else if (is_out_first_ragged) num_gemms = out_first_dims.dimensions()[0];
-  else if (is_out_last_ragged)  num_gemms = out_last_dims.dimensions()[0];
-  else                          num_gemms = alpha.element_count();  // batched: no ragged tensor
+  if (is_lhs_first_ragged)
+    num_gemms = lhs_first_dims.dimensions()[0];
+  else if (is_lhs_last_ragged)
+    num_gemms = lhs_last_dims.dimensions()[0];
+  else if (is_rhs_first_ragged)
+    num_gemms = rhs_first_dims.dimensions()[0];
+  else if (is_rhs_last_ragged)
+    num_gemms = rhs_last_dims.dimensions()[0];
+  else if (is_out_first_ragged)
+    num_gemms = out_first_dims.dimensions()[0];
+  else if (is_out_last_ragged)
+    num_gemms = out_last_dims.dimensions()[0];
+  else
+    num_gemms = alpha.element_count();  // batched: no ragged tensor
 
   const Buffer_Type *active_gs_ptr = nullptr;
-  if      (is_lhs_first_ragged) active_gs_ptr = &lhs_first_dims;
-  else if (is_lhs_last_ragged)  active_gs_ptr = &lhs_last_dims;
-  else if (is_rhs_first_ragged) active_gs_ptr = &rhs_first_dims;
-  else if (is_rhs_last_ragged)  active_gs_ptr = &rhs_last_dims;
+  if (is_lhs_first_ragged)
+    active_gs_ptr = &lhs_first_dims;
+  else if (is_lhs_last_ragged)
+    active_gs_ptr = &lhs_last_dims;
+  else if (is_rhs_first_ragged)
+    active_gs_ptr = &rhs_first_dims;
+  else if (is_rhs_last_ragged)
+    active_gs_ptr = &rhs_last_dims;
 
   // lhs_data and rhs_data are 2D; derive m, n, k from buffer dimensions.
   NVTE_CHECK(lhs_data.dimensions().size() == 2, "lhs_data must be 2D.");
@@ -754,9 +763,8 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
     NVTE_CHECK(active_gs_ptr != nullptr, "active_gs_ptr is null but any_ragged is true.");
     NVTE_CHECK(active_gs_ptr->element_type() == xla::ffi::DataType::S32,
                "group_sizes must be int32.");
-    nvte_convert_int32_to_int64(
-        reinterpret_cast<const int32_t *>(active_gs_ptr->untyped_data()), int64_sizes_ptr,
-        num_gemms, stream);
+    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t *>(active_gs_ptr->untyped_data()),
+                                int64_sizes_ptr, num_gemms, stream);
   }
 
   NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
@@ -961,8 +969,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                           Buffer_Type lhs_first_dims, Buffer_Type lhs_last_dims,
                           Buffer_Type rhs_first_dims, Buffer_Type rhs_last_dims,
                           Buffer_Type out_first_dims, Buffer_Type out_last_dims,
-                          Buffer_Type group_offset,
-                          Result_Type output, Result_Type workspace,
+                          Buffer_Type group_offset, Result_Type output, Result_Type workspace,
                           GroupedGemmConfig config) {
   auto [lhs_is_trans, rhs_is_trans, scaling_mode, has_bias, use_async_d2h_group_sizes] = config;
   // Notes on matrix layouts and transpose:
@@ -983,25 +990,34 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   // Determine which group_sizes buffers are active (non-empty = ragged dimension).
   bool is_lhs_first_ragged = lhs_first_dims.element_count() > 0;
-  bool is_lhs_last_ragged  = lhs_last_dims.element_count() > 0;
+  bool is_lhs_last_ragged = lhs_last_dims.element_count() > 0;
   bool is_rhs_first_ragged = rhs_first_dims.element_count() > 0;
-  bool is_rhs_last_ragged  = rhs_last_dims.element_count() > 0;
+  bool is_rhs_last_ragged = rhs_last_dims.element_count() > 0;
   bool is_lhs_ragged = is_lhs_first_ragged || is_lhs_last_ragged;
   bool is_rhs_ragged = is_rhs_first_ragged || is_rhs_last_ragged;
-  bool any_ragged    = is_lhs_ragged || is_rhs_ragged;
+  bool any_ragged = is_lhs_ragged || is_rhs_ragged;
 
   size_t num_gemms;
-  if      (is_lhs_first_ragged) num_gemms = lhs_first_dims.dimensions()[0];
-  else if (is_lhs_last_ragged)  num_gemms = lhs_last_dims.dimensions()[0];
-  else if (is_rhs_first_ragged) num_gemms = rhs_first_dims.dimensions()[0];
-  else if (is_rhs_last_ragged)  num_gemms = rhs_last_dims.dimensions()[0];
-  else                          num_gemms = 1;  // degenerate batched; legacy batched not a tested use case
+  if (is_lhs_first_ragged)
+    num_gemms = lhs_first_dims.dimensions()[0];
+  else if (is_lhs_last_ragged)
+    num_gemms = lhs_last_dims.dimensions()[0];
+  else if (is_rhs_first_ragged)
+    num_gemms = rhs_first_dims.dimensions()[0];
+  else if (is_rhs_last_ragged)
+    num_gemms = rhs_last_dims.dimensions()[0];
+  else
+    num_gemms = 1;  // degenerate batched; legacy batched not a tested use case
 
   const Buffer_Type *active_gs_ptr = nullptr;
-  if      (is_lhs_first_ragged) active_gs_ptr = &lhs_first_dims;
-  else if (is_lhs_last_ragged)  active_gs_ptr = &lhs_last_dims;
-  else if (is_rhs_first_ragged) active_gs_ptr = &rhs_first_dims;
-  else if (is_rhs_last_ragged)  active_gs_ptr = &rhs_last_dims;
+  if (is_lhs_first_ragged)
+    active_gs_ptr = &lhs_first_dims;
+  else if (is_lhs_last_ragged)
+    active_gs_ptr = &lhs_last_dims;
+  else if (is_rhs_first_ragged)
+    active_gs_ptr = &rhs_first_dims;
+  else if (is_rhs_last_ragged)
+    active_gs_ptr = &rhs_last_dims;
 
   // lhs_data and rhs_data are 2D; derive m, n, k from buffer dimensions.
   NVTE_CHECK(lhs_data.dimensions().size() == 2, "lhs_data must be 2D.");
@@ -1126,8 +1142,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                  " does not match the return of GroupedGemmGetGroupSizes ", host_num_gemms, ".");
     } else {
       NVTE_CHECK(active_gs_ptr != nullptr, "active_gs_ptr is null but any_ragged is true.");
-      auto gs_data_ptr =
-          reinterpret_cast<const int32_t *>(active_gs_ptr->untyped_data());
+      auto gs_data_ptr = reinterpret_cast<const int32_t *>(active_gs_ptr->untyped_data());
       cudaMemcpyAsync(dim_list_host.data(), gs_data_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
                       stream);
       // Note: This may break cudaGraph.
