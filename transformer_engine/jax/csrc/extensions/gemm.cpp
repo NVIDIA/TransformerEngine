@@ -559,13 +559,17 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
   return std::move(grouped_tensor_wrapper);
 }
 
-// V2 variant: derives data shape from the 2D XLA buffer directly, converts group_sizes
-// int32→int64 per-tensor into int64_workspace, and wires first_dims/last_dims.
-// Only NO_SCALING is supported.
+// V2 variant: derives data shape from the XLA buffer directly, converts group_sizes
+// int32→int64 per-tensor into a dedicated slot of int64_workspace, and wires first_dims/last_dims.
+// int64_offset (in int64 elements) is updated on return to the next available slot so callers can
+// thread it through successive make_grouped_tensor calls without aliasing.  Bounds are checked
+// before each slot is used.  Only NO_SCALING is supported.
 JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
                                               Buffer_Type const &first_dims,
                                               Buffer_Type const &last_dims,
-                                              Result_Type int64_workspace,
+                                              int64_t *int64_workspace_base,
+                                              size_t int64_workspace_capacity,
+                                              size_t &int64_offset,
                                               size_t num_gemms,
                                               cudaStream_t stream) {
   auto dims = data.dimensions();
@@ -577,22 +581,27 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
                       .ndim = 2};
   JAXX_GroupedTensorWrapper wrapper(JAXX_Scaling_Mode::NO_SCALING, num_gemms, dataShape);
   wrapper.set_rowwise(data, std::nullopt);
-  auto *int64_sizes_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
   if (first_dims.element_count() > 0) {
     NVTE_CHECK(first_dims.element_type() == xla::ffi::DataType::S32,
                "group_sizes must be int32.");
+    NVTE_CHECK(int64_offset + num_gemms <= int64_workspace_capacity,
+               "int64_workspace overflow: not enough space for first_dims conversion.");
+    auto *slot = int64_workspace_base + int64_offset;
     nvte_convert_int32_to_int64(
-        reinterpret_cast<const int32_t *>(first_dims.untyped_data()),
-        int64_sizes_ptr, num_gemms, stream);
-    wrapper.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedFirstDims);
+        reinterpret_cast<const int32_t *>(first_dims.untyped_data()), slot, num_gemms, stream);
+    wrapper.set_group_sizes_only(slot, num_gemms, kNVTEGroupedFirstDims);
+    int64_offset += num_gemms;
   }
   if (last_dims.element_count() > 0) {
     NVTE_CHECK(last_dims.element_type() == xla::ffi::DataType::S32,
                "group_sizes must be int32.");
+    NVTE_CHECK(int64_offset + num_gemms <= int64_workspace_capacity,
+               "int64_workspace overflow: not enough space for last_dims conversion.");
+    auto *slot = int64_workspace_base + int64_offset;
     nvte_convert_int32_to_int64(
-        reinterpret_cast<const int32_t *>(last_dims.untyped_data()),
-        int64_sizes_ptr, num_gemms, stream);
-    wrapper.set_group_sizes_only(int64_sizes_ptr, num_gemms, kNVTEGroupedLastDims);
+        reinterpret_cast<const int32_t *>(last_dims.untyped_data()), slot, num_gemms, stream);
+    wrapper.set_group_sizes_only(slot, num_gemms, kNVTEGroupedLastDims);
+    int64_offset += num_gemms;
   }
   return wrapper;
 }
@@ -770,13 +779,21 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             convert_ffi_datatype_to_te_dtype(beta.element_type()));
 
   // Build grouped tensors from XLA buffer shapes and group_sizes — no m/n/k derivation needed.
-  // int32→int64 conversion for group_sizes is handled per-tensor inside make_grouped_tensor.
+  // int64_workspace is partitioned into per-ragged-buffer slots of num_gemms int64 elements each.
+  // int64_offset is threaded through the three make_grouped_tensor calls so each non-empty *_dims
+  // buffer gets its own non-aliasing slot; bounds are checked inside make_grouped_tensor.
+  auto *int64_base = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
+  size_t int64_capacity = int64_workspace->element_count() / sizeof(int64_t);
+  size_t int64_offset = 0;
   auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims,
-                                        int64_workspace, num_gemms, stream);
+                                        int64_base, int64_capacity, int64_offset, num_gemms,
+                                        stream);
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims,
-                                        int64_workspace, num_gemms, stream);
+                                        int64_base, int64_capacity, int64_offset, num_gemms,
+                                        stream);
   auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims,
-                                        int64_workspace, num_gemms, stream);
+                                        int64_base, int64_capacity, int64_offset, num_gemms,
+                                        stream);
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),

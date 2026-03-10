@@ -1549,7 +1549,24 @@ class GroupedGemmPrimitive(BasePrimitive):
                 shape=(get_grouped_gemm_setup_workspace_size(num_groups),), dtype=jnp.uint8
             )
             # Temporary buffer for int32 -> int64 conversion of group_sizes on device.
-            int64_workspace_size = num_groups * jnp.dtype(jnp.int64).itemsize
+            # Each non-empty *_dims buffer needs its own slot of num_groups int64 elements so that
+            # make_grouped_tensor can write to a distinct region per ragged dimension.  Allocate
+            # exactly as many slots as there are non-empty buffers (minimum 1 to avoid zero-size).
+            num_ragged_dim_buffers = sum(
+                1
+                for aval in [
+                    lhs_first_dims_aval,
+                    lhs_last_dims_aval,
+                    rhs_first_dims_aval,
+                    rhs_last_dims_aval,
+                    out_first_dims_aval,
+                    out_last_dims_aval,
+                ]
+                if aval.size > 0
+            )
+            int64_workspace_size = (
+                max(num_ragged_dim_buffers, 1) * num_groups * jnp.dtype(jnp.int64).itemsize
+            )
             int64_workspace_aval = jax.core.ShapedArray(
                 shape=(int64_workspace_size,), dtype=jnp.uint8
             )
