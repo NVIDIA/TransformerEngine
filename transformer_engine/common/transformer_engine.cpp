@@ -1358,3 +1358,19 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor) 
   const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
   return t.logical_shape;
 }
+
+void nvte_set_grouped_tensor_swizzled_scales(NVTEGroupedTensor tensor, uint8_t val) {
+  if (tensor == nullptr) {
+    return;
+  }
+  auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+  t.with_gemm_swizzled_scales = (val != 0);
+}
+
+uint8_t nvte_get_grouped_tensor_swizzled_scales(const NVTEGroupedTensor tensor) {
+  if (tensor == nullptr) {
+    return 0;
+  }
+  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+  return t.with_gemm_swizzled_scales ? 1 : 0;
+}
