@@ -693,9 +693,9 @@ def test_dump_tensors_sanity(feature_dirs):
 
         dump_files = os.listdir(dump_dir)
         assert len(dump_files) == 1, f"Expected 1 dump file, got {len(dump_files)}"
-        assert dump_files[0] == "test_layer_activation_iter_000000.pt", (
-            f"Unexpected dump filename: {dump_files[0]}"
-        )
+        assert (
+            dump_files[0] == "test_layer_activation_iter_000000.pt"
+        ), f"Unexpected dump filename: {dump_files[0]}"
 
         # Load and verify structure
         dump_file = os.path.join(dump_dir, dump_files[0])
