@@ -407,6 +407,48 @@ def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
             )
 
 
+def _reorder_tpsp_leading(tensor, original_shape):
+    """Reorder tensor so the tpsp axis is leading: reshape (dp, n, tpsp, m, ...), transpose (2, 0, 1, 3, ...)."""
+    assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+        f"Original_shape[0]={original_shape[0]} is not divisible by"
+        f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+    )
+    assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+        f"Original_shape[1]={original_shape[1]} is not divisible by"
+        f" tpsp_axis_size()={tpsp_axis_size()}"
+    )
+    reshaped = tensor.reshape(
+        dp_or_fsdp_axis_size(),
+        int(original_shape[0] / dp_or_fsdp_axis_size()),
+        tpsp_axis_size(),
+        int(original_shape[1] / tpsp_axis_size()),
+        *original_shape[2:],
+    )
+    reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
+    return reordered.reshape(original_shape)
+
+
+def _reorder_dp_leading(tensor, original_shape):
+    """Reorder tensor so the dp axis is leading: reshape (tpsp, dp, n, m, ...), transpose (1, 2, 0, 3, ...)."""
+    assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+        f"Original_shape[0]={original_shape[0]} is not divisible by"
+        f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+    )
+    assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+        f"Original_shape[1]={original_shape[1]} is not divisible by"
+        f" tpsp_axis_size()={tpsp_axis_size()}"
+    )
+    reshaped = tensor.reshape(
+        tpsp_axis_size(),
+        dp_or_fsdp_axis_size(),
+        int(original_shape[0] / dp_or_fsdp_axis_size()),
+        int(original_shape[1] / tpsp_axis_size()),
+        *original_shape[2:],
+    )
+    reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
+    return reordered.reshape(original_shape)
+
+
 class GemmPrimitive(BasePrimitive):
     """
     Primitive for cuBLAS GEMM
@@ -658,28 +700,8 @@ class GemmPrimitive(BasePrimitive):
             and not is_outer
             and not lhs.shape[0] == 1
         ):
-            if sequence_dim != 1:
-                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
-            original_shape = lhs.shape
-            if original_shape[0] % dp_or_fsdp_axis_size() != 0 and original_shape[0] != 1:
-                raise ValueError(
-                    f"Original_shape[0]={original_shape[0]} is not divisible by"
-                    f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-                )
-            if original_shape[1] % tpsp_axis_size() != 0 and original_shape[1] != 1:
-                raise ValueError(
-                    f"Original_shape[1]={original_shape[1]} is not divisible by"
-                    f" tpsp_axis_size()={tpsp_axis_size()}"
-                )
-            reshaped = lhs.reshape(
-                dp_or_fsdp_axis_size(),
-                int(original_shape[0] / dp_or_fsdp_axis_size()),
-                tpsp_axis_size(),
-                int(original_shape[1] / tpsp_axis_size()),
-                *original_shape[2:],
-            )
-            reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
-            lhs = reordered.reshape(original_shape)
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            lhs = _reorder_tpsp_leading(lhs, lhs.shape)
 
         if (
             collective_op.is_all_gather
@@ -688,26 +710,8 @@ class GemmPrimitive(BasePrimitive):
             and not lhs_scale_inv.shape[0] == 1
             and scaling_mode.is_1d_block_scaling()
         ):
-
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
-            original_shape = lhs_scale_inv.shape
-            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
-                f"Original_shape[0]={original_shape[0]} is not divisible by"
-                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-            )
-            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
-                f"Original_shape[1]={original_shape[1]} is not divisible by"
-                f" tpsp_axis_size()={tpsp_axis_size()}"
-            )
-            reshaped = lhs_scale_inv.reshape(
-                dp_or_fsdp_axis_size(),
-                int(original_shape[0] / dp_or_fsdp_axis_size()),
-                tpsp_axis_size(),
-                int(original_shape[1] / tpsp_axis_size()),
-                *original_shape[2:],
-            )
-            reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
-            lhs_scale_inv = reordered.reshape(original_shape)
+            lhs_scale_inv = _reorder_tpsp_leading(lhs_scale_inv, lhs_scale_inv.shape)
 
         (output, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
@@ -733,28 +737,8 @@ class GemmPrimitive(BasePrimitive):
             and not is_outer
             and not output.shape[0] == 1
         ):
-            if sequence_dim != 1:
-                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
-            original_shape = output.shape
-            if original_shape[0] % dp_or_fsdp_axis_size() != 0 and original_shape[0] != 1:
-                raise ValueError(
-                    f"Original_shape[0]={original_shape[0]} is not divisible by"
-                    f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-                )
-            if original_shape[1] % tpsp_axis_size() != 0 and original_shape[1] != 1:
-                raise ValueError(
-                    f"Original_shape[1]={original_shape[1]} is not divisible by"
-                    f" tpsp_axis_size()={tpsp_axis_size()}"
-                )
-            reshaped = output.reshape(
-                tpsp_axis_size(),
-                dp_or_fsdp_axis_size(),
-                int(original_shape[0] / dp_or_fsdp_axis_size()),
-                int(original_shape[1] / tpsp_axis_size()),
-                *original_shape[2:],
-            )
-            reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
-            output = reordered.reshape(original_shape)
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            output = _reorder_dp_leading(output, output.shape)
 
         return (output,)
 
