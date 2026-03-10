@@ -371,12 +371,12 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
  *  \param[in]  A_list           List of A tensors (length = num_tensors).
  *  \param[in]  num_a_tensors    Number of tensors in A_list.
  */
- void nvte_grouped_gemm_with_discrete_in(const NVTETensor *A_list, size_t num_a_tensors, int transa,
-  const NVTEGroupedTensor B, int transb,
-  const NVTEGroupedTensor C, NVTEGroupedTensor D,
-  const NVTETensor alpha, const NVTETensor beta,
-  NVTETensor workspace_setup, NVTETensor workspace_cublas,
-  NVTEGroupedMatmulConfig config, cudaStream_t stream);
+void nvte_grouped_gemm_with_discrete_in(const NVTETensor *A_list, size_t num_a_tensors, int transa,
+                                        const NVTEGroupedTensor B, int transb,
+                                        const NVTEGroupedTensor C, NVTEGroupedTensor D,
+                                        const NVTETensor alpha, const NVTETensor beta,
+                                        NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                        NVTEGroupedMatmulConfig config, cudaStream_t stream);
 
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Grouped matrix multiplication with discrete output tensors.
@@ -391,12 +391,12 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
 *  \param[in]  num_d_tensors    Number of tensors in D_list.
 */
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
-   const NVTEGroupedTensor B, int transb,
-   const NVTETensor *C_list, size_t num_c_tensors,
-   NVTETensor *D_list, size_t num_d_tensors,
-   const NVTETensor alpha, const NVTETensor beta,
-   NVTETensor workspace_setup, NVTETensor workspace_cublas,
-   NVTEGroupedMatmulConfig config, cudaStream_t stream);
+                                         const NVTEGroupedTensor B, int transb,
+                                         const NVTETensor *C_list, size_t num_c_tensors,
+                                         NVTETensor *D_list, size_t num_d_tensors,
+                                         const NVTETensor alpha, const NVTETensor beta,
+                                         NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                         NVTEGroupedMatmulConfig config, cudaStream_t stream);
 
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
                            cudaStream_t stream);
