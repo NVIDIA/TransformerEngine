@@ -28,16 +28,14 @@ from common import (
     _create_mesh,
     DP_AXIS,
     TPSP_AXIS,
-    PARAMS_KEY,
     cgemm_parser,
     get_quantization_recipe_from_name_string,
-    get_scaling_mode_from_recipe_name,
 )
 
 import transformer_engine.jax.cpp_extensions as tex
 from transformer_engine.jax.quantize import (
     autocast,
-    is_scaling_mode_supported,
+    is_quantize_recipe_supported,
     QuantizerFactory,
     noop_quantizer_set,
 )
@@ -213,9 +211,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_delayed_scaling_fp8_all_gather_with_dp(self):
         """Test Collective GEMM with FP8 DelayedScaling + AllGather"""
         self.args.quantize_recipe = "DelayedScaling"
-        is_supported, reason = is_scaling_mode_supported(
-            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
-        )
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
         if not is_supported:
             self.skipTest(reason)
 
@@ -225,9 +221,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_delayed_scaling_fp8_reduce_scatter_with_dp(self):
         """Test Collective GEMM with FP8 DelayedScaling + ReduceScatter"""
         self.args.quantize_recipe = "DelayedScaling"
-        is_supported, reason = is_scaling_mode_supported(
-            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
-        )
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
         if not is_supported:
             self.skipTest(reason)
 
@@ -237,9 +231,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_current_scaling_fp8_all_gather_with_dp(self):
         """Test Collective GEMM with FP8 Float8CurrentScaling + AllGather"""
         self.args.quantize_recipe = "Float8CurrentScaling"
-        is_supported, reason = is_scaling_mode_supported(
-            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
-        )
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
         if not is_supported:
             self.skipTest(reason)
 
@@ -249,9 +241,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_current_scaling_fp8_reduce_scatter_with_dp(self):
         """Test Collective GEMM with FP8 Float8CurrentScaling + ReduceScatter"""
         self.args.quantize_recipe = "Float8CurrentScaling"
-        is_supported, reason = is_scaling_mode_supported(
-            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
-        )
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
         if not is_supported:
             self.skipTest(reason)
 
@@ -261,9 +251,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_mxfp8_all_gather_with_dp(self):
         """Test Collective GEMM with MXFP8BlockScaling + AllGather"""
         self.args.quantize_recipe = "MXFP8BlockScaling"
-        is_supported, reason = is_scaling_mode_supported(
-            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
-        )
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
         if not is_supported:
             self.skipTest(reason)
 
@@ -273,9 +261,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_mxfp8_reduce_scatter_with_dp(self):
         """Test Collective GEMM with MXFP8BlockScaling + ReduceScatter"""
         self.args.quantize_recipe = "MXFP8BlockScaling"
-        is_supported, reason = is_scaling_mode_supported(
-            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
-        )
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
         if not is_supported:
             self.skipTest(reason)
 
@@ -285,7 +271,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     # def test_te_nvfp4_all_gather_with_dp(self):
     #     """Test Collective GEMM with NVFP4BlockScaling + AllGather"""
     #     self.args.quantize_recipe = "NVFP4BlockScaling"
-    #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+    #     is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
     #     if not is_supported:
     #         self.skipTest(reason)
     #     self.args.collective_type = "all_gather"
@@ -294,7 +280,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     # def test_te_nvfp4_reduce_scatter_with_dp(self):
     #     """Test Collective GEMM with NVFP4BlockScaling + ReduceScatter"""
     #     self.args.quantize_recipe = "NVFP4BlockScaling"
-    #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+    #     is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
     #     if not is_supported:
     #         self.skipTest(reason)
     #     self.args.collective_type = "reduce_scatter"

@@ -19,17 +19,15 @@ from common import (
     _create_mesh,
     DP_AXIS,
     TPSP_AXIS,
-    PARAMS_KEY,
     cgemm_parser,
     get_quantization_recipe_from_name_string,
-    get_scaling_mode_from_recipe_name,
 )
 
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
 from transformer_engine.jax.quantize import (
     autocast,
-    is_scaling_mode_supported,
+    is_quantize_recipe_supported,
     QuantizerFactory,
     noop_quantizer_set,
 )
@@ -269,9 +267,7 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
     def test_te_delayed_scaling_fp8_layernorm_mlp_grad(self):
         """Test Collective LayerNorm MLP Gradient with FP8 DelayedScaling"""
         self.args.quantize_recipe = "DelayedScaling"
-        is_supported, reason = is_scaling_mode_supported(
-            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
-        )
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
         if not is_supported:
             self.skipTest(reason)
 
@@ -280,9 +276,7 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
     def test_te_current_scaling_fp8_layernorm_mlp_grad(self):
         """Test Collective LayerNorm MLP Gradient with FP8 Float8CurrentScaling"""
         self.args.quantize_recipe = "Float8CurrentScaling"
-        is_supported, reason = is_scaling_mode_supported(
-            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
-        )
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
         if not is_supported:
             self.skipTest(reason)
 
@@ -291,9 +285,7 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
     def test_te_mxfp8_layernorm_mlp_grad(self):
         """Test Collective LayerNorm MLP Gradient with MXFP8BlockScaling"""
         self.args.quantize_recipe = "MXFP8BlockScaling"
-        is_supported, reason = is_scaling_mode_supported(
-            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
-        )
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
         if not is_supported:
             self.skipTest(reason)
         run_layernorm_mlp_grad_tests(self.args, self.mesh)
@@ -301,7 +293,7 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
     # def test_te_nvfp4_layernorm_mlp_grad(self):
     #     """Test Collective LayerNorm MLP Gradient with NVFP4BlockScaling"""
     #     self.args.quantize_recipe = "NVFP4BlockScaling"
-    #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+    #     is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
     #     if not is_supported:
     #         self.skipTest(reason)
     #     run_layernorm_mlp_grad_tests(self.args, self.mesh)

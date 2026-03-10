@@ -1,20 +1,24 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Shared functions for the comm_overlap tests"""
+"""Shared functions for the collective GEMM tests"""
 
+import argparse
+
+import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.experimental import mesh_utils
+
+from transformer_engine.common import recipe as te_recipe
+from transformer_engine.jax.cpp_extensions.gemm import collective_gemm_bootstrap
 
 
-# Add this after your existing imports
 def dtype_tols(dtype, rtol=None, atol=None):
     """Expected numerical tolerance for a data type."""
-    # Return immediately if tolerances are fully specified
     if rtol is not None and atol is not None:
         return {"rtol": rtol, "atol": atol}
 
-    # Default tolerances for common dtypes
     if dtype in [jnp.float32, "float32"]:
         return {"rtol": 1e-5, "atol": 1e-8}
     elif dtype in [jnp.float16, "float16"]:
@@ -39,23 +43,11 @@ def get_tolerance_dtype(quantizer_set):
     return jnp.bfloat16
 
 
-def assert_allclose(
-    actual,
-    desired,
-    rtol=None,
-    atol=None,
-    dtype=None,
-    **kwargs,
-):
+def assert_allclose(actual, desired, rtol=None, atol=None, dtype=None, **kwargs):
     """Check if two tensors are close."""
-    # Infer data type if needed
     if dtype is None:
-        if isinstance(actual, float):
-            dtype = "float32"
-        else:
-            dtype = actual.dtype
+        dtype = "float32" if isinstance(actual, float) else actual.dtype
 
-    # Determine tolerances
     tols = {}
     if rtol is None or atol is None:
         tols = dtype_tols(dtype)
@@ -64,51 +56,26 @@ def assert_allclose(
     if atol is not None:
         tols["atol"] = atol
 
-    # Cast tensors to fp32
     if not isinstance(actual, float):
         actual = actual.astype(jnp.float32)
     if not isinstance(desired, float):
         desired = desired.astype(jnp.float32)
 
-    # Check if tensors are close
     np.testing.assert_allclose(actual, desired, **tols, **kwargs)
 
 
-def assert_allclose_print_index(ref_output, gathered_output, rtol=1e-5, atol=1e-8):
-    if not jnp.allclose(ref_output, gathered_output, rtol=rtol, atol=atol):
-        diff = jnp.abs(ref_output - gathered_output)
-        mask = diff > (atol + rtol * jnp.abs(gathered_output))
-        print(mask.astype(int))
-        print(jnp.where(mask, diff, 0))
-
-
-# Shared constants for all tests
+# Shared constants
 DP_AXIS = "data"
 TPSP_AXIS = "tensor_sequence"
-PARAMS_KEY = "params"
-
-# Shared functions for distributed testing
-import argparse
-import jax
-from jax.experimental import mesh_utils
-from transformer_engine.common import recipe as te_recipe
-from transformer_engine.jax.quantize import ScalingMode
-from transformer_engine.jax.cpp_extensions.gemm import collective_gemm_bootstrap
 
 # Global flag to track if distributed has been initialized
 _distributed_initialized = False
-
-
-def _is_distributed_initialized():
-    """Check if JAX distributed has been initialized."""
-    return _distributed_initialized
 
 
 def _initialize_distributed(args):
     """Initialize JAX distributed with custom arguments."""
     global _distributed_initialized
 
-    # Check if already initialized
     if _distributed_initialized:
         return
 
@@ -121,14 +88,10 @@ def _initialize_distributed(args):
         assert (
             args.num_devices_per_process is not None
         ), "Either local_device_ids or num_devices_per_process must be provided"
-        # Calculate device range for this process
-        # Single process single device: each process gets one unique device
-        # Single process multiple devices: each process gets a unique range of devices
         start_device = args.process_id * args.num_devices_per_process
         device_range = range(start_device, start_device + args.num_devices_per_process)
         global_device_ids_for_this_process = ",".join(map(str, device_range))
     else:
-        # Use explicitly provided global device IDs
         global_device_ids_for_this_process = args.local_device_ids
         args.num_devices_per_process = len(args.local_device_ids.split(","))
 
@@ -199,30 +162,15 @@ def _create_mesh(args):
     return mesh
 
 
-def get_scaling_mode_from_recipe_name(name: str) -> ScalingMode:
-    """Get ScalingMode from a recipe name string."""
-    match name:
-        case "DelayedScaling":
-            return ScalingMode.DELAYED_TENSOR_SCALING
-        case "Float8CurrentScaling":
-            return ScalingMode.CURRENT_TENSOR_SCALING
-        case "MXFP8BlockScaling":
-            return ScalingMode.MXFP8_1D_SCALING
-        case "NVFP4BlockScaling":
-            return ScalingMode.NVFP4_1D_SCALING
-        case _:
-            raise ValueError(f"Invalid recipe name, got {name}")
-
-
 def get_quantization_recipe_from_name_string(name: str):
-    """Query recipe from a given name string"""
+    """Return a recipe object from a recipe name string."""
     match name:
         case "DelayedScaling":
             return te_recipe.DelayedScaling()
-        case "MXFP8BlockScaling":
-            return te_recipe.MXFP8BlockScaling()
         case "Float8CurrentScaling":
             return te_recipe.Float8CurrentScaling()
+        case "MXFP8BlockScaling":
+            return te_recipe.MXFP8BlockScaling()
         case "NVFP4BlockScaling":
             return te_recipe.NVFP4BlockScaling()
         case _:

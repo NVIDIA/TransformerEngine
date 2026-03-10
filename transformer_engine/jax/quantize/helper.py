@@ -51,6 +51,7 @@ __all__ = [
     "fp8_autocast",
     "is_fp8_available",
     "is_scaling_mode_supported",
+    "is_quantize_recipe_supported",
     "get_supported_scaling_modes",
     "get_supported_quantization_recipes",
     "update_collections",
@@ -160,6 +161,32 @@ def is_scaling_mode_supported(
                 _reason_for_no_scaling_mode[scaling_mode] = msg
                 return ret, msg
     return _is_scaling_mode_supported[scaling_mode], _reason_for_no_scaling_mode[scaling_mode]
+
+
+_RECIPE_NAME_TO_SCALING_MODE = {
+    "DelayedScaling": ScalingMode.DELAYED_TENSOR_SCALING,
+    "Float8CurrentScaling": ScalingMode.CURRENT_TENSOR_SCALING,
+    "MXFP8BlockScaling": ScalingMode.MXFP8_1D_SCALING,
+    "NVFP4BlockScaling": ScalingMode.NVFP4_1D_SCALING,
+}
+
+
+def is_quantize_recipe_supported(recipe_name: str, gpu_id=None) -> Tuple[bool, str]:
+    """Check if the given quantization recipe (by name) is supported on the current GPU.
+
+    Args:
+        recipe_name: Name of the recipe, e.g. "DelayedScaling", "Float8CurrentScaling",
+            "MXFP8BlockScaling", "NVFP4BlockScaling".
+        gpu_id: Optional GPU ID to check a specific device (default: all local devices).
+
+    Returns:
+        A tuple of (supported: bool, reason: str).
+    """
+    scaling_mode = _RECIPE_NAME_TO_SCALING_MODE.get(recipe_name)
+    if scaling_mode is None:
+        valid = list(_RECIPE_NAME_TO_SCALING_MODE)
+        return False, f"Unknown quantization recipe '{recipe_name}'. Valid options: {valid}"
+    return is_scaling_mode_supported(scaling_mode, gpu_id)
 
 
 def is_fp8_available(
