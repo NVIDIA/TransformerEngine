@@ -684,19 +684,27 @@ class GemmPrimitive(BasePrimitive):
             if not collective_op.is_none and not is_outer:
                 # MXFP8 + Collective AG/RS: both sides of flatten_axis must be multiples of 128.
                 # No padding is needed in this case
-                lhs_first, lhs_last = math.prod(lhs.shape[:lhs_flatten_axis]), math.prod(lhs.shape[lhs_flatten_axis:])
+                lhs_first, lhs_last = math.prod(lhs.shape[:lhs_flatten_axis]), math.prod(
+                    lhs.shape[lhs_flatten_axis:]
+                )
                 assert lhs_first % 128 == 0 and lhs_last % 128 == 0, (
-                    f"MXFP8 + Collective AG requires LHS dimensions before and after the flatten axis to be multiples of 128. "
-                    f"Got lhs.shape={lhs.shape}, lhs_flatten_axis={lhs_flatten_axis}"
+                    "MXFP8 + Collective AG requires LHS dimensions before and after the flatten"
+                    f" axis to be multiples of 128. Got lhs.shape={lhs.shape},"
+                    f" lhs_flatten_axis={lhs_flatten_axis}"
                 )
                 # The scale needs to be in good shape for reordering
                 assert lhs_scale_inv.shape[sequence_dim] % tpsp_axis_size() == 0, (
-                    f"MXFP8 + Collective AG/RS requires LHS scale inv sequence dimension to be multiples of tpsp_axis_size. "
-                    f"Got lhs_scale_inv.shape={lhs_scale_inv.shape}, tpsp_axis_size={tpsp_axis_size()}, sequence_dim={sequence_dim}"
+                    "MXFP8 + Collective AG/RS requires LHS scale inv sequence dimension to be"
+                    f" multiples of tpsp_axis_size. Got lhs_scale_inv.shape={lhs_scale_inv.shape},"
+                    f" tpsp_axis_size={tpsp_axis_size()}, sequence_dim={sequence_dim}"
                 )
             else:
                 lhs_scale_inv = apply_padding_to_scale_inv(
-                    lhs_scale_inv, scaling_mode, lhs.shape, lhs_transposed, lhs_flatten_axis,
+                    lhs_scale_inv,
+                    scaling_mode,
+                    lhs.shape,
+                    lhs_transposed,
+                    lhs_flatten_axis,
                 )
                 rhs_scale_inv = apply_padding_to_scale_inv(
                     rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
@@ -715,7 +723,12 @@ class GemmPrimitive(BasePrimitive):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             lhs = _reorder_tpsp_leading(lhs, lhs.shape)
 
-        if need_reorder and (collective_op.is_reduce_scatter or collective_op.is_all_gather) and lhs_scale_inv.shape[0] != 1 and scaling_mode.is_1d_block_scaling():
+        if (
+            need_reorder
+            and (collective_op.is_reduce_scatter or collective_op.is_all_gather)
+            and lhs_scale_inv.shape[0] != 1
+            and scaling_mode.is_1d_block_scaling()
+        ):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             lhs_scale_inv = _reorder_tpsp_leading(lhs_scale_inv, lhs_scale_inv.shape)
 
@@ -974,7 +987,9 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode.is_1d_block_scaling():
             rhs_scale_specs = rhs_specs
             if collective_op.is_all_gather:
-                lhs_scale_specs = tuple(None if i == sequence_dim else s for i, s in enumerate(lhs_specs))
+                lhs_scale_specs = tuple(
+                    None if i == sequence_dim else s for i, s in enumerate(lhs_specs)
+                )
             else:
                 lhs_scale_specs = lhs_specs
 
@@ -1012,7 +1027,11 @@ class GemmPrimitive(BasePrimitive):
         )
 
         (_, out_specs, *_) = GemmPrimitive._parse_operand_output_specs(
-            arg_infos, contracting_dims, transpose_batch_sequence, collective_op, scaling_mode,
+            arg_infos,
+            contracting_dims,
+            transpose_batch_sequence,
+            collective_op,
+            scaling_mode,
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 

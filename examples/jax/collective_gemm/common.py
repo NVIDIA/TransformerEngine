@@ -278,7 +278,12 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
         "--quantize-recipe",
         type=str,
         default=None,
-        choices=["DelayedScaling", "Float8CurrentScaling", "MXFP8BlockScaling", "NVFP4BlockScaling"],
+        choices=[
+            "DelayedScaling",
+            "Float8CurrentScaling",
+            "MXFP8BlockScaling",
+            "NVFP4BlockScaling",
+        ],
         help="Quantization recipe to use. Omit for BF16 (no quantization).",
     )
     parser.add_argument(

@@ -117,7 +117,9 @@ def run_gemm_tests(args, mesh=None):
     )
 
     use_quantization = args.quantize_recipe is not None
-    recipe = get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
+    recipe = (
+        get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
+    )
 
     # autocast sets the global recipe (fwd/bwd dtypes) AND the global MeshResource
     # (via global_shard_guard) required for collective GEMM sharding axis resolution.
@@ -170,7 +172,9 @@ def run_gemm_tests(args, mesh=None):
         jax.block_until_ready(gathered_output)
 
     if args.enable_result_check and args.process_id == 0:
-        assert_allclose(gathered_ref_output, gathered_output, dtype=get_tolerance_dtype(quantizer_set))
+        assert_allclose(
+            gathered_ref_output, gathered_output, dtype=get_tolerance_dtype(quantizer_set)
+        )
 
 
 class TestCollectiveGemmWithDP(unittest.TestCase):
@@ -257,7 +261,9 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_mxfp8_all_gather_with_dp(self):
         """Test Collective GEMM with MXFP8BlockScaling + AllGather"""
         self.args.quantize_recipe = "MXFP8BlockScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
 
@@ -267,7 +273,9 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_mxfp8_reduce_scatter_with_dp(self):
         """Test Collective GEMM with MXFP8BlockScaling + ReduceScatter"""
         self.args.quantize_recipe = "MXFP8BlockScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
 

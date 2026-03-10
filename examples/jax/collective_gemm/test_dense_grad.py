@@ -112,7 +112,9 @@ def run_dense_grad_tests(args, mesh=None):
     collective_op_set = CollectiveOpSet.create(forward_collective_op=collective_op)
 
     use_quantization = args.quantize_recipe is not None
-    recipe = get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
+    recipe = (
+        get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
+    )
     with mesh, autocast(
         enabled=use_quantization,
         recipe=recipe,
@@ -259,7 +261,9 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def test_te_mxfp8_all_gather(self):
         """Test Collective Dense Gradient with MXFP8BlockScaling + AllGather"""
         self.args.quantize_recipe = "MXFP8BlockScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.collective_type = "all_gather"
@@ -268,7 +272,9 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def test_te_mxfp8_reduce_scatter(self):
         """Test Collective Dense Gradient with MXFP8BlockScaling + ReduceScatter"""
         self.args.quantize_recipe = "MXFP8BlockScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         self.args.collective_type = "reduce_scatter"

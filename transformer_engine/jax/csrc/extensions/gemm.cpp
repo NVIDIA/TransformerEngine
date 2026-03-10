@@ -74,8 +74,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
         input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       }
       input.set_with_gemm_swizzled_scales(true);
-    }
-    else if (is_nvfp4) {  // Swizzle for NVFP4
+    } else if (is_nvfp4) {  // Swizzle for NVFP4
       NVTE_CHECK(rowwise, "NVFP4 GEMM expects rowwise for both LHS and RHS");
       input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       // Create tensor to hold swizzled scale factor

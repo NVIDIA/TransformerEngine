@@ -162,7 +162,9 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
     noop_collective_op_sets = (noop_collective_op_set, noop_collective_op_set)
 
     use_quantization = args.quantize_recipe is not None
-    recipe = get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
+    recipe = (
+        get_quantization_recipe_from_name_string(args.quantize_recipe) if use_quantization else None
+    )
     with mesh, autocast(
         enabled=use_quantization,
         recipe=recipe,
@@ -289,7 +291,9 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
     def test_te_mxfp8_layernorm_mlp_grad(self):
         """Test Collective LayerNorm MLP Gradient with MXFP8BlockScaling"""
         self.args.quantize_recipe = "MXFP8BlockScaling"
-        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        is_supported, reason = is_scaling_mode_supported(
+            get_scaling_mode_from_recipe_name(self.args.quantize_recipe)
+        )
         if not is_supported:
             self.skipTest(reason)
         run_layernorm_mlp_grad_tests(self.args, self.mesh)
