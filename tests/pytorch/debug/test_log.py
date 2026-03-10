@@ -709,5 +709,3 @@ def test_dump_tensors_sanity(feature_dirs):
         assert data["high_precision"].shape == tensor.shape, "high_precision shape mismatch"
 
     print("DumpTensors sanity test passed!")
-
-

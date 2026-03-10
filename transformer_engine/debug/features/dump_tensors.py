@@ -262,4 +262,3 @@ class DumpTensors(TEConfigAPIMapper):
                 f"Dumped {tensor_name} at iteration {iteration} (keys: {list(dump_dict.keys())})",
                 layer_name,
             )
-
