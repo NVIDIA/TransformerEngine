@@ -286,16 +286,14 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
 
         run_layernorm_mlp_grad_tests(self.args, self.mesh)
 
-    # TODO: Enable when MXFP8BlockScaling + Collective GEMM is supported
-    # def test_te_mxfp8_layernorm_mlp_grad(self):
-    #     """Test Collective LayerNorm MLP Gradient with MXFP8BlockScaling"""
-    #     self.args.quantize_recipe = "MXFP8BlockScaling"
-    #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
-    #     if not is_supported:
-    #         self.skipTest(reason)
-    #     run_layernorm_mlp_grad_tests(self.args, self.mesh)
+    def test_te_mxfp8_layernorm_mlp_grad(self):
+        """Test Collective LayerNorm MLP Gradient with MXFP8BlockScaling"""
+        self.args.quantize_recipe = "MXFP8BlockScaling"
+        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        if not is_supported:
+            self.skipTest(reason)
+        run_layernorm_mlp_grad_tests(self.args, self.mesh)
 
-    # TODO: Enable when NVFP4BlockScaling + Collective GEMM is supported
     # def test_te_nvfp4_layernorm_mlp_grad(self):
     #     """Test Collective LayerNorm MLP Gradient with NVFP4BlockScaling"""
     #     self.args.quantize_recipe = "NVFP4BlockScaling"

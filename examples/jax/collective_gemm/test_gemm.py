@@ -274,7 +274,6 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.collective_type = "reduce_scatter"
         run_gemm_tests(self.args, self.mesh)
 
-    # TODO: Enable when NVFP4BlockScaling + Collective GEMM is supported
     # def test_te_nvfp4_all_gather_with_dp(self):
     #     """Test Collective GEMM with NVFP4BlockScaling + AllGather"""
     #     self.args.quantize_recipe = "NVFP4BlockScaling"
@@ -284,7 +283,6 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     #     self.args.collective_type = "all_gather"
     #     run_gemm_tests(self.args, self.mesh)
 
-    # TODO: Enable when NVFP4BlockScaling + Collective GEMM is supported
     # def test_te_nvfp4_reduce_scatter_with_dp(self):
     #     """Test Collective GEMM with NVFP4BlockScaling + ReduceScatter"""
     #     self.args.quantize_recipe = "NVFP4BlockScaling"
