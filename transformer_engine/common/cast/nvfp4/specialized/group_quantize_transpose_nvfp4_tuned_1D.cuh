@@ -1055,21 +1055,22 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
              "descriptors (64).");
   switch (shape_rep) {
     case ShapeRepresentation::SAME_BOTH_DIMS: {
-      NVTE_CHECK(first_logical_dim % num_tensors == 0, 
-                 "First logical dimension of a grouped tensor must be divisible by the number of tensors.");
-      NVTE_CHECK((first_logical_dim / num_tensors) % 128 == 0, 
+      NVTE_CHECK(first_logical_dim % num_tensors == 0,
+                 "First logical dimension of a grouped tensor must be divisible by the number of "
+                 "tensors.");
+      NVTE_CHECK((first_logical_dim / num_tensors) % 128 == 0,
                  "First dimension of each tensor in a group must be divisible by 128.");
       break;
     }
     case ShapeRepresentation::VARYING_FIRST_DIM: {
-      NVTE_CHECK(first_logical_dim % 128 == 0, 
+      NVTE_CHECK(first_logical_dim % 128 == 0,
                  "First logical dimension of a grouped tensor must be divisible by 128.");
       break;
     }
     case ShapeRepresentation::VARYING_LAST_DIM: {
-      NVTE_CHECK(first_logical_dim % 128 == 0, 
+      NVTE_CHECK(first_logical_dim % 128 == 0,
                  "First logical dimension of a grouped tensor must be divisible by 128.");
-      NVTE_CHECK(last_logical_dim % 128 == 0, 
+      NVTE_CHECK(last_logical_dim % 128 == 0,
                  "Last logical dimension of a grouped tensor must be divisible by 128.");
       break;
     }
