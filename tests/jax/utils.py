@@ -44,8 +44,8 @@ Initializer = Callable[[PRNGKey, Shape, DType], Array]
 NVTE_DEBUG_NUMERICS = bool(int(os.getenv("NVTE_DEBUG_NUMERICS", 0)))
 
 
-def require_triton():
-    """Skip the current test module if JAX is too old for Triton kernel support."""
+def require_triton_or_skip_test_file():
+    """Skip the current test file if JAX is too old for Triton kernel support (calls pytest.skip)."""
     if not is_triton_extension_supported():
         pytest.skip(
             f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for Triton kernel support. "

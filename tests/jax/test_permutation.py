@@ -16,7 +16,14 @@ from utils import assert_allclose, pytest_parametrize_wrapper
 
 @pytest.fixture(autouse=True, scope="function")
 def _inject_permutation(request):
-    """Lazy-load permutation API only for tests marked 'triton'. Other tests run without importing."""
+    """Lazy-load permutation API only for tests marked 'triton'. Other tests run without importing.
+
+    We inject into sys.modules[__name__] so that test code in this module can use
+    token_dispatch, token_combine, etc. as module-level names. A plain import inside
+    this fixture would only bind those names in the fixture's local scope; the test
+    methods (e.g. in TestHighLevelPermutationAPI) reference them as globals, so they
+    must exist on the module's namespace.
+    """
     if not request.node.get_closest_marker("triton"):
         yield
         return
@@ -25,7 +32,6 @@ def _inject_permutation(request):
         token_combine,
         sort_chunks_by_index,
     )
-
     mod = sys.modules[__name__]
     mod.token_dispatch = token_dispatch
     mod.token_combine = token_combine

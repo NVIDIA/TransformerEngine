@@ -17,7 +17,11 @@ from utils import pytest_parametrize_wrapper
 
 @pytest.fixture(autouse=True, scope="function")
 def _inject_router(request):
-    """Lazy-load router API only for tests marked 'triton'. Other tests run without importing."""
+    """Lazy-load router API only for tests marked 'triton'. Other tests run without importing.
+
+    We inject into sys.modules[__name__] so test code can use fused_topk_with_score_function,
+    fused_moe_aux_loss as module-level names (fixture locals are not visible to tests).
+    """
     if not request.node.get_closest_marker("triton"):
         yield
         return
@@ -25,7 +29,6 @@ def _inject_router(request):
         fused_topk_with_score_function,
         fused_moe_aux_loss,
     )
-
     mod = sys.modules[__name__]
     mod.fused_topk_with_score_function = fused_topk_with_score_function
     mod.fused_moe_aux_loss = fused_moe_aux_loss

@@ -15,7 +15,7 @@ from packaging.version import Version as PkgVersion
 
 
 @lru_cache(maxsize=None)
-def _jax_version_meet_requirement(version: str):
+def jax_version_meet_requirement(version: str):
     """Return True if the installed JAX version is >= the required version."""
     jax_version = PkgVersion(get_pkg_version("jax"))
     jax_version_required = PkgVersion(version)
@@ -33,10 +33,11 @@ def is_triton_extension_supported() -> bool:
     Triton kernels. Use this to skip tests or gate features without importing
     triton_extensions (which would raise immediately on old jax).
     """
-    return _jax_version_meet_requirement(TRITON_EXTENSION_MIN_JAX_VERSION)
+    return jax_version_meet_requirement(TRITON_EXTENSION_MIN_JAX_VERSION)
 
 
 __all__ = [
+    "jax_version_meet_requirement",
     "is_triton_extension_supported",
     "TRITON_EXTENSION_MIN_JAX_VERSION",
 ]

@@ -7,9 +7,9 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from utils import assert_allclose, pytest_parametrize_wrapper, require_triton
+from utils import assert_allclose, pytest_parametrize_wrapper, require_triton_or_skip_test_file
 
-require_triton()
+require_triton_or_skip_test_file()
 
 import triton
 import triton.language as tl
