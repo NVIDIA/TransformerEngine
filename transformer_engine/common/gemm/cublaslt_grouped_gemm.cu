@@ -11,6 +11,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
+#include <type_traits>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
@@ -488,10 +489,13 @@ __global__ void grouped_bias_add_kernel(char *d_base, const char *bias_base, Ten
   auto *d_ptr = reinterpret_cast<T *>(d_base + d_offset * sizeof(T));
   const auto *bias_ptr = reinterpret_cast<const T *>(bias_base + bias_offset * sizeof(T));
 
-  for (int64_t linear = threadIdx.x; linear < m * n; linear += blockDim.x) {
+  const int64_t elements = m * n;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.y;
+  for (int64_t linear = static_cast<int64_t>(blockIdx.y) * blockDim.x + threadIdx.x;
+       linear < elements; linear += stride) {
     const int64_t col = linear % n;
     if (col < bias_n) {
-      d_ptr[linear] += bias_ptr[col];
+      d_ptr[linear] = d_ptr[linear]+ bias_ptr[col];
     }
   }
 }
@@ -717,7 +721,15 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
 
   const DType dtype = outputD->dtype();
   constexpr int kThreads = 256;
-  const dim3 grid(outputD->num_tensors);
+  constexpr int kMaxBlocksPerTensor = 128;
+  const size_t total_elements =
+      static_cast<size_t>(outputD->logical_shape.data[0]) *
+      static_cast<size_t>(outputD->logical_shape.data[1]);
+  const size_t avg_elements = total_elements / outputD->num_tensors;
+  int blocks_per_tensor = static_cast<int>((avg_elements + kThreads - 1) / kThreads);
+  if (blocks_per_tensor < 1) blocks_per_tensor = 1;
+  if (blocks_per_tensor > kMaxBlocksPerTensor) blocks_per_tensor = kMaxBlocksPerTensor;
+  const dim3 grid(outputD->num_tensors, blocks_per_tensor);
   const dim3 block(kThreads);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {

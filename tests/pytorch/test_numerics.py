@@ -4,6 +4,7 @@
 
 import math
 import os
+from torch._tensor import Tensor
 from typing import Dict, List, Tuple, Optional
 import pytest
 import random
@@ -2849,9 +2850,18 @@ def _make_grouped_tensor_uniform(
     )
 
 
+@pytest.mark.parametrize(
+    "z, m, n, k",
+    [
+        (4, 256, 256, 256),
+        (4, 512, 256, 512),
+        (4, 512, 512, 256),
+        (8, 512, 256, 512),
+    ],
+)
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_grouped_gemm_grouped_tensor(layout, accumulate) -> None:
+def test_grouped_gemm_grouped_tensor(z, m, n, k, layout, accumulate) -> None:
     if tex.get_cublasLt_version() < 130200:
         pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
     if torch.cuda.get_device_capability() < (10, 0):
@@ -2861,7 +2871,6 @@ def test_grouped_gemm_grouped_tensor(layout, accumulate) -> None:
 
     torch.manual_seed(0)
 
-    z, m, n, k = (4, 512, 512, 256)
     dtype = torch.bfloat16
 
     split_points = torch.randperm(m - 1)[: z - 1] + 1
@@ -2893,40 +2902,83 @@ def test_grouped_gemm_grouped_tensor(layout, accumulate) -> None:
 
     if accumulate:
         out_ref = [out[i].float() + o for i, o in enumerate(out_ref)]
-    out_ref = [o.to(dtype) for o in out_ref]
 
+    # Bias is applied after GEMM (broadcasted along rows)
+    # Match kernel behavior: GEMM output is already in output dtype when bias is added.
+    out_ref = [o.to(dtype) for o in out_ref]
+    if layout == "TN":
+        bias_last_dim = n
+    else:  # layout == "NT" or "NN"
+        bias_last_dim = k
+    bias = [torch.zeros(1, bias_last_dim, dtype=dtype, device="cuda") * 0.01 for _ in range(z)]
+    # Bias add in grouped kernel accumulates in FP32 for BF16/FP16.
+    out_ref = [(o.float() + b.float()).to(dtype) for o, b in zip(out_ref, bias)]
     # Create grouped tensors based on case
     device = A[0].device
     grouped_A = A
     grouped_out = out
+    grouped_out_bias = None
+    grouped_out_no_bias = None
     if layout == "TN":
         grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)  #
         grouped_B = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)  # input
         grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # output
+        grouped_out_bias = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
+        grouped_out_no_bias = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
     elif layout == "NN":
         grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)  # weight
         grouped_B = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # grad_output
         grouped_out = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+        grouped_out_bias = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+        grouped_out_no_bias = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
     else:  # layout == "NT"
         grouped_A = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)  # input
         grouped_B = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # grad_output
         grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)  # wgrad
+        grouped_out_bias = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+        grouped_out_no_bias = _make_grouped_tensor_uniform(z, n, k, device, dtype)
     _pack_grouped_tensor(grouped_B, B)
     _pack_grouped_tensor(grouped_out, out)
+    _pack_grouped_tensor(grouped_out_bias, out)
+    _pack_grouped_tensor(grouped_out_no_bias, out)
     _pack_grouped_tensor(grouped_A, A)
+
+    grouped_bias = _make_grouped_tensor_uniform(z, 1, bias_last_dim, device, dtype)
+    _pack_grouped_tensor(grouped_bias, bias)
 
     general_grouped_gemm_for_grouped_tensor(
         grouped_A,
         grouped_B,
-        grouped_out,
+        grouped_out_no_bias,
         layout=layout,
         accumulate=accumulate,
+        bias=None,
     )
-    out_grouped = (
-        grouped_out if isinstance(grouped_out, list) else grouped_out.split_into_quantized_tensors()
+    general_grouped_gemm_for_grouped_tensor(
+        grouped_A,
+        grouped_B,
+        grouped_out_bias,
+        layout=layout,
+        accumulate=accumulate,
+        bias=grouped_bias,
     )
+    out_grouped_no_bias = (
+        grouped_out_no_bias
+        if isinstance(grouped_out_no_bias, list)
+        else grouped_out_no_bias.split_into_quantized_tensors()
+    )
+    out_grouped_bias = (
+        grouped_out_bias
+        if isinstance(grouped_out_bias, list)
+        else grouped_out_bias.split_into_quantized_tensors()
+    )
+    out_grouped_manual_bias = [
+        (o.float() + b.float()).to(dtype) for o, b in zip(out_grouped_no_bias, bias)
+    ]
     tols = dtype_tols(dtype)
-    for o, o_ref in zip(out_grouped, out_ref):
+    for o, o_ref in zip(out_grouped_bias, out_ref):
+        torch.testing.assert_close(o, o_ref, **tols)
+    for o, o_ref in zip(out_grouped_bias, out_grouped_manual_bias):
         torch.testing.assert_close(o, o_ref, **tols)
 
 

@@ -150,8 +150,8 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count);
 
 py::object te_general_grouped_gemm_for_grouped_tensor(
-    py::handle A, bool transa, py::handle B, bool transb, py::handle D, at::Tensor alpha,
-    py::object bias, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
+    py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
+    at::Tensor alpha, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
     bool use_split_accumulator, int math_sm_count);
 
 /***************************************************************************************************
