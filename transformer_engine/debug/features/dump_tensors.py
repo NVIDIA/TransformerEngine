@@ -167,7 +167,7 @@ class DumpTensors(TEConfigAPIMapper):
     .. note::
         The ``quantized`` value is a pickled ``QuantizedTensor`` object. Loading it
         (with ``weights_only=False``) requires the same version of TransformerEngine
-        to be installed. For maximum portability, dequantize the tensor before saving.
+        to be installed.
     """
 
     @api_method
