@@ -693,33 +693,15 @@ class GemmPrimitive(BasePrimitive):
             lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
             rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
+        # Determine if we need to reorder the tensor so that the input/output are in the correct layout for the collective operation
+        need_reorder = not transpose_batch_sequence and not is_outer and not collective_op.is_none
+
         # Alter lhs blocks so that CGEMM RS outputs correctly
-        if (
-            collective_op.is_reduce_scatter
-            and not transpose_batch_sequence
-            and not is_outer
-            and not lhs.shape[0] == 1
-        ):
+        if need_reorder and collective_op.is_reduce_scatter and lhs.shape[0] != 1:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             lhs = _reorder_tpsp_leading(lhs, lhs.shape)
 
-        if (
-            collective_op.is_reduce_scatter
-            and not transpose_batch_sequence
-            and not is_outer
-            and not lhs_scale_inv.shape[0] == 1
-            and scaling_mode.is_1d_block_scaling()
-        ):
-            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
-            lhs_scale_inv = _reorder_tpsp_leading(lhs_scale_inv, lhs_scale_inv.shape)
-
-        if (
-            collective_op.is_all_gather
-            and not transpose_batch_sequence
-            and not is_outer
-            and not lhs_scale_inv.shape[0] == 1
-            and scaling_mode.is_1d_block_scaling()
-        ):
+        if need_reorder and (collective_op.is_reduce_scatter or collective_op.is_all_gather) and lhs_scale_inv.shape[0] != 1 and scaling_mode.is_1d_block_scaling():
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             lhs_scale_inv = _reorder_tpsp_leading(lhs_scale_inv, lhs_scale_inv.shape)
 
@@ -741,12 +723,7 @@ class GemmPrimitive(BasePrimitive):
             collective_op=collective_op,
         )
         # Alter output blocks for CGEMM AG
-        if (
-            collective_op.is_all_gather
-            and not transpose_batch_sequence
-            and not is_outer
-            and not output.shape[0] == 1
-        ):
+        if need_reorder and collective_op.is_all_gather and output.shape[0] != 1:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             output = _reorder_dp_leading(output, output.shape)
 
