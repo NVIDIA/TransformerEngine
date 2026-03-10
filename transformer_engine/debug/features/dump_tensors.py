@@ -16,12 +16,7 @@ from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 from transformer_engine.debug.features.utils import next_enabled_iter
-from transformer_engine.pytorch.constants import TE_DType_To_Torch
 from transformer_engine.pytorch.tensor import QuantizedTensor, Quantizer
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
-from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Tensor
 
 
 class TensorLogger:
@@ -119,10 +114,6 @@ class DumpTensors(TEConfigAPIMapper):
         If True, dump the high-precision tensor (before quantization).
     quantized_tensor : bool
         If True, dump the quantized tensor (after quantization).
-    dump_quantized_internals : bool, default = False
-        If True, include extracted internal data from quantized tensors
-        (raw data, scales, etc.) in the output dictionary.
-        Useful for offline analysis. Output format may change between versions.
     tensors/tensors_struct : List[str]
         list of tensors to dump:
             - activation
@@ -156,7 +147,6 @@ class DumpTensors(TEConfigAPIMapper):
                         - tensor: activation
                           high_precision_tensor: True
                           quantized_tensor: True
-                          dump_quantized_internals: True
                           freq: 100
                         - tensor: weight
                           high_precision_tensor: True
@@ -173,8 +163,6 @@ class DumpTensors(TEConfigAPIMapper):
     Dictionary keys:
         - ``high_precision``: pre-quantization tensor (if high_precision_tensor=True)
         - ``quantized``: quantized tensor object (if quantized_tensor=True)
-        - Additional internal components when dump_quantized_internals=True
-          (raw data, scales, etc. - format may change between versions)
     """
 
     @api_method
@@ -255,12 +243,6 @@ class DumpTensors(TEConfigAPIMapper):
 
         if dump_quant and quantized_tensor is not None:
             dump_dict["quantized"] = quantized_tensor
-
-            # Add internals for quantized tensors
-            if config.get("dump_quantized_internals", False):
-                internals = self._get_quantized_internals(quantized_tensor)
-                dump_dict.update(internals)
-
         elif dump_quant and quantized_tensor is None:
             debug_api.log_message(
                 f"Feature={self.__class__.__name__}: quantized_tensor is True but "
@@ -281,150 +263,3 @@ class DumpTensors(TEConfigAPIMapper):
                 layer_name,
             )
 
-    def _get_quantized_internals(
-        self,
-        quantized_tensor: QuantizedTensor,
-    ) -> Dict[str, torch.Tensor]:
-        """Get internal components of quantized tensors (raw data, scales, etc.)."""
-        if isinstance(quantized_tensor, Float8Tensor):
-            tensors = _get_extended_tensors_fp8(quantized_tensor)
-        elif isinstance(quantized_tensor, Float8BlockwiseQTensor):
-            tensors = _get_extended_tensors_fp8_blockwise(quantized_tensor)
-        elif isinstance(quantized_tensor, MXFP8Tensor):
-            tensors = _get_extended_tensors_mxfp8(quantized_tensor)
-        elif isinstance(quantized_tensor, NVFP4Tensor):
-            tensors = _get_extended_tensors_nvfp4(quantized_tensor)
-        else:
-            debug_api.log_message(
-                "[TE DumpTensors] dump_quantized_internals=True but tensor type "
-                f"{type(quantized_tensor).__name__} is not supported for internals extraction. "
-                "Skipping internals."
-            )
-            return {}
-
-        # Filter out None values
-        return {k: v for k, v in tensors.items() if v is not None}
-
-
-def _get_extended_tensors_fp8(tensor: Float8Tensor) -> Dict[str, torch.Tensor]:
-    """Get extended tensors for Float8Tensor: raw FP8 data, transpose, and scale."""
-    torch_fp8_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
-    result = {
-        "data": tensor._data.view(torch_fp8_dtype),
-        "scale_inv": tensor._scale_inv,
-    }
-    if tensor._transpose is not None and not tensor._transpose_invalid:
-        result["transpose"] = tensor._transpose.view(torch_fp8_dtype)
-    return result
-
-
-def _get_extended_tensors_fp8_blockwise(
-    tensor: Float8BlockwiseQTensor,
-) -> Dict[str, Optional[torch.Tensor]]:
-    """Get extended tensors for Float8BlockwiseQTensor: raw FP8 data and block scales."""
-    torch_fp8_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
-    result: Dict[str, Optional[torch.Tensor]] = {}
-
-    if tensor._rowwise_data is not None:
-        result["rowwise_data"] = tensor._rowwise_data.view(torch_fp8_dtype)
-    if tensor._columnwise_data is not None:
-        result["columnwise_data"] = tensor._columnwise_data.view(torch_fp8_dtype)
-
-    # Block scaling factors (FP32)
-    if tensor._rowwise_scale_inv is not None:
-        result["rowwise_block_scale_inv"] = tensor._rowwise_scale_inv
-    if tensor._columnwise_scale_inv is not None:
-        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv
-
-    return result
-
-
-def _get_extended_tensors_mxfp8(tensor: MXFP8Tensor) -> Dict[str, Optional[torch.Tensor]]:
-    """Get extended tensors for MXFP8Tensor: raw FP8 data and block scales (E8M0)."""
-    torch_fp8_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
-    result: Dict[str, Optional[torch.Tensor]] = {}
-
-    if tensor._rowwise_data is not None:
-        result["rowwise_data"] = tensor._rowwise_data.view(torch_fp8_dtype)
-    if tensor._columnwise_data is not None:
-        result["columnwise_data"] = tensor._columnwise_data.view(torch_fp8_dtype)
-
-    # Block scaling factors (E8M0 format)
-    if tensor._rowwise_scale_inv is not None:
-        result["rowwise_block_scale_inv"] = tensor._rowwise_scale_inv.view(torch.float8_e8m0fnu)
-    if tensor._columnwise_scale_inv is not None:
-        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv.view(
-            torch.float8_e8m0fnu
-        )
-
-    return result
-
-
-def _unpack_uint4_codes(packed_data: torch.Tensor) -> torch.Tensor:
-    """Unpack packed uint4 values stored in uint8 into uint8 tensor with values 0..15."""
-    packed_uint8 = packed_data.view(torch.uint8).contiguous().view(-1)
-    unpacked = torch.empty(packed_uint8.numel() * 2, dtype=torch.uint8, device=packed_data.device)
-    unpacked[::2] = packed_uint8 & 0x0F
-    unpacked[1::2] = (packed_uint8 >> 4) & 0x0F
-    unpacked_shape = (*packed_data.shape[:-1], packed_data.shape[-1] * 2)
-    return unpacked.view(unpacked_shape)
-
-
-def _decode_uint4_e2m1_to_float(unpacked_codes: torch.Tensor) -> torch.Tensor:
-    """Decode uint4 FP4 E2M1 codes (0..15) into float32 values."""
-    # Bit layout: [sign:1][exp:2][mantissa:1], exponent bias = 1.
-    # Positive representable magnitudes are: 0, 0.5, 1, 1.5, 2, 3, 4, 6.
-    fp4_e2m1_lut = torch.tensor(
-        [
-            0.0,
-            0.5,
-            1.0,
-            1.5,
-            2.0,
-            3.0,
-            4.0,
-            6.0,
-            -0.0,
-            -0.5,
-            -1.0,
-            -1.5,
-            -2.0,
-            -3.0,
-            -4.0,
-            -6.0,
-        ],
-        device=unpacked_codes.device,
-        dtype=torch.float32,
-    )
-    return fp4_e2m1_lut[unpacked_codes.long()]
-
-
-def _get_extended_tensors_nvfp4(tensor: NVFP4Tensor) -> Dict[str, Optional[torch.Tensor]]:
-    """Get extended tensors for NVFP4Tensor: raw packed FP4 data, block scales, and amax."""
-    result: Dict[str, Optional[torch.Tensor]] = {}
-
-    # Raw data (packed FP4, 2 values per byte)
-    if tensor._rowwise_data is not None:
-        result["rowwise_data"] = tensor._rowwise_data
-        rowwise_codes = _unpack_uint4_codes(tensor._rowwise_data)
-        result["rowwise_data_unpacked_values"] = _decode_uint4_e2m1_to_float(rowwise_codes)
-    if tensor._columnwise_data is not None:
-        result["columnwise_data"] = tensor._columnwise_data
-        columnwise_codes = _unpack_uint4_codes(tensor._columnwise_data)
-        result["columnwise_data_unpacked_values"] = _decode_uint4_e2m1_to_float(columnwise_codes)
-
-    # Block scaling factors (E4M3 format)
-    if tensor._rowwise_scale_inv is not None:
-        result["rowwise_block_scale_inv"] = tensor._rowwise_scale_inv.view(torch.float8_e4m3fn)
-    if tensor._columnwise_scale_inv is not None:
-        result["columnwise_block_scale_inv"] = tensor._columnwise_scale_inv.view(
-            torch.float8_e4m3fn
-        )
-
-    # Input absolute maximum value (used to compute tensor scale)
-    if tensor._amax_rowwise is not None:
-        result["amax_rowwise"] = tensor._amax_rowwise
-    if tensor._amax_columnwise is not None:
-        result["amax_columnwise"] = tensor._amax_columnwise
-
-    return result

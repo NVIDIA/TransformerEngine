@@ -658,23 +658,6 @@ dump:
       tensors: [activation]
       high_precision_tensor: True
       quantized_tensor: True
-      dump_quantized_internals: True
-      freq: 1
-"""
-
-
-NVFP4_DUMP_TENSORS_CONFIG = """
-dump:
-  layers:
-    layer_name_regex_pattern: .*
-  enabled: True
-  transformer_engine:
-    DumpTensors:
-      enabled: True
-      tensors: [activation]
-      high_precision_tensor: False
-      quantized_tensor: True
-      dump_quantized_internals: True
       freq: 1
 """
 
@@ -722,75 +705,9 @@ def test_dump_tensors_sanity(feature_dirs):
         assert "high_precision" in data, "Missing high_precision tensor"
         assert "quantized" in data, "Missing quantized tensor"
 
-        # Check internals are present (dump_quantized_internals=True)
-        assert "data" in data, "Missing data (raw FP8 data)"
-        assert "scale_inv" in data, "Missing scale_inv"
-
         # Verify tensor shapes match
         assert data["high_precision"].shape == tensor.shape, "high_precision shape mismatch"
 
     print("DumpTensors sanity test passed!")
 
 
-def test_dump_tensors_nvfp4_unpacked_codes(feature_dirs):
-    """Verify DumpTensors includes unpacked FP4 values in NVFP4 internals."""
-    if not nvfp4_available:
-        pytest.skip(reason_for_no_nvfp4)
-
-    with debug_session(NVFP4_DUMP_TENSORS_CONFIG, feature_dirs) as log_dir:
-        recipe_state = RecipeState.create(
-            recipe.NVFP4BlockScaling(),
-            mode="forward",
-            num_quantizers=3,
-        )
-
-        tensor = torch.randn(128, 128, dtype=torch.bfloat16).cuda()
-        quantizer = recipe_state.make_quantizers()[0]
-        quantized_tensor = quantizer(tensor)
-
-        debug_api.transformer_engine.inspect_tensor(
-            layer_name="test_layer",
-            tensor_name="activation",
-            iteration=0,
-            tp_group=None,
-            tensor=tensor,
-            quantizer=quantizer,
-            rowwise_quantized_tensor=quantized_tensor,
-            columnwise_quantized_tensor=quantized_tensor,
-        )
-        debug_api.step()
-
-        dump_dir = os.path.join(log_dir, "tensor_dumps", "rank_0")
-        dump_files = os.listdir(dump_dir)
-        assert len(dump_files) == 1, f"Expected 1 dump file, got {len(dump_files)}"
-
-        data = torch.load(os.path.join(dump_dir, dump_files[0]), weights_only=False)
-        assert "rowwise_data" in data, "Missing packed NVFP4 rowwise_data"
-        assert "rowwise_data_unpacked_values" in data, "Missing unpacked NVFP4 rowwise values"
-
-        packed = data["rowwise_data"]
-        unpacked = data["rowwise_data_unpacked_values"]
-        assert unpacked.dtype == torch.float32, "Unpacked values must be float32"
-        assert (
-            unpacked.shape[-1] == packed.shape[-1] * 2
-        ), "Unpacked values should double the last packed dimension"
-        assert (
-            unpacked.min().item() >= -6.0 and unpacked.max().item() <= 6.0
-        ), "Decoded FP4 values should be in representable E2M1 range [-6, 6]"
-
-        # Reconstruct dequantized values from unpacked FP4 values and block scales.
-        # For NVFP4 rowwise path, one E4M3 scale corresponds to a block of 16 values.
-        assert "rowwise_block_scale_inv" in data, "Missing rowwise NVFP4 block scales"
-        rowwise_scale_inv = data["rowwise_block_scale_inv"].to(torch.float32)
-        values = unpacked.to(torch.float32)
-        n_rows, n_cols = values.shape
-        scale_tiles = (n_cols + 15) // 16
-        expanded_scales = rowwise_scale_inv[:n_rows, :scale_tiles].repeat_interleave(16, dim=1)[
-            :, :n_cols
-        ]
-        reconstructed = values * expanded_scales
-
-        expected = quantized_tensor.dequantize(dtype=torch.float32)
-        assert torch.allclose(
-            reconstructed, expected, atol=1e-5, rtol=1e-3
-        ), "Unpacked FP4 values multiplied by block scales should match NVFP4 dequantization"
