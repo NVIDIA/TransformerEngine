@@ -268,3 +268,9 @@ class DumpTensors(TEConfigAPIMapper):
                 f"Dumped {tensor_name} at iteration {iteration} (keys: {list(dump_dict.keys())})",
                 layer_name,
             )
+        else:
+            debug_api.log_message(
+                f"Feature={self.__class__.__name__}: No tensors available to dump for "
+                f"{tensor_name} at iteration {iteration}. No file written.",
+                layer_name,
+            )
