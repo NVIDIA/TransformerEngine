@@ -70,14 +70,20 @@ def _setup():
     return world_size, local_rank, device
 
 
-def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None):
+def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None, use_meta_device=True):
     """Build a Sequential of TransformerLayers, optionally with FP8 init.
 
-    When fp8_init=True, the model is created on the meta device to avoid
-    FSDP2 incompatibility with QuantizedTensor wrapper subclasses (e.g.
-    MXFP8Tensor) whose storage is inaccessible via data_ptr().  Parameters
-    are materialized after FSDP2 sharding via reset_parameters() in
-    _shard_model().
+    When fp8_init=True and use_meta_device=True (the default), the model is
+    created on the meta device to avoid FSDP2 incompatibility with
+    QuantizedTensor wrapper subclasses (e.g. MXFP8Tensor) whose storage is
+    inaccessible via data_ptr().  Parameters are materialized after FSDP2
+    sharding via reset_parameters() in _shard_model().
+
+    When use_meta_device=False, the model is created directly on CUDA.
+    This is the legacy path that does NOT work for block-scaling quantized
+    tensors (MXFP8, Float8Blockwise, NVFP4) because FSDP2's
+    reset_sharded_param() crashes on wrapper subclass tensors with
+    data_ptr() == 0.
     """
     if fp8_init:
         ctx = te.quantized_model_init(enabled=True, recipe=recipe)
@@ -92,7 +98,7 @@ def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None):
         hidden_dropout=0.0,
         attention_dropout=0.0,
     )
-    if fp8_init:
+    if fp8_init and use_meta_device:
         kwargs["device"] = "meta"
     with ctx:
         model = torch.nn.Sequential(
@@ -199,6 +205,42 @@ def test_fused_adam_fp8_master_weights(recipe=None):
         if isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
     )
     assert qt_count > 0, "No QuantizedTensor local tensors after training"
+
+    dist.destroy_process_group()
+
+
+def test_fused_adam_fp8_master_weights_no_meta(recipe=None):
+    """FusedAdam with master_weights + FSDP2 + quantized_model_init WITHOUT meta device.
+
+    This is the legacy path that creates quantized params directly on CUDA.
+    FSDP2's reset_sharded_param() crashes on block-scaling QuantizedTensor
+    wrapper subclasses (data_ptr() == 0). This test documents that failure.
+
+    For per-tensor FP8 (DelayedScaling, Float8CurrentScaling) this works
+    because Float8Tensor's storage is accessible via data_ptr().
+    """
+    world_size, _, device = _setup()
+
+    model = _build_model(fp8_init=True, recipe=recipe, use_meta_device=False)
+    model = _shard_model(model, world_size)
+
+    optimizer = te.optimizers.FusedAdam(
+        model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    for step in range(NUM_STEPS):
+        optimizer.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            output = model(x)
+        loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
 
     dist.destroy_process_group()
 
@@ -644,6 +686,7 @@ def test_dcp_output_parity(recipe=None, async_save=False):
 
 TESTS = {
     "fused_adam_fp8_master_weights": test_fused_adam_fp8_master_weights,
+    "fused_adam_fp8_master_weights_no_meta": test_fused_adam_fp8_master_weights_no_meta,
     "fused_adam_bf16": test_fused_adam_bf16,
     "fused_adam_fp8_no_master": test_fused_adam_fp8_no_master,
     "fused_adam_bf16_store_param_remainders": test_fused_adam_bf16_store_param_remainders,

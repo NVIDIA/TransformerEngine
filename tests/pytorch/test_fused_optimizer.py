@@ -614,13 +614,29 @@ class TestFusedAdamMXFP8(TestFusedOptimizer):
         target = torch.randn_like(x)
 
         losses = []
-        for _ in range(self.iters):
+        for i in range(self.iters):
             optimizer.zero_grad(set_to_none=True)
             with te.autocast(enabled=True, recipe=recipe):
                 output = model(x)
             loss = torch.nn.functional.mse_loss(output, target)
             losses.append(loss.item())
             loss.backward()
+
+            # Verify all params have non-None gradients after backward
+            for name, p in model.named_parameters():
+                assert p.grad is not None, (
+                    f"Step {i}: {name} has no gradient after backward"
+                )
+                assert p.grad.shape == p.shape, (
+                    f"Step {i}: {name} grad shape {p.grad.shape} != param shape {p.shape}"
+                )
+                assert torch.isfinite(p.grad).all(), (
+                    f"Step {i}: {name} has non-finite gradients"
+                )
+                assert p.grad.any(), (
+                    f"Step {i}: {name} gradient is all zeros"
+                )
+
             optimizer.step()
 
         # Verify loss decreased

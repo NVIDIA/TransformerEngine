@@ -115,13 +115,32 @@ def _run_fused_adam_test(test_name, recipe="delayed_scaling"):
 
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
 def test_fsdp2_fused_adam_fp8_master_weights(fp_recipe):
-    """FusedAdam(master_weights=True) + FSDP2 + quantized_model_init."""
+    """FusedAdam(master_weights=True) + FSDP2 + quantized_model_init (meta device init)."""
     if fp_recipe in ("Float8BlockScaling", "NVFP4BlockScaling"):
         pytest.xfail(
             f"{fp_recipe}: quantized_model_init and FSDP2 is not currently supported, since the "
             "block tensor is dequantized before we flatten it for FSDP2."
         )
     _run_fused_adam_test("fused_adam_fp8_master_weights", fp_recipe)
+
+
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
+def test_fsdp2_fused_adam_fp8_master_weights_no_meta(fp_recipe):
+    """FusedAdam(master_weights=True) + FSDP2 + quantized_model_init (CUDA init, no meta device).
+
+    Block-scaling QuantizedTensors (MXFP8, Float8Blockwise, NVFP4) are wrapper
+    subclasses with data_ptr() == 0.  Without meta-device init, FSDP2's
+    reset_sharded_param() crashes with 'invalid python storage'.
+    Per-tensor FP8 (DelayedScaling, Float8CurrentScaling) works because
+    Float8Tensor's storage is accessible.
+    """
+    if fp_recipe in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
+        pytest.xfail(
+            f"{fp_recipe}: FSDP2 without meta-device init crashes on block-scaling "
+            "QuantizedTensor wrapper subclasses (data_ptr() == 0). "
+            "Use device='meta' + reset_parameters() after sharding."
+        )
+    _run_fused_adam_test("fused_adam_fp8_master_weights_no_meta", fp_recipe)
 
 
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
