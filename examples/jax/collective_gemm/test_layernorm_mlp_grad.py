@@ -167,9 +167,9 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
         recipe=recipe,
         mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
-        # Build quantizer_set inside autocast so create_set() reads the global recipe
+        # Build quantizer_sets inside autocast so create_set() reads the global recipe
         # for correct fwd/bwd dtypes. One set per dense layer (GEMM1=AG, GEMM2=RS).
-        quantizer_set = QuantizerFactory.create_set(n_quantizer_sets) if use_quantization else (noop_quantizer_set, noop_quantizer_set)
+        quantizer_sets = QuantizerFactory.create_set(n_quantizer_sets=2) if use_quantization else (noop_quantizer_set, noop_quantizer_set)
 
         # Get the base axis rules and extend them with TE's rules. This must be done inside autocast
         axis_rules = flax.linen.get_logical_axis_rules()
@@ -232,7 +232,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
         jax.block_until_ready(gathered_ref_grads)
 
     if args.enable_result_check and args.process_id == 0:
-        tol_dtype = get_tolerance_dtype(quantizer_set)
+        tol_dtype = get_tolerance_dtype(quantizer_sets[0])
         assert_allclose(ref_output, output, dtype=tol_dtype)
         for ref_grad, gathered_grad in zip(gathered_ref_grads, gathered_grads):
             assert_allclose(ref_grad, gathered_grad, dtype=tol_dtype)
