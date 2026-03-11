@@ -1671,6 +1671,8 @@ void fused_attn_fp8_fwd_impl_v1(
   bool is_dropout = (is_training && dropout_probability != 0.0f);
   auto bias_b = b;
   auto bias_h = h;
+  auto bias_sq = s_q;
+  auto bias_skv = s_kv;
   NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
   NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
   bool is_current_scaling = (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
@@ -1697,6 +1699,8 @@ void fused_attn_fp8_fwd_impl_v1(
                                0,
                                bias_b,
                                bias_h,
+                               bias_sq,
+                               bias_skv,
                                scaling_factor,
                                is_training,
                                dropout_probability,
@@ -1818,8 +1822,8 @@ void fused_attn_fp8_fwd_impl_v1(
       // if (is_bias) {
       //     bias = mha_graph->tensor(fe::graph::Tensor_attributes()
       //                     .set_name("bias")
-      //                     .set_dim({bias_b, bias_h, s_q, s_kv})
-      //                     .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+      //                     .set_dim({bias_b, bias_h, bias_sq, bias_skv})
+      //                     .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
       //     sdpa_options.set_bias(bias);
       // }
 
@@ -1978,13 +1982,13 @@ void fused_attn_fp8_fwd_impl_v1(
 void fused_attn_fp8_bwd_impl_v1(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d, float scaling_factor,
     float dropout_probability, NVTE_QKV_Layout layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, void* devPtrQ, void* devPtrK, void* devPtrV, void* devPtrM,
-    void* devPtrZInv, void* devPtrO, void* devPtrdO, void* devPtrdQ, void* devPtrdK, void* devPtrdV,
-    void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV, void* devPtrDescaleO,
-    void* devPtrDescaledO, void* devPtrDescaleS, void* devPtrDescaledP, void* devPtrScaleS,
-    void* devPtrScaledP, void* devPtrScaledQ, void* devPtrScaledK, void* devPtrScaledV,
-    void* devPtrAmaxdP, void* devPtrAmaxdQ, void* devPtrAmaxdK, void* devPtrAmaxdV,
-    void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV, void* devPtrDropoutSeed,
+    NVTE_Mask_Type mask_type, bool deterministic, void* devPtrQ, void* devPtrK, void* devPtrV,
+    void* devPtrM, void* devPtrZInv, void* devPtrO, void* devPtrdO, void* devPtrdQ, void* devPtrdK,
+    void* devPtrdV, void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV,
+    void* devPtrDescaleO, void* devPtrDescaledO, void* devPtrDescaleS, void* devPtrDescaledP,
+    void* devPtrScaleS, void* devPtrScaledP, void* devPtrScaledQ, void* devPtrScaledK,
+    void* devPtrScaledV, void* devPtrAmaxdP, void* devPtrAmaxdQ, void* devPtrAmaxdK,
+    void* devPtrAmaxdV, void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV, void* devPtrDropoutSeed,
     void* devPtrDropoutOffset, cudnn_frontend::DataType_t qkv_tensor_type,
     cudnn_frontend::DataType_t o_tensor_type, cudnn_frontend::DataType_t do_tensor_type,
     cudnn_frontend::DataType_t dqkv_tensor_type, void* workspace, size_t* workspace_size,
@@ -1999,6 +2003,9 @@ void fused_attn_fp8_bwd_impl_v1(
   bool is_dropout = (dropout_probability != 0.0f);
   auto bias_b = b;
   auto bias_h = h;
+  const auto cudnn_runtime_version = cudnnGetVersion();
+  auto bias_sq = s_q;
+  auto bias_skv = s_kv;
   NVTE_CHECK(~is_bias, "FP8 fused attention does not support pre/post_scale_bias yet!");
   NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
   bool is_current_scaling = (dqkv_tensor_type == cudnn_frontend::DataType_t::HALF ||
@@ -2027,6 +2034,8 @@ void fused_attn_fp8_bwd_impl_v1(
                                0,
                                bias_b,
                                bias_h,
+                               bias_sq,
+                               bias_skv,
                                scaling_factor,
                                true,
                                dropout_probability,
@@ -2037,7 +2046,7 @@ void fused_attn_fp8_bwd_impl_v1(
                                0,
                                0,
                                true,
-                               false,
+                               deterministic,
                                qkv_tensor_type,
                                o_tensor_type,
                                do_tensor_type,
@@ -2194,20 +2203,23 @@ void fused_attn_fp8_bwd_impl_v1(
       // if (is_bias) {
       //     bias = mha_graph->tensor(fe::graph::Tensor_attributes()
       //                     .set_name("bias")
-      //                     .set_dim({bias_b, bias_h, s_q, s_kv})
-      //                     .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+      //                     .set_dim({bias_b, bias_h, bias_sq, bias_skv})
+      //                     .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
       //     dBias = mha_graph->tensor(fe::graph::Tensor_attributes()
       //                     .set_name("dBias")
-      //                     .set_dim({bias_b, bias_h, s_q, s_kv})
-      //                     .set_stride({bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+      //                     .set_dim({bias_b, bias_h, bias_sq, bias_skv})
+      //                     .set_stride({bias_h * bias_sq * bias_skv, bias_sq * bias_skv, bias_skv, 1}));
       //     sdpa_backward_options.set_bias(bias);
-      //     // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s]
-      //     // are not supported for dbias calculation but they are
-      //     // supported for forward bias calculation
-      //     if ((bias_b == 1) && (bias_h == h)) {
-      //       sdpa_backward_options.set_dbias(dBias);
-      //     }
+      // bias shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s], [1, h, s, s] are supported for dbias calculation
+      // bias shape [1, 1, 1, s] is not supported for dbias calculation as of cuDNN 9.18
+      // if (!((bias_b == 1) && (bias_h == 1) && (bias_sq == 1))) {
+      //    sdpa_backward_options.set_dbias(dBias);
+      //  }
       // }
+
+      if (cudnn_runtime_version >= 91900) {
+        sdpa_backward_options.set_deterministic_algorithm(deterministic);
+      }
 
       if (is_padding) {
         seq_q = mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -2512,11 +2524,11 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
 void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
                         size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim,
                         float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
-                        NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, const Tensor* input_Q,
-                        const Tensor* input_K, const Tensor* input_V, const Tensor* input_O,
-                        const Tensor* input_dO, const Tensor* input_M, const Tensor* input_ZInv,
-                        const Tensor* input_S, Tensor* input_output_dP, const Tensor* output_dQ,
-                        const Tensor* output_dK, const Tensor* output_dV,
+                        NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, bool deterministic,
+                        const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V,
+                        const Tensor* input_O, const Tensor* input_dO, const Tensor* input_M,
+                        const Tensor* input_ZInv, const Tensor* input_S, Tensor* input_output_dP,
+                        const Tensor* output_dQ, const Tensor* output_dK, const Tensor* output_dV,
                         const Tensor* cu_seqlens_q, const Tensor* cu_seqlens_kv,
                         const Tensor* rng_state, Tensor* workspace, cudaStream_t stream,
                         cudnnHandle_t handle) {
@@ -2574,11 +2586,11 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
     fused_attn::fused_attn_fp8_bwd_impl_v1(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, attn_scale,
-        p_dropout, qkv_layout, bias_type, mask_type, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv,
-        devPtrO, devPtrdO, devPtrdQ, devPtrdK, devPtrdV, devPtrDescaleQ, devPtrDescaleK,
-        devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP,
-        devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP,
-        devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+        p_dropout, qkv_layout, bias_type, mask_type, deterministic, devPtrQ, devPtrK, devPtrV,
+        devPtrM, devPtrZInv, devPtrO, devPtrdO, devPtrdQ, devPtrdK, devPtrdV, devPtrDescaleQ,
+        devPtrDescaleK, devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS,
+        devPtrDescaledP, devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV,
+        devPtrAmaxdP, devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
         devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
         get_cudnn_fe_dtype(O_type), get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type),
         workspace->data.dptr, &workspace_size, stream, handle);

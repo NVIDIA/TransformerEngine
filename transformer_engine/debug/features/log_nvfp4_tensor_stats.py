@@ -148,6 +148,7 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
         rowwise_quantized_tensor: Optional[QuantizedTensor] = None,
         columnwise_quantized_tensor: Optional[QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
+        tp_size: int = 1,
     ):
         """
         API call used to collect the data about the tensor after process_tensor()/quantization.
@@ -199,7 +200,7 @@ class LogNvfp4TensorStats(BaseLogTensorStats):
         )
 
         skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(
-            tensor_name, tp_group
+            tensor_name, tp_group, tp_size
         )
 
         # Add nvfp4_ prefix to all stats for internal use
