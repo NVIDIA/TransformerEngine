@@ -77,7 +77,7 @@ def check_group_quantization_nvfp4_versus_reference(
         reference_group_quantize(x, quantizers, split_sections, return_identity, return_transpose)
     )
 
-    split_quantize_outputs = tex.split_quantize(x, split_sections, quantizers)
+    split_quantize_outputs, _ = tex.split_quantize(x, split_sections, quantizers)
 
     if return_identity:
         x_qx = [output._rowwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
