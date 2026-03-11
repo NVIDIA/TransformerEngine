@@ -27,8 +27,8 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 
 }  // namespace
 
-// MXFP8 support for grouped GEMM requires cuBLAS 13.3+
-#define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130100
+// MXFP8 support for grouped GEMM requires cuBLAS 13.2+
+#define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130200
 
 #if CUBLAS_VERSION >= 130200
 
