@@ -41,13 +41,13 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
   auto logits_tensor = TensorWrapper(logits, flat_shape, dtype);
   auto probs_tensor = TensorWrapper(probs, flat_shape, dtype);
   auto routing_map_tensor = TensorWrapper(routing_map, flat_shape, DType::kByte);
-  // intermediate uses CompType (set by the abstract via ROUTER_COMP_DTYPE).
+  // intermediate is always float32 (CompType) regardless of logits dtype.
   auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf->element_type());
   NVTE_CHECK(intermediate_dtype == DType::kFloat32,
              "intermediate_output must be float32 (CompType); got dtype ",
              static_cast<int>(intermediate_dtype),
-             ". Check ROUTER_COMP_DTYPE in cpp_extensions/router.py.");
-  auto intermediate_tensor = TensorWrapper(intermediate, flat_shape, intermediate_dtype);
+             ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
+  auto intermediate_tensor = TensorWrapper(intermediate, flat_shape, DType::kFloat32);
 
   if (compute_aux_scores) {
     nvte_fused_score_for_moe_aux_loss_forward(
@@ -103,11 +103,12 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
     Result_Type grad_logits_buf,  // [num_tokens, num_experts]
     int64_t topk, int64_t use_pre_softmax, double scaling_factor,
     JAXX_Score_Function score_function, int64_t compute_aux_scores) {
-  // intermediate uses CompType (set by the abstract via ROUTER_COMP_DTYPE).
-  NVTE_CHECK(convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type()) == DType::kFloat32,
+  // intermediate is always float32 (CompType) regardless of logits dtype.
+  auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type());
+  NVTE_CHECK(intermediate_dtype == DType::kFloat32,
              "intermediate_output must be float32 (CompType); got dtype ",
-             static_cast<int>(convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type())),
-             ". Check ROUTER_COMP_DTYPE in cpp_extensions/router.py.");
+             static_cast<int>(intermediate_dtype),
+             ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
   auto grad_dtype = convert_ffi_datatype_to_te_dtype(grad_probs_buf.element_type());
   auto dims = intermediate_buf.dimensions();
   auto num_tokens = static_cast<int>(product(dims, 0, dims.size() - 1));
