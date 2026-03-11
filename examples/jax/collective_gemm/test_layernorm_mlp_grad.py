@@ -202,7 +202,6 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 noop_collective_op_sets,
                 quantizer_sets,
             )
-            jax.profiler.start_trace(f"traces/cgemm_trace_{args.quantize_recipe}")
             output, sharded_grads = _value_and_grad_layernorm_mlp(
                 x_sharded,
                 weight_1_sharded,
@@ -217,8 +216,6 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 collective_op_sets,
                 quantizer_sets,
             )
-            jax.block_until_ready(output)
-            jax.profiler.stop_trace()
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)
         gathered_grads = []
