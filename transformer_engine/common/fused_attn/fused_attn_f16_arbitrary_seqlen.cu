@@ -56,7 +56,9 @@ namespace py = pybind11;
 namespace {
 
 auto make_attention_score_modifier(void *callback)
-    -> cudnn_frontend::graph::SDPA_attributes::AttentionScoreModifier_t {
+    -> std::function<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>(
+        std::shared_ptr<cudnn_frontend::graph::Graph>,
+        std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>)> {
   if (callback == nullptr) {
     return nullptr;
   }
