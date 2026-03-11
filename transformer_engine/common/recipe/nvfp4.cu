@@ -617,7 +617,7 @@ void nvfp4_expand_scale_to_fp8(const Tensor input, Tensor output, size_t tile_ro
  *
  * Computes per-block decode scale from block amax and global amax:
  *   global_scale = (fp8_max * fp4_max) / global_amax = 2688 / global_amax
- *   per_block_decode_scale = block_amax / fp4_max * global_scale
+ *   per_block_decode_scale = block_amax * (global_scale * (1 / fp4_max))
  *                          = block_amax * 448 / global_amax
  *
  * This matches the CUDA device function compute_decoding_scaling_factor() in core_nvfp4.cuh
@@ -649,9 +649,11 @@ __global__ void nvfp4_compute_per_block_scale_kernel(
   float global_scale =
       (global_amax > 0.0f) ? fminf((fp8_max * fp4_max) / safe_global_amax, flt_max) : 1.0f;
 
-  // Compute per-block decode scale: S_dec_b = block_amax / fp4_max * S_enc
+  // Compute per-block decode scale: S_dec_b = block_amax * (S_enc * (1 / fp4_max))
   float amax_val = block_amax[idx];
-  float result = fminf((amax_val / fp4_max) * global_scale, flt_max);
+  constexpr float fp4_max_inv = 1.0f / fp4_max;
+  const float global_scale_multiplier = global_scale * fp4_max_inv;
+  float result = fminf(amax_val * global_scale_multiplier, flt_max);
   scale[idx] = result;
 }
 
@@ -765,10 +767,12 @@ __global__ void nvfp4_fused_scale_kernel(
     float safe_global_amax = fmaxf(g_amax, tiny);
     float global_scale =
         (g_amax > 0.0f) ? fminf((fp8_max * fp4_max) / safe_global_amax, flt_max) : 1.0f;
+    constexpr float fp4_max_inv = 1.0f / fp4_max;
+    const float global_scale_multiplier = global_scale * fp4_max_inv;
 
     // Read block amax and compute per-block decode scale
     float amax_val = block_amax[tile_row * tile_cols + out_col];
-    scale_val = fminf((amax_val / fp4_max) * global_scale, flt_max);
+    scale_val = fminf(amax_val * global_scale_multiplier, flt_max);
 
     // Write per-block scale (only once per tile, when out_row % block_len == 0)
     if (out_row % block_len == 0) {
