@@ -702,7 +702,7 @@ class GemmPrimitive(BasePrimitive):
                 )
                 # The scale needs to be in good shape for reordering
                 assert lhs_scale_inv.shape[sequence_dim] % tpsp_axis_size() == 0, (
-                    "MXFP8 + Collective AG/RS requires LHS scale inv sequence dimension to be"
+                    "MXFP8 + Collective AG/RS requires RHS scale inv sequence dimension to be"
                     f" multiples of tpsp_axis_size. Got lhs_scale_inv.shape={lhs_scale_inv.shape},"
                     f" tpsp_axis_size={tpsp_axis_size()}, sequence_dim={sequence_dim}"
                 )
