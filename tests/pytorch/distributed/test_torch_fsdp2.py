@@ -133,10 +133,10 @@ def test_fsdp2_fused_adam_bf16(fp_recipe):
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
 def test_fsdp2_fused_adam_fp8_no_master(fp_recipe):
     """FusedAdam(master_weights=False) + FSDP2 + FP8 params."""
-    if fp_recipe == "MXFP8BlockScaling":
+    if fp_recipe in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
         pytest.xfail(
-            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access"
+            f"{fp_recipe}: FusedAdam without master_weights does not support "
+            "block-scaling quantized tensors. Use master_weights=True."
         )
     _run_fused_adam_test("fused_adam_fp8_no_master", fp_recipe)
 
