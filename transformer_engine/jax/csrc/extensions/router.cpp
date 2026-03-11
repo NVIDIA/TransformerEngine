@@ -43,10 +43,11 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
   auto routing_map_tensor = TensorWrapper(routing_map, flat_shape, DType::kByte);
   // intermediate is always float32 (CompType) regardless of logits dtype.
   auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf->element_type());
-  NVTE_CHECK(intermediate_dtype == DType::kFloat32,
-             "intermediate_output must be float32 (CompType); got dtype ",
-             static_cast<int>(intermediate_dtype),
-             ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
+  NVTE_CHECK(
+      intermediate_dtype == DType::kFloat32,
+      "intermediate_output must be float32 (CompType); got dtype ",
+      static_cast<int>(intermediate_dtype),
+      ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
   auto intermediate_tensor = TensorWrapper(intermediate, flat_shape, DType::kFloat32);
 
   if (compute_aux_scores) {
@@ -105,10 +106,11 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
     JAXX_Score_Function score_function, int64_t compute_aux_scores) {
   // intermediate is always float32 (CompType) regardless of logits dtype.
   auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type());
-  NVTE_CHECK(intermediate_dtype == DType::kFloat32,
-             "intermediate_output must be float32 (CompType); got dtype ",
-             static_cast<int>(intermediate_dtype),
-             ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
+  NVTE_CHECK(
+      intermediate_dtype == DType::kFloat32,
+      "intermediate_output must be float32 (CompType); got dtype ",
+      static_cast<int>(intermediate_dtype),
+      ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
   auto grad_dtype = convert_ffi_datatype_to_te_dtype(grad_probs_buf.element_type());
   auto dims = intermediate_buf.dimensions();
   auto num_tokens = static_cast<int>(product(dims, 0, dims.size() - 1));
