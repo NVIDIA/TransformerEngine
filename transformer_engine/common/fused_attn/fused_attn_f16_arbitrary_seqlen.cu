@@ -87,6 +87,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   const auto cudnn_runtime_version = cudnnGetVersion();
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
+  bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && !(sm_arch_ >= 120);
 
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
   bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
@@ -355,7 +356,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       }
 
       std::shared_ptr<fe::graph::Tensor_attributes> Max, Sum_Exp;
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         offset_stats =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("offset_stats")
@@ -372,7 +373,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                         .set_name("Sum_Exp")
                                         .set_dim({b, h, s_q, 1})
                                         .set_data_type(fe::DataType_t::FLOAT));
-        if (is_ragged_q && cudnn_runtime_version >= 90600) {
+        if (use_ragged_stats) {
           Max->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
           Sum_Exp->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
         } else {
@@ -400,7 +401,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
       if (!return_max_logit) {
         Stats->set_output(true).set_data_type(fe::DataType_t::FLOAT).set_dim({b, h, s_q, 1});
-        if (is_ragged_q && cudnn_runtime_version >= 90600) {
+        if (use_ragged_stats) {
           Stats->set_stride({h * s_q, 1, h, 1}).set_ragged_offset(offset_stats);
         } else {
           Stats->set_stride({h * s_q, s_q, 1, 1});
@@ -426,7 +427,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
       auto offset_kv_tuple =
           is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
-      auto offset_s_tuple = (is_ragged_q && cudnn_runtime_version >= 90600)
+      auto offset_s_tuple = use_ragged_stats
                                 ? std::make_tuple(offset_stats)
                                 : std::make_tuple(nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
@@ -462,7 +463,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     size_t seqlen_offsets_workspace_size = 0;
     if (is_ragged_q || is_ragged_kv) {
       size_t count = 2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         seqlen_offsets_workspace_size = (count + 1) * num_bytes_per_ragged_offset;
       } else {
         seqlen_offsets_workspace_size = count * num_bytes_per_ragged_offset;
@@ -529,7 +530,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         devOffsetsV = static_cast<int8_t *>(devOffsetsK) + num_bytes_per_ragged_offset;
       }
       void *devOffsetsS = nullptr;
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         devOffsetsS = static_cast<int8_t *>(devOffsets) +
                       (static_cast<int>(is_ragged_q) + static_cast<int>(is_ragged_kv)) * 2 *
                           num_bytes_per_ragged_offset;
@@ -548,7 +549,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         variant_pack[offset_k] = devOffsetsK;
         variant_pack[offset_v] = devOffsetsV;
       }
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         variant_pack[offset_stats] = devOffsetsS;
       }
     }
@@ -606,6 +607,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   const auto cudnn_runtime_version = cudnnGetVersion();
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
+  bool use_ragged_stats = is_ragged_q && cudnn_runtime_version >= 90600 && !(sm_arch_ >= 120);
 
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
   bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
@@ -798,7 +800,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                     .set_name("stats")
                                     .set_dim({b, h, s_q, 1})
                                     .set_data_type(fe::DataType_t::FLOAT));
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         offset_stats =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("offset_stats")
@@ -824,7 +826,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                   .set_causal_mask_bottom_right(is_bottom_right)
                                   .set_attn_scale(attn_scale);
 
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         sdpa_backward_options.set_max_total_seq_len_q(s_q);
       }
       if (is_ragged_kv && cudnn_runtime_version >= 90600) {
@@ -947,7 +949,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
       auto offset_kv_tuple =
           is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
-      auto offset_s_tuple = (is_ragged_q && cudnn_runtime_version >= 90600)
+      auto offset_s_tuple = use_ragged_stats
                                 ? std::make_tuple(offset_stats)
                                 : std::make_tuple(nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
@@ -982,7 +984,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     size_t seqlen_offsets_workspace_size = 0;
     if (is_ragged_q || is_ragged_kv) {
       size_t count = 2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         seqlen_offsets_workspace_size = (count + 1) * num_bytes_per_ragged_offset;
       } else {
         seqlen_offsets_workspace_size = count * num_bytes_per_ragged_offset;
@@ -1052,7 +1054,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         devOffsetsV = static_cast<int8_t *>(devOffsetsK) + num_bytes_per_ragged_offset;
       }
       void *devOffsetsS = nullptr;
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         devOffsetsS = static_cast<int8_t *>(devOffsets) +
                       (static_cast<int>(is_ragged_q) + static_cast<int>(is_ragged_kv)) * 2 *
                           num_bytes_per_ragged_offset;
@@ -1071,7 +1073,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         variant_pack[offset_k] = devOffsetsK;
         variant_pack[offset_v] = devOffsetsV;
       }
-      if (is_ragged_q && cudnn_runtime_version >= 90600) {
+      if (use_ragged_stats) {
         variant_pack[offset_stats] = devOffsetsS;
       }
     }
