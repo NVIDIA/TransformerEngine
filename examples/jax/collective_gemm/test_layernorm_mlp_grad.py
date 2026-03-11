@@ -159,9 +159,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
     noop_collective_op_sets = (noop_collective_op_set, noop_collective_op_set)
 
     use_quantization = args.quantize_recipe is not None
-    recipe = (
-        get_quantization_recipe(args.quantize_recipe) if use_quantization else None
-    )
+    recipe = get_quantization_recipe(args.quantize_recipe) if use_quantization else None
     with mesh, autocast(
         enabled=use_quantization,
         recipe=recipe,
@@ -169,7 +167,11 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
     ):
         # Build quantizer_sets inside autocast so create_set() reads the global recipe
         # for correct fwd/bwd dtypes. One set per dense layer (GEMM1=AG, GEMM2=RS).
-        quantizer_sets = QuantizerFactory.create_set(n_quantizer_sets=2) if use_quantization else (noop_quantizer_set, noop_quantizer_set)
+        quantizer_sets = (
+            QuantizerFactory.create_set(n_quantizer_sets=2)
+            if use_quantization
+            else (noop_quantizer_set, noop_quantizer_set)
+        )
 
         # Get the base axis rules and extend them with TE's rules. This must be done inside autocast
         axis_rules = flax.linen.get_logical_axis_rules()

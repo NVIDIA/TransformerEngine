@@ -205,10 +205,10 @@ def is_quantize_recipe_supported(recipe_name: str) -> Tuple[bool, str]:
     recipe = get_quantization_recipe(recipe_name)
     config = get_quantize_config_with_recipe(recipe)
     for tensor_source in TensorSource:
-         scaling_mode = config.get_scaling_mode(tensor_source)
-         is_supported, reason = is_scaling_mode_supported(scaling_mode)
-         if not is_supported:
-              return is_supported, reason
+        scaling_mode = config.get_scaling_mode(tensor_source)
+        is_supported, reason = is_scaling_mode_supported(scaling_mode)
+        if not is_supported:
+            return is_supported, reason
     return True, None
 
 

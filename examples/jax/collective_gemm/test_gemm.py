@@ -98,9 +98,7 @@ def run_gemm_tests(args, mesh=None):
     )
 
     use_quantization = args.quantize_recipe is not None
-    recipe = (
-        get_quantization_recipe(args.quantize_recipe) if use_quantization else None
-    )
+    recipe = get_quantization_recipe(args.quantize_recipe) if use_quantization else None
 
     # autocast sets the global recipe (fwd/bwd dtypes) AND the global MeshResource
     # (via global_shard_guard) required for collective GEMM sharding axis resolution.

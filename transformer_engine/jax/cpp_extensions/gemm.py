@@ -1302,8 +1302,8 @@ def _te_gemm(
 
     if not collective_op.is_none:
         assert not scaling_mode.is_nvfp4_scaling, (
-            f"Collective GEMM is not yet supported with {scaling_mode} quantization. "
-            "Only DELAYED_TENSOR_SCALING, CURRENT_TENSOR_SCALING, and MXFP8_1D_SCALING are supported."
+            f"Collective GEMM is not yet supported with {scaling_mode} quantization. Only"
+            " DELAYED_TENSOR_SCALING, CURRENT_TENSOR_SCALING, and MXFP8_1D_SCALING are supported."
         )
 
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype

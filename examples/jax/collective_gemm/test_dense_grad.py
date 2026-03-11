@@ -109,9 +109,7 @@ def run_dense_grad_tests(args, mesh=None):
     collective_op_set = CollectiveOpSet.create(forward_collective_op=collective_op)
 
     use_quantization = args.quantize_recipe is not None
-    recipe = (
-        get_quantization_recipe(args.quantize_recipe) if use_quantization else None
-    )
+    recipe = get_quantization_recipe(args.quantize_recipe) if use_quantization else None
     with mesh, autocast(
         enabled=use_quantization,
         recipe=recipe,
