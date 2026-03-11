@@ -1099,7 +1099,7 @@ def _start_all_gather_fp8_blockwise(
             device = inp._columnwise_data.device
         else:
             raise ValueError("Got Float8BlockwiseQTensorStorage input tensor without any data")
-        dtype = torch.bfloat16  # Only has fp8 dtype. Guess BF16 for dequant.
+        dtype = inp._dtype
     else:
         raise ValueError(
             "Invalid type for input tensor (expected torch.Tensor or"
@@ -1348,7 +1348,7 @@ def _all_gather_nvfp4(
         if inp._columnwise_data is not None:
             in_shape_t = inp._columnwise_data.size()
             device = inp._columnwise_data.device
-        dtype = torch.bfloat16
+        dtype = inp._dtype
     else:
         raise ValueError(
             "Invalid type for input tensor (expected torch.Tensor or NVFP4TensorStorage, "
@@ -1528,7 +1528,7 @@ def _all_gather_mxfp8(
             device = inp._columnwise_data.device
         else:
             raise ValueError("Got MXFP8 input tensor without any data")
-        dtype = torch.bfloat16  # Guess high-precision dtype.
+        dtype = inp._dtype
     else:
         raise ValueError(
             "Invalid type for input tensor (expected torch.Tensor or MXFP8TensorStorage, "
