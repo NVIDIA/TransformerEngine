@@ -435,6 +435,8 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
+at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
+
 /***************************************************************************************************
  * Support THD format for Context Parallel
  **************************************************************************************************/
