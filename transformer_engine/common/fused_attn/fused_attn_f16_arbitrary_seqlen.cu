@@ -427,9 +427,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
       auto offset_kv_tuple =
           is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
-      auto offset_s_tuple = use_ragged_stats
-                                ? std::make_tuple(offset_stats)
-                                : std::make_tuple(nullptr);
+      auto offset_s_tuple =
+          use_ragged_stats ? std::make_tuple(offset_stats) : std::make_tuple(nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
@@ -949,9 +948,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
       auto offset_kv_tuple =
           is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
-      auto offset_s_tuple = use_ragged_stats
-                                ? std::make_tuple(offset_stats)
-                                : std::make_tuple(nullptr);
+      auto offset_s_tuple =
+          use_ragged_stats ? std::make_tuple(offset_stats) : std::make_tuple(nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
