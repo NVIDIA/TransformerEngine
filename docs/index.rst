@@ -45,6 +45,7 @@ Transformer Engine documentation
    :caption: Features
 
    features/low_precision_training/index.rst
+   features/other_optimizations/index.rst
 
 
 .. toctree::
@@ -57,6 +58,7 @@ Transformer Engine documentation
    examples/te_gemma/tutorial_generation_gemma_with_te.ipynb
    examples/onnx/onnx_export.ipynb
    examples/te_jax_integration.ipynb
+   examples/op_fuser/op_fuser.rst
 
 .. toctree::
    :hidden:
