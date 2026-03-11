@@ -48,7 +48,7 @@ void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int
 
 /*! \brief Perform the columnwise hadamard transform cast fusion.
  *
- *  This has been deprecated in favor of nvte_quantize_with_hadamard_transform.
+ *  \deprecated This function has been deprecated in favor of nvte_quantize_with_hadamard_transform.
  *
  *  \param[in]      input           Input tensor to apply Hadamard transform.
  *  \param[in,out]  output          Output tensor.

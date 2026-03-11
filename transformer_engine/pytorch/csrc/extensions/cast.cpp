@@ -999,9 +999,8 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   // accuracy for performance. These optimizations are experimental
   // and inconsistently implemented.
   // What math is accelerated? Only the high precision math, so numerical impact is minimal
-  // 1. replace x / y by x * (1/y)
-  // 2. replace 1 / x by reciprocal_approximate_ftz(x)
-  // 3. when RHT cast fusion is available, fusion allows cast to be performed on FP32 data,
+  // 1. replace 1 / x by reciprocal_approximate_ftz(x)
+  // 2. when RHT cast fusion is available, fusion allows cast to be performed on FP32 data,
   //    this will essentially remove a round trip between FP32 to BF16 then FP32
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
   if (use_fast_math) {
