@@ -33,72 +33,81 @@ __device__ __forceinline__ void load_store(T *dst, T *src, int dst_offset, int s
   ((LT *)dst)[dst_offset] = ((LT *)src)[src_offset];  // NOLINT(*)
 }
 
+__device__ __forceinline__ float get_scale_value(float scale) { return scale; }
+
+__device__ __forceinline__ float get_scale_value(const float *scale_ptr) { return *scale_ptr; }
+
+template <typename in_t, typename out_t, typename scale_t>
+__device__ __forceinline__ void scale_chunk(int chunk_size, volatile int *is_infinite_gmem,
+                                            TensorListMetadata<2> &tl, scale_t scale_arg) {
+  // I'd like this kernel to propagate infs/nans.
+  // if(*noop_gmem == 1)
+  //   return;
+  const float scale = get_scale_value(scale_arg);
+  int tensor_loc = tl.block_to_tensor[blockIdx.x];
+  int chunk_idx = tl.block_to_chunk[blockIdx.x];
+  int n = tl.sizes[tensor_loc];
+
+  in_t *in = reinterpret_cast<in_t *>(tl.addresses[0][tensor_loc]);
+  in += chunk_idx * chunk_size;
+
+  out_t *out = reinterpret_cast<out_t *>(tl.addresses[1][tensor_loc]);
+  out += chunk_idx * chunk_size;
+
+  n -= chunk_idx * chunk_size;
+
+  bool finite = true;
+  in_t r_in[ILP];
+  out_t r_out[ILP];
+
+  // to make things simple, we put aligned case in a different code path
+  if (n % ILP == 0 && chunk_size % ILP == 0 && is_aligned(in) && is_aligned(out)) {
+    for (int i_start = threadIdx.x; i_start * ILP < n && i_start * ILP < chunk_size;
+         i_start += blockDim.x) {
+      // load
+      load_store(r_in, in, 0, i_start);
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        r_out[ii] = static_cast<float>(r_in[ii]) * scale;
+        finite = finite && isfinite(static_cast<float>(r_in[ii]));
+      }
+      // store
+      load_store(out, r_out, i_start, 0);
+    }
+  } else {
+    // Non-divergent exit condition for __syncthreads, not necessary here
+    for (int i_start = 0; i_start < n && i_start < chunk_size; i_start += blockDim.x * ILP) {
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        r_in[ii] = 0.f;
+        int i = i_start + threadIdx.x + ii * blockDim.x;
+        if (i < n && i < chunk_size) r_in[ii] = in[i];
+      }
+      // From a pure memory dependency perspective, there's likely no point unrolling
+      // the write loop, since writes just fire off once their LDGs arrive.
+      // Put another way, the STGs are dependent on the LDGs, but not on each other.
+      // There is still compute ILP benefit from unrolling the loop though.
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        r_out[ii] = static_cast<float>(r_in[ii]) * scale;
+        finite = finite && isfinite(static_cast<float>(r_in[ii]));
+      }
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        int i = i_start + threadIdx.x + ii * blockDim.x;
+        if (i < n && i < chunk_size) out[i] = r_out[ii];
+      }
+    }
+  }
+  if (!finite) *is_infinite_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
+}
+
 template <typename in_t, typename out_t>
 struct ScaleFunctor {
   __device__ __forceinline__ void operator()(int chunk_size, volatile int *is_infinite_gmem,
                                              TensorListMetadata<2> &tl,  // NOLINT(*)
                                              float scale) {
-    // I'd like this kernel to propagate infs/nans.
-    // if(*noop_gmem == 1)
-    //   return;
-
-    int tensor_loc = tl.block_to_tensor[blockIdx.x];
-    int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
-
-    in_t *in = reinterpret_cast<in_t *>(tl.addresses[0][tensor_loc]);
-    in += chunk_idx * chunk_size;
-
-    out_t *out = reinterpret_cast<out_t *>(tl.addresses[1][tensor_loc]);
-    out += chunk_idx * chunk_size;
-
-    n -= chunk_idx * chunk_size;
-
-    bool finite = true;
-    in_t r_in[ILP];
-    out_t r_out[ILP];
-
-    // to make things simple, we put aligned case in a different code path
-    if (n % ILP == 0 && chunk_size % ILP == 0 && is_aligned(in) && is_aligned(out)) {
-      for (int i_start = threadIdx.x; i_start * ILP < n && i_start * ILP < chunk_size;
-           i_start += blockDim.x) {
-        // load
-        load_store(r_in, in, 0, i_start);
-#pragma unroll
-        for (int ii = 0; ii < ILP; ii++) {
-          r_out[ii] = static_cast<float>(r_in[ii]) * scale;
-          finite = finite && isfinite(static_cast<float>(r_in[ii]));
-        }
-        // store
-        load_store(out, r_out, i_start, 0);
-      }
-    } else {
-      // Non-divergent exit condition for __syncthreads, not necessary here
-      for (int i_start = 0; i_start < n && i_start < chunk_size; i_start += blockDim.x * ILP) {
-#pragma unroll
-        for (int ii = 0; ii < ILP; ii++) {
-          r_in[ii] = 0.f;
-          int i = i_start + threadIdx.x + ii * blockDim.x;
-          if (i < n && i < chunk_size) r_in[ii] = in[i];
-        }
-        // From a pure memory dependency perspective, there's likely no point unrolling
-        // the write loop, since writes just fire off once their LDGs arrive.
-        // Put another way, the STGs are dependent on the LDGs, but not on each other.
-        // There is still compute ILP benefit from unrolling the loop though.
-#pragma unroll
-        for (int ii = 0; ii < ILP; ii++) {
-          r_out[ii] = static_cast<float>(r_in[ii]) * scale;
-          finite = finite && isfinite(static_cast<float>(r_in[ii]));
-        }
-#pragma unroll
-        for (int ii = 0; ii < ILP; ii++) {
-          int i = i_start + threadIdx.x + ii * blockDim.x;
-          if (i < n && i < chunk_size) out[i] = r_out[ii];
-        }
-      }
-    }
-    if (!finite)
-      *is_infinite_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
+    scale_chunk<in_t, out_t>(chunk_size, is_infinite_gmem, tl, scale);
   }
 };
 
@@ -107,67 +116,7 @@ struct ScalePtrFunctor {
   __device__ __forceinline__ void operator()(int chunk_size, volatile int *is_infinite_gmem,
                                              TensorListMetadata<2> &tl,  // NOLINT(*)
                                              float *scale_ptr) {
-    // I'd like this kernel to propagate infs/nans.
-    // if(*noop_gmem == 1)
-    //   return;
-    float scale = *scale_ptr;
-    int tensor_loc = tl.block_to_tensor[blockIdx.x];
-    int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
-
-    in_t *in = reinterpret_cast<in_t *>(tl.addresses[0][tensor_loc]);
-    in += chunk_idx * chunk_size;
-
-    out_t *out = reinterpret_cast<out_t *>(tl.addresses[1][tensor_loc]);
-    out += chunk_idx * chunk_size;
-
-    n -= chunk_idx * chunk_size;
-
-    bool finite = true;
-    in_t r_in[ILP];
-    out_t r_out[ILP];
-
-    // to make things simple, we put aligned case in a different code path
-    if (n % ILP == 0 && chunk_size % ILP == 0 && is_aligned(in) && is_aligned(out)) {
-      for (int i_start = threadIdx.x; i_start * ILP < n && i_start * ILP < chunk_size;
-           i_start += blockDim.x) {
-        // load
-        load_store(r_in, in, 0, i_start);
-#pragma unroll
-        for (int ii = 0; ii < ILP; ii++) {
-          r_out[ii] = static_cast<float>(r_in[ii]) * scale;
-          finite = finite && isfinite(static_cast<float>(r_in[ii]));
-        }
-        // store
-        load_store(out, r_out, i_start, 0);
-      }
-    } else {
-      // Non-divergent exit condition for __syncthreads, not necessary here
-      for (int i_start = 0; i_start < n && i_start < chunk_size; i_start += blockDim.x * ILP) {
-#pragma unroll
-        for (int ii = 0; ii < ILP; ii++) {
-          r_in[ii] = 0.f;
-          int i = i_start + threadIdx.x + ii * blockDim.x;
-          if (i < n && i < chunk_size) r_in[ii] = in[i];
-        }
-        // From a pure memory dependency perspective, there's likely no point unrolling
-        // the write loop, since writes just fire off once their LDGs arrive.
-        // Put another way, the STGs are dependent on the LDGs, but not on each other.
-        // There is still compute ILP benefit from unrolling the loop though.
-#pragma unroll
-        for (int ii = 0; ii < ILP; ii++) {
-          r_out[ii] = static_cast<float>(r_in[ii]) * scale;
-          finite = finite && isfinite(static_cast<float>(r_in[ii]));
-        }
-#pragma unroll
-        for (int ii = 0; ii < ILP; ii++) {
-          int i = i_start + threadIdx.x + ii * blockDim.x;
-          if (i < n && i < chunk_size) out[i] = r_out[ii];
-        }
-      }
-    }
-    if (!finite)
-      *is_infinite_gmem = 1;  // Blindly fire off a write.  These will race but that's ok.
+    scale_chunk<in_t, out_t>(chunk_size, is_infinite_gmem, tl, scale_ptr);
   }
 };
 
