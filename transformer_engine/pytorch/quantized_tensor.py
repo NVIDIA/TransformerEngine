@@ -560,11 +560,12 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten.new_empty.default:
             tensor = args[0]
             size = args[1]
+            dtype = kwargs.get("dtype", tensor.dtype)
             device = kwargs.get("device", tensor.device)
             pin_memory = kwargs.get("pin_memory", False)
             out = tensor._quantizer.make_empty(
                 shape=torch.Size(size),
-                dtype=tensor.dtype,
+                dtype=dtype,
                 device=device,
                 requires_grad=tensor.requires_grad,
                 pin_memory=pin_memory,
