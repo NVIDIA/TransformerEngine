@@ -41,7 +41,7 @@ _FP8_RECIPE_CONFIGS = [
 
 
 def _parametrize_fp8_recipes():
-    """Generate pytest.param objects with xfail marks for unsupported FP8 recipes."""
+    """Generate pytest.param objects with skip marks for unsupported FP8 recipes."""
     params = []
     for name, check_fn in _FP8_RECIPE_CONFIGS:
         supported, reason = check_fn()
@@ -49,7 +49,7 @@ def _parametrize_fp8_recipes():
             pytest.param(
                 name,
                 id=name,
-                marks=pytest.mark.xfail(condition=not supported, reason=reason),
+                marks=pytest.mark.skipif(not supported, reason=reason),
             )
         )
     return params

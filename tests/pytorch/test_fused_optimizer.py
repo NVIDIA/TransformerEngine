@@ -663,6 +663,10 @@ class TestFusedAdamFloat8Block(TestFusedOptimizer):
 
     def setup_method(self) -> None:
         super().setup_method(iters=5)
+        fp8_block_available, self.fp8_block_reason = te.is_fp8_block_scaling_available(
+            return_reason=True
+        )
+        self.fp8_block_available = fp8_block_available
 
     def _build_model(self):
         recipe = Float8BlockScaling()
@@ -679,6 +683,9 @@ class TestFusedAdamFloat8Block(TestFusedOptimizer):
         - FP32 master weights track a reference Adam optimizer
         - Params remain QuantizedTensors after training
         """
+        if not self.fp8_block_available:
+            pytest.skip(self.fp8_block_reason)
+
         model, recipe = self._build_model()
 
         # Verify weight params are QuantizedTensors (bias stays bf16)
@@ -729,6 +736,9 @@ class TestFusedAdamFloat8Block(TestFusedOptimizer):
         Uses te.autocast with Float8BlockScaling recipe for the forward pass,
         verifying the full training loop works with quantized compute.
         """
+        if not self.fp8_block_available:
+            pytest.skip(self.fp8_block_reason)
+
         model, recipe = self._build_model()
 
         optimizer = te.optimizers.FusedAdam(
