@@ -217,30 +217,25 @@ def _dense_fwd_rule(
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
     # GEMM NN
-    use_bias = bias is not None
     output = tex.gemm(
         casted_x.get_tensor(usage=TensorUsage.LHS),
         casted_kernel.get_tensor(usage=TensorUsage.RHS),
+        bias=bias,
         contracting_dims=(x_contracting_dims, k_contracting_dims),
         transpose_batch_sequence=transpose_batch_sequence,
-        bias=bias if not tex.gemm_uses_jax_dot() else None,
-        fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
         collective_op=collective_op_set.forward,
     )
     output = with_sharding_constraint_by_logical_axes(output, output_axes)
 
-    if use_bias and tex.gemm_uses_jax_dot():
-        bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
-        output += jnp.reshape(bias, bias_new_shape)
-
+    has_bias = bias is not None
     ctx = (
         casted_x.get_tensor(usage=TensorUsage.LHS_TRANS).checkpoint(quantizer_set.x),
         casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS).checkpoint(quantizer_set.kernel),
         x.shape,
         kernel.shape,
-        use_bias,
         quantizer_set,
         flatten_axis_k,
+        has_bias,
     )
     return output, ctx
 
@@ -265,9 +260,9 @@ def _dense_bwd_rule(
         casted_kernel_rhs,
         x_shape,
         kernel_shape,
-        use_bias,
         quantizer_set,
         flatten_axis_k,
+        has_bias,
     ) = ctx
     grad = with_sharding_constraint_by_logical_axes(grad, output_axes)
 
@@ -277,7 +272,7 @@ def _dense_bwd_rule(
 
     casted_grad, dbias = tex.quantize_dbias(
         grad,
-        is_dbias=use_bias,
+        is_dbias=has_bias,
         flatten_axis=flatten_axis_k,
         quantizer=quantizer_set.dgrad,
         amax_scope=AmaxScope.TPSP,

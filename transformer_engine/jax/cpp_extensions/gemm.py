@@ -5,9 +5,10 @@
 
 import math
 import operator
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from functools import partial, reduce
+from functools import partial, reduce, cache
 from typing import Tuple, Sequence, Union
 from enum import Enum
 import warnings
@@ -43,8 +44,6 @@ from ..quantize import (
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
-    get_quantize_config_with_recipe,
-    get_global_quantize_recipe,
     QuantizeLayout,
 )
 from .misc import get_padded_spec, is_all_reduce_in_float32
@@ -63,7 +62,6 @@ __all__ = [
     "gemm",
     "grouped_gemm_copy_group_sizes",
     "grouped_gemm",
-    "gemm_uses_jax_dot",
     "sanitize_dims",
     "get_non_contracting_dims",
     "transpose_dims",
@@ -380,6 +378,12 @@ def get_rhs_axis_boundary(rhs_cdims, is_transposed):
     return min(rhs_cdims) if is_transposed else max(rhs_cdims) + 1
 
 
+@cache
+def _get_high_precision_accumulation_from_env() -> bool:
+    """Read NVTE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION once per process (cached)."""
+    return os.getenv("NVTE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION", "0") == "1"
+
+
 def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
     """Assert that the given tensor shape and layout meet the requirements for cuBLAS GEMM."""
     if scaling_mode != ScalingMode.NO_SCALING:
@@ -397,9 +401,9 @@ class GemmPrimitive(BasePrimitive):
     Primitive for cuBLAS GEMM
     """
 
-    name = "te_gemm_ffi"
+    name = "te_gemm_v2_ffi"
     multiple_results = True
-    impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14)
     inner_primitive = None
     outer_primitive = None
 
@@ -410,15 +414,11 @@ class GemmPrimitive(BasePrimitive):
         rhs,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -457,6 +457,8 @@ class GemmPrimitive(BasePrimitive):
             "cuBLAS GEMM operands have incompatible contracting dimensions: "
             f"{lhs.shape} @ idx {lhs_contracting_dims} X {rhs.shape} @ idx {rhs_contracting_dims}."
         )
+        assert_cublas_requirements(scaling_mode, lhs_contracting_size, "LHS")
+        assert_cublas_requirements(scaling_mode, rhs_contracting_size, "RHS")
 
         lhs_is_transposed, rhs_is_transposed = _get_gemm_layout(operand_ndims, contracting_dims)
         if scaling_mode != ScalingMode.NO_SCALING:
@@ -509,8 +511,8 @@ class GemmPrimitive(BasePrimitive):
             assert out_dtype == jnp.bfloat16, f"Unsupported out_dtype={out_dtype}"
             output = jax.core.ShapedArray(shape=overlap_out_shape, dtype=out_dtype)
 
-        # Validate bias
-        if fuse_bias:
+        # Validate bias when present (bias.size > 0 means fuse bias)
+        if bias.size > 0:
             assert bias.shape == tuple(rhs_non_contracting_shape), (
                 "cuBLAS GEMM bias tensor has incorrect shape, "
                 f"expected ({tuple(rhs_non_contracting_shape)}, ) but found {bias.shape}."
@@ -519,29 +521,7 @@ class GemmPrimitive(BasePrimitive):
                 "cuBLAS GEMM bias tensor has incorrect data type, "
                 f"expected {out_dtype} but found {bias.dtype}."
             )
-        # WAR: allocate dbias regardless of fuse_bias so that the sharding propagation works as we
-        # change the fuse_bias value in the sharded_impl
-        dbias_shape = bias.shape if grad else (0,)
-        bias_grad = jax.core.ShapedArray(shape=dbias_shape, dtype=bias.dtype)
 
-        # Validate pre-GeLU
-        pre_gelu_shape = (0,)
-        pre_gelu_dtype = out_dtype
-        if fuse_gelu:
-            pre_gelu_shape = out_shape
-            if grad:
-                pre_gelu_ndim = len(pre_gelu_shape)
-                assert gelu_input.ndim == pre_gelu_shape and all(
-                    gelu_input.shape[i] == pre_gelu_shape[i] for i in range(pre_gelu_ndim)
-                ), (
-                    "cuBLAS GEMM pre-GeLU tensor has incorrect shape, "
-                    f"expected {pre_gelu_shape} but found {gelu_input.shape}."
-                )
-                assert gelu_input.dtype == out_dtype, (
-                    "cuBLAS GEMM pre-GeLU tensor has incorrect data type, "
-                    f"expected {pre_gelu_dtype} but found {gelu_input.dtype}."
-                )
-        pre_gelu_out = jax.core.ShapedArray(shape=pre_gelu_shape, dtype=pre_gelu_dtype)
         assert alpha.size == 1 and alpha.dtype == jnp.float32
         assert beta.size == 1 and beta.dtype == jnp.float32
 
@@ -557,12 +537,12 @@ class GemmPrimitive(BasePrimitive):
         workspace_size += 256
         workspace = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
-        return output, bias_grad, pre_gelu_out, workspace
+        return output, workspace
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        outputs = GemmPrimitive.abstract(*args, **kwargs)
-        return outputs[:-1]  # discard workspace array
+        output, _ = GemmPrimitive.abstract(*args, **kwargs)
+        return (output,)
 
     @staticmethod
     def lowering(
@@ -572,15 +552,11 @@ class GemmPrimitive(BasePrimitive):
         rhs,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -595,53 +571,18 @@ class GemmPrimitive(BasePrimitive):
             (lhs_aval.ndim, rhs_aval.ndim), (lhs_cdims, rhs_cdims)
         )
 
-        lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
-        lhs_contracting_size = (
-            reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
-            if lhs_transposed
-            else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            lhs_contracting_size,
-            f"LHS {lhs_aval.shape} with contracting dims {lhs_cdims}",
-        )
-        rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
-        rhs_contracting_size = (
-            reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
-            if rhs_transposed
-            else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            rhs_contracting_size,
-            f"RHS {rhs_aval.shape} with contracting dims {rhs_cdims}",
-        )
-
-        args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta)
+        args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta)
         kwargs = {
             "scaling_mode": int(scaling_mode.value),
+            "collective_op": int(collective_op.value),
             "lhs_axis_boundary": get_lhs_axis_boundary(lhs_cdims, lhs_transposed),
             "rhs_axis_boundary": get_rhs_axis_boundary(rhs_cdims, rhs_transposed),
             "lhs_transposed": lhs_transposed,
             "rhs_transposed": rhs_transposed,
-            "fuse_bias": fuse_bias,
-            "fuse_gelu": fuse_gelu,
-            "grad": grad,
             "use_split_accumulator": use_split_accumulator,
-            "collective_op": int(collective_op.value),
         }
 
-        operand_output_aliases = {}
-        if grad:
-            operand_output_aliases.update({4: 1})  # bias <-> bias_grad
-        if fuse_gelu and grad:
-            operand_output_aliases.update({5: 2})  # gelu_input <-> pre_gelu_out
-
-        return jax.ffi.ffi_lowering(
-            GemmPrimitive.name,
-            operand_output_aliases=operand_output_aliases,
-        )(ctx, *args, **kwargs)
+        return jax.ffi.ffi_lowering(GemmPrimitive.name)(ctx, *args, config=kwargs)
 
     @staticmethod
     def impl(
@@ -650,15 +591,11 @@ class GemmPrimitive(BasePrimitive):
         rhs,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -679,6 +616,7 @@ class GemmPrimitive(BasePrimitive):
             rhs_scale_inv = apply_padding_to_scale_inv(
                 rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
             )
+
         # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
         if scaling_mode.is_mxfp8_scaling:
             lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
@@ -711,26 +649,22 @@ class GemmPrimitive(BasePrimitive):
             reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
             lhs = reordered.reshape(original_shape)
 
-        (output, bias_grad, pre_gelu_out, _) = GemmPrimitive.inner_primitive.bind(
+        (output, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
             lhs_scale_inv,
             rhs,
             rhs_scale_inv,
             bias,
-            gelu_input,
             alpha,
             beta,
             out_dtype=out_dtype,
             contracting_dims=contracting_dims,
             scaling_mode=scaling_mode,
-            fuse_bias=fuse_bias,
-            fuse_gelu=fuse_gelu,
-            grad=grad,
             use_split_accumulator=use_split_accumulator,
-            collective_op=collective_op,
             transpose_batch_sequence=transpose_batch_sequence,
             sequence_dim=sequence_dim,
             is_outer=is_outer,
+            collective_op=collective_op,
         )
         # Alter output blocks for CGEMM AG
         if (
@@ -759,7 +693,7 @@ class GemmPrimitive(BasePrimitive):
             reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
             output = reordered.reshape(original_shape)
 
-        return [output, bias_grad, pre_gelu_out]
+        return (output,)
 
     @staticmethod
     def outer_impl(
@@ -768,15 +702,11 @@ class GemmPrimitive(BasePrimitive):
         rhs,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -789,15 +719,11 @@ class GemmPrimitive(BasePrimitive):
             rhs,
             rhs_scale_inv,
             bias,
-            gelu_input,
             alpha,
             beta,
             out_dtype,
             contracting_dims,
             scaling_mode,
-            fuse_bias,
-            fuse_gelu,
-            grad,
             use_split_accumulator,
             transpose_batch_sequence,
             sequence_dim,
@@ -812,9 +738,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         collective_op,
         transpose_batch_sequence,
@@ -831,30 +754,19 @@ class GemmPrimitive(BasePrimitive):
         ), f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
         out_bdims = (None,)
 
-        # Bias gradient is never batched
-        bias_bdims = (None,)
-
-        # Pre-GeLU output, if exists, is batched like GEMM output
-        pre_gelu_bdims = (None,)
-        if fuse_gelu and not grad:
-            pre_gelu_bdims = out_bdims
-
         return (
             GemmPrimitive.outer_primitive.bind(
                 *batched_args,
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
                 scaling_mode=scaling_mode,
-                fuse_bias=fuse_bias,
-                fuse_gelu=fuse_gelu,
-                grad=grad,
                 use_split_accumulator=use_split_accumulator,
                 collective_op=collective_op,
                 transpose_batch_sequence=transpose_batch_sequence,
                 sequence_dim=sequence_dim,
                 is_outer=is_outer,
             ),
-            (out_bdims, bias_bdims, pre_gelu_bdims),
+            (out_bdims,),
         )
 
     @staticmethod
@@ -996,16 +908,15 @@ class GemmPrimitive(BasePrimitive):
             (lhs_non_cspecs, rhs_non_cspecs),
         )
 
-        # Bias and Pre-GeLU sharding is based on GEMM output before any scatter
-        bias_specs = tuple(list(rhs_non_cspecs).copy())
-        gelu_specs = tuple(list(out_specs).copy())
+        # Bias sharding is based on GEMM output before any scatter
+        bias_specs = rhs_non_cspecs if arg_infos[4].size > 0 else (None,)  # bias is operand index 4
 
         if not collective_op.is_none:
             assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
 
         return (
-            (lhs_specs, rhs_specs, bias_specs, gelu_specs),
-            (out_specs, bias_specs, gelu_specs),
+            (lhs_specs, rhs_specs, bias_specs),
+            out_specs,
             reduce_spec,
             sequence_dim,
         )
@@ -1015,9 +926,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -1036,33 +944,18 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim,
         )
 
-        (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
-            GemmPrimitive._parse_operand_output_specs(
-                arg_infos, contracting_dims, transpose_batch_sequence, collective_op
-            )
+        (_, out_specs, *_) = GemmPrimitive._parse_operand_output_specs(
+            arg_infos, contracting_dims, transpose_batch_sequence, collective_op
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
-        # Discard dbias gradient spec if there is no bias and grad fusion
-        if not (fuse_bias and grad):
-            dbias_specs = (None,)
-        dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_specs))
-
-        # Discard pre-GeLU output spec if there is no GeLU fusion
-        if not fuse_gelu:
-            pre_gelu_specs = (None,)
-        pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_specs))
-
-        return [out_sharding, dbias_sharding, pre_gelu_sharding]
+        return (out_sharding,)
 
     @staticmethod
     def partition(
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -1075,8 +968,8 @@ class GemmPrimitive(BasePrimitive):
         del result_infos, is_outer, sequence_dim
 
         (
-            (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
-            (out_specs, dbias_specs, pre_gelu_specs),
+            (lhs_specs, rhs_specs, bias_input_specs),
+            out_specs,
             reduce_spec,
             inferred_sequence_dim,
         ) = GemmPrimitive._parse_operand_output_specs(
@@ -1097,50 +990,31 @@ class GemmPrimitive(BasePrimitive):
             rhs_sharding if scaling_mode.is_1d_block_scaling() else none_sharding,
         )
 
-        # Discard bias input spec if there is no bias fusion
-        if not fuse_bias:
-            bias_input_specs = (None,)
+        # Bias
         arg_shardings += (NamedSharding(mesh, PartitionSpec(*bias_input_specs)),)
-
-        # Discard pre-GeLU input spec if there is no GeLU fusion
-        if not fuse_gelu:
-            gelu_input_specs = (None,)
-        arg_shardings += (NamedSharding(mesh, PartitionSpec(*gelu_input_specs)),)
 
         # Alpha, beta
         arg_shardings += (none_sharding, none_sharding)
 
         # Assemble output shardings
-        out_shardings = [NamedSharding(mesh, PartitionSpec(*out_specs))]
+        out_sharding = (NamedSharding(mesh, PartitionSpec(*out_specs)),)
 
-        # Discard bias gradient spec if there is no bias and grad fusion
-        if not (fuse_bias and grad):
-            dbias_specs = (None,)
-        out_shardings.append(NamedSharding(mesh, PartitionSpec(*dbias_specs)))
-
-        # Discard pre-GeLU output spec if there is no GeLU fusion
-        if not fuse_gelu:
-            pre_gelu_specs = (None,)
-        out_shardings.append(NamedSharding(mesh, PartitionSpec(*pre_gelu_specs)))
-
-        def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta):
+        def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta):
             # We should not fuse bias in the output reduction case
-            sharded_fuse_bias = fuse_bias and reduce_spec is None
-            outputs = GemmPrimitive.impl(
+            has_bias = bias.size > 0
+            fuse_bias = has_bias and reduce_spec is None
+            bias_for_impl = bias if fuse_bias else jnp.empty(0, dtype=bias.dtype)
+            (output,) = GemmPrimitive.impl(
                 lhs,
                 lhs_scale_inv,
                 rhs,
                 rhs_scale_inv,
-                bias,
-                gelu_input,
+                bias_for_impl,
                 alpha,
                 beta,
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
                 scaling_mode=scaling_mode,
-                fuse_bias=sharded_fuse_bias,
-                fuse_gelu=fuse_gelu,
-                grad=grad,
                 use_split_accumulator=use_split_accumulator,
                 transpose_batch_sequence=transpose_batch_sequence,
                 sequence_dim=inferred_sequence_dim,
@@ -1151,27 +1025,24 @@ class GemmPrimitive(BasePrimitive):
             if reduce_spec is not None:
                 if not collective_op.is_reduce_scatter:
                     if is_all_reduce_in_float32():  # For unittest only
-                        outputs[0] = jax.lax.psum(
-                            outputs[0].astype(jnp.float32), reduce_spec
-                        ).astype(out_dtype)
+                        output = jax.lax.psum(output.astype(jnp.float32), reduce_spec).astype(
+                            out_dtype
+                        )
                     else:
-                        outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
+                        output = jax.lax.psum(output, reduce_spec)
 
-                if fuse_bias:  # TODO(Phuong): rename fuse_bias to has_bias
-                    outputs[0] += bias
+                if has_bias:
+                    output += bias
 
-            return outputs
+            return (output,)
 
-        return mesh, _sharded_impl, out_shardings, arg_shardings
+        return mesh, _sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -1231,11 +1102,10 @@ class GemmPrimitive(BasePrimitive):
         lhs_non_cspec = tuple(lhs_specs[i] for i in range(operand_ndims[0]) if i not in lhs_cdims)
         rhs_non_cspec = tuple(rhs_specs[i] for i in range(operand_ndims[1]) if i not in rhs_cdims)
         out_spec = (*lhs_non_cspec, *rhs_non_cspec)
-        bias_spec = rhs_non_cspec if fuse_bias else ("…4",)
-        gelu_spec = out_spec if fuse_gelu else ("…5",)
-        alpha_spec = ("_6",)
-        beta_spec = ("_7",)
-        dbias_spec = bias_spec if grad else ("…8")
+        bias_aval = operand_types[4]
+        bias_spec = rhs_non_cspec if math.prod(bias_aval.shape) > 0 else ("…4",)
+        alpha_spec = ("_5",)
+        beta_spec = ("_6",)
 
         return SdyShardingRule(
             operand_mappings=(
@@ -1244,55 +1114,29 @@ class GemmPrimitive(BasePrimitive):
                 rhs_specs,
                 rhs_scale_specs,
                 bias_spec,
-                gelu_spec,
                 alpha_spec,
                 beta_spec,
             ),
-            result_mappings=(
-                out_spec,
-                dbias_spec,
-                gelu_spec,
-            ),
+            result_mappings=(out_spec,),
         )
 
 
 register_primitive(GemmPrimitive)
 
 
-def gemm_uses_jax_dot() -> bool:
-    """Check if the GEMM call directs to the TE custom cuBLAS call or native JAX dot."""
-    return not GemmPrimitive.enabled()
-
-
+# TODO(Phuong): move this function down after GroupedGemmPrimitive after initial review. Keep it
+# here for now to minimize line changes.
 def _te_gemm(
     lhs: Union[jax.Array, ScaledTensor],
     rhs: Union[jax.Array, ScaledTensor],
     bias: jax.Array = None,
-    gelu_input: jax.Array = None,
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
-    fuse_bias: bool = False,
-    fuse_gelu: bool = False,
-    grad: bool = False,
-    use_split_accumulator: bool = None,
+    use_split_accumulator: bool = False,
     transpose_batch_sequence: bool = False,
     collective_op: CollectiveOp = CollectiveOp.NONE,
 ) -> Tuple[jax.Array, ...]:
-
-    if grad or fuse_gelu:
-        warnings.warn(
-            "GEMM + fused grad or fused gelu is not well tested and will be deprecated in the"
-            " future",
-            DeprecationWarning,
-        )
-
-    if use_split_accumulator is None:
-        # TODO(jberchtold): Rework GEMM API to provide the context here instead of relying on global state and also
-        # use context of the GEMM type so we can decide between fprop, dgrad, and wgrad
-        use_split_accumulator = get_quantize_config_with_recipe(
-            get_global_quantize_recipe()
-        ).FP8_2X_ACC_FPROP
 
     # Prepare non-quantized GEMM operands
     lhs_data = lhs
@@ -1354,34 +1198,28 @@ def _te_gemm(
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs_amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
 
-    # Dummy empties for bias and gelu
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
-    if bias is None or not (fuse_bias and not grad):
+    if bias is None:
         bias = jnp.empty(0, dtype=out_dtype)
-    if gelu_input is None or not (fuse_gelu and grad):
-        gelu_input = jnp.empty(0, dtype=out_dtype)
 
-    return GemmPrimitive.outer_primitive.bind(
+    (output,) = GemmPrimitive.outer_primitive.bind(
         lhs_data,
         lhs_scale_inv,
         rhs_data,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype=out_dtype,
         contracting_dims=(lhs_cdims, rhs_cdims),
         scaling_mode=scaling_mode,
-        fuse_bias=fuse_bias,
-        fuse_gelu=fuse_gelu,
-        grad=grad,
         use_split_accumulator=use_split_accumulator,
         transpose_batch_sequence=transpose_batch_sequence,
         sequence_dim=-1,  #  Dummy value and will be set in the primitive
         is_outer=True,
         collective_op=collective_op,
     )
+    return output
 
 
 class GroupedGemmCopySizesPrimitive(BasePrimitive):
@@ -1827,6 +1665,7 @@ def _jax_gemm(
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
+    use_split_accumulator: bool = False,
 ) -> jnp.ndarray:
     """
     FP8 GEMM via JAX
@@ -1838,12 +1677,6 @@ def _jax_gemm(
             assert (
                 rhs.scaling_mode == lhs.scaling_mode
             ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
-
-            # TODO(jberchtold): Rework GEMM API to provide the context here instead of relying on global state and also
-            # use context of the GEMM type so we can decide between fprop, dgrad, and wgrad
-            use_split_accumulator = get_quantize_config_with_recipe(
-                get_global_quantize_recipe()
-            ).FP8_2X_ACC_FPROP
 
             precision = (
                 jax.lax.Precision.HIGHEST if use_split_accumulator else jax.lax.Precision.DEFAULT
@@ -1874,6 +1707,7 @@ def _jax_gemm(
 def gemm(
     lhs: Union[jnp.ndarray, AbstractBaseTensor],
     rhs: Union[jnp.ndarray, AbstractBaseTensor],
+    bias: jnp.ndarray = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
@@ -1889,30 +1723,15 @@ def gemm(
         Left-hand side operand in the matrix multiplication.
     rhs: Union[jax.Array, ScaledTensor]
         Right-hand side operand in the matrix multiplication.
+    bias: jax.Array, default = None
+        Optional additive bias term. When provided (non-empty), bias is added to the result of the Matrix Multiplication operation.
+        This bias addition is fused when using the TE's custom call to cuBLAS GEMM.
+    contracting_dims: Tuple[Sequence[int], Sequence[int]], default = ((-1, ), (0, ))
+        Tuple of sequences representing the contracting dimensions of the operands.
     lhs_quantizer: Quantizer, default = None
         Object for down-casting the LHS operand for quantized GEMM.
     rhs_quantizer: Quantizer, default = None
         Object for down-casting the RHS operand for quantized GEMM.
-    contracting_dims: Tuple[Sequence[int], Sequence[int]], default = ((-1, ), (0, ))
-        Tuple of sequences representing the contracting dimensions of the operands.
-    bias: jax.Array, default = None
-        Optional additive bias term, required for forward GEMM with bias fusion. Only supported
-        with TE's custom call to cuBLAS GEMM.
-    gelu_input: jax.Array, default = None
-        Pre-GeLU output from forward GEMM, required for backward/grad GEMM with dGeLU fusion. Only
-        supported with TE's custom call to cuBLAS GEMM.
-    fuse_bias: bool, default = False
-        Enable bias addition in forward GEMM or bias gradient in backward GEMM. Only supported with
-        TE's custom call to cuBLAS GEMM.
-    fuse_gelu: bool, default = False
-        Enable GeLU activation in forward GEMM or GeLU gradient in backward GEMM. Only supported
-        with TE's custom call to cuBLAS GEMM.
-    grad: bool, default = False
-        Flag for switching bias and GeLU fusions from forward to backward mode. Only supported with
-        TE's custom call to cuBLAS GEMM.
-    use_split_accumulator: bool, default = True
-        Enable promoting some intermediate sums to higher precision when accumulating the result in
-        the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
     transpose_batch_sequence: bool, default = False
         Transpose the batch and sequence dimensions of the input tensor.
     collective_op: CollectiveOp, default = CollectiveOp.NONE
@@ -1921,18 +1740,7 @@ def gemm(
     Returns
     -------
     jax.Array:
-        Result of the operation. For TE's custom call to cuBLAS GEMM, this result can include the
-        GeLU application when `fuse_gelu=True` and `grad=False`, the GeLU gradient contribution
-        when `fuse_gelu=True` and `grad=True`, and the additive bias when `fuse_bias=True` and
-        `grad=False`.
-    Optional[jax.Array]:
-        Bias gradient when `fuse_bias=True` and `grad=True`. Only supported with TE's custom call
-        to cuBLAS GEMM.
-    Optional[jax.Array]:
-        Pre-GeLU GEMM output when `fuse_gelu=True` and `grad=False`. This is required as an input
-        to `_te_gemm()` with `fuse_gelu=True` and `grad=True` in the backward pass in order to
-        compute the GeLU contribution to the gradient. Only supported with TE's custom call to
-        cuBLAS GEMM.
+        Result of the operation lhs * rhs + bias.
     """
     if isinstance(lhs, NoScaleTensor):
         lhs = lhs.data
@@ -1946,45 +1754,33 @@ def gemm(
             lhs_quantizer = quantizer_set.x
             rhs_quantizer = quantizer_set.kernel
 
-    # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
-    # TODO(Phuong): fuse_bias -> has_bias and has_bias = bias is not None
-    fuse_bias = kwargs.get("fuse_bias", False)
-    fuse_gelu = kwargs.get("fuse_gelu", False)
-    if not GemmPrimitive.enabled():
-        assert kwargs.get("bias", None) is None and not fuse_gelu, (
-            "TE GEMM was invoked with bias fusion options that are not supported by the "
-            "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backends used when the custom cuBLAS "
-            "GEMM primitive is disabled."
-        )
-        assert kwargs.get("gelu_input", None) is None and not fuse_bias, (
-            "TE GEMM was invoked with GeLU fusion options that are not supported by the "
-            "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backends used when the custom cuBLAS "
-            "GEMM primitive is disabled."
-        )
-        assert collective_op.is_none, "JAX GEMM does not support collective GEMM"
-        return _jax_gemm(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer)
+    # This option enable promoting some intermediate sums to higher precision when accumulating the result in
+    # the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
+    use_split_accumulator = _get_high_precision_accumulation_from_env()
 
-    outputs = _te_gemm(
+    # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
+    if not GemmPrimitive.enabled():
+        assert collective_op.is_none, "JAX GEMM does not support collective GEMM"
+        output = _jax_gemm(
+            lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer, use_split_accumulator
+        )
+        if bias is not None:
+            output += bias  # Unfused
+        return output
+
+    output = _te_gemm(
         lhs,
         rhs,
+        bias,
         lhs_quantizer=lhs_quantizer,
         rhs_quantizer=rhs_quantizer,
         contracting_dims=contracting_dims,
+        use_split_accumulator=use_split_accumulator,
         transpose_batch_sequence=transpose_batch_sequence,
         collective_op=collective_op,
-        **kwargs,
     )
 
-    # Discard empty outputs
-    grad = kwargs.get("grad", False)
-    clean_outputs = outputs[0]  # first output is the final result and is never empty
-    if (fuse_bias and grad) or (fuse_gelu and not grad):
-        clean_outputs = (outputs[0],)
-        if fuse_bias and grad:  # only return bias gradient if it exists
-            clean_outputs += (outputs[1],)
-        if fuse_gelu and not grad:  # only return pre-GeLU output if it exists
-            clean_outputs += (outputs[2],)
-    return clean_outputs
+    return output
 
 
 def grouped_gemm_copy_group_sizes(
