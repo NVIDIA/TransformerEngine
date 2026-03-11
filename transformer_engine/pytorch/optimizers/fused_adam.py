@@ -629,6 +629,9 @@ class FusedAdam(torch.optim.Optimizer):
                     # Block-scaling quantized params (MXFP8Tensor, Float8BlockwiseQTensor,
                     # NVFP4Tensor). Operate on FP32 master weights, requantize back after
                     # Adam update.
+                    # TODO: Fuse the Adam update + requantization into a single kernel
+                    # for MXFP8Tensor, Float8BlockwiseQTensor, and NVFP4Tensor
+                    # (similar to multi_tensor_adam_fp8 for Float8Tensor).
                     if not self.master_weights:
                         local_p = p._local_tensor if isinstance(p, DTensor) else p
                         raise RuntimeError(
@@ -637,8 +640,10 @@ class FusedAdam(torch.optim.Optimizer):
                         )
                     # Route to the FP32 master-weight path: Adam updates the FP32 master,
                     # then we write back to the quantized param after kernels run.
+                    # Gradients may be BF16/FP16 from the backward pass — cast to FP32
+                    # to match the FP32 Adam kernel expectations.
                     p_f32_model.append(unscaled_state["master_param"].data)
-                    g_of_f32_model.append(p_grad.data)
+                    g_of_f32_model.append(p_grad.data.float())
                     m_of_f32_model.append(unscaled_state["exp_avg"])
                     v_of_f32_model.append(unscaled_state["exp_avg_sq"])
                     quantized_params_to_update.append((p, unscaled_state["master_param"]))

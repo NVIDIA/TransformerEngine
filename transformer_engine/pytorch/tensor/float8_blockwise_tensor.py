@@ -19,11 +19,6 @@ from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..utils import devices_match, round_up_to_nearest_multiple
 
-try:
-    from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
-except ImportError:
-    TrainingState = None
-
 aten = torch.ops.aten
 
 
