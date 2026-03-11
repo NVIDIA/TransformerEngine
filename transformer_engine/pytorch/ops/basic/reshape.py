@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -20,11 +20,11 @@ from ...tensor import Quantizer
 class Reshape(BasicOperation):
     """Reshape tensor
 
-    See `torch.reshape`.
+    See ``torch.reshape``.
 
     Parameters
     ----------
-    shape: iterable of int
+    shape : iterable of int
         Output tensor dimensions. If one dimension is -1, it is
         inferred based on input tensor dimensions.
 

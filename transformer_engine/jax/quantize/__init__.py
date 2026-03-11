@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -14,5 +14,7 @@ from .quantizer import *
 from .dequantizer import *
 from .scaling_modes import *
 from .metadata import *
+from .hadamard import *
 from .helper import *
 from .device_utils import *
+from .misc import *

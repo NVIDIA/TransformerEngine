@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 220">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      .arrow {
+        stroke: #616161;
+        stroke-width: 2;
+        fill: none;
+        marker-end: url(#arrowhead-cast);
+      }
+    </style>
+    <marker id="arrowhead-cast" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 10 3, 0 6" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="450" y="30" class="title" text-anchor="middle">FP8 quantization </text>
+  
+  <!-- Step 1: High Precision Tensor -->
+  <rect x="80" y="80" width="140" height="70" class="hp" rx="6"/>
+  <text x="150" y="110" class="text" text-anchor="middle">High Precision</text>
+  <text x="150" y="130" class="text" text-anchor="middle">Tensor</text>
+  
+  <!-- Arrow 1 -->
+  <path d="M 220 115 L 270 115" class="arrow"/>
+  
+  <!-- Quantize container box -->
+  <rect x="270" y="60" width="330" height="130" class="quantize" rx="6"/>
+  <text x="435" y="205" class="text" style="font-weight: 600; font-size: 14px;" text-anchor="middle">Quantize</text>
+  
+  <!-- Step 2: Compute Amax (sub-box) -->
+  <rect x="280" y="95" width="140" height="50" class="amax" rx="4"/>
+  <text x="350" y="118" class="text" style="font-weight: 600;" text-anchor="middle">Compute amax</text>
+  <text x="350" y="160" class="small-text" text-anchor="middle">1 tensor read</text>
+  
+  <!-- Arrow 2 (inside quantize box) -->
+  <path d="M 420 120 L 450 120" class="arrow"/>
+  
+  <!-- Step 3: Apply Scale + Cast (sub-box) -->
+  <rect x="450" y="95" width="140" height="50" class="quantize" rx="4"/>
+  <text x="520" y="115" class="text" style="font-weight: 600;" text-anchor="middle">Apply Scale</text>
+  <text x="520" y="130" class="text" style="font-weight: 600;" text-anchor="middle">+ Cast</text>
+  <text x="520" y="160" class="small-text" text-anchor="middle">1 tensor read</text>
+  
+  <!-- Arrow 3 -->
+  <path d="M 600 115 L 650 115" class="arrow"/>
+  
+  <!-- Step 4: FP8 Tensor -->
+  <rect x="650" y="80" width="140" height="70" class="fp8" rx="6"/>
+  <text x="720" y="110" class="text" text-anchor="middle">FP8</text>
+  <text x="720" y="130" class="text" text-anchor="middle">Tensor</text>
+  
+</svg>

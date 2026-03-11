@@ -1,25 +1,25 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import pytest
 import torch
-import transformer_engine as te
+import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+from transformer_engine.pytorch import (
     Float8BlockQuantizer,
-    Float8BlockwiseQTensor,
+    get_device_compute_capability,
 )
 from references.blockwise_quantizer_reference import CuBLASScaleMunger
 from references.blockwise_fp8_gemm_reference import CuBLASRefBlockwiseGemm
 
 
 def fp8_blockwise_gemm_supported() -> bool:
-    supported, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
-    return supported
+    supported = te.is_fp8_block_scaling_available()
+    emulated = get_device_compute_capability() >= (10, 0)
+    return supported and not emulated
 
 
 def cublas_gemm_fp8_blockwise_case(
@@ -884,7 +884,7 @@ def test_illegal_2D_by_2D_enforced(
     is_w_1d_scaled,
 ) -> None:
     # 2D block quantization by 2D block quantization is not supported.
-    expected_err_msg = "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling supported"
+    expected_err_msg = "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling GEMM is supported"
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,

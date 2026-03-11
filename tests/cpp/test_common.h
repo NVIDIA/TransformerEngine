@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -62,6 +62,8 @@ using fp8e5m2 = __nv_fp8_e5m2;
 using fp8e8m0 = uint8_t;
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
+using fp4e2m1x2 = __nv_fp4x2_e2m1;
+using fp4e2m1x4 = __nv_fp4x4_e2m1;
 #endif
 
 template <typename T>
@@ -223,7 +225,9 @@ class Tensor {
 
   float scale() const {
     if(scale_cpu_data_) {
-      NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");
+      NVTE_CHECK((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
+                 || (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING),
+                 "Invalid scaling_mode!");
       to_cpu();
       return *scale_cpu_data_;
     } else {
@@ -237,6 +241,8 @@ class Tensor {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING) {
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
     }
@@ -250,6 +256,8 @@ class Tensor {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING) {
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
     }
@@ -278,6 +286,10 @@ class Tensor {
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
 
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
+    tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  }
+
   void to_cpu() const;
   void from_cpu() const;
   void set_scale(float scale);
@@ -304,10 +316,10 @@ constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 
 // [128,4] rowwise and [4,128] colwise alignment requirement
-constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
-constexpr size_t scale_tensor_alignment_X_colwise = 128;
+constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
+constexpr size_t scale_tensor_alignment_X_colwise = 128;
 
 inline size_t divide_round_up(const size_t N, const size_t M) {
     return (N - 1 + M) / M;
@@ -413,10 +425,14 @@ inline fp8e8m0 float_to_e8m0(float val) {
 }
 
 inline float exp2f_rcp(fp8e8m0 biased_exp) {
-  if (biased_exp == 0) {
-    return 1.0f;
+  int32_t int_val = 0;
+  if (biased_exp == 255) {
+    int_val = 0x7fffffff;
+  } else if (biased_exp == 254) {
+    int_val = 0x00400000;
+  } else {
+    int_val = (254 - biased_exp) << FP32_MANTISSA_BITS;   // 127 - (biased_exp - 127)
   }
-  int32_t int_val = (254 - biased_exp) << FP32_MANTISSA_BITS;   // 127 - (biased_exp - 127)
   float fp32_val = *reinterpret_cast<float*>(&int_val);
   return fp32_val;
 }
@@ -456,12 +472,14 @@ void compareResults(const std::string &name, const float test, const float ref,
                     double atol = 1e-5, double rtol = 1e-8);
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t row_blocks, const size_t col_blocks, const size_t stride,
-                                  size_t& mismatches_num,
-                                  const size_t scale_diff_abs_tolerance = 0,
-                                  const double abs_tolerable_mismatches_limit = 0,
-                                  const double rel_tolerable_mismatches_limit = 0);
+template <typename T>
+void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
+                             const size_t row_blocks, const size_t col_blocks, const size_t stride,
+                             size_t& mismatches_num,
+                             const size_t scale_diff_abs_tolerance = 0,
+                             const double abs_tolerable_mismatches_limit = 0,
+                             const double rel_tolerable_mismatches_limit = 0);
+
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
                                             const size_t block_size_rows, const size_t block_size_cols);
@@ -484,10 +502,65 @@ const std::string& caseName(InputsFillCase type);
 extern std::vector<DType> all_fp_types;
 
 bool isFp8Type(DType type);
+bool isFp4Type(DType type);
 
 int32_t getDeviceComputeCapability();
 constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
+
+// Custom deleters for RAII
+struct CudaDeleter {
+  void operator()(void* p) const { if (p) cudaFree(p); }
+};
+struct GroupedTensorDeleter {
+  void operator()(NVTEGroupedTensor h) const { if (h) nvte_destroy_grouped_tensor(h); }
+};
+
+template <typename T = void>
+using CudaPtr = std::unique_ptr<T, CudaDeleter>;
+using GroupedTensorHandle = std::unique_ptr<std::remove_pointer_t<NVTEGroupedTensor>, GroupedTensorDeleter>;
+
+// Helper to allocate CUDA memory into a CudaPtr
+template <typename T = void>
+CudaPtr<T> cuda_alloc(size_t bytes) {
+  void* ptr = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&ptr, bytes));
+  return CudaPtr<T>(static_cast<T*>(ptr));
+}
+
+// Helper owning GPU buffers that back NVTEGroupedTensor.
+// NVTEGroupedTensor does not own memory; data/offsets/scales
+// must be allocated and freed by the test.
+struct GroupedBuffers {
+  GroupedTensorHandle handle;
+  CudaPtr<> data;
+  CudaPtr<> scale_inv;
+  CudaPtr<int64_t> first_dims_dev;
+  CudaPtr<int64_t> last_dims_dev;
+  CudaPtr<int64_t> offsets_dev;
+  CudaPtr<> columnwise_data;
+  NVTEShape logical_shape{};
+  std::vector<int64_t> offsets_host;
+  std::vector<size_t> tensor_bytes;
+  size_t num_tensors{0};
+  size_t elem_size{0};
+  DType dtype{DType::kFloat32};
+  NVTEScalingMode scaling_mode{NVTE_DELAYED_TENSOR_SCALING};
+
+  GroupedBuffers() = default;
+  GroupedBuffers(const GroupedBuffers&) = delete;
+  GroupedBuffers& operator=(const GroupedBuffers&) = delete;
+  GroupedBuffers(GroupedBuffers&&) = default;
+  GroupedBuffers& operator=(GroupedBuffers&&) = default;
+  ~GroupedBuffers() = default;
+
+  // Convenience accessors for raw pointers
+  NVTEGroupedTensor get_handle() const { return handle.get(); }
+  void* get_data() const { return data.get(); }
+};
+
+GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
+                                    const NVTEScalingMode scaling_mode);
 
 }  // namespace test
 
@@ -561,7 +634,7 @@ constexpr int32_t blackwellComputeCapability = 100;
         SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__) \
         default: \
             printf("dtype: %d\n", static_cast<int>(dtype)); \
-            NVTE_ERROR("Invalid type MARKED TEST."); \
+            NVTE_ERROR("Invalid type."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(dtype, type, ...) \
@@ -580,7 +653,7 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type MARKED TEST 2."); \
+            NVTE_ERROR("Invalid type."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4_ONLY(dtype, type, ...) \
@@ -588,7 +661,7 @@ constexpr int32_t blackwellComputeCapability = 100;
         using namespace transformer_engine; \
         SWITCH_FP4_HANDLE(type, __VA_ARGS__) \
         default: \
-            NVTE_ERROR("Invalid type MARKED TEST 3."); \
+            NVTE_ERROR("Invalid type."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(dtype, type, ...) \
@@ -613,5 +686,5 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type MARKED TEST 4."); \
+            NVTE_ERROR("Invalid type."); \
     }

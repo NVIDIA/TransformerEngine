@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,4 +11,4 @@ from .layernorm import LayerNorm
 from .rmsnorm import RMSNorm
 from .fp8_padding import Fp8Padding
 from .fp8_unpadding import Fp8Unpadding
-from .base import initialize_ub, destroy_ub
+from .base import initialize_ub, destroy_ub, UserBufferQuantizationMode

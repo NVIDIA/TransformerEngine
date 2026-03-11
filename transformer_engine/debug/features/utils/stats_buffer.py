@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -90,12 +90,19 @@ class _Buffer:
         if self.modified[0] and not self.reduce_within_microbatch:
             return
 
-        if (
-            tensor.numel() == 0
-            if hasattr(tensor, "numel")
-            else all((t is None or t.numel() == 0) for t in tensor.get_data_tensors())
-        ):
-            return
+        if tensor is not None:
+            # tensor can be None if we compute fp8 stats for weight and fp8 model parameters are used
+            # then high precision is not provided and quantized tensor from aux_dict is used.
+
+            # This condition prevents computation of stats for empty tensor.
+            # This will not happen for weight - since it is the only situation then tensor can be None,
+            # we do not need to check similar condition for weight.
+            if (
+                tensor.numel() == 0
+                if hasattr(tensor, "numel")
+                else all((t is None or t.numel() == 0) for t in tensor.get_data_tensors())
+            ):
+                return
 
         # save stats for tensor to tmp buffer
         for stat_name in self.stats_to_compute:
@@ -130,8 +137,12 @@ class _Buffer:
         for stat_name in self.stats_to_log:
             combiner = STATS[stat_name][1]
             stat_value = combiner(gathered_helper_stats)
+
+            # Convert stat key to string for logging (uses __str__ for named tuples)
+            stat_name_str = str(stat_name)
+
             MetricLogger.log_scalar(
-                f"{self.layer_name}_{self.tensor_name}_{stat_name}", stat_value, self.iteration
+                f"{self.layer_name}_{self.tensor_name}_{stat_name_str}", stat_value, self.iteration
             )
             output[(self.layer_name, self.tensor_name, stat_name, self.iteration)] = (
                 stat_value  # for debugging purposes
@@ -172,11 +183,19 @@ class StatsBuffers:
         if self.at_least_one_layer_fed:
             return True
         iteration = TEDebugState.get_iteration()
-        for _, next_iter in self.layers_to_next_iter.items():
+        layers_to_remove = []
+        for layer_name, next_iter in self.layers_to_next_iter.items():
+            # When next_iter is None the feature will no longer run.
+            if next_iter is None:
+                layers_to_remove.append(layer_name)
+                continue
             # Note that layer can be not run for many iterations,
             # in this case we will synchronize until every step until we get any information from it.
             if iteration >= next_iter:
                 return True
+
+        for layer_name in layers_to_remove:
+            self.layers_to_next_iter.pop(layer_name, None)
         return False
 
     def reset(self):

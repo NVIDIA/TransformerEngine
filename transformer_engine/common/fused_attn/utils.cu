@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -535,11 +535,13 @@ size_t get_max_batch_size(size_t batch_size) {
   // batch size is expected to be 10s-100s
   // b = 1, ..., 32   -> max_b = 32
   // b = 33, ..., 512 -> max_b = next power of 2
-  // otherwise        -> max_b = b
+  // b = 513, ...     -> max_b = increment by 512
   if (log2_b <= 5) {
     max_b = 32;
   } else if (log2_b <= 9) {
     max_b = pow(2, log2_b);
+  } else {
+    max_b = (batch_size + 511) / 512 * 512;
   }
   return max_b;
 }
@@ -600,13 +602,14 @@ uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cud
   // workspace size requires 4 bytes
   uint32_t *dout = static_cast<uint32_t *>(workspace);
   uint32_t hout{};
-  cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream);
+  NVTE_CHECK_CUDA(cudaMemsetAsync(dout, 0, sizeof(uint32_t), stream));
   constexpr int threads = 128;
   const int blocks = (len - 1) / threads + 1;
   get_runtime_num_segments_kernel<<<blocks, threads, 0, stream>>>(static_cast<int32_t *>(cu_seqlen),
                                                                   len, dout);
-  cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&hout, dout, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
   return hout;
 }
 
@@ -633,4 +636,5 @@ void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t 
 
   fused_attn::extract_seed_and_offset<<<1, 1, 0, stream>>>(
       rng_state_ptr, captured, seed_ptr, seed_val, offset_ptr, offset_val, offset_intragraph);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }

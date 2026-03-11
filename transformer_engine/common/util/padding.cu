@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -101,7 +101,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
       if (row < num_rows) {
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            local_input.data.elt[j2] = input[row * row_length + col + j2];
+            local_input.data.elt[j2] = input[static_cast<size_t>(row) * row_length + col + j2];
           }
         }
       }
@@ -112,14 +112,14 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
       if (row < num_rows) {
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            output[row * row_length + col + j2] = local_output.data.elt[j2];
+            output[static_cast<size_t>(row) * row_length + col + j2] = local_output.data.elt[j2];
           }
         }
       } else if (row < padded_num_rows) {
         // padding
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            output[row * row_length + col + j2] = local_zero;
+            output[static_cast<size_t>(row) * row_length + col + j2] = local_zero;
           }
         }
       }
@@ -185,7 +185,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
       if (row < num_rows) {
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            local_input.data.elt[j2] = input[row * row_length + col + j2];
+            local_input.data.elt[j2] = input[static_cast<size_t>(row) * row_length + col + j2];
           }
         }
       }
@@ -196,7 +196,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
       if (row < num_rows) {
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            output[row * row_length + col + j2] = local_output.data.elt[j2];
+            output[static_cast<size_t>(row) * row_length + col + j2] = local_output.data.elt[j2];
           }
         }
       }
@@ -248,6 +248,7 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
           const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
           multi_padding_kernel<nvec, Type>
           <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
       kernel_args.num_tensors = 0;
     }
 
@@ -277,6 +278,7 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
         const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
         multi_padding_kernel<nvec, Type>
         <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -322,6 +324,7 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
           const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
           multi_unpadding_kernel<nvec, Type>
           <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+      NVTE_CHECK_CUDA(cudaGetLastError());
       kernel_args.num_tensors = 0;
     }
 
@@ -349,6 +352,7 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
         const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
         multi_unpadding_kernel<nvec, Type>
         <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 

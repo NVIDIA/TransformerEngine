@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Layer normalization operations for Transformer Engine in JAX.
@@ -17,7 +17,6 @@ import jax.numpy as jnp
 from . import cpp_extensions as tex
 
 from .quantize import (
-    ScaledTensor,
     Quantizer,
 )
 
@@ -32,7 +31,11 @@ def canonicalize_norm_type(x):
         Canonicalized normalization type string
     """
     canonicalized = x.lower().strip().replace("-", "").replace("_", "")
-    assert canonicalized in ["layernorm", "rmsnorm"]
+    if canonicalized not in ["layernorm", "rmsnorm"]:
+        raise ValueError(
+            f"Unsupported normalization type '{x}' (canonicalized: '{canonicalized}'). "
+            "Valid options are: 'layernorm', 'rmsnorm'."
+        )
     return canonicalized
 
 
@@ -112,8 +115,8 @@ def _layernorm_fwd_rule(x, gamma, beta, norm_type: str, zero_centered_gamma, eps
     output, mu, rsigma = tex.normalization_fwd(
         x, gamma, beta, zero_centered_gamma, epsilon, norm_type, quantizer
     )
-    if isinstance(output, ScaledTensor):
-        output = output.dequantize()
+    # This is a no-op for higher-precision tensors
+    output = output.dequantize()
 
     return output, (x, mu, rsigma, gamma, beta, quantizer)
 

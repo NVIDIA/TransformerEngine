@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,10 +11,24 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
+
+__all__ = [
+    "GELU",
+    "GEGLU",
+    "GLU",
+    "QGELU",
+    "QGEGLU",
+    "ReLU",
+    "ReGLU",
+    "SReLU",
+    "SReGLU",
+    "SiLU",
+]
 
 
 class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
@@ -38,7 +52,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
     Parameters
     ----------
-    cache_quantized_input: bool, default = False
+    cache_quantized_input : bool, default = False
         Quantize input tensor when caching for use in the backward
         pass. This will typically reduce memory usage but require
         extra compute and increase numerical error. This feature is
@@ -97,6 +111,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Save state for backward pass
         if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x)
             ctx.save_for_backward(x)
             ctx.dtype = dtype
             ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
@@ -136,7 +152,7 @@ class GELU(_ActivationOperation):
 
        \text{GELU}(x) \approx \frac{x}{2} \left( 1 + \tanh\left( 0.797x+0.036 x^3 \right) \right)
 
-    See `Gaussian Error Linear Units (GELUs)<https://arxiv.org/abs/1606.08415>`__.
+    See `Gaussian Error Linear Units (GELUs) <https://arxiv.org/abs/1606.08415>`__.
 
     """
 
@@ -147,24 +163,40 @@ class GELU(_ActivationOperation):
         return tex.dgelu(*args, **kwargs)
 
 
-class ReLU(_ActivationOperation):
-    r"""Rectified linear unit
+class GLU(_ActivationOperation):
+    r"""Gated Linear Unit
+
+    The input tensor is split into chunks :math:`a` and :math:`b`
+    along the last dimension and the following is computed:
 
     .. math::
 
-       \text{ReLU}(x) = \max(x,0)
+       \text{GLU}(a,b) = \sigma(a) * b
+
+    where :math:`\sigma` is the sigmoid function.
+
+    .. warning::
+
+       Transformer Engine's gated activations and PyTorch's GLU
+       activation follow opposite conventions for :math:`a` and
+       :math:`b`. Transformer Engine applies the gating function to
+       the first half of the input tensor, while PyTorch applies it to
+       the second half.
+
+    See `Language Modeling with Gated Convolutional Networks <https://arxiv.org/abs/1612.08083>`__
+    and `GLU Variants Improve Transformer <https://arxiv.org/abs/2002.05202>`__.
 
     """
 
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.relu(*args, **kwargs)
+        return tex.glu(*args, **kwargs)
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.drelu(*args, **kwargs)
+        return tex.dglu(*args, **kwargs)
 
 
 class GEGLU(_ActivationOperation):
-    r"""Gaussian error gated linear unit
+    r"""Gaussian Error Gated Linear Unit
 
     The input tensor is split into chunks :math:`a` and :math:`b`
     along the last dimension and the following is computed:
@@ -187,7 +219,7 @@ class GEGLU(_ActivationOperation):
        the first half of the input tensor, while PyTorch applies it to
        the second half.
 
-    See `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
+    See `GLU Variants Improve Transformer <https://arxiv.org/abs/2002.05202>`__.
 
     """
 
@@ -198,8 +230,76 @@ class GEGLU(_ActivationOperation):
         return tex.dgeglu(*args, **kwargs)
 
 
+class QGELU(_ActivationOperation):
+    r"""Quick Gaussian Error Linear Unit
+
+    Quick GELU from `HuggingFace <https://github.com/huggingface/transformers/blob/3e93dd295b5343557a83bc07b0b2ea64c926f9b4/src/transformers/activations.py#L90>`__
+    and `paper <https://github.com/hendrycks/GELUs>`__.
+
+    .. math::
+
+       \text{QGELU}(x) \approx x * \sigma(1.702 * x)
+
+    """
+
+    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.qgelu(*args, **kwargs)
+
+    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.dqgelu(*args, **kwargs)
+
+
+class QGEGLU(_ActivationOperation):
+    r"""Quick Gaussian Error Gated Linear Unit
+
+    The input tensor is split into chunks :math:`a` and :math:`b`
+    along the last dimension and the following is computed:
+
+    .. math::
+
+       \text{QGEGLU}(a,b) = \text{QGELU}(a) * b
+
+    where
+
+    .. math::
+
+       \text{QGELU}(x) \approx x * \sigma(1.702 * x)
+
+    .. warning::
+
+       Transformer Engine's gated activations and PyTorch's GLU
+       activation follow opposite conventions for :math:`a` and
+       :math:`b`. Transformer Engine applies the gating function to
+       the first half of the input tensor, while PyTorch applies it to
+       the second half.
+
+    """
+
+    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.qgeglu(*args, **kwargs)
+
+    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.dqgeglu(*args, **kwargs)
+
+
+class ReLU(_ActivationOperation):
+    r"""Rectified Linear Unit
+
+    .. math::
+
+       \text{ReLU}(x) = \max(x,0)
+
+    """
+
+    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.relu(*args, **kwargs)
+
+    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.drelu(*args, **kwargs)
+
+
 class ReGLU(_ActivationOperation):
-    r"""Rectified gated linear unit
+    r"""Rectified Gated Linear Unit
 
     The input tensor is split into chunks :math:`a` and :math:`b`
     along the last dimension and the following is computed:
@@ -216,7 +316,7 @@ class ReGLU(_ActivationOperation):
        the first half of the input tensor, while PyTorch applies it to
        the second half.
 
-    See `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
+    See `GLU Variants Improve Transformer <https://arxiv.org/abs/2002.05202>`__.
 
     """
 
@@ -227,21 +327,33 @@ class ReGLU(_ActivationOperation):
         return tex.dreglu(*args, **kwargs)
 
 
-class SwiGLU(_ActivationOperation):
-    r"""Swish gated linear unit
+class SReLU(_ActivationOperation):
+    r"""Squared Rectified Linear Unit
+
+    .. math::
+
+       \text{SReLU}(x) = \max(x^2,0)
+
+    See `Primer: Searching for Efficient Transformers for Language Modeling <https://arxiv.org/abs/2109.08668v2>`__.
+
+    """
+
+    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.srelu(*args, **kwargs)
+
+    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.dsrelu(*args, **kwargs)
+
+
+class SReGLU(_ActivationOperation):
+    r"""Squared Rectified Gated Linear Unit
 
     The input tensor is split into chunks :math:`a` and :math:`b`
     along the last dimension and the following is computed:
 
     .. math::
 
-       \text{GEGLU}(a,b) = \text{SiLU}(a) * b
-
-    where
-
-    .. math::
-
-       \text{SiLU}(x) = x \sigma(x) = \frac{x}{1+\exp(-x)}
+       \text{SReGLU}(a,b) = \max(a^2,0) * b
 
     .. warning::
 
@@ -251,15 +363,26 @@ class SwiGLU(_ActivationOperation):
        the first half of the input tensor, while PyTorch applies it to
        the second half.
 
-    The Sigmoid Linear Unit (SiLU) gating function is also known as
-    the swish function. See
-    `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__
-    and `Gaussian Error Linear Units (GELUs)<https://arxiv.org/abs/1606.08415>`__.
+    """
+
+    def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.sreglu(*args, **kwargs)
+
+    def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
+        return tex.dsreglu(*args, **kwargs)
+
+
+class SiLU(_ActivationOperation):
+    r"""Sigmoid Linear Unit
+
+    .. math::
+
+       \text{SiLU}(x) = x \sigma(x) = \frac{x}{1+\exp(-x)}
 
     """
 
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.swiglu(*args, **kwargs)
+        return tex.silu(*args, **kwargs)
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
-        return tex.dswiglu(*args, **kwargs)
+        return tex.dsilu(*args, **kwargs)

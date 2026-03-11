@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -335,6 +335,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                       static_cast<const CType *>(output.scale.dptr),
                       static_cast<CType *>(output.amax.dptr),
                       static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
+              NVTE_CHECK_CUDA(cudaGetLastError());
             }
           } else {
             NVTE_ERROR("Not implemented scaling mode: ", to_string(output.scaling_mode));

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -22,7 +22,8 @@
       .value("kFloat16", transformer_engine::DType::kFloat16)                                      \
       .value("kBFloat16", transformer_engine::DType::kBFloat16)                                    \
       .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)                                \
-      .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2);                               \
+      .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2)                                \
+      .value("kFloat4E2M1", transformer_engine::DType::kFloat4E2M1);                               \
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())                   \
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)                                         \
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)                           \
@@ -36,6 +37,10 @@
       .value("NVTE_CAUSAL_BOTTOM_RIGHT_MASK", NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)       \
       .value("NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK",                                              \
              NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);                               \
+  pybind11::enum_<NVTE_Softmax_Type>(m, "NVTE_Softmax_Type", pybind11::module_local())             \
+      .value("NVTE_VANILLA_SOFTMAX", NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)                      \
+      .value("NVTE_OFF_BY_ONE_SOFTMAX", NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX)                \
+      .value("NVTE_LEARNABLE_SOFTMAX", NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX);                 \
   pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())                 \
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)                                              \
       .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)                                              \
@@ -78,7 +83,8 @@
   pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
       .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
-      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT);                \
+      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT)                 \
+      .value("INVALID", transformer_engine::Float8BlockScaleTensorFormat::INVALID);                \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
       .value("RS", transformer_engine::CommOverlapType::RS)                                        \

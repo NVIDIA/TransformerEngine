@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -388,8 +388,6 @@ void populate_transpose_dbias_workspace_config(const Tensor &input, /*cast*/
         workspace->data.dtype);
     const size_t required_size =
         get_buffer_size_bytes(num_rows_partial_dbias, row_length, DType::kFloat32);
-    NVTE_CHECK(!workspace->data.shape.empty(), "Invalid workspace dims (expected (",
-               num_rows_partial_dbias, ",", row_length, "), found ())");
     NVTE_CHECK(workspace_size >= required_size, "Invalid workspace (expected dims=(",
                num_rows_partial_dbias, ",", row_length, "), dtype=", to_string(DType::kFloat32),
                "; found dims=", workspace->data.shape,
@@ -416,6 +414,7 @@ void reduce_dbias(const Tensor &workspace, Tensor *dbias, const size_t row_lengt
           reinterpret_cast<BiasType *>(dbias->data.dptr),
           reinterpret_cast<const fp32 *>(workspace.data.dptr), reduce_dbias_row_length,
           reduce_dbias_num_rows);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fp8_transpose_dbias(const Tensor &input, Tensor *transposed_output, Tensor *dbias,
@@ -472,17 +471,21 @@ void fp8_transpose_dbias(const Tensor &input, Tensor *transposed_output, Tensor 
           param.workspace = reinterpret_cast<ComputeType *>(workspace->data.dptr);
 
           if (full_tile) {
-            cudaFuncSetAttribute(transpose_dbias_kernel<nvec_in, nvec_out, Param>,
-                                 cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(transpose_dbias_kernel<nvec_in, nvec_out, Param>,
+                                                 cudaFuncAttributePreferredSharedMemoryCarveout,
+                                                 100));
             transpose_dbias_kernel<nvec_in, nvec_out, Param>
                 <<<n_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>(
                     param, row_length, num_rows, n_tiles);
+            NVTE_CHECK_CUDA(cudaGetLastError());
           } else {
-            cudaFuncSetAttribute(transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
-                                 cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+            NVTE_CHECK_CUDA(
+                cudaFuncSetAttribute(transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>,
+                                     cudaFuncAttributePreferredSharedMemoryCarveout, 100));
             transpose_dbias_kernel_notaligned<nvec_in, nvec_out, Param>
                 <<<n_blocks, cast_transpose_num_threads, shared_size_transpose, stream>>>(
                     param, row_length, num_rows, n_tiles);
+            NVTE_CHECK_CUDA(cudaGetLastError());
           }
 
           reduce_dbias<BiasType>(*workspace, dbias, row_length, num_rows, nvec_out,

@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -28,7 +28,7 @@ on `NVIDIA GPU Cloud <https://ngc.nvidia.com>`_.
 
 
 pip - from PyPI
------------------------
+---------------
 
 Transformer Engine can be directly installed from `our PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
 
@@ -38,8 +38,16 @@ Transformer Engine can be directly installed from `our PyPI <https://pypi.org/pr
 
 To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
 
+The core package from Transformer Engine (without any framework extensions) can be installed via:
+
+.. code-block:: bash
+
+    pip3 install transformer_engine[core]
+
+By default, this will install the core library compiled for CUDA 12. The cuda major version can be specified by modified the extra dependency to `core_cu12` or `core_cu13`.
+
 pip - from GitHub
------------------------
+-----------------
 
 Additional Prerequisites
 ^^^^^^^^^^^^^^^^^^^^^^^^

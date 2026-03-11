@@ -1,0 +1,342 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 55 900 715">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      
+      .title { font: bold 18px sans-serif; fill: #333; text-anchor: middle; }
+      .dots-text { font: bold 24px sans-serif; fill: #333; text-anchor: middle; }
+      
+      /* Tensor colors */
+      .fp8-tensor { fill: #87CEEB; stroke: #444; stroke-width: 2; }
+      .fp8-block { fill: #87CEEB; stroke: #555; stroke-width: 1.5; }
+      .fp8-block-alt { fill: #5F9FCC; stroke: #555; stroke-width: 1.5; }
+      
+      /* Scaling factor colors */
+      .scale-factor { fill: #FFA500; stroke: #444; stroke-width: 2; }
+      
+      .grid-line { stroke: #444; stroke-width: 2; }
+      .boundary-line { stroke: #444; stroke-width: 2; }
+    </style>
+  </defs>
+  
+  <!-- FIRST IMAGE: Standard vs Blockwise Scaling -->
+  
+  <!-- LEFT SIDE: Standard FP8 Scaling -->
+  <g id="standard-scaling">
+    <text x="225" y="85" class="title">Delayed/Current FP8 Scaling</text>
+    <text x="225" y="108" class="label">(Single scaling factor per tensor)</text>
+    
+    <!-- FP8 Tensor - solid blue with white cross -->
+    <g id="left-tensor">
+      <!-- Solid blue background -->
+      <rect x="105" y="140" width="240" height="120" class="fp8-tensor"/>
+      
+      <!-- White backgrounds for dots areas - cross pattern -->
+      <rect x="225.0" y="140.0" width="40" height="120" fill="#FFFFFF" stroke="none"/>
+      <rect x="105.0" y="190.0" width="240" height="30" fill="#FFFFFF" stroke="none"/>
+      
+      <!-- Three dots in VERTICAL white bar -->
+      <text x="245" y="167.5" class="dots-text">…</text>
+      <text x="245" y="242.5" class="dots-text">…</text>
+      
+      <!-- Three dots in HORIZONTAL white bar -->
+      <text x="165" y="205" class="dots-text">…</text>
+      <text x="305" y="205" class="dots-text">…</text>
+      
+      <!-- ONE diagonal dot at intersection -->
+      <text x="245" y="205" class="dots-text" transform="rotate(45 245 205)">…</text>
+      
+      <!-- Main outline -->
+      <rect x="105.0" y="140.0" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    </g>
+    
+    <!-- Single scaling factor - one 10x10 square -->
+    <rect x="220" y="285" width="10" height="10" class="scale-factor" stroke="#444" stroke-width="1"/>
+    
+    <text x="225" y="315" class="small-text" text-anchor="middle">1 scaling factor</text>
+  </g>
+  
+  <!-- RIGHT SIDE: FP8 Blockwise Scaling -->
+  <g id="blockwise-scaling">
+    <text x="675" y="85" class="title">Blockwise FP8 Scaling – 1 dimension</text>
+    <text x="675" y="108" class="label">(One scaling factor per 128 elements)</text>
+    
+    <!-- FP8 Tensor split into many small blocks (40×10) - EXACT coordinates from Python script -->
+    <g id="tensor-blocks">
+      <!-- White backgrounds for dots areas - cross pattern -->
+      <rect x="675.0" y="140.0" width="40" height="120" fill="#FFFFFF" stroke="none"/>
+      <rect x="555.0" y="190.0" width="240" height="30" fill="#FFFFFF" stroke="none"/>
+      
+      <!-- Blocks ONLY where they don't overlap with white cross (from Python script) -->
+      <rect x="555" y="140" width="40" height="10" class="fp8-block"/>
+      <rect x="595" y="140" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="635" y="140" width="40" height="10" class="fp8-block"/>
+      <rect x="715" y="140" width="40" height="10" class="fp8-block"/>
+      <rect x="755" y="140" width="40" height="10" class="fp8-block-alt"/>
+      
+      <rect x="555" y="150" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="595" y="150" width="40" height="10" class="fp8-block"/>
+      <rect x="635" y="150" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="715" y="150" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="755" y="150" width="40" height="10" class="fp8-block"/>
+      
+      <rect x="555" y="160" width="40" height="10" class="fp8-block"/>
+      <rect x="595" y="160" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="635" y="160" width="40" height="10" class="fp8-block"/>
+      <rect x="715" y="160" width="40" height="10" class="fp8-block"/>
+      <rect x="755" y="160" width="40" height="10" class="fp8-block-alt"/>
+      
+      <rect x="555" y="170" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="595" y="170" width="40" height="10" class="fp8-block"/>
+      <rect x="635" y="170" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="715" y="170" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="755" y="170" width="40" height="10" class="fp8-block"/>
+      
+      <rect x="555" y="180" width="40" height="10" class="fp8-block"/>
+      <rect x="595" y="180" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="635" y="180" width="40" height="10" class="fp8-block"/>
+      <rect x="715" y="180" width="40" height="10" class="fp8-block"/>
+      <rect x="755" y="180" width="40" height="10" class="fp8-block-alt"/>
+      
+      <!-- Three dots in VERTICAL white bar -->
+      <text x="695" y="167.5" class="dots-text">…</text>
+      <text x="695" y="242.5" class="dots-text">…</text>
+      
+      <!-- Three dots in HORIZONTAL white bar -->
+      <text x="615" y="205" class="dots-text">…</text>
+      <text x="755" y="205" class="dots-text">…</text>
+      
+      <!-- ONE diagonal dot at intersection -->
+      <text x="695" y="205" class="dots-text" transform="rotate(45 695 205)">…</text>
+      
+      <!-- Bottom rows (y >= 220 after horizontal white bar) -->
+      <rect x="555" y="220" width="40" height="10" class="fp8-block"/>
+      <rect x="595" y="220" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="635" y="220" width="40" height="10" class="fp8-block"/>
+      <rect x="715" y="220" width="40" height="10" class="fp8-block"/>
+      <rect x="755" y="220" width="40" height="10" class="fp8-block-alt"/>
+      
+      <rect x="555" y="230" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="595" y="230" width="40" height="10" class="fp8-block"/>
+      <rect x="635" y="230" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="715" y="230" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="755" y="230" width="40" height="10" class="fp8-block"/>
+      
+      <rect x="555" y="240" width="40" height="10" class="fp8-block"/>
+      <rect x="595" y="240" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="635" y="240" width="40" height="10" class="fp8-block"/>
+      <rect x="715" y="240" width="40" height="10" class="fp8-block"/>
+      <rect x="755" y="240" width="40" height="10" class="fp8-block-alt"/>
+      
+      <rect x="555" y="250" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="595" y="250" width="40" height="10" class="fp8-block"/>
+      <rect x="635" y="250" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="715" y="250" width="40" height="10" class="fp8-block-alt"/>
+      <rect x="755" y="250" width="40" height="10" class="fp8-block"/>
+      
+      <!-- Main outline -->
+      <rect x="555.0" y="140.0" width="240" height="120" fill="none" stroke="#444" stroke-width="2"/>
+    </g>
+    
+    <!-- Scaling factors tensor - 3+2 columns of 10px squares -->
+    <g id="scale-factors">
+      <!-- Orange background -->
+      <rect x="640" y="285" width="70" height="120" fill="#FFA500"/>
+      
+      <!-- White backgrounds for dots areas - cross pattern -->
+      <rect x="670" y="285" width="20" height="120" fill="#FFFFFF" stroke="none"/>
+      <rect x="640" y="335" width="70" height="30" fill="#FFFFFF" stroke="none"/>
+      
+      <!-- Grid lines showing 10x10 squares (3 left + 2 right columns) -->
+      <!-- Vertical lines every 10px (skipping white space) -->
+      <!-- Left 3 columns (640-670) -->
+      <line x1="650" y1="285" x2="650" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="660" y1="285" x2="660" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="670" y1="285" x2="670" y2="335" class="grid-line" stroke-width="1"/>
+      
+      <!-- Right 2 columns (690-710) -->
+      <line x1="690" y1="285" x2="690" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="700" y1="285" x2="700" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="710" y1="285" x2="710" y2="335" class="grid-line" stroke-width="1"/>
+      
+      <!-- Bottom sections -->
+      <line x1="650" y1="365" x2="650" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="660" y1="365" x2="660" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="670" y1="365" x2="670" y2="405" class="grid-line" stroke-width="1"/>
+      
+      <line x1="690" y1="365" x2="690" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="700" y1="365" x2="700" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="710" y1="365" x2="710" y2="405" class="grid-line" stroke-width="1"/>
+      
+      <!-- Horizontal lines every 10px -->
+      <line x1="640" y1="295" x2="670" y2="295" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="295" x2="710" y2="295" class="grid-line" stroke-width="1"/>
+      <line x1="640" y1="305" x2="670" y2="305" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="305" x2="710" y2="305" class="grid-line" stroke-width="1"/>
+      <line x1="640" y1="315" x2="670" y2="315" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="315" x2="710" y2="315" class="grid-line" stroke-width="1"/>
+      <line x1="640" y1="325" x2="670" y2="325" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="325" x2="710" y2="325" class="grid-line" stroke-width="1"/>
+      
+      <!-- Top bottom boundaries -->
+      <line x1="640" y1="335" x2="670" y2="335" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="335" x2="710" y2="335" class="grid-line" stroke-width="1"/>
+      
+      <line x1="640" y1="365" x2="670" y2="365" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="365" x2="710" y2="365" class="grid-line" stroke-width="1"/>
+      <line x1="640" y1="375" x2="670" y2="375" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="375" x2="710" y2="375" class="grid-line" stroke-width="1"/>
+      <line x1="640" y1="385" x2="670" y2="385" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="385" x2="710" y2="385" class="grid-line" stroke-width="1"/>
+      <line x1="640" y1="395" x2="670" y2="395" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="395" x2="710" y2="395" class="grid-line" stroke-width="1"/>
+      
+      <!-- Bottom boundaries -->
+      <line x1="640" y1="405" x2="670" y2="405" class="grid-line" stroke-width="1"/>
+      <line x1="690" y1="405" x2="710" y2="405" class="grid-line" stroke-width="1"/>
+      
+      <!-- Main outline -->
+      <rect x="640" y="285" width="70" height="120" fill="none" stroke="#444" stroke-width="2"/>
+      
+      <!-- Three dots -->
+      <text x="680" y="312.5" class="dots-text" style="font-size: 14px;">…</text>
+      <text x="680" y="387.5" class="dots-text" style="font-size: 14px;">…</text>
+      <text x="655" y="350" class="dots-text" style="font-size: 14px;">…</text>
+      <text x="700" y="350" class="dots-text" style="font-size: 14px;">…</text>
+      <text x="680" y="350" class="dots-text" style="font-size: 14px;" transform="rotate(45 680 350)">…</text>
+    </g>
+    
+    <text x="675" y="430" class="small-text" text-anchor="middle">Scaling factors (one per block)</text>
+  </g>
+
+  <!-- SECOND IMAGE: 2D Blockwise Scaling -->
+  <!-- Main Title -->
+  <text x="450" y="470" class="title">Blockwise FP8 Scaling – 2 dimensions</text>
+  <text x="450" y="495" class="label">(One scaling factor per 128x128 block of elements)</text>
+  
+  <!-- TOP: DATA TENSOR (20x20 blocks, with 3 extra columns on right) -->
+  <g id="data-tensor">
+    
+    <!-- Background for entire tensor -->
+    <rect x="390" y="525" width="180" height="120" class="fp8-tensor"/>
+    
+    <!-- White space for gaps (cross pattern) -->
+    <rect x="450" y="525" width="20" height="120" fill="#FFFFFF" stroke="none"/>
+    <rect x="390" y="585" width="180" height="20" fill="#FFFFFF" stroke="none"/>
+
+    <!-- Grid Lines (every 20px) -->
+    <!-- Vertical Lines Left (x=410, 430) -->
+    <line x1="410" y1="525" x2="410" y2="585" class="grid-line" stroke-width="1"/>
+    <line x1="430" y1="525" x2="430" y2="585" class="grid-line" stroke-width="1"/>
+    <line x1="410" y1="605" x2="410" y2="645" class="grid-line" stroke-width="1"/>
+    <line x1="430" y1="605" x2="430" y2="645" class="grid-line" stroke-width="1"/>
+    
+    <!-- Vertical Lines Right (x=490, 510, 530, 550) -->
+    <line x1="490" y1="525" x2="490" y2="585" class="grid-line" stroke-width="1"/>
+    <line x1="490" y1="605" x2="490" y2="645" class="grid-line" stroke-width="1"/>
+    <line x1="510" y1="525" x2="510" y2="585" class="grid-line" stroke-width="1"/>
+    <line x1="510" y1="605" x2="510" y2="645" class="grid-line" stroke-width="1"/>
+    <line x1="530" y1="525" x2="530" y2="585" class="grid-line" stroke-width="1"/>
+    <line x1="530" y1="605" x2="530" y2="645" class="grid-line" stroke-width="1"/>
+    <line x1="550" y1="525" x2="550" y2="585" class="grid-line" stroke-width="1"/>
+    <line x1="550" y1="605" x2="550" y2="645" class="grid-line" stroke-width="1"/>
+
+    <!-- Horizontal Lines Top (y=545, 565) -->
+    <line x1="390" y1="545" x2="450" y2="545" class="grid-line" stroke-width="1"/>
+    <line x1="470" y1="545" x2="570" y2="545" class="grid-line" stroke-width="1"/>
+    <line x1="390" y1="565" x2="450" y2="565" class="grid-line" stroke-width="1"/>
+    <line x1="470" y1="565" x2="570" y2="565" class="grid-line" stroke-width="1"/>
+
+    <!-- Horizontal Lines Bottom (y=625) -->
+    <line x1="390" y1="625" x2="450" y2="625" class="grid-line" stroke-width="1"/>
+    <line x1="470" y1="625" x2="570" y2="625" class="grid-line" stroke-width="1"/>
+
+    <!-- Dots / Ellipses -->
+    <!-- Horizontal dots in gap -->
+    <text x="460" y="552" class="dots-text" style="font-size: 14px;">…</text>
+    <text x="460" y="632" class="dots-text" style="font-size: 14px;">…</text>
+    
+    <!-- Vertical dots in gap -->
+    <text x="420" y="597" class="dots-text" style="font-size: 14px;">…</text>
+    <text x="540" y="597" class="dots-text" style="font-size: 14px;">…</text>
+    
+    <!-- Diagonal dot -->
+    <text x="460" y="597" class="dots-text" style="font-size: 14px;" transform="rotate(45 460 597)">…</text>
+
+    <!-- Boundaries around white spaces (excluding center intersection) -->
+    <!-- Vertical boundaries - broken at horizontal white space -->
+    <line x1="450" y1="525" x2="450" y2="585" class="boundary-line"/>
+    <line x1="450" y1="605" x2="450" y2="645" class="boundary-line"/>
+    <line x1="470" y1="525" x2="470" y2="585" class="boundary-line"/>
+    <line x1="470" y1="605" x2="470" y2="645" class="boundary-line"/>
+    <!-- Horizontal boundaries - broken at vertical white space -->
+    <line x1="390" y1="585" x2="450" y2="585" class="boundary-line"/>
+    <line x1="470" y1="585" x2="570" y2="585" class="boundary-line"/>
+    <line x1="390" y1="605" x2="450" y2="605" class="boundary-line"/>
+    <line x1="470" y1="605" x2="570" y2="605" class="boundary-line"/>
+
+    <!-- Main outline -->
+    <rect x="390" y="525" width="180" height="120" fill="none" stroke="#444" stroke-width="2"/>
+  </g>
+
+  <!-- BOTTOM: SCALING FACTORS (10x10 blocks, with 3 extra columns on right) -->
+  <g id="scaling-factors-2d">
+    <!-- Background for entire scaling tensor -->
+    <rect x="420" y="675" width="90" height="60" class="scale-factor"/>
+    
+    <!-- White space for gaps (cross pattern) -->
+    <rect x="450" y="675" width="10" height="60" fill="#FFFFFF" stroke="none"/>
+    <rect x="420" y="705" width="90" height="10" fill="#FFFFFF" stroke="none"/>
+
+    <!-- Grid Lines (every 10px) -->
+    <!-- Vertical Left -->
+    <line x1="430" y1="675" x2="430" y2="705" class="grid-line" stroke-width="1"/>
+    <line x1="440" y1="675" x2="440" y2="705" class="grid-line" stroke-width="1"/>
+    <line x1="430" y1="715" x2="430" y2="735" class="grid-line" stroke-width="1"/>
+    <line x1="440" y1="715" x2="440" y2="735" class="grid-line" stroke-width="1"/>
+
+    <!-- Vertical Right -->
+    <line x1="470" y1="675" x2="470" y2="705" class="grid-line" stroke-width="1"/>
+    <line x1="470" y1="715" x2="470" y2="735" class="grid-line" stroke-width="1"/>
+    <line x1="480" y1="675" x2="480" y2="705" class="grid-line" stroke-width="1"/>
+    <line x1="480" y1="715" x2="480" y2="735" class="grid-line" stroke-width="1"/>
+    <line x1="490" y1="675" x2="490" y2="705" class="grid-line" stroke-width="1"/>
+    <line x1="490" y1="715" x2="490" y2="735" class="grid-line" stroke-width="1"/>
+    <line x1="500" y1="675" x2="500" y2="705" class="grid-line" stroke-width="1"/>
+    <line x1="500" y1="715" x2="500" y2="735" class="grid-line" stroke-width="1"/>
+
+    <!-- Horizontal Top -->
+    <line x1="420" y1="685" x2="450" y2="685" class="grid-line" stroke-width="1"/>
+    <line x1="460" y1="685" x2="510" y2="685" class="grid-line" stroke-width="1"/>
+    <line x1="420" y1="695" x2="450" y2="695" class="grid-line" stroke-width="1"/>
+    <line x1="460" y1="695" x2="510" y2="695" class="grid-line" stroke-width="1"/>
+
+    <!-- Horizontal Bottom -->
+    <line x1="420" y1="725" x2="450" y2="725" class="grid-line" stroke-width="1"/>
+    <line x1="460" y1="725" x2="510" y2="725" class="grid-line" stroke-width="1"/>
+
+    <!-- Dots -->
+    <text x="455" y="692" class="dots-text" style="font-size: 12px;">…</text>
+    <text x="455" y="727" class="dots-text" style="font-size: 12px;">…</text>
+    <text x="435" y="711" class="dots-text" style="font-size: 12px;">…</text>
+    <text x="490" y="711" class="dots-text" style="font-size: 12px;">…</text>
+    <text x="455" y="711" class="dots-text" style="font-size: 12px;" transform="rotate(45 455 711)">…</text>
+
+    <!-- Boundaries around white spaces (excluding center intersection) -->
+    <!-- Vertical boundaries - broken at horizontal white space -->
+    <line x1="450" y1="675" x2="450" y2="705" class="boundary-line"/>
+    <line x1="450" y1="715" x2="450" y2="735" class="boundary-line"/>
+    <line x1="460" y1="675" x2="460" y2="705" class="boundary-line"/>
+    <line x1="460" y1="715" x2="460" y2="735" class="boundary-line"/>
+    <!-- Horizontal boundaries - broken at vertical white space -->
+    <line x1="420" y1="705" x2="450" y2="705" class="boundary-line"/>
+    <line x1="460" y1="705" x2="510" y2="705" class="boundary-line"/>
+    <line x1="420" y1="715" x2="450" y2="715" class="boundary-line"/>
+    <line x1="460" y1="715" x2="510" y2="715" class="boundary-line"/>
+
+    <!-- Main outline -->
+    <rect x="420" y="675" width="90" height="60" fill="none" stroke="#444" stroke-width="2"/>
+
+    <text x="465" y="755" class="small-text" text-anchor="middle">Scaling factors (1 per 2D block)</text>
+  </g>
+</svg>

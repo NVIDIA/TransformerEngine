@@ -1,14 +1,14 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+import functools
 import io
 import math
-import pathlib
-import sys
+import random
 from typing import Optional
 
 import pytest
@@ -17,36 +17,44 @@ import torch
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
+    BackwardAddRMSNorm,
     BackwardLinearAdd,
     BackwardLinearScale,
     ForwardLinearBiasActivation,
     ForwardLinearBiasAdd,
     ForwardLinearScaleAdd,
 )
-from transformer_engine.pytorch.tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
+from transformer_engine.pytorch import (
+    QuantizedTensor,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+    is_bf16_available,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
-from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
 # Import utility functions
-from utils import dtype_tols, make_recipe, reset_rng_states
+from utils import (
+    assert_close,
+    assert_close_grads,
+    dtype_tols,
+    make_recipe,
+    quantization_tols,
+    reset_rng_states,
+)
 
-# Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+# Check for supported quantization schemes
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     _dtypes.append(torch.bfloat16)
 
 # Supported devices
@@ -58,6 +66,8 @@ if fp8_available:
     _quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
 if mxfp8_available:
     _quantization_list.append("mxfp8")
+if nvfp4_available:
+    _quantization_list.append("nvfp4")
 
 
 def maybe_skip_quantization(
@@ -65,6 +75,7 @@ def maybe_skip_quantization(
     *,
     dims: Optional[Iterable[int] | int] = None,
     device: Optional[torch.device | str] = None,
+    dtype: Optional[torch.dtype] = None,
 ) -> None:
     """Skip test case if a quantization scheme is not supported"""
 
@@ -72,12 +83,17 @@ def maybe_skip_quantization(
     if quantization is None:
         return
 
-    # Check if quantization scheme is supported
+    # Check if quantization scheme is supported on device
+    if device is not None and torch.device(device).type != "cuda":
+        pytest.skip("Quantization is only supported on CUDA devices")
     if quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if quantization == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
 
+    # Check dims
     if dims is not None:
         if not isinstance(dims, Iterable):
             dims = (dims,)
@@ -87,15 +103,22 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
+        elif quantization == "nvfp4":
+            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
+                pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
 
-    # Check if device is supported
-    if device is not None and torch.device(device).type != "cuda":
-        pytest.skip("Quantization is only supported on CUDA devices")
+    # Check dtype
+    if dtype is not None:
+        if quantization == "nvfp4" and dtype != torch.bfloat16:
+            pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
+    *,
+    min: float = 0.0,
+    max: float = 1.0,
     quantization: Optional[str] = None,
     ref_dtype: torch.dtype = torch.float64,
     ref_device: torch.device = "cpu",
@@ -116,7 +139,8 @@ def make_reference_and_test_tensors(
     """
 
     # Random reference tensor
-    ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
+    ref = torch.empty(shape, dtype=ref_dtype, device=ref_device)
+    ref.uniform_(min, max)
 
     # Construct test tensor from reference tensor
     test = ref.to(device=test_device, dtype=test_dtype)
@@ -140,6 +164,14 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
+    elif quantization == "nvfp4":
+        test = NVFP4Quantizer(
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
     if isinstance(test, QuantizedTensor) and not test_is_quantized:
@@ -349,7 +381,7 @@ class TestFuser:
         )
 
         # Construct model
-        with te.fp8_model_init(recipe=recipe):
+        with te.quantized_model_init(recipe=recipe):
             model = te_ops.basic.BasicLinear(
                 size,
                 size,
@@ -381,7 +413,7 @@ class TestFuser:
             )
 
             # Training step
-            with te.fp8_autocast(fp8_recipe=recipe):
+            with te.autocast(recipe=recipe):
                 y = model(x)
             y.backward(dy)
             with torch.no_grad():
@@ -394,12 +426,12 @@ class TestFuser:
             torch.testing.assert_close(
                 y,
                 torch.full_like(y, y_val_ref),
-                **dtype_tols(tex.DType.kFloat8E4M3),
+                **quantization_tols("fp8_delayed_scaling"),
             )
             torch.testing.assert_close(
                 x.grad,
                 torch.full_like(x.grad, dx_val_ref),
-                **dtype_tols(tex.DType.kFloat8E5M2),
+                **quantization_tols("fp8_delayed_scaling"),
             )
 
             # Check that scaling factors match expected
@@ -433,7 +465,8 @@ class TestFuser:
         # Skip invalid configurations
         in_shape = (size, size)
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=init_dtype)
+        maybe_skip_quantization(quantization, dtype=final_dtype)
 
         # Random data
         dtype = torch.float32
@@ -449,7 +482,7 @@ class TestFuser:
         )
 
         # Construct operation
-        with te.fp8_model_init(enabled=with_quantization, recipe=make_recipe(quantization)):
+        with te.quantized_model_init(enabled=with_quantization, recipe=make_recipe(quantization)):
             op = te_ops.Linear(size, size, bias=False, device=device, dtype=init_dtype)
         with torch.no_grad():
             op.weight.copy_(w_test)
@@ -501,11 +534,12 @@ class TestFuser:
         # Skip invalid configurations
         in_shape = (size, size)
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=model_dtype)
+        maybe_skip_quantization(quantization, dtype=autocast_dtype)
 
         # Construct operation
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weights, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weights, recipe=recipe):
             op = te_ops.Linear(size, size, bias=False, device=device, dtype=model_dtype)
 
         # Check forward and backward pass
@@ -515,7 +549,7 @@ class TestFuser:
             device=device,
             requires_grad=True,
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
                 y = op(x)
         y.backward(torch.zeros_like(y))
@@ -528,7 +562,7 @@ class TestFuser:
             x.grad = None
             op.weight.grad = None
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-                with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+                with te.autocast(enabled=quantized_compute, recipe=recipe):
                     y = op(x)
             y.backward(torch.zeros_like(y))
             assert y.dtype == autocast_dtype
@@ -557,7 +591,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -623,7 +657,7 @@ class TestBasicOps:
         # Skip invalid configurations
         if memory_format == torch.channels_last and len(in_shape) != 4:
             pytest.skip("torch.channels_last only supports 4D tensors")
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, device=device, dtype=dtype)
         with_quantization = quantization is not None
 
         # Random data
@@ -689,7 +723,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -751,7 +785,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, device=device, dtype=dtype)
         if quantization == "mxfp8":
             maybe_skip_quantization(quantization, dims=in_shape)
 
@@ -778,7 +812,7 @@ class TestBasicOps:
         # Implementation with fusible operation
         op = te_ops.Quantize(forward=cast_forward, backward=cast_backward)
         recipe = make_recipe(quantization)
-        with te.fp8_autocast(enabled=with_quantization, fp8_recipe=recipe):
+        with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = op(x_test)
         y_test.backward(dy_test)
 
@@ -818,7 +852,7 @@ class TestBasicOps:
         out_shape = in_shape[:-1] + [out_features]
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         quantization_needed = any(
             (
@@ -872,7 +906,7 @@ class TestBasicOps:
 
         # Implementation with fusible operation
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te_ops.BasicLinear(
                 in_features,
                 out_features,
@@ -880,16 +914,16 @@ class TestBasicOps:
                 dtype=dtype,
                 accumulate_into_main_grad=accumulate_into_main_grad,
             )
+            forward = te_ops.Sequential(
+                te_ops.Quantize(forward=quantized_input, backward=quantized_grad_input),
+                op,
+                te_ops.Quantize(forward=quantized_output, backward=quantized_grad_output),
+            )
         with torch.no_grad():
             op.weight.copy_(w_test)
             del w_test
             op.weight.main_grad = torch.full_like(op.weight, 0.5, dtype=torch.float32)
-        forward = te_ops.Sequential(
-            te_ops.Quantize(forward=quantized_input, backward=quantized_grad_input),
-            op,
-            te_ops.Quantize(forward=quantized_output, backward=quantized_grad_output),
-        )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
@@ -898,7 +932,7 @@ class TestBasicOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute or quantized_output or quantized_grad_input:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1009,7 +1043,7 @@ class TestBasicOps:
         out_shape = in_shape[:-1] + [out_features]
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantization is None and (quantized_compute or quantized_weight):
             pytest.skip("Quantization scheme is not specified")
@@ -1050,7 +1084,7 @@ class TestBasicOps:
 
         # Implementation with fusible operation
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te_ops.Linear(
                 in_features,
                 out_features,
@@ -1066,7 +1100,7 @@ class TestBasicOps:
             del b_test
             for param in op.parameters():
                 param.requires_grad_(requires_grad=weight_requires_grad)
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = op(x_test)
         if input_requires_grad or weight_requires_grad:
             y_test.backward(dy_test)
@@ -1076,7 +1110,7 @@ class TestBasicOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1113,7 +1147,7 @@ class TestBasicOps:
         in_shape = list(in_shape)[:-1] + list(weight_shape)
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1167,14 +1201,14 @@ class TestBasicOps:
             op,
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1283,7 +1317,7 @@ class TestBasicOps:
         in_shape = list(in_shape)[:-1] + list(weight_shape)
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1329,14 +1363,14 @@ class TestBasicOps:
             op,
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1416,7 +1450,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x1_ref, x1_test = make_reference_and_test_tensors(
@@ -1455,8 +1489,11 @@ class TestBasicOps:
 
         # Check results
         tols = dtype_tols(dtype)
-        if with_quantization:
-            tols = dtype_tols(x1_test._fp8_dtype)
+        if in_place:
+            if quantization in ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"):
+                tols = dtype_tols(x1_test._fp8_dtype)
+            elif quantization == "nvfp4":
+                tols = dtype_tols(x1_test._fp4_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
         dx2_test = x2_test.grad.to(dtype=torch.float64, device="cpu")
@@ -1485,7 +1522,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1531,7 +1568,22 @@ class TestBasicOps:
         torch.testing.assert_close(y2_test, y2_ref, rtol=0, atol=0)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
-    @pytest.mark.parametrize("activation", ("relu", "gelu", "geglu", "reglu", "swiglu"))
+    @pytest.mark.parametrize(
+        "activation",
+        (
+            "gelu",
+            "geglu",
+            "qgelu",
+            "qgeglu",
+            "relu",
+            "reglu",
+            "glu",
+            "srelu",
+            "sreglu",
+            "silu",
+            "swiglu",
+        ),
+    )
     @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (32, 1, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -1550,12 +1602,12 @@ class TestBasicOps:
 
         # Tensor dimensions
         in_shape = list(out_shape)
-        if activation in ("geglu", "reglu", "swiglu"):
+        if activation in ("geglu", "glu", "qgeglu", "reglu", "sreglu", "swiglu"):
             in_shape[-1] *= 2
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if cache_quantized_input:
             maybe_skip_quantization("fp8_current_scaling", device=device)
 
@@ -1577,14 +1629,33 @@ class TestBasicOps:
         y_ref: torch.Tensor
         if activation == "gelu":
             y_ref = torch.nn.functional.gelu(x_ref, approximate="tanh")
-        elif activation == "relu":
-            y_ref = torch.nn.functional.relu(x_ref)
         elif activation == "geglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.gelu(x1, approximate="tanh") * x2
+        elif activation == "qgelu":
+            y_ref = x_ref * torch.sigmoid(1.702 * x_ref)
+        elif activation == "qgeglu":
+            x1, x2 = x_ref.chunk(2, dim=-1)
+            y_ref = x1 * torch.sigmoid(1.702 * x1) * x2
+        elif activation == "relu":
+            y_ref = torch.nn.functional.relu(x_ref)
         elif activation == "reglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.relu(x1) * x2
+        elif activation == "sigmoid":
+            y_ref = torch.nn.functional.sigmoid(x_ref)
+        elif activation == "glu":
+            x = x_ref.reshape(*in_shape[:-1], 2, in_shape[-1] // 2)
+            x = x.flip(-2)  # PyTorch GLU swaps gate and linear unit
+            x = x.reshape(in_shape)
+            y_ref = torch.nn.functional.glu(x)
+        elif activation == "srelu":
+            y_ref = torch.nn.functional.relu(x_ref) ** 2
+        elif activation == "sreglu":
+            x1, x2 = x_ref.chunk(2, dim=-1)
+            y_ref = torch.nn.functional.relu(x1) ** 2 * x2
+        elif activation == "silu":
+            y_ref = torch.nn.functional.silu(x_ref)
         elif activation == "swiglu":
             x1, x2 = x_ref.chunk(2, dim=-1)
             y_ref = torch.nn.functional.silu(x1) * x2
@@ -1596,9 +1667,15 @@ class TestBasicOps:
         recipe = make_recipe(quantization)
         make_op = dict(
             gelu=te_ops.GELU,
-            relu=te_ops.ReLU,
             geglu=te_ops.GEGLU,
+            glu=te_ops.GLU,
+            qgelu=te_ops.QGELU,
+            qgeglu=te_ops.QGEGLU,
+            relu=te_ops.ReLU,
             reglu=te_ops.ReGLU,
+            srelu=te_ops.SReLU,
+            sreglu=te_ops.SReGLU,
+            silu=te_ops.SiLU,
             swiglu=te_ops.SwiGLU,
         )[activation]
         forward = te_ops.Sequential(
@@ -1606,14 +1683,16 @@ class TestBasicOps:
             make_op(cache_quantized_input=cache_quantized_input),
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute or cache_quantized_input:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+        if quantized_compute:
+            tols = quantization_tols(quantization)
+        elif cache_quantized_input:
+            tols = quantization_tols("fp8_current_scaling")
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1634,8 +1713,96 @@ class TestBasicOps:
         quantization: Optional[str],
         quantize_forward: bool,
         quantize_backward: bool,
+        glu_interleave_size: Optional[int] = None,
     ):
 
+        # Tensor dimensions
+        in_shape = list(out_shape)
+        in_shape[-1] *= 2
+
+        # Skip invalid configurations
+        quantized_compute = quantization is not None
+        if not quantized_compute and (quantize_forward or quantize_backward):
+            pytest.skip("Quantization scheme has not been provided")
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(
+                *in_shape[:-1],
+                in_shape[-1] // (2 * glu_interleave_size),
+                2,
+                glu_interleave_size,
+            )
+            x = x.transpose(-3, -2)
+            x = x.reshape(in_shape)
+        x1, x2 = x.chunk(2, dim=-1)
+        y_ref = torch.nn.functional.silu(x1) * x2
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        recipe = make_recipe(quantization)
+        forward = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=quantize_backward),
+            te_ops.SwiGLU(glu_interleave_size=glu_interleave_size),
+            te_ops.Quantize(forward=quantize_forward, backward=False),
+        )
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
+            y_test = forward(x_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if quantized_compute:
+            tols = quantization_tols(quantization)
+
+        # Check results
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    def test_interleaved_swiglu(self):
+        """SwiGLU with block interleaved input format"""
+        self.test_swiglu(
+            out_shape=(32, 192),
+            dtype=torch.float32,
+            quantization=None,
+            quantize_forward=False,
+            quantize_backward=False,
+            glu_interleave_size=32,
+        )
+
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantize_forward", (False, True))
+    @pytest.mark.parametrize("quantize_backward", (False, True))
+    def test_clamped_swiglu(
+        self,
+        *,
+        out_shape: Iterable[int] = (32, 32),
+        glu_interleave_size: Optional[int] = None,
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantize_forward: bool,
+        quantize_backward: bool,
+        limit: float = 0.75,
+        alpha: float = 1.702,
+    ):
+        """SwiGLU variant used in GPT-OSS"""
         # Tensor dimensions
         in_shape = list(out_shape)
         in_shape[-1] *= 2
@@ -1660,31 +1827,61 @@ class TestBasicOps:
         )
 
         # Plain PyTorch implementation
-        x1, x2 = x_ref.chunk(2, dim=-1)
-        y_ref = torch.nn.functional.silu(x1) * x2
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(
+                *in_shape[:-1],
+                in_shape[-1] // (2 * glu_interleave_size),
+                2,
+                glu_interleave_size,
+            )
+            x = x.transpose(-3, -2)
+            x = x.reshape(in_shape)
+        x_glu, x_linear = x.chunk(2, dim=-1)
+        x_glu = x_glu.clamp(min=None, max=limit)
+        x_linear = x_linear.clamp(min=-limit, max=limit)
+        out_glu = x_glu * torch.sigmoid(alpha * x_glu)
+        y_ref = out_glu * (x_linear + 1)
         y_ref.backward(dy_ref)
 
         # Implementation with fusible operation
         recipe = make_recipe(quantization)
+
         forward = te_ops.Sequential(
             te_ops.Quantize(forward=False, backward=quantize_backward),
-            te_ops.SwiGLU(),
+            te_ops.ClampedSwiGLU(
+                limit=limit,
+                alpha=alpha,
+                glu_interleave_size=glu_interleave_size,
+            ),
             te_ops.Quantize(forward=quantize_forward, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
+
         y_test.backward(dy_test)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute:
+        if quantized_compute and quantization == "nvfp4":
+            tols = dtype_tols(tex.DType.kFloat4E2M1)
+        elif quantized_compute:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
 
         # Check results
-        y_test = y_test.to(dtype=torch.float64, device="cpu")
-        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        torch.testing.assert_close(y_test, y_ref, **tols)
-        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+
+    def test_interleaved_clamped_swiglu(self):
+        """GPT-OSS SwiGLU with block interleaved input format"""
+        self.test_clamped_swiglu(
+            out_shape=(32, 192),
+            dtype=torch.float32,
+            quantization=None,
+            quantize_forward=False,
+            quantize_backward=False,
+            glu_interleave_size=32,
+        )
 
     @pytest.mark.parametrize("scale", (1, 0, -2.5, 3.5))
     @pytest.mark.parametrize("shape", ((), (1, 13), (4, 4, 2)))
@@ -1728,25 +1925,44 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
-    @pytest.mark.parametrize("prob", (0.1, 0.5, 0.75))
+    @pytest.mark.parametrize("prob", (0.0625, 0.5, 0.75))
     @pytest.mark.parametrize("is_training", (True, False))
-    @pytest.mark.parametrize("shape", ((101,), (2, 4, 16)))
+    @pytest.mark.parametrize("quantization", (None, "fp8_current_scaling"))
+    @pytest.mark.parametrize("shape", ((101,), (2, 4, 16), (128, 128)))
     @pytest.mark.parametrize("dtype", _dtypes)
     def test_dropout(
         self,
         *,
         prob: float,
         is_training: bool,
+        quantization: Optional[str],
         shape: Iterable[int],
         dtype: torch.dtype,
         device: torch.device = "cuda",
     ):
 
+        # Skip invalid configurations
+        quantized_input = quantization is not None
+        maybe_skip_quantization(quantization, dims=shape, device=device, dtype=dtype)
+
         # Random data
-        x_ref = torch.rand(shape, dtype=dtype, device=device) + 0.5
-        x_test = x_ref.clone().requires_grad_()
-        dy_ref = torch.rand(shape, dtype=dtype, device=device) + 0.5
-        dy_test = dy_ref.clone()
+        # Note: Shift values to make sure inputs are non-zero
+        x_ref, x_test = make_reference_and_test_tensors(
+            shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            test_is_quantized=quantized_input,
+        )
+        with torch.no_grad():
+            x_test += 1
+            x_ref.copy_(x_test)
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
 
         # Apply dropout
         op = te_ops.Dropout(prob)
@@ -1754,17 +1970,20 @@ class TestBasicOps:
             op.train()
         else:
             op.eval()
-        y = op(x_test)
-        y.backward(dy_test)
+        y_test = op(x_test)
+        y_test.backward(dy_test)
 
         # Check values
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
         if is_training:
-            mask = ((y != 0) / (1 - prob)).to(dtype=dtype)
-            torch.testing.assert_close(y, x_ref * mask)
-            torch.testing.assert_close(x_test.grad, dy_ref * mask)
+            tols = dtype_tols(dtype)
+            mask = ((y_test != 0) / (1 - prob)).to(dtype=dtype)
+            torch.testing.assert_close(y_test, x_ref * mask, **tols)
+            torch.testing.assert_close(dx_test, dy_ref * mask, **tols)
         else:
-            torch.testing.assert_close(y, x_ref, rtol=0, atol=0)
-            torch.testing.assert_close(x_test.grad, dy_ref, rtol=0, atol=0)
+            torch.testing.assert_close(y_test, x_ref, rtol=0, atol=0)
+            torch.testing.assert_close(dx_test, dy_ref, rtol=0, atol=0)
 
         # Hypothesis testing for number of zeros
         # Note: A Bernoulli random variable with probability p has
@@ -1776,9 +1995,236 @@ class TestBasicOps:
         # p-value is less than 1% and we assume that the dropout
         # distribution is incorrect.
         if is_training:
-            prob_observed = 1 - torch.count_nonzero(y).item() / y.numel()
-            z_score = (prob_observed - prob) / math.sqrt(prob * (1 - prob) / y.numel())
-            assert abs(z_score) < 2.5758, "Number of zeros is outside 99% confidence interval"
+            prob_observed = 1 - torch.count_nonzero(y_test).item() / y_test.numel()
+            z_score = (prob_observed - prob) / math.sqrt(prob * (1 - prob) / y_test.numel())
+            assert (
+                abs(z_score) < 2.5758
+            ), f"Number of zeros is outside 99% confidence interval ({prob=}, {prob_observed=})"
+
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantized_compute", (False, True))
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    @pytest.mark.parametrize("weight_requires_grad", (False, True))
+    def test_grouped_linear(
+        self,
+        *,
+        group_size: int = 4,
+        bias: bool,
+        weight_shape: tuple[int, int] = (128, 128),
+        split_alignment: int = 128,
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantized_compute: bool,
+        quantized_weight: bool,
+        input_requires_grad: bool,
+        weight_requires_grad: bool,
+    ) -> None:
+        """Grouped GEMM"""
+
+        # Split sizes
+        split_sizes = [split_alignment * i for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+
+        # Make input and weight shapes consistent
+        out_features, in_features = weight_shape
+        in_shape = (split_sizes.sum().item(), in_features)
+        out_shape = (in_shape[0], out_features)
+
+        # Skip invalid configurations
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(quantization, dims=out_shape)
+        if quantization is None and (quantized_compute or quantized_weight):
+            pytest.skip("Quantization scheme is not specified")
+        if quantization is not None and not (quantized_compute or quantized_weight):
+            pytest.skip("Quantization scheme is not used")
+        if quantization is not None and dtype not in (torch.bfloat16, torch.float16):
+            pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=input_requires_grad,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        ws_ref, ws_test = [], []
+        bs_ref, bs_test = [], []
+        for _ in range(group_size):
+            w_ref, w_test = make_reference_and_test_tensors(
+                (out_features, in_features),
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+                requires_grad=weight_requires_grad,
+            )
+            b_ref, b_test = None, None
+            if bias:
+                b_ref, b_test = make_reference_and_test_tensors(
+                    out_features,
+                    test_dtype=dtype,
+                    test_device=device,
+                    requires_grad=weight_requires_grad,
+                )
+            ws_ref.append(w_ref)
+            ws_test.append(w_test)
+            bs_ref.append(b_ref)
+            bs_test.append(b_test)
+
+        # Plain PyTorch implementation
+        xs_ref = torch.split(x_ref, split_sizes.tolist())
+        ys_ref = []
+        for x, w, b in zip(xs_ref, ws_ref, bs_ref):
+            ys_ref.append(torch.nn.functional.linear(x, w, bias=b))
+        y_ref = torch.cat(ys_ref)
+        if input_requires_grad or weight_requires_grad:
+            y_ref.backward(dy_ref)
+
+        # Construct fusible operation
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+            op = te_ops.GroupedLinear(
+                group_size,
+                in_features,
+                out_features,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+            )
+        with torch.no_grad():
+            for group_idx in range(group_size):
+                getattr(op, f"weight{group_idx}").copy_(ws_test[group_idx])
+                if bias:
+                    getattr(op, f"bias{group_idx}").copy_(bs_test[group_idx])
+            del ws_test, bs_test
+            for param in op.parameters():
+                param.requires_grad_(requires_grad=weight_requires_grad)
+
+        # Forward and backward pass with op
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
+            y_test = op(x_test, split_sizes)
+        if input_requires_grad or weight_requires_grad:
+            y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+        if quantized_compute:
+            tols = quantization_tols(quantization)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        if input_requires_grad:
+            dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        else:
+            assert x_test.grad is None
+        for group_idx in range(group_size):
+            w_test = getattr(op, f"weight{group_idx}")
+            if weight_requires_grad:
+                dw_test = w_test.grad.to(dtype=torch.float64, device="cpu")
+                torch.testing.assert_close(dw_test, ws_ref[group_idx].grad, **tols)
+            else:
+                assert w_test.grad is None
+            if bias:
+                b_test = getattr(op, f"bias{group_idx}")
+                if weight_requires_grad:
+                    db_test = b_test.grad.to(dtype=torch.float64, device="cpu")
+                    torch.testing.assert_close(db_test, bs_ref[group_idx].grad, **tols)
+                else:
+                    assert b_test.grad is None
+
+    @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    @pytest.mark.parametrize("scales_requires_grad", (False, True))
+    def test_scaled_swiglu(
+        self,
+        *,
+        in_shape: Iterable[int],
+        glu_interleave_size: Optional[int] = None,
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+        input_requires_grad: bool,
+        scales_requires_grad: bool,
+    ) -> None:
+        """SwiGLU with post-scale"""
+
+        # Tensor dims
+        out_shape = list(in_shape)
+        out_shape[-1] //= 2
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=input_requires_grad,
+        )
+        scales_ref, scales_test = make_reference_and_test_tensors(
+            in_shape[:-1],
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=scales_requires_grad,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        x = x_ref
+        if glu_interleave_size is not None:
+            x = x.reshape(
+                -1,
+                in_shape[-1] // (2 * glu_interleave_size),
+                2,
+                glu_interleave_size,
+            )
+            x = x.transpose(1, 2)
+            x = x.reshape(in_shape)
+        x1, x2 = x.chunk(2, dim=-1)
+        y = torch.nn.functional.silu(x1) * x2
+        y_ref = scales_ref.unsqueeze(-1) * y
+        if input_requires_grad or scales_requires_grad:
+            y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+        y_test = op(x_test, scales_test)
+        if input_requires_grad or scales_requires_grad:
+            y_test.backward(dy_test)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(scales_test, scales_ref, **tols)
+
+    def test_interleaved_scaled_swiglu(self):
+        """SwiGLU with post-scale and block interleaved input format"""
+        self.test_scaled_swiglu(
+            in_shape=(32, 192),
+            glu_interleave_size=32,
+            input_requires_grad=True,
+            scales_requires_grad=True,
+        )
 
 
 class TestFusedOps:
@@ -1813,7 +2259,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if dtype not in (torch.float16, torch.bfloat16):
             pytest.skip(
@@ -1854,7 +2300,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_compute, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_compute, recipe=recipe):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -1870,7 +2316,7 @@ class TestFusedOps:
                 model[0].bias.copy_(b_test)
             del w_test
             del b_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x_test)
         y_test.backward(dy_test)
 
@@ -1884,7 +2330,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1920,7 +2366,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantized_compute and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
@@ -1964,7 +2410,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -1981,7 +2427,7 @@ class TestFusedOps:
                 model[0].bias.copy_(b_test)
             del w_test
             del b_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x1_test, x2_test)
         y_test.backward(dy_test)
 
@@ -1995,7 +2441,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2033,7 +2479,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantized_compute and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
@@ -2070,7 +2516,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -2086,7 +2532,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[0].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x1_test, x2_test)
         y_test.backward(dy_test)
 
@@ -2101,7 +2547,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2134,7 +2580,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, device=device, dtype=dtype)
         if quantization == "mxfp8" and (len(in_shape) < 2 or in_shape[-1] % 32 != 0):
             pytest.skip("Unsupported tensor size for MXFP8")
 
@@ -2177,7 +2623,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[1].bias.copy_(b_test)
             del b_test
-        with te.fp8_autocast(enabled=with_quantization, fp8_recipe=recipe):
+        with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = model(x_test)
         y_test.backward(dy_test)
 
@@ -2185,18 +2631,18 @@ class TestFusedOps:
         backward_ops = model._module_groups[0]._backward_ops
         if with_quantization:
             assert len(backward_ops) == 2
-            assert isinstance(backward_ops[0][0], BackwardActivationBias)
-            assert isinstance(backward_ops[1][0], te_ops.Quantize)
+            assert isinstance(backward_ops[0][0], te_ops.Quantize)
+            assert isinstance(backward_ops[1][0], BackwardActivationBias)
         else:
             assert len(backward_ops) == 3
-            assert isinstance(backward_ops[0][0], act_type)
+            assert isinstance(backward_ops[0][0], te_ops.Quantize)
             assert isinstance(backward_ops[1][0], te_ops.Bias)
-            assert isinstance(backward_ops[2][0], te_ops.Quantize)
+            assert isinstance(backward_ops[2][0], act_type)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
         if with_quantization:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2205,6 +2651,94 @@ class TestFusedOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(db_test, b_ref.grad, **tols)
+
+    @pytest.mark.parametrize("weight_shape", ((19,), (64,)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("zero_centered_gamma", (False, True))
+    def test_backward_add_rmsnorm(
+        self,
+        *,
+        weight_shape: Iterable[int],
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        eps: float = 0.3,
+        zero_centered_gamma: bool,
+    ) -> None:
+        """Fused backward RMNorm + add"""
+
+        # Make input and weight shapes consistent
+        in_shape = list(in_shape)[:-1] + list(weight_shape)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            weight_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy1_ref, dy1_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        dy2_ref, dy2_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        inner_dims = tuple(range(len(in_shape) - len(weight_shape), len(in_shape)))
+        var_ref = x_ref.square().sum(dim=inner_dims, keepdim=True) / math.prod(weight_shape)
+        if zero_centered_gamma:
+            y1_ref = x_ref / torch.sqrt(eps + var_ref) * (1 + w_ref)
+        else:
+            y1_ref = x_ref / torch.sqrt(eps + var_ref) * w_ref
+        y2_ref = x_ref
+        (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+
+        # Implementation with fusible operations
+        model = te_ops.Sequential(
+            te_ops.MakeExtraOutput(),
+            te_ops.RMSNorm(
+                weight_shape,
+                eps=eps,
+                device=device,
+                dtype=dtype,
+                zero_centered_gamma=zero_centered_gamma,
+            ),
+        )
+        with torch.no_grad():
+            model[1].weight.copy_(w_test)
+            del w_test
+        y1_test, y2_test = model(x_test)
+        (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+
+        # Check that backward operations have been fused
+        backward_ops = model._module_groups[0]._backward_ops
+        assert len(backward_ops) == 1
+        assert isinstance(backward_ops[0][0], BackwardAddRMSNorm)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+
+        # Check results
+        y1_test = y1_test.to(dtype=torch.float64, device="cpu")
+        y2_test = y2_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = model[1].weight.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y1_test, y1_ref, **tols)
+        torch.testing.assert_close(y2_test, y2_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -2227,7 +2761,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantized_compute and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
@@ -2267,7 +2801,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight):
+        with te.quantized_model_init(enabled=quantized_weight):
             model = te_ops.Sequential(
                 te_ops.MakeExtraOutput(in_place=True),
                 te_ops.Linear(
@@ -2281,7 +2815,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[1].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y1_test, y2_test = model(x_test)
         (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
 
@@ -2295,7 +2829,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y1_test = y1_test.to(dtype=torch.float64, device="cpu")
@@ -2330,7 +2864,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantized_compute and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
@@ -2362,7 +2896,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight):
+        with te.quantized_model_init(enabled=quantized_weight):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -2376,7 +2910,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[0].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x_test)
         (y_test * dy_test).sum().backward()
 
@@ -2390,7 +2924,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2431,12 +2965,12 @@ class TestCheckpointing:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
 
         # Construct model
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model_save = te_ops.Sequential(
                 te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
             )
@@ -2447,7 +2981,7 @@ class TestCheckpointing:
             x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
             dy = torch.randn(out_shape, dtype=dtype, device=device)
             optim_save.zero_grad()
-            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            with te.autocast(enabled=quantized_compute, recipe=recipe):
                 y = model_save(x)
             y.backward(dy)
             optim_save.step()
@@ -2476,14 +3010,14 @@ class TestCheckpointing:
         ys_save = []
         for i in range(post_checkpoint_steps):
             optim_save.zero_grad()
-            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            with te.autocast(enabled=quantized_compute, recipe=recipe):
                 y = model_save(xs_save[i])
             y.backward(dys[i])
             optim_save.step()
             ys_save.append(y)
 
         # Load checkpoint
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model_load = te_ops.Sequential(
                 te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
             )
@@ -2496,7 +3030,7 @@ class TestCheckpointing:
         ys_load = []
         for i in range(post_checkpoint_steps):
             optim_load.zero_grad()
-            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            with te.autocast(enabled=quantized_compute, recipe=recipe):
                 y = model_load(xs_load[i])
             y.backward(dys[i])
             optim_load.step()
@@ -2505,7 +3039,11 @@ class TestCheckpointing:
         # Check that original and loaded model match exactly
         tols = {"rtol": 0, "atol": 0}
         for param_load, param_save in zip(model_load.parameters(), model_save.parameters()):
-            torch.testing.assert_close(param_load, param_save, **tols)
+            torch.testing.assert_close(  # Force dequantization by casting to FP64
+                param_load.to(dtype=torch.float64, device="cpu"),
+                param_save.to(dtype=torch.float64, device="cpu"),
+                **tols,
+            )
             torch.testing.assert_close(param_load.grad, param_save.grad, **tols)
         for y_load, y_save in zip(ys_load, ys_save):
             torch.testing.assert_close(y_load, y_save, **tols)
@@ -2522,7 +3060,6 @@ class TestSequentialModules:
 
     @pytest.mark.parametrize("requires_grad", (False, True))
     @pytest.mark.parametrize("bias", (False, True))
-    @pytest.mark.parametrize("normalization", ("LayerNorm", "RMSNorm"))
     @pytest.mark.parametrize("quantized_compute", (False, True))
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -2532,32 +3069,25 @@ class TestSequentialModules:
         *,
         requires_grad: bool,
         bias: bool,
-        normalization: str,
         quantized_compute: bool,
         quantized_weight: bool,
         dtype: torch.dtype,
         quantization: Optional[str],
         device: torch.device = "cuda",
-        hidden_size: int = 32,
-        sequence_length: int = 512,
+        hidden_size: int = 256,
+        sequence_length: int = 48,
         batch_size: int = 4,
-        ffn_hidden_size: int = 64,
+        ffn_hidden_size: int = 384,
         layernorm_epsilon: float = 1e-5,
     ) -> None:
-        """
-        LayerNorm/RMSNorm + Linear + GELU + Linear
-
-        Note that this test checks only if the module runs
-        as when chaining multiple modules it is hard to validate
-        numerical accuracy.
-        """
+        """LayerNorm/RMSNorm + Linear + SwiGLU + Linear"""
 
         # Make input shape
         in_shape = (sequence_length, batch_size, hidden_size)
         ffn_shape = in_shape[:-1] + (ffn_hidden_size,)
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=ffn_shape, device=device)
         quantization_needed = quantized_compute or quantized_weight
         if quantization is None and quantization_needed:
@@ -2566,38 +3096,90 @@ class TestSequentialModules:
             pytest.skip("Quantization scheme is not used")
 
         # Random data
-        _, x_test = make_reference_and_test_tensors(
+        x_ref, x_test = make_reference_and_test_tensors(
             in_shape,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
             requires_grad=requires_grad,
         )
-        _, dy_test = make_reference_and_test_tensors(
+        norm_w_ref, norm_w_test = make_reference_and_test_tensors(
+            hidden_size,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        norm_b_ref, norm_b_test = make_reference_and_test_tensors(
+            hidden_size,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w1_ref, w1_test = make_reference_and_test_tensors(
+            (ffn_hidden_size, hidden_size),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w2_ref, w2_test = make_reference_and_test_tensors(
+            (hidden_size, ffn_hidden_size // 2),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        b1_ref, b1_test, b2_ref, b2_test = None, None, None, None
+        if bias:
+            b1_ref, b1_test = make_reference_and_test_tensors(
+                ffn_hidden_size,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            b2_ref, b2_test = make_reference_and_test_tensors(
+                hidden_size,
+                test_dtype=dtype,
+                test_device=device,
+            )
+        dy_ref, dy_test = make_reference_and_test_tensors(
             in_shape,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
             requires_grad=False,
         )
+        with torch.no_grad():
+            for t in (norm_w_ref, norm_w_test, norm_b_ref, norm_b_test):
+                t -= 0.5
+            for t in (w1_ref, w1_test, w2_ref, w2_test):
+                t *= 1 / 64
+            if bias:
+                for t in (b1_ref, b1_test, b2_ref, b2_test):
+                    t -= 0.5
+            for t in (dy_ref, dy_test):
+                t -= 0.5
 
-        # Implementation with fusible operations
+        # Reference implementation
+        x = x_ref
+        x = torch.nn.functional.layer_norm(
+            x,
+            (hidden_size,),
+            weight=norm_w_ref,
+            bias=norm_b_ref,
+            eps=layernorm_epsilon,
+        )
+        x = torch.nn.functional.linear(x, w1_ref, bias=b1_ref)
+        x1, x2 = x.chunk(2, dim=-1)
+        x = torch.nn.functional.silu(x1) * x2
+        x = torch.nn.functional.linear(x, w2_ref, bias=b2_ref)
+        y_ref = x
+        y_ref.backward(dy_ref)
+
+        # Construct operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
-            if normalization == "LayerNorm":
-                norm = te_ops.LayerNorm(
-                    hidden_size,
-                    eps=layernorm_epsilon,
-                    device=device,
-                    dtype=dtype,
-                )
-            else:
-                norm = te_ops.RMSNorm(
-                    hidden_size,
-                    eps=layernorm_epsilon,
-                    device=device,
-                    dtype=dtype,
-                )
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+            norm = te_ops.LayerNorm(
+                hidden_size,
+                eps=layernorm_epsilon,
+                device=device,
+                dtype=dtype,
+            )
             ffn1 = te_ops.Linear(
                 hidden_size,
                 ffn_hidden_size,
@@ -2605,15 +3187,652 @@ class TestSequentialModules:
                 device=device,
                 dtype=dtype,
             )
-            act = te_ops.GELU()
+            act = te_ops.SwiGLU()
             ffn2 = te_ops.Linear(
-                ffn_hidden_size,
+                ffn_hidden_size // 2,
                 hidden_size,
                 bias=bias,
                 device=device,
                 dtype=dtype,
             )
+
+        # Copy weights
+        with torch.no_grad():
+            norm.weight.copy_(norm_w_test)
+            norm.bias.copy_(norm_b_test)
+            ffn1.weight.copy_(w1_test)
+            ffn2.weight.copy_(w2_test)
+            if bias:
+                ffn1.bias.copy_(b1_test)
+                ffn2.bias.copy_(b2_test)
+        del norm_w_test, norm_b_test, w1_test, b1_test, w2_test, b2_test
+
+        # Fuse ops and perform forward and backward pass
         forward = te_ops.Sequential(norm, ffn1, act, ffn2)
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
+
+        def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+            """Convert to FP64 CPU tensor"""
+            if tensor is None:
+                return None
+            out = tensor.detach().to(dtype=torch.float64, device="cpu")
+            out = out.requires_grad_(requires_grad=tensor.requires_grad)
+            return out
+
+        # Check values
+        tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
+        torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
+        torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(norm.weight.grad), norm_w_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(norm.bias.grad), norm_b_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(ffn2.weight.grad), w2_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(ffn1.weight.grad), w1_ref.grad, **tols)
+        if bias:
+            torch.testing.assert_close(to_cpu(ffn1.bias.grad), b1_ref.grad, **tols)
+            torch.testing.assert_close(to_cpu(ffn2.bias.grad), b2_ref.grad, **tols)
+
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    def test_grouped_mlp(
+        self,
+        *,
+        group_size: int = 4,
+        bias: bool,
+        hidden_size: int = 256,
+        dtype: torch.dtype,
+        quantization: Optional[str],
+        device: torch.device = "cuda",
+        split_alignment: int = 256,
+        glu_interleave_size: Optional[int],
+    ) -> None:
+        """GroupedLinear + ScaledSwiGLU + GroupedLinear"""
+
+        # Split sizes
+        split_sizes = [split_alignment * i for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
+
+        # Make input shape
+        in_shape = (split_sizes.sum().item(), hidden_size)
+        out_shape = in_shape
+
+        # Skip invalid configurations
+        with_quantization = quantization is not None
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        if with_quantization and dtype not in (torch.bfloat16, torch.float16):
+            pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            min=-0.25,
+            max=0.25,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            min=-0.25,
+            max=0.25,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        probs_ref, probs_test = make_reference_and_test_tensors(
+            (in_shape[0],),
+            test_dtype=dtype,
+            test_device=device,
+        )
+        fc1_ws_ref, fc1_ws_test = [], []
+        fc1_bs_ref, fc1_bs_test = [], []
+        fc2_ws_ref, fc2_ws_test = [], []
+        fc2_bs_ref, fc2_bs_test = [], []
+        for _ in range(group_size):
+            fc1_w_ref, fc1_w_test = make_reference_and_test_tensors(
+                (2 * hidden_size, hidden_size),
+                min=-0.25,
+                max=0.25,
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            fc2_w_ref, fc2_w_test = make_reference_and_test_tensors(
+                (hidden_size, hidden_size),
+                min=-0.25,
+                max=0.25,
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            fc1_b_ref, fc1_b_test = None, None
+            fc2_b_ref, fc2_b_test = None, None
+            if bias:
+                fc1_b_ref, fc1_b_test = make_reference_and_test_tensors(
+                    (2 * hidden_size,),
+                    min=-0.5,
+                    max=0.5,
+                    test_dtype=dtype,
+                    test_device=device,
+                )
+                fc2_b_ref, fc2_b_test = make_reference_and_test_tensors(
+                    (hidden_size,),
+                    min=-0.5,
+                    max=0.5,
+                    test_dtype=dtype,
+                    test_device=device,
+                )
+            fc1_ws_ref.append(fc1_w_ref)
+            fc1_bs_ref.append(fc1_b_ref)
+            fc1_ws_test.append(fc1_w_test)
+            fc1_bs_test.append(fc1_b_test)
+            fc2_ws_ref.append(fc2_w_ref)
+            fc2_bs_ref.append(fc2_b_ref)
+            fc2_ws_test.append(fc2_w_test)
+            fc2_bs_test.append(fc2_b_test)
+
+        # Reference implementation
+        xs = torch.split(x_ref, split_sizes.tolist())
+        probs = torch.split(probs_ref, split_sizes.tolist())
+        ys = []
+        for group_idx in range(group_size):
+            x = xs[group_idx]
+            x = torch.nn.functional.linear(x, fc1_ws_ref[group_idx], bias=fc1_bs_ref[group_idx])
+            if glu_interleave_size is not None:
+                x = x.reshape(
+                    -1,
+                    2 * hidden_size // (2 * glu_interleave_size),
+                    2,
+                    glu_interleave_size,
+                )
+                x = x.transpose(1, 2)
+                x = x.reshape(-1, 2 * hidden_size)
+            x1, x2 = x.chunk(2, dim=-1)
+            x = torch.nn.functional.silu(x1) * x2
+            x = x * probs[group_idx].unsqueeze(-1)
+            x = torch.nn.functional.linear(x, fc2_ws_ref[group_idx], bias=fc2_bs_ref[group_idx])
+            ys.append(x)
+        y_ref = torch.cat(ys)
+        y_ref.backward(dy_ref)
+
+        # Construct operations
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
+            fc1 = te_ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+            )
+            fc2 = te_ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+            )
+            module = te_ops.Sequential(
+                fc1,
+                te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size),
+                fc2,
+            )
+
+        # Copy weights
+        with torch.no_grad():
+            for group_idx in range(group_size):
+                getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_test[group_idx])
+                getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_test[group_idx])
+                if bias:
+                    getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_test[group_idx])
+                    getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_test[group_idx])
+        del fc1_ws_test, fc1_bs_test, fc2_ws_test, fc2_bs_test
+
+        # Fuse ops and perform forward and backward pass
+        with te.autocast(enabled=with_quantization, recipe=recipe):
+            y_test = module(x_test, split_sizes, probs_test, split_sizes)
+        y_test.backward(dy_test)
+
+        # Loose tols for sanity checking
+        tols = {"rtol": 0.125, "atol": 0.25}
+        if quantization == "nvfp4":
+            tols = {"rtol": 0.25, "atol": 0.5}
+
+        # Check values
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x_test, x_ref, **tols)
+        assert_close_grads(probs_test, probs_ref, **tols)
+        for group_idx in range(group_size):
+            assert_close_grads(getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols)
+            assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
+
+
+class TestCustomOps:
+    """Test with ops that are defined externally"""
+
+    def test_custom_basic_op(
+        self,
+        *,
+        shape: Iterable[int] = (7, 5),
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Custom basic op"""
+
+        class LearnableScale(te.ops.BasicOperation):
+            """Custom op that applies a learnable scale
+
+            This class is as an example in the op fuser guide at
+            docs/examples/op_fuser/op_fuser.rst (see "Implementing a
+            basic operation"). Any changes made to this class should
+            also be made there.
+
+            """
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.scale: torch.nn.Parameter
+                scale = torch.ones((), dtype=dtype, device=device)
+                scale = torch.nn.Parameter(scale)
+                self.register_parameter("scale", scale)
+
+            def op_forward(
+                self,
+                ctx: OperationContext,
+                input_: torch.Tensor,
+                **unused,
+            ) -> torch.Tensor:
+                out = self.scale * input_
+                ctx.save_for_backward(self.scale, input_)
+                return out
+
+            def op_backward(
+                self,
+                ctx: OperationContext,
+                grad_output: torch.Tensor,
+            ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
+                scale, input_ = ctx.saved_tensors
+                grad_scale = torch.inner(input_.reshape(-1), grad_output.reshape(-1)).reshape(())
+                grad_input = scale * grad_output
+                return grad_input, (grad_scale,)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            (),
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = w_ref * x_ref
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = LearnableScale()
+        forward = te.ops.Sequential(te.ops.Identity(), op, te.ops.Identity())
+        with torch.no_grad():
+            op.scale.copy_(w_test)
+            del w_test
+        y_test = forward(x_test)
+        y_test.backward(dy_test)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = op.scale.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(dw_test, w_ref.grad, **tols)
+
+    def test_custom_forward_fused_op1(
+        self,
+        *,
+        shape: Iterable[int] = (5, 11),
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ):
+        """Custom fused op in forward pass"""
+
+        class ForwardAxpy(te.ops.FusedOperation):
+            """Custom op that computes BLAS SAXPY in forward pass
+
+            This class is as an example in the op fuser guide at
+            docs/examples/op_fuser/op_fuser.rst (see "Implementing a
+            fused operation"). Any changes made to this class should
+            also be made there.
+
+            """
+
+            _enabled = True
+
+            def __init__(
+                self,
+                scale: te.ops.ConstantScale,
+                add: te.ops.AddExtraInput,
+            ) -> None:
+                super().__init__((scale, add))
+
+            def fuser_forward(
+                self,
+                basic_op_ctxs: list[OperationContext],
+                input_: torch.Tensor,
+                basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+                **unused,
+            ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, ...]]]:
+                scale_op, add_op = self.basic_ops
+                extra_input = basic_op_extra_inputs[1][0]  # Extra input to add op
+                out = scale_op.scale * input_ + extra_input
+                scale_ctx, add_ctx = basic_op_ctxs  # No state needed for backward
+                return (
+                    out,  # Output
+                    [(), ()],  # Extra outputs for each basic op
+                )
+
+        def fuse_axpy_ops(
+            ops: list[te.ops.FusibleOperation],
+            **unused,
+        ) -> list[te.ops.FusibleOperation]:
+            """Apply fusion the first time this function is called"""
+            if ForwardAxpy._enabled:
+                ForwardAxpy._enabled = False
+            else:
+                return ops
+            out = []
+            window, ops = ops[:2], ops[2:]
+            while len(window) == 2:
+                if isinstance(window[0], te.ops.ConstantScale) and isinstance(
+                    window[1], te.ops.AddExtraInput
+                ):
+                    window = [ForwardAxpy(*window)]
+                else:
+                    out.append(window[0])
+                    window = window[1:]
+                window, ops = window + ops[:1], ops[1:]
+            out.extend(window + ops)
+            return out
+
+        # Random data
+        scale = 0.5
+        x1_ref, x1_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        x2_ref, x2_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = scale * x1_ref + x2_ref
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        te.ops.register_forward_fusion(fuse_axpy_ops)
+        model = te.ops.Sequential(
+            te.ops.ConstantScale(scale=scale),
+            te.ops.AddExtraInput(),
+        )
+        y_test = model(x1_test, x2_test)
+        y_test.backward(dy_test)
+
+        # Check values
+        tols = dtype_tols(dtype)
+        assert_close(y_test, y_ref, **tols)
+        assert_close_grads(x1_test, x1_ref, **tols)
+        assert_close_grads(x2_test, x2_ref, **tols)
+
+    def test_custom_forward_fused_op2(
+        self,
+        *,
+        shape: Iterable[int] = (7, 11),
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ):
+        """Custom fused op in forward pass"""
+
+        class CustomForwardLinearSiLU(te.ops.FusedOperation):
+            """Custom fused op for GEMM + SiLU"""
+
+            _enabled = True
+
+            def __init__(self, *, linear, silu) -> None:
+                super().__init__((linear, silu))
+
+            def fuser_forward(
+                self,
+                basic_op_ctxs: list[OperationContext],
+                input_: torch.Tensor,
+                **unused,
+            ) -> torch.Tensor:
+                weight = self.basic_ops[0].weight
+                dtype = weight.dtype
+                device = weight.device
+
+                # Perform compute on CPU, because why not?
+                x = input_.cpu()
+                w = weight.cpu()
+                y = torch.matmul(x, w.T)
+                z = torch.nn.functional.silu(y)
+                out = z.to(device=device)
+
+                # Save state for linear backward
+                linear_op_ctx = basic_op_ctxs[0]
+                linear_op_ctx.save_for_backward(input_, weight)
+                linear_op_ctx.with_quantized_compute = False
+                linear_op_ctx.input_quantizer = None
+                linear_op_ctx.weight_quantizer = None
+                linear_op_ctx.grad_output_quantizer = None
+                linear_op_ctx.grad_input_quantizer = None
+                linear_op_ctx.dtype = dtype
+                linear_op_ctx.input_requires_grad = True
+                linear_op_ctx.weight_requires_grad = True
+
+                # Save state for SiLU backward
+                silu_op_ctx = basic_op_ctxs[1]
+                silu_op_ctx.save_for_backward(y.to(device=device))
+                silu_op_ctx.dtype = dtype
+                silu_op_ctx.prev_op_grad_output_quantizer = None
+
+                return out, [(), ()]
+
+            @staticmethod
+            def fuse_ops(
+                ops: list[FusibleOperation],
+                **unused,
+            ) -> list[FusibleOperation]:
+                """Apply fusion the first time this function is called"""
+                if CustomForwardLinearSiLU._enabled:
+                    CustomForwardLinearSiLU._enabled = False
+                    op = CustomForwardLinearSiLU(linear=ops[0], silu=ops[1])
+                    return [op] + ops[2:]
+                return ops
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            (shape[-1], shape[-1]),
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = torch.nn.functional.linear(x_ref, w_ref)
+        y_ref = torch.nn.functional.silu(y_ref)
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        te.ops.register_forward_fusion(CustomForwardLinearSiLU.fuse_ops)
+        model = te.ops.Sequential(
+            te.ops.Linear(shape[-1], shape[-1], bias=False),
+            te.ops.SiLU(),
+        )
+        with torch.no_grad():
+            model[0].weight.copy_(w_test)
+            del w_test
+        y_test = model(x_test)
+        y_test.backward(dy_test)
+
+        # Check that forward operations have been fused
+        forward_ops = model._module_groups[0]._forward_ops
+        assert len(forward_ops) == 1
+        assert isinstance(forward_ops[0][0], CustomForwardLinearSiLU)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = model[0].weight.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(dw_test, w_ref.grad, **tols)
+
+    def test_custom_backward_fused_op(
+        self,
+        *,
+        shape: Iterable[int] = (13, 5),
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ):
+        """Custom fused op in backward pass"""
+
+        class CustomBackwardLinearScale(te.ops.FusedOperation):
+            """Custom fused op for backward linear + scale"""
+
+            _enabled: bool = True
+
+            def __init__(self, *, scale, linear) -> None:
+                super().__init__((scale, linear))
+
+            def fuser_backward(
+                self,
+                basic_op_ctxs: list[OperationContext],
+                grad_output: torch.Tensor,
+                **unused,
+            ) -> torch.Tensor:
+
+                # Load state from linear forward
+                linear_op_ctx = basic_op_ctxs[1]
+                x, w = linear_op_ctx.saved_tensors
+                dtype = linear_op_ctx.dtype
+                device = w.device
+
+                # Perform compute in FP64 and apply scale before dgrad
+                # GEMM instead of after
+                scale = self.basic_ops[0].scale
+                dy = grad_output.double()
+                x = x.double()
+                w = w.double()
+                dx = torch.matmul(dy, scale * w)
+                dw = torch.matmul(dy.T, x)
+                dx = dx.to(dtype=dtype)
+                dw = dw.to(dtype=dtype)
+
+                return dx, [(), (dw,)], [(), ()]
+
+            @staticmethod
+            def fuse_ops(
+                ops: list[FusibleOperation],
+                **unused,
+            ) -> list[FusibleOperation]:
+                """Apply fusion the first time this function is called"""
+                if CustomBackwardLinearScale._enabled:
+                    CustomBackwardLinearScale._enabled = False
+                    op = CustomBackwardLinearScale(scale=ops[0], linear=ops[1])
+                    return [op] + ops[2:]
+                return ops
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            (shape[-1], shape[-1]),
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        scale = 1.234
+
+        # Plain PyTorch implementation
+        y_ref = torch.nn.functional.linear(scale * x_ref, w_ref)
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        te.ops.register_backward_fusion(CustomBackwardLinearScale.fuse_ops, prepend=True)
+        model = te.ops.Sequential(
+            te.ops.ConstantScale(scale),
+            te.ops.Linear(shape[-1], shape[-1], bias=False),
+        )
+        with torch.no_grad():
+            model[1].weight.copy_(w_test)
+            del w_test
+        y_test = model(x_test)
+        y_test.backward(dy_test)
+
+        # Check that forward operations have been fused
+        backward_ops = model._module_groups[0]._backward_ops
+        assert len(backward_ops) == 1
+        assert isinstance(backward_ops[0][0], CustomBackwardLinearScale)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = model[1].weight.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(dw_test, w_ref.grad, **tols)

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -57,9 +57,16 @@ class CMakeExtension(setuptools.Extension):
             build_dir,
             f"-DPython_EXECUTABLE={sys.executable}",
             f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
+            f"-DPython_SITEARCH={sysconfig.get_path('platlib')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
+        if bool(int(os.getenv("NVTE_USE_CCACHE", "0"))):
+            ccache_bin = os.getenv("NVTE_CCACHE_BIN", "ccache")
+            configure_command += [
+                f"-DCMAKE_CXX_COMPILER_LAUNCHER={ccache_bin}",
+                f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache_bin}",
+            ]
         configure_command += self.cmake_flags
 
         import pybind11

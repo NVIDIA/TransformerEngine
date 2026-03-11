@@ -1,16 +1,17 @@
 ..
-    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
 Config File Structure
-====================
+=====================
 
 To enable debug features, create a configuration YAML file to specify the desired behavior, such as determining which GEMMs (General Matrix Multiply operations) should run in higher precision rather than FP8 and defining which statistics to log. 
 Below, we outline how to structure the configuration YAML file.
 
 General Format
--------------
+--------------
+
 
 A config file can have one or more sections, each containing settings for specific layers and features:
 
@@ -55,7 +56,8 @@ Sections may have any name and must contain:
 3. Additional fields describing features for those layers.
 
 Layer Specification
-------------------
+-------------------
+
 
 Debug layers can be identified by a ``name`` parameter:
 
@@ -89,7 +91,8 @@ Examples:
         (...)
 
 Names in Transformer Layers
---------------------------
+---------------------------
+
 
 There are three ways to assign a name to a layer in the Transformer Engine:
 
@@ -106,6 +109,8 @@ The ``TransformerLayer`` in Transformer Engine is a composition of multiple sub-
 - ``transformer_layer.layernorm_mlp.fc2``,
 
 depending on the configuration. Some layers, like ``LayerNormLinear``, are fusions of two layers: ``LayerNorm`` and ``Linear``. When referring to such layers in precision debug tools, only the ``Linear`` part is affected.
+
+For `GroupedLinear` layer, the names of underlying GEMMS are of the form `layer_name.gemm_n`, where `n` is the index of the GEMM.
 
 Below is an example ``TransformerLayer`` with four linear layers that can be influenced by the precision debug tools.
 
@@ -154,7 +159,7 @@ Below is an example ``TransformerLayer`` with four linear layers that can be inf
 
 
 Structured Configuration for GEMMs and Tensors
----------------------------------------------
+----------------------------------------------
 
 Sometimes a feature is parameterized by a list of tensors or by a list of GEMMs.
 There are multiple ways of describing this parameterization.
@@ -216,7 +221,7 @@ We can use both structs for tensors and GEMMs. The tensors_struct should be nest
           gemm_feature_param1: value
 
 Enabling or Disabling Sections and Features
-------------------------------------------
+-------------------------------------------
 
 Debug features can be enabled or disabled with the ``enabled`` keyword:
 

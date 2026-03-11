@@ -1,8 +1,8 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
-"""MoE Permutaion API"""
+"""MoE Permutation API"""
 import warnings
 from typing import Optional, Tuple
 import torch
@@ -10,7 +10,7 @@ import torch
 import transformer_engine_torch as tex
 import transformer_engine.pytorch.triton.permutation as triton_permutation
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
@@ -42,10 +42,16 @@ class _moe_permute_index_map(torch.autograd.Function):
             return inp, torch.tensor([], device=inp.device)
 
         # Device check
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert index.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not index.is_cuda:
+            raise ValueError(f"index must be a CUDA tensor, but got tensor on {index.device}.")
         # Shape check
-        assert inp.size(0) == index.size(0), "Permute not possible"
+        if inp.size(0) != index.size(0):
+            raise ValueError(
+                f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
+                f"index.size(0) ({index.size(0)})."
+            )
 
         # Data type check
         dtype = TE_DType[inp.dtype]
@@ -119,7 +125,8 @@ class _moe_unpermute_index_map(torch.autograd.Function):
 
         # None probs check
         if probs is not None:
-            assert probs.is_cuda, "TransformerEngine needs CUDA."
+            if not probs.is_cuda:
+                raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
 
             if probs.dtype != torch.float32:
                 warnings.warn(
@@ -136,8 +143,12 @@ class _moe_unpermute_index_map(torch.autograd.Function):
             probs = torch.empty(0)
 
         # Device check
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not row_id_map.is_cuda:
+            raise ValueError(
+                f"row_id_map must be a CUDA tensor, but got tensor on {row_id_map.device}."
+            )
 
         # Data type check
         dtype = TE_DType[inp.dtype]
@@ -191,23 +202,37 @@ class _moe_permute_mask_map(torch.autograd.Function):
         routing_map: torch.Tensor,
         num_out_tokens: int,
         probs: torch.Tensor,
+        pad_offsets: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
             ctx.probs = probs
             return inp, torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
 
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert routing_map.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not routing_map.is_cuda:
+            raise ValueError(
+                f"routing_map must be a CUDA tensor, but got tensor on {routing_map.device}."
+            )
         if probs is not None:
-            assert probs.is_cuda, "TransformerEngine needs CUDA."
+            if not probs.is_cuda:
+                raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
+        if pad_offsets is not None:
+            if not pad_offsets.is_cuda:
+                raise ValueError(
+                    f"pad_offsets must be a CUDA tensor, but got tensor on {pad_offsets.device}."
+                )
 
-        assert inp.size(0) == routing_map.size(0), "Permute not possible"
+        if inp.size(0) != routing_map.size(0):
+            raise ValueError(
+                f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
+                f"routing_map.size(0) ({routing_map.size(0)})."
+            )
         num_tokens, hidden_size = inp.size()
         num_experts = routing_map.size(1)
-        assert (
-            num_out_tokens is not None
-        ), "num_out_tokens must be provided to the fused permute function."
+        if num_out_tokens is None:
+            raise ValueError("num_out_tokens must be provided to the fused permute function.")
 
         row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
 
@@ -223,13 +248,25 @@ class _moe_permute_mask_map(torch.autograd.Function):
             if blockwise_recipe:
                 fp8_scale = inp._rowwise_scale_inv.T.contiguous()
                 scale_hidden_dim = fp8_scale.shape[1]
-                assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+                if num_tokens != fp8_scale.shape[0]:
+                    raise ValueError(
+                        f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
+                        f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                        f"Input shape: ({num_tokens}, {hidden_size}), "
+                        f"scale shape: {tuple(fp8_scale.shape)}."
+                    )
                 inp = inp._rowwise_data
             # mxfp8 scaling
             elif mxfp8_recipe:
                 fp8_scale = inp._rowwise_scale_inv.contiguous()
                 scale_hidden_dim = fp8_scale.shape[1]
-                assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+                if num_tokens != fp8_scale.shape[0]:
+                    raise ValueError(
+                        f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
+                        f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                        f"Input shape: ({num_tokens}, {hidden_size}), "
+                        f"scale shape: {tuple(fp8_scale.shape)}."
+                    )
                 inp = inp._rowwise_data
             # per-tensor scaling
             elif per_tensor_recipe:
@@ -250,6 +287,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
             row_id_map,
             probs,
             fp8_scale,
+            pad_offsets,
             num_tokens,
             num_experts,
             num_out_tokens,
@@ -290,9 +328,10 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     columnwise_scale_inv=None,
                     quantizer=None,
                     requires_grad=output.requires_grad,
+                    with_gemm_swizzled_scales=False,
                 )
 
-        ctx.save_for_backward(row_id_map)
+        ctx.save_for_backward(row_id_map, pad_offsets)
         ctx.num_experts = num_experts
         ctx.num_tokens = num_tokens
         ctx.hidden_size = hidden_size
@@ -307,27 +346,30 @@ class _moe_permute_mask_map(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
         if not permuted_act_grad.numel():
-            return permuted_act_grad, None, None, ctx.probs
+            return permuted_act_grad, None, None, ctx.probs, None
 
         act_grad = None
         probs_grad = None
         if ctx.needs_input_grad[0]:
-            (row_id_map,) = ctx.saved_tensors
-            assert not isinstance(
-                permuted_act_grad, QuantizedTensor
-            ), "The backward of moe_permute does not support FP8."
+            row_id_map, pad_offsets = ctx.saved_tensors
+            if isinstance(permuted_act_grad, QuantizedTensor):
+                raise TypeError(
+                    "The backward of moe_permute does not support FP8, but got "
+                    f"QuantizedTensor of type {type(permuted_act_grad).__name__}."
+                )
             act_grad, probs_grad = triton_permutation.unpermute_with_mask_map(
                 permuted_act_grad,
                 row_id_map,
                 None,
                 permuted_probs_grad,
+                pad_offsets,
                 ctx.num_tokens,
                 ctx.num_experts,
                 ctx.hidden_size,
             )
         if not ctx.needs_input_grad[3]:
             probs_grad = None
-        return act_grad, None, None, probs_grad
+        return act_grad, None, None, probs_grad, None
 
 
 class _moe_unpermute_mask_map(torch.autograd.Function):
@@ -340,6 +382,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         row_id_map: torch.Tensor,
         merging_probs: Optional[torch.Tensor],
         restore_shape: Optional[torch.Size],
+        pad_offsets: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
@@ -353,29 +396,45 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
 
         with_probs = merging_probs is not None
         if with_probs:
-            assert merging_probs.is_cuda, "TransformerEngine needs CUDA."
+            if not merging_probs.is_cuda:
+                raise ValueError(
+                    "merging_probs must be a CUDA tensor, but got tensor on "
+                    f"{merging_probs.device}."
+                )
 
         # Device check
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not row_id_map.is_cuda:
+            raise ValueError(
+                f"row_id_map must be a CUDA tensor, but got tensor on {row_id_map.device}."
+            )
+        if pad_offsets is not None:
+            if not pad_offsets.is_cuda:
+                raise ValueError(
+                    f"pad_offsets must be a CUDA tensor, but got tensor on {pad_offsets.device}."
+                )
 
-        assert not isinstance(
-            inp, QuantizedTensor
-        ), "The forward of moe_unpermute does not support FP8."
+        if isinstance(inp, QuantizedTensor):
+            raise TypeError(
+                "The forward of moe_unpermute does not support FP8, but got "
+                f"QuantizedTensor of type {type(inp).__name__}."
+            )
         unpermuted_output, _ = triton_permutation.unpermute_with_mask_map(
             inp,
             row_id_map,
             merging_probs,
             None,
+            pad_offsets,
             num_tokens,
             num_experts,
             hidden_size,
         )
 
         if with_probs:
-            ctx.save_for_backward(inp, row_id_map, merging_probs)
+            ctx.save_for_backward(inp, row_id_map, merging_probs, pad_offsets)
         else:
-            ctx.save_for_backward(row_id_map)
+            ctx.save_for_backward(row_id_map, pad_offsets)
         ctx.num_experts = num_experts
         ctx.num_tokens = num_tokens
         ctx.num_permuted_tokens = inp.size(0)
@@ -387,15 +446,15 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
     def backward(ctx, unpermuted_act_grad):
         # pylint: disable=missing-function-docstring
         if not unpermuted_act_grad.numel():
-            return unpermuted_act_grad, None, ctx.merging_probs, None
+            return unpermuted_act_grad, None, ctx.merging_probs, None, None
 
         act_grad = None
         probs_grad = None
         if ctx.needs_input_grad[0]:
             if ctx.with_probs:
-                fwd_input, row_id_map, merging_probs = ctx.saved_tensors
+                fwd_input, row_id_map, merging_probs, pad_offsets = ctx.saved_tensors
             else:
-                (row_id_map,) = ctx.saved_tensors
+                row_id_map, pad_offsets = ctx.saved_tensors
 
             fp8 = isinstance(unpermuted_act_grad, QuantizedTensor)
             per_tensor_recipe = isinstance(unpermuted_act_grad, Float8Tensor)
@@ -417,13 +476,23 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     fp8_scale = unpermuted_act_grad._rowwise_scale_inv.T.contiguous()
                     unpermuted_act_grad = unpermuted_act_grad._rowwise_data
                     scale_hidden_dim = fp8_scale.shape[1]
-                    assert ctx.num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+                    if ctx.num_tokens != fp8_scale.shape[0]:
+                        raise ValueError(
+                            f"Scale and input shape mismatch: num_tokens ({ctx.num_tokens}) != "
+                            f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                            f"Scale shape: {tuple(fp8_scale.shape)}."
+                        )
                 # mxfp8 scaling
                 elif mxfp8_recipe:
                     fp8_scale = unpermuted_act_grad._rowwise_scale_inv.contiguous()
                     unpermuted_act_grad = unpermuted_act_grad._rowwise_data
                     scale_hidden_dim = fp8_scale.shape[1]
-                    assert ctx.num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+                    if ctx.num_tokens != fp8_scale.shape[0]:
+                        raise ValueError(
+                            f"Scale and input shape mismatch: num_tokens ({ctx.num_tokens}) != "
+                            f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                            f"Scale shape: {tuple(fp8_scale.shape)}."
+                        )
                 else:
                     raise ValueError("Unsupported FP8 recipe")
             else:
@@ -431,16 +500,20 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 fp8_dtype = None
                 fp8_scale = None
 
+            permuted_scale = None
             if ctx.with_probs:
-                assert (
-                    not fp8
-                ), "The backward of moe_unpermute with merging probs does not support FP8."
+                if fp8:
+                    raise TypeError(
+                        "The backward of moe_unpermute with merging probs does not support FP8, "
+                        f"but got FP8 gradient with dtype {fp8_dtype}."
+                    )
                 act_grad, probs_grad = (
                     triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
                         unpermuted_act_grad,
                         row_id_map,
                         fwd_input,
                         merging_probs,
+                        pad_offsets,
                         ctx.num_tokens,
                         ctx.num_experts,
                         ctx.num_permuted_tokens,
@@ -453,6 +526,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     row_id_map,
                     None,
                     fp8_scale,
+                    pad_offsets,
                     ctx.num_tokens,
                     ctx.num_experts,
                     ctx.num_permuted_tokens,
@@ -493,11 +567,12 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         columnwise_scale_inv=None,
                         quantizer=None,
                         requires_grad=act_grad.requires_grad,
+                        with_gemm_swizzled_scales=False,
                     )
 
         if not ctx.needs_input_grad[2]:
             probs_grad = None
-        return act_grad, None, probs_grad, None
+        return act_grad, None, probs_grad, None, None
 
 
 def moe_permute(
@@ -514,22 +589,22 @@ def moe_permute(
 
     Parameters
     ----------
-    inp: torch.Tensor
+    inp : torch.Tensor
         Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
-    routing_map: torch.Tensor
+    routing_map : torch.Tensor
         The token to expert mapping tensor.
         If map_type is 'mask', routing_map is of shape [num_tokens, num_experts] and dtype 'int32'.
         The values in it: 1 means the token is routed to this expert and 0 means not.
         If map_type is 'index', routing_map is of shape [num_tokens, topK] and dtype 'int32'.
         The values in it are the routed expert indices.
-    num_out_tokens: int, default = -1
+    num_out_tokens : int, default = -1
         The effective output token count, representing the number of tokens not dropped.
         By default, set to '-1', meaning no tokens are dropped.
-    max_token_num: int, default = -1
+    max_token_num : int, default = -1
         The maximum number of tokens, used for workspace allocation.
         By default, set to '-1', meaning the calculation of the size of workspace is
         automatically taken over by the operator.
-    map_type: str, default = 'mask'
+    map_type : str, default = 'mask'
         Type of the routing map tensor.
         Options are: 'mask', 'index'.
         Refer to `routing_map` for more details.
@@ -537,7 +612,9 @@ def moe_permute(
     if map_type == "index":
         return _moe_permute_index_map.apply(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
-        output, row_id_map, _ = _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, None)
+        output, row_id_map, _ = _moe_permute_mask_map.apply(
+            inp, routing_map, num_out_tokens, None, None
+        )
         return output, row_id_map
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
@@ -556,6 +633,40 @@ def moe_permute_with_probs(
 
     Parameters
     ----------
+    inp : torch.Tensor
+        Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
+    probs : torch.Tensor
+        The tensor of probabilities corresponding to the permuted tokens and is
+        of shape [num_tokens, num_experts]. It will be permuted with the tokens
+        according to the routing_map.
+    routing_map : torch.Tensor
+        The token to expert mapping tensor of shape [num_tokens, num_experts] and dtype 'int32'.
+        The values in it: 1 means the token is routed to this expert and 0 means not.
+    num_out_tokens : int, default = -1
+        The effective output token count, representing the number of tokens not dropped.
+        By default, set to '-1', meaning no tokens are dropped.
+    """
+    output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
+        inp, routing_map, num_out_tokens, probs, None
+    )
+    return output, permuted_probs, row_id_map
+
+
+def moe_permute_and_pad_with_probs(
+    inp: torch.Tensor,
+    probs: torch.Tensor,
+    routing_map: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    align_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    """
+    Permute the tokens and probs based on the routing_map.
+    Token with the same index will be grouped together.
+    Tokens with the same designated expert will be grouped together.
+    The routing_map indicates which experts were selected by each token.
+
+    Parameters
+    ----------
     inp: torch.Tensor
         Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
     probs: torch.Tensor
@@ -565,14 +676,38 @@ def moe_permute_with_probs(
     routing_map: torch.Tensor
         The token to expert mapping tensor of shape [num_tokens, num_experts] and dtype 'int32'.
         The values in it: 1 means the token is routed to this expert and 0 means not.
-    num_out_tokens: int, default = -1
-        The effective output token count, representing the number of tokens not dropped.
-        By default, set to '-1', meaning no tokens are dropped.
+    tokens_per_expert : torch.Tensor
+        Tensor of shape `[num_experts]` containing actual token counts per expert.
+    align_size : int
+        the alignment size for the input tensor.
     """
+    if tokens_per_expert is None:
+        raise ValueError(
+            "tokens_per_expert must be provided to the fused permute padding function."
+        )
+    if align_size <= 0:
+        raise ValueError(f"align_size must be positive, got {align_size}.")
+
+    # Ensure tokens_per_expert is on the same device as input to avoid device transfers
+    if tokens_per_expert.device != inp.device:
+        tokens_per_expert = tokens_per_expert.to(inp.device)
+
+    # Calculate aligned token counts per expert
+    target_tokens_per_expert = (torch.ceil(tokens_per_expert / align_size) * align_size).long()
+
+    if torch.equal(tokens_per_expert, target_tokens_per_expert):
+        pad_offsets = None
+    else:
+        pad_lengths = target_tokens_per_expert - tokens_per_expert
+        cum_pad = torch.cumsum(pad_lengths, dim=0)
+        pad_offsets = torch.cat(
+            [torch.zeros(1, dtype=cum_pad.dtype, device=inp.device), cum_pad[:-1]]
+        )
+
     output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
-        inp, routing_map, num_out_tokens, probs
+        inp, routing_map, target_tokens_per_expert.sum().item(), probs, pad_offsets
     )
-    return output, permuted_probs, row_id_map
+    return output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert
 
 
 def moe_unpermute(
@@ -582,6 +717,7 @@ def moe_unpermute(
     restore_shape: Optional[torch.Size] = None,
     map_type: str = "mask",
     probs: Optional[torch.Tensor] = None,
+    pad_offsets: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Unpermute a tensor with permuted tokens, and optionally merge the tokens with their
@@ -589,22 +725,26 @@ def moe_unpermute(
 
     Parameters
     ----------
-    inp: torch.Tensor
+    inp : torch.Tensor
         Input tensor with permuted tokens of shape `[num_tokens, hidden_size]` to be unpermuted.
-    row_id_map: torch.Tensor
+    row_id_map : torch.Tensor
         The tensor of a mapping table for sorted indices used to unpermute the tokens,
         which is the second output tensor of `Permute`.
-    merging_probs: torch.Tensor, default = None
+    merging_probs : torch.Tensor, default = None
         The tensor of probabilities corresponding to the permuted tokens. If provided,
         the unpermuted tokens will be merged with their respective probabilities.
         By default, set to an empty tensor, which means that the tokens are directly merged by accumulation.
-    restore_shape: torch.Size, default = None
+    restore_shape : torch.Size, default = None
         The output shape after the unpermute operation.
-    map_type: str, default = 'mask'
+    map_type : str, default = 'mask'
         Type of the routing map tensor. Should be the same as the value passed to moe_permute.
         Options are: 'mask', 'index'.
-    probs: torch.Tensor, default = None
+    probs : torch.Tensor, default = None
         Renamed to merging_probs. Keep for backward compatibility.
+    pad_offsets : torch.Tensor, default = None
+        Tensor of per-expert cumulative padding offsets used to remove padding added
+        during permutation. This is the fourth output of `moe_permute_and_pad_with_probs`
+        and is required when unpermuting padded outputs.
     """
     if probs is not None:
         if merging_probs is not None:
@@ -616,7 +756,9 @@ def moe_unpermute(
     if map_type == "index":
         return _moe_unpermute_index_map.apply(inp, row_id_map, merging_probs)
     if map_type == "mask":
-        return _moe_unpermute_mask_map.apply(inp, row_id_map, merging_probs, restore_shape)
+        return _moe_unpermute_mask_map.apply(
+            inp, row_id_map, merging_probs, restore_shape, pad_offsets
+        )
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
@@ -635,15 +777,27 @@ class _moe_chunk_sort(torch.autograd.Function):
         if not inp.numel():
             return inp, probs
 
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert split_sizes.is_cuda, "TransformerEngine needs CUDA."
-        assert sorted_idxs.is_cuda, "TransformerEngine needs CUDA."
+        if not inp.is_cuda:
+            raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+        if not split_sizes.is_cuda:
+            raise ValueError(
+                f"split_sizes must be a CUDA tensor, but got tensor on {split_sizes.device}."
+            )
+        if not sorted_idxs.is_cuda:
+            raise ValueError(
+                f"sorted_idxs must be a CUDA tensor, but got tensor on {sorted_idxs.device}."
+            )
         if probs is not None:
-            assert probs.is_cuda, "TransformerEngine needs CUDA."
+            if not probs.is_cuda:
+                raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
 
         num_tokens, hidden_size = inp.shape
         num_splits = split_sizes.size(0)
-        assert num_splits == sorted_idxs.size(0)
+        if num_splits != sorted_idxs.size(0):
+            raise ValueError(
+                f"split_sizes.size(0) ({num_splits}) must match "
+                f"sorted_idxs.size(0) ({sorted_idxs.size(0)})."
+            )
 
         fp8 = isinstance(inp, Float8Tensor)
         if fp8:
@@ -733,11 +887,11 @@ def moe_sort_chunks_by_index(
 
     Parameters
     ----------
-    inp: torch.Tensor
+    inp : torch.Tensor
         Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
-    split_sizes: torch.Tensor
+    split_sizes : torch.Tensor
         Chunk sizes of the inp tensor along the 0-th dimension.
-    sorted_indices: torch.Tensor
+    sorted_indices : torch.Tensor
         Chunk indices used to permute the chunks.
     """
     output, _ = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, None)
@@ -757,15 +911,15 @@ def moe_sort_chunks_by_index_with_probs(
 
     Parameters
     ----------
-    inp: torch.Tensor
+    inp : torch.Tensor
         Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
-    probs: torch.Tensor
+    probs : torch.Tensor
         The tensor of probabilities corresponding to the permuted tokens and is
         of shape [num_tokens]. It will be permuted with the tokens according to
         the split_sizes and sorted_indices.
-    split_sizes: torch.Tensor
+    split_sizes : torch.Tensor
         Chunk sizes of the inp tensor along the 0-th dimension.
-    sorted_indices: torch.Tensor
+    sorted_indices : torch.Tensor
         Chunk indices used to permute the chunks.
     """
     output, permuted_probs = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, probs)

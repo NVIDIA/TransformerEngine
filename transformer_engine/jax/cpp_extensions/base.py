@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE base custom ops"""
@@ -7,21 +7,23 @@ import re
 import warnings
 from abc import ABCMeta, abstractmethod
 from functools import partial
-from packaging import version
 
+import jax
 from jax.extend import core
 from jax.interpreters import xla, mlir
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax._src.interpreters import batching
 from jax._src import dispatch
+from jax import ffi
+from packaging.version import Version as PkgVersion
 
-import jax
 import transformer_engine_jax
 
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax import ffi  # pylint: disable=ungrouped-imports
-else:
-    from jax.extend import ffi  # pylint: disable=ungrouped-imports
+# GSPMD sharding propagation (infer_sharding_from_operands) is removed in JAX > 0.9.1.
+# Only register it for older JAX versions to maintain backwards compatibility.
+# For JAX > 0.9.1, infer_sharding_from_operands is also removed from def_partition's signature,
+# so it must not be passed at all.
+_JAX_GSPMD_SUPPORTED = PkgVersion(jax.__version__) <= PkgVersion("0.9.1")
 
 
 class BasePrimitive(metaclass=ABCMeta):
@@ -134,6 +136,13 @@ class BasePrimitive(metaclass=ABCMeta):
         """
         return NotImplemented
 
+    @classmethod
+    def outer_impl(cls, *args, **kwargs):
+        """
+        to describe implementation for outer primitive
+        """
+        return cls.impl(*args, **kwargs)
+
     @staticmethod
     @abstractmethod
     def batcher():
@@ -142,13 +151,15 @@ class BasePrimitive(metaclass=ABCMeta):
         """
         return NotImplemented
 
-    @staticmethod
-    @abstractmethod
-    def infer_sharding_from_operands():
+    @classmethod
+    def infer_sharding_from_operands(cls, *args, **kwargs):
         """
         to describe infer_sharding_from_operands for custom_partitioning
         """
-        return NotImplemented
+        raise NotImplementedError(
+            f"{cls.__name__} does not support GSPMD sharding propagation."
+            " Please use Shardy partitioner instead."
+        )
 
     @staticmethod
     @abstractmethod
@@ -171,10 +182,29 @@ class BasePrimitive(metaclass=ABCMeta):
 # Registry to store all registered primitive classes
 _primitive_registry = {}
 
+_gspmd_deprecation_warned = False
 
-def register_primitive(cls):
+
+def _warn_gspmd_deprecation_once():
+    global _gspmd_deprecation_warned
+    if not _gspmd_deprecation_warned:
+        warnings.warn(
+            "GSPMD sharding propagation rules in TE-JAX are planned to be removed in June 2026."
+            " They are no longer maintained or tested. Use them at your own risk."
+            " Please use Shardy propagation instead."
+            " In case you cannot upgrade to a JAX version that supports Shardy, please reach out!",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        _gspmd_deprecation_warned = True
+
+
+def register_primitive(cls, outer_only=False):
     """
     Register a JAX primitive and add it to the internal registry.
+    Inner primitive - single device, no sharding awareness, eager mode fallback
+    Outer primitive - multi device, sharding aware, partition() distributes work,
+                      used when there's a dev mesh context
     """
     _primitive_registry[cls.__name__] = cls
 
@@ -185,25 +215,47 @@ def register_primitive(cls):
     def name_of_wrapper_p():
         return cls.name + "_wrapper"
 
-    inner_p = core.Primitive(cls.name)
-    dispatch.prim_requires_devices_during_lowering.add(inner_p)
-    inner_p.multiple_results = cls.multiple_results
-    inner_p.def_impl(partial(xla.apply_primitive, inner_p))
-    inner_p.def_abstract_eval(cls.abstract)
-    mlir.register_lowering(inner_p, cls.lowering, platform="cuda")
-    cls.inner_primitive = inner_p
+    if not outer_only:
+        inner_p = core.Primitive(cls.name)
+        dispatch.prim_requires_devices_during_lowering.add(inner_p)
+        inner_p.multiple_results = cls.multiple_results
+        # Define eager execution implementation (by invoking it's MLIR lowering)
+        inner_p.def_impl(partial(xla.apply_primitive, inner_p))
+        inner_p.def_abstract_eval(cls.abstract)
+        mlir.register_lowering(inner_p, cls.lowering, platform="cuda")
+        cls.inner_primitive = inner_p
 
+    # Create the outer primitive for distributed execution
     outer_p = core.Primitive(name_of_wrapper_p())
     dispatch.prim_requires_devices_during_lowering.add(outer_p)
     outer_p.multiple_results = cls.multiple_results
-    outer_p.def_impl(cls.impl)
+    # Define the eager execution implementation
+    outer_p.def_impl(cls.outer_impl)
     outer_p.def_abstract_eval(cls.outer_abstract)
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
+
+    if _JAX_GSPMD_SUPPORTED:
+        fn = cls.__dict__.get("infer_sharding_from_operands")
+        if fn is not None:
+            actual_fn = (
+                cls.infer_sharding_from_operands
+            )  # Use descriptor protocol to unwrap staticmethod
+
+            def _gspmd_wrapper(*args, **kwargs):
+                _warn_gspmd_deprecation_once()
+                return actual_fn(*args, **kwargs)
+
+            gspmd_kwargs = {"infer_sharding_from_operands": _gspmd_wrapper}
+        else:
+            gspmd_kwargs = {"infer_sharding_from_operands": cls.infer_sharding_from_operands}
+    else:
+        gspmd_kwargs = {}
+
     outer_p_lower.def_partition(
-        infer_sharding_from_operands=cls.infer_sharding_from_operands,
         partition=cls.partition,
         sharding_rule=cls.shardy_sharding_rule,
+        **gspmd_kwargs,
     )
     mlir.register_lowering(
         outer_p, mlir.lower_fun(outer_p_lower, multiple_results=cls.multiple_results)
@@ -219,7 +271,7 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
     """
     Helper function to manage primitive states by name without modifying environment variables.
     Allows enabling specific primitives, disabling specific primitives, or disabling all primitives.
-    This helper is used in the QuantizeConfig.initialize() methods.
+    This helper is used in the get_quantize_config_with_recipe().initialize() methods.
 
     Args:
         enable_names: List of strings, each representing the name of a primitive class to enable. Defaults to None.
