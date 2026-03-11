@@ -1408,14 +1408,16 @@ class GroupedGemmPrimitive(BasePrimitive):
         # lhs shape: [M, K] (lhs_is_trans=False) or [K, M] (lhs_is_trans=True)
         # rhs shape: [G*K, N] or [K, N] (rhs_is_trans=False) or [G*N, K] (rhs_is_trans=True)
         M = _grouped_gemm_lhs_M(lhs_data_aval.shape, lhs_is_trans)
-        N = _grouped_gemm_rhs_N(rhs_data_aval.shape, rhs_is_trans, num_groups)
-        # When rhs has a ragged (contracting) K dimension, M and N are fixed per group
-        # and the output has a leading group axis.
         # K validation is intentionally skipped: per-group K values may not fill the
         # entire buffer (padding is allowed), so sum(rhs_*_dims) != buffer K is acceptable.
         if rhs_first_dims_aval.size > 0 or rhs_last_dims_aval.size > 0:
+            # Wgrad case: rhs has ragged contracting K dimension with no G-prefix.
+            # T-layout rhs shape is (N, K_total); N-layout rhs shape is (K_total, N).
+            N = rhs_data_aval.shape[0] if rhs_is_trans else rhs_data_aval.shape[1]
             out_shape = (num_groups, M, N)
         else:
+            # When rhs has a leading group axis, _grouped_gemm_rhs_N divides by num_groups.
+            N = _grouped_gemm_rhs_N(rhs_data_aval.shape, rhs_is_trans, num_groups)
             out_shape = (M, N)
 
         cublas_workspace_aval = jax.core.ShapedArray(
@@ -1887,6 +1889,11 @@ def _can_use_v2_grouped_gemm(
     # Bias can be supported in a kernel or in pure-JAX in the future.
 
     if not _v2_grouped_gemm_available:
+        return False
+
+    # nvte_grouped_gemm (the v2 kernel) requires SM100+ (Blackwell or newer).
+    # Fall back to the v1 path on SM90 (Hopper) and older architectures.
+    if get_device_compute_capability(0) < 100:
         return False
 
     return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias

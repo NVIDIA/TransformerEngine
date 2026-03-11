@@ -835,7 +835,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   if (is_rhs_ragged) {
     // wgrad: lhs shape [K_lhs, M]: lhs_is_trans=True, contracting is dim[0]=K_lhs, output is dim[1]=M
     m = lhs_is_trans ? lhs_data.dimensions()[1] : lhs_data.dimensions()[0];
-    n = rhs_data.dimensions()[1];
+    // T-layout rhs: (N, K_total) -> n = dim[0]; N-layout rhs: (K_total, N) -> n = dim[1]
+    n = rhs_is_trans ? rhs_data.dimensions()[0] : rhs_data.dimensions()[1];
   } else {
     m = lhs_is_trans ? lhs_data.dimensions()[1]
                      : lhs_data.dimensions()[0];  // total M (sum of group sizes)
