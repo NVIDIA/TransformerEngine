@@ -323,6 +323,9 @@ class NVFP4Quantizer : public Quantizer {
   // random hadamard transform
   bool with_rht;
   bool with_post_rht_amax;
+  // Optional: estimate post-RHT amax from pre-RHT amax using a linear scale
+  bool with_amax_estimation;
+  float amax_estimation_scale;
   // 2D block scaling
   bool with_2d_quantization;
   bool stochastic_rounding;
