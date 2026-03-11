@@ -10,6 +10,12 @@
 #include <cudaTypedefs.h>
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 
+#ifndef NVTE_BUILD_NUM_PHILOX_ROUNDS
+#define NVTE_BUILD_NUM_PHILOX_ROUNDS 10
+#endif
+static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
+              "NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer.");
+
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
