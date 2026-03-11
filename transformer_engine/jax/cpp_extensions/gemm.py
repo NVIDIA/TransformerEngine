@@ -1313,9 +1313,9 @@ def _assert_grouped_gemm_dims_shapes(
         ("rhs_last_dims", rhs_last_dims_aval),
     ]:
         if aval.size > 0:
-            assert aval.size == num_groups, (
-                f"grouped GEMM {name} has size {aval.size}, expected num_groups={num_groups}"
-            )
+            assert (
+                aval.size == num_groups
+            ), f"grouped GEMM {name} has size {aval.size}, expected num_groups={num_groups}"
 
 
 class GroupedGemmPrimitive(BasePrimitive):

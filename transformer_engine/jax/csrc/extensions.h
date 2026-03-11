@@ -207,14 +207,12 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     ::xla::ffi::StructMember<bool>("use_split_accumulator"));
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
-    transformer_engine::jax::GroupedGemmV2Config,
-    ::xla::ffi::StructMember<bool>("lhs_is_trans"),
+    transformer_engine::jax::GroupedGemmV2Config, ::xla::ffi::StructMember<bool>("lhs_is_trans"),
     ::xla::ffi::StructMember<bool>("rhs_is_trans"),
     ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"));
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
-    transformer_engine::jax::GroupedGemmConfig,
-    ::xla::ffi::StructMember<bool>("lhs_is_trans"),
+    transformer_engine::jax::GroupedGemmConfig, ::xla::ffi::StructMember<bool>("lhs_is_trans"),
     ::xla::ffi::StructMember<bool>("rhs_is_trans"),
     ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"),
     ::xla::ffi::StructMember<bool>("has_bias"),

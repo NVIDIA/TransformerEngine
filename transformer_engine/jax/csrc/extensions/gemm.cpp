@@ -626,10 +626,8 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
                                               Buffer_Type const &first_dims,
                                               Buffer_Type const &last_dims,
                                               int64_t *int64_workspace_base,
-                                              size_t int64_workspace_capacity,
-                                              size_t &int64_offset,
-                                              size_t num_gemms,
-                                              cudaStream_t stream) {
+                                              size_t int64_workspace_capacity, size_t &int64_offset,
+                                              size_t num_gemms, cudaStream_t stream) {
   auto dims = data.dimensions();
   NVTE_CHECK(dims.size() >= 2, "grouped GEMM data buffer must be at least 2D.");
   // Flatten all leading dimensions into the first axis to produce a 2D NVTE shape.
@@ -640,24 +638,22 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
   JAXX_GroupedTensorWrapper wrapper(JAXX_Scaling_Mode::NO_SCALING, num_gemms, dataShape);
   wrapper.set_rowwise(data, std::nullopt);
   if (first_dims.element_count() > 0) {
-    NVTE_CHECK(first_dims.element_type() == xla::ffi::DataType::S32,
-               "group_sizes must be int32.");
+    NVTE_CHECK(first_dims.element_type() == xla::ffi::DataType::S32, "group_sizes must be int32.");
     NVTE_CHECK(int64_offset + num_gemms <= int64_workspace_capacity,
                "int64_workspace overflow: not enough space for first_dims conversion.");
     auto *slot = int64_workspace_base + int64_offset;
-    nvte_convert_int32_to_int64(
-        reinterpret_cast<const int32_t *>(first_dims.untyped_data()), slot, num_gemms, stream);
+    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t *>(first_dims.untyped_data()), slot,
+                                num_gemms, stream);
     wrapper.set_group_sizes_only(slot, num_gemms, kNVTEGroupedFirstDims);
     int64_offset += num_gemms;
   }
   if (last_dims.element_count() > 0) {
-    NVTE_CHECK(last_dims.element_type() == xla::ffi::DataType::S32,
-               "group_sizes must be int32.");
+    NVTE_CHECK(last_dims.element_type() == xla::ffi::DataType::S32, "group_sizes must be int32.");
     NVTE_CHECK(int64_offset + num_gemms <= int64_workspace_capacity,
                "int64_workspace overflow: not enough space for last_dims conversion.");
     auto *slot = int64_workspace_base + int64_offset;
-    nvte_convert_int32_to_int64(
-        reinterpret_cast<const int32_t *>(last_dims.untyped_data()), slot, num_gemms, stream);
+    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t *>(last_dims.untyped_data()), slot,
+                                num_gemms, stream);
     wrapper.set_group_sizes_only(slot, num_gemms, kNVTEGroupedLastDims);
     int64_offset += num_gemms;
   }
@@ -666,12 +662,9 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
 
 // Returns num_gemms from the first non-empty per-tensor group_sizes buffer,
 // falling back to the element count of alpha for the uniform-batch case.
-size_t grouped_gemm_num_gemms(Buffer_Type const &lhs_first_dims,
-                              Buffer_Type const &lhs_last_dims,
-                              Buffer_Type const &rhs_first_dims,
-                              Buffer_Type const &rhs_last_dims,
-                              Buffer_Type const &out_first_dims,
-                              Buffer_Type const &out_last_dims,
+size_t grouped_gemm_num_gemms(Buffer_Type const &lhs_first_dims, Buffer_Type const &lhs_last_dims,
+                              Buffer_Type const &rhs_first_dims, Buffer_Type const &rhs_last_dims,
+                              Buffer_Type const &out_first_dims, Buffer_Type const &out_last_dims,
                               Buffer_Type const &alpha) {
   if (lhs_first_dims.element_count() > 0) {
     return lhs_first_dims.dimensions()[0];
@@ -710,9 +703,8 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
              "Only non-quantized grouped GEMM is supported in current implementation.");
 
-  size_t num_gemms = grouped_gemm_num_gemms(lhs_first_dims, lhs_last_dims,
-                                            rhs_first_dims, rhs_last_dims,
-                                            out_first_dims, out_last_dims, alpha);
+  size_t num_gemms = grouped_gemm_num_gemms(lhs_first_dims, lhs_last_dims, rhs_first_dims,
+                                            rhs_last_dims, out_first_dims, out_last_dims, alpha);
 
   // Workspaces.
   auto setup_workspace_ptr = reinterpret_cast<uint8_t *>(setup_workspace->untyped_data());
@@ -739,15 +731,12 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   auto *int64_base = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
   size_t int64_capacity = int64_workspace->element_count() / sizeof(int64_t);
   size_t int64_offset = 0;
-  auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims,
-                                        int64_base, int64_capacity, int64_offset, num_gemms,
-                                        stream);
-  auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims,
-                                        int64_base, int64_capacity, int64_offset, num_gemms,
-                                        stream);
-  auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims,
-                                        int64_base, int64_capacity, int64_offset, num_gemms,
-                                        stream);
+  auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims, int64_base,
+                                        int64_capacity, int64_offset, num_gemms, stream);
+  auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims, int64_base,
+                                        int64_capacity, int64_offset, num_gemms, stream);
+  auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base,
+                                        int64_capacity, int64_offset, num_gemms, stream);
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
@@ -824,7 +813,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   else if (is_rhs_last_ragged)
     num_gemms = rhs_last_dims.dimensions()[0];
   else
-    NVTE_CHECK(false, "GroupedGemmFFI (v1): At least one of the group size buffers must be non-empty to determine num_gemms.");
+    NVTE_CHECK(false,
+               "GroupedGemmFFI (v1): At least one of the group size buffers must be non-empty to "
+               "determine num_gemms.");
 
   const Buffer_Type *active_gs_ptr = nullptr;
   if (is_lhs_first_ragged)
@@ -846,7 +837,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     m = lhs_is_trans ? lhs_data.dimensions()[1] : lhs_data.dimensions()[0];
     n = rhs_data.dimensions()[1];
   } else {
-    m = lhs_is_trans ? lhs_data.dimensions()[1] : lhs_data.dimensions()[0];  // total M (sum of group sizes)
+    m = lhs_is_trans ? lhs_data.dimensions()[1]
+                     : lhs_data.dimensions()[0];  // total M (sum of group sizes)
     n = rhs_is_trans ? rhs_data.dimensions()[0] / num_gemms : rhs_data.dimensions()[1];
   }
 
