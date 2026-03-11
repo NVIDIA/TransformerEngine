@@ -748,20 +748,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             buffer = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
             p2p_comm_buffers[0] = nvshmem.tensor(list(buffer.shape), dtype=buffer.dtype)
             p2p_comm_buffers[0].copy_(buffer)
+        
+        for i in range(1, cp_size):
+            p2p_comm_buffers[i] = nvshmem.tensor(list(p2p_comm_buffers[0].shape), dtype=p2p_comm_buffers[0].dtype)        
+        
         send_recv_reqs = [[], []]
 
-        # Initialize NVSHMEM backend and allocate symmetric KV storage and signal.
-        # try:
-        # tex.init_nvshmem_backend(cp_group)
-        # Create a symmetric NVSHMEM tensor to hold this rank's KV chunk.
-        # nvshmem_kv = tex.create_nvshmem_tensor(list(p2p_comm_buffers[0].shape), p2p_comm_buffers[0].dtype)
-
-
-        # except Exception:
-        #     print("nvshmem init failed, fallback to p2p")
-        #     # If NVSHMEM is not enabled or initialization fails, fall back to P2P comm
-        #     nvshmem_kv = None
-        #     nvshmem_signal = None
         nvshmem_kv = nvshmem.tensor(list(p2p_comm_buffers[0].shape), dtype=p2p_comm_buffers[0].dtype)
         
         # copy local KV into symmetric heap so remote ranks can fetch it
@@ -776,14 +768,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if i < cp_size:
                 with torch.cuda.stream(flash_attn_streams[i % 2]):
                     # wait until KV is received
-                    for req in send_recv_reqs[(i + 1) % 2]:
-                        req.wait()
-                    if nvshmem_kv is not None:
-                        # If NVSHMEM is available, ensure the get is completed before using the buffer
-                        communicate_stream.sync()
+                    # for req in send_recv_reqs[(i + 1) % 2]:
+                    #     req.wait()
+                    # if nvshmem_kv is not None:
+                    #     # If NVSHMEM is available, ensure the get is completed before using the buffer
+                    # communicate_stream.sync()
 
                     if i < (cp_size - 1):                 
-                        p2p_comm_buffers[i + 1] = nvshmem.tensor(list(p2p_comm_buffers[i].shape), dtype=p2p_comm_buffers[i].dtype)                      
+                        # p2p_comm_buffers[i + 1] = nvshmem.tensor(list(p2p_comm_buffers[i].shape), dtype=p2p_comm_buffers[i].dtype)                      
                         if nvshmem_kv is not None:
                             # Use NVSHMEM get: compute owner of the (i+1)-th step KV block
                             owner_idx = (rank - (i + 1)) % cp_size

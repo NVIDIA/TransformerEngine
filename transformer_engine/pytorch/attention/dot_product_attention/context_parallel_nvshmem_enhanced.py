@@ -849,6 +849,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             buffer = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
             p2p_comm_buffers[0] = nvshmem.tensor(list(buffer.shape), dtype=buffer.dtype)
             p2p_comm_buffers[0].copy_(buffer)
+
+        for i in range(1, cp_size):
+            p2p_comm_buffers[i] = nvshmem.tensor(list(p2p_comm_buffers[0].shape), dtype=p2p_comm_buffers[0].dtype)      
+        
         send_recv_reqs = [[], []]
 
         # Create a symmetric NVSHMEM tensor to hold this rank's KV chunk.
@@ -868,19 +872,23 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # total_count_array = nvshmem.array((1,), dtype=cp.int32) 
         count_array[:] = cp.zeros(cp_size, dtype=cp.int32)
         count_gather_array = nvshmem.array((cp_size * cp_size,), dtype=cp.int32)
+        signal_array = nvshmem.array((1,), dtype="bool")  
         device = Device()
         communicate_stream = device.create_stream()
         
         out = None
         for i in range(cp_size + 1):
+            print("rank", rank)
+            print("count array:", count_array)
             if i < cp_size:
                 with torch.cuda.stream(flash_attn_streams[i % 2]):
                     # wait until KV is received
                     # for req in send_recv_reqs[(i + 1) % 2]:
                     #     req.wait()
+                    nvshmem.quiet(communicate_stream) 
 
                     if i < (cp_size - 1):
-                        p2p_comm_buffers[i + 1] = nvshmem.tensor(list(p2p_comm_buffers[i].shape), dtype=p2p_comm_buffers[i].dtype)   
+                        # p2p_comm_buffers[i + 1] = nvshmem.tensor(list(p2p_comm_buffers[i].shape), dtype=p2p_comm_buffers[i].dtype)   
                         # if nvshmem_kv is not None:
                         # Use NVSHMEM get: compute owner of the (i+1)-th step KV block
                         owner_idx = (rank - (i + 1)) % cp_size
@@ -888,17 +896,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         owner_global = cp_global_ranks[owner_idx * cp_size_a2a + rank_a2a]
                         # nvshmem_get: dst (local buffer), src (symmetric address), peer=owner_global
                         nvshmem_get_on_stream(p2p_comm_buffers[i + 1], nvshmem_kv, owner_global, stream=communicate_stream)
-                        # else:
-                        #     # fallback to P2P if NVSHMEM not available
-                        #     send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
-                        #         rank,
-                        #         p2p_comm_buffers[i],
-                        #         send_dst,
-                        #         p2p_comm_buffers[i + 1],
-                        #         recv_src,
-                        #         cp_group,
-                        #         batch_p2p_comm,
-                        #     )
+
 
                     if not fp8 or is_input_fp8 or int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                         kv_inputs[i % 2] = p2p_comm_buffers[i]
@@ -1554,7 +1552,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
                 if i < cp_size:
                     flash_attn_streams[(i - 1) % 2].record_event(fwd_results_correction_done)
-
+        
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
         second_half_lse_seqlen = None
@@ -1562,7 +1560,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]
 
 
-        signal_array = nvshmem.array((1,), dtype="bool")  
+        
         # Let the fast rank help computing for the slow ranks
         # fast ranks will finish cpsize + 1 for loops while slow ranks not done
         # so let fast ranks get the q from the slow ranks, compute and send back the out by NVSHMEM
@@ -1678,7 +1676,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             
             print("iteration: ", j)
             # nvshmem.fcollect(count_gather_array, count_array, cp_size)
+            nvtx.range_push("nvshmem.fcollect")
             nvshmem.fcollect(team=nvshmem.Teams.TEAM_WORLD, dst_array=count_gather_array, src_array=count_array, stream=communicate_stream)
+            nvtx.range_pop()
             print("count_gather_array:", count_gather_array)
             true_count_per_pe = cp.array([cp.sum(count_gather_array[i*cp_size:(i+1)*cp_size]) for i in range(cp_size)])
             min_true_pe = int(cp.argmin(true_count_per_pe))
