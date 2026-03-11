@@ -545,13 +545,13 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
-    // T3HD and TH3D are not supported by cuDNN on SM120 (Blackwell); assert before hitting the path.
+    // T3HD and TH3D are not supported by cuDNN on SM120; assert before hitting the path.
     const int device_id_fwd = cuda::current_device();
     const int sm_arch_fwd = cuda::sm_arch(device_id_fwd);
     if (sm_arch_fwd >= 120 &&
         (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD || qkv_layout == NVTE_QKV_Layout::NVTE_TH3D)) {
       NVTE_ERROR(
-          "T3HD and TH3D QKV layouts are not supported by cuDNN on SM120 (Blackwell). "
+          "T3HD and TH3D QKV layouts are not supported by cuDNN on SM120 "
           "Use thd_thd_thd or other THD layouts instead.");
     }
     fused_attn_arbitrary_seqlen_fwd(
@@ -653,13 +653,13 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
-    // T3HD and TH3D are not supported by cuDNN on SM120 (Blackwell); assert before hitting the path.
+    // T3HD and TH3D are not supported by cuDNN on SM120; assert before hitting the path.
     const int device_id_bwd = cuda::current_device();
     const int sm_arch_bwd = cuda::sm_arch(device_id_bwd);
     if (sm_arch_bwd >= 120 &&
         (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD || qkv_layout == NVTE_QKV_Layout::NVTE_TH3D)) {
       NVTE_ERROR(
-          "T3HD and TH3D QKV layouts are not supported by cuDNN on SM120 (Blackwell). "
+          "T3HD and TH3D QKV layouts are not supported by cuDNN on SM120. "
           "Use thd_thd_thd or other THD layouts instead.");
     }
     size_t i = 0;

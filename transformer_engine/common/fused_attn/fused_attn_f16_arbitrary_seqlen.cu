@@ -95,23 +95,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
   }
 
-  /*
   // keep original batch size because cu_seqlens are created with [b+1] shape
   int64_t actual_b = b;
   if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // replace batch size and maximum sequence lengths with maximum token counts
-    // for query and key/value so the graph is static within each quantization bucket
-    b = max_b;
-    s_q = is_ragged_q ? max_t_q : s_q;
-    s_kv = is_ragged_kv ? max_t_kv : s_kv;
-  }
-*/
-  // keep original batch size because cu_seqlens are created with [b+1] shape
-  int64_t actual_b = b;
-  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
-    NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // On SM 120+ (Blackwell), cuDNN support check treats layouts with stride[0] > dim[1]*dim[2]*dim[3]
+    // On SM 120, cuDNN support check treats layouts with stride[0] > dim[1]*dim[2]*dim[3]
     // as interleaved and rejects them. Use BHSD-like dimensions/strides with max_seqlen at plan build
     // so the check passes; ragged offset still provides variable-length boundaries.
     if (sm_arch_ < 120) {
@@ -614,23 +602,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
   }
 
-  /*
   // keep original batch size because cu_seqlens are created with [b+1] shape
   int64_t actual_b = b;
   if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // replace batch size and maximum sequence lengths with maximum token counts
-    // for query and key/value so the graph is static within each quantization bucket
-    b = max_b;
-    s_q = is_ragged_q ? max_t_q : s_q;
-    s_kv = is_ragged_kv ? max_t_kv : s_kv;
-  }
-*/
-  // keep original batch size because cu_seqlens are created with [b+1] shape
-  int64_t actual_b = b;
-  if ((is_ragged_q || is_ragged_kv) && cudnn_runtime_version >= 90600) {
-    NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
-    // On SM 120+ (Blackwell), cuDNN support check requires BHSD-like strides with max_seqlen (see fwd).
+    // On SM 120, cuDNN support check requires BHSD-like strides with max_seqlen (see fwd).
     if (sm_arch_ < 120) {
       // replace batch size and maximum sequence lengths with maximum token counts
       // for query and key/value so the graph is static within each quantization bucket
