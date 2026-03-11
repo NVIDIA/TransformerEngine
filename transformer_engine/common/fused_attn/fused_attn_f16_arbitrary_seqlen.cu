@@ -4,17 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <Python.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
-#include <pybind11/cast.h>
-#include <pybind11/pybind11.h>
 
 #include <map>
 #include <vector>
 
-#include "../../../3rdparty/cudnn-frontend/python/pygraph/pygraph.h"
 #include "../common.h"
 #include "../cudnn_utils.h"
 #include "../util/cuda_runtime.h"
@@ -51,27 +49,37 @@
 
 namespace transformer_engine {
 namespace fused_attn {
-namespace py = pybind11;
-
 namespace {
 
+using Tensor_t = std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>;
+using Graph_t = std::shared_ptr<cudnn_frontend::graph::Graph>;
+
 auto make_attention_score_modifier(void *callback)
-    -> std::function<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>(
-        std::shared_ptr<cudnn_frontend::graph::Graph>,
-        std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>)> {
+    -> std::function<Tensor_t(Graph_t, Tensor_t)> {
   if (callback == nullptr) {
     return nullptr;
   }
 
-  auto *py_callback = reinterpret_cast<PyObject *>(callback);
-  return [py_callback](std::shared_ptr<cudnn_frontend::graph::Graph> graph,
-                       std::shared_ptr<cudnn_frontend::graph::Tensor_attributes> score_tensor) {
-    py::gil_scoped_acquire gil;
-    py::module_::import("cudnn");
-    cudnn_frontend::python_bindings::PyGraph py_graph(graph);
-    py::object result = py::reinterpret_borrow<py::object>(py_callback)(
-        py::cast(&py_graph, py::return_value_policy::reference), py::cast(score_tensor));
-    return result.cast<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>>();
+  PyObject *py_callback = static_cast<PyObject *>(callback);
+  return [py_callback](Graph_t graph, Tensor_t score) -> Tensor_t {
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    PyObject *py_graph = PyCapsule_New(graph.get(), "fe::graph::Graph", nullptr);
+    PyObject *py_score = PyCapsule_New(score.get(), "fe::graph::Tensor_attributes", nullptr);
+    PyObject *result = PyObject_CallFunctionObjArgs(py_callback, py_graph, py_score, nullptr);
+    Py_DECREF(py_graph);
+    Py_DECREF(py_score);
+    Tensor_t result_tensor = score;  // default: return input score unchanged
+    if (result != nullptr) {
+      void *ptr = PyCapsule_IsValid(result, "fe::graph::Tensor_attributes")
+                      ? PyCapsule_GetPointer(result, "fe::graph::Tensor_attributes")
+                      : nullptr;
+      if (ptr != nullptr) {
+        result_tensor = Tensor_t(score, static_cast<cudnn_frontend::graph::Tensor_attributes *>(ptr));
+      }
+      Py_DECREF(result);
+    }
+    PyGILState_Release(gstate);
+    return result_tensor;
   };
 }
 
@@ -169,6 +177,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
         return_max_logit,
+        (score_mod != nullptr),
+        false,
     };
 
     namespace fe = cudnn_frontend;
@@ -677,6 +687,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
         false,
+        (score_mod != nullptr),
+        (score_mod_bprop != nullptr),
     };
 
     namespace fe = cudnn_frontend;
