@@ -666,6 +666,13 @@ class FusedAdam(torch.optim.Optimizer):
                         "FusedAdam does not support FP8 model weights with capturable=True."
                     )
 
+                if self.capturable and len(quantized_params_to_update) > 0:
+                    raise RuntimeError(
+                        "FusedAdam does not support block-scaling quantized weights "
+                        "with capturable=True. The post-step quantize_() writeback "
+                        "cannot be captured in a CUDA graph."
+                    )
+
                 if has_fp16 and has_bf16:
                     if self.store_param_remainders:
                         raise RuntimeError(

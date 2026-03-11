@@ -114,6 +114,10 @@ def _shard_model(model, world_size):
 
     If the model was created on the meta device (e.g. for FP8 init),
     parameters are materialized after sharding via reset_parameters().
+
+    restore_custom_attrs is called last so it applies to the final parameter
+    objects. For meta-device models, reset_parameters() replaces params via
+    module_setattr (base.py:1336-1339), so attrs must be restored afterward.
     """
     has_meta_params = any(p.is_meta for p in model.parameters())
     custom_attrs = save_custom_attrs(model)
@@ -121,11 +125,15 @@ def _shard_model(model, world_size):
     for child in model.children():
         fully_shard(child, mesh=mesh)
     fully_shard(model, mesh=mesh)
-    restore_custom_attrs(model, custom_attrs)
     if has_meta_params:
         for module in model.modules():
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
+    # Restore after reset_parameters so attrs land on the final param objects.
+    # save_custom_attrs skips private attrs (_*) on QuantizedTensor params;
+    # reset_parameters fully reinitializes quantizer state from
+    # self.param_init_meta, so no private attrs need restoring.
+    restore_custom_attrs(model, custom_attrs)
     return model
 
 
