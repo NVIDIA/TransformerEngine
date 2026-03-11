@@ -693,7 +693,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             Tuple of (Float8BlockwiseQTensor, all_gather_outputs).
         """
         fp8_dtype, is_2D_scaled, rowwise_usage, columnwise_usage = metadata
-        block_len = self._quantizer.block_len  # 128
 
         # Extract rowwise tensors from all-gather outputs
         rowwise_data, rowwise_scale_inv = (
