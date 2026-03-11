@@ -100,7 +100,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
     if [ $i -eq 0 ]; then
       # For process 0: show live output AND save to log file using tee
       echo "=== Live output from process 0 ==="
-      XLA_FLAGS="--xla_gpu_graph_min_graph_size=1 $XLA_FLAGS" pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
+      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
         -vs --junitxml=$XML_LOG_DIR/collective_gemm_${TEST_NAME}.xml \
         "$TE_PATH/examples/jax/collective_gemm/$TEST_CASE" \
         --num-processes=$NUM_GPUS \
@@ -109,7 +109,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
       PIDS+=($PID)
     else
       # For other processes: redirect to log files only
-      XLA_FLAGS="--xla_gpu_graph_min_graph_size=1 $XLA_FLAGS" pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
+      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
         -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_CASE" \
         --num-processes=$NUM_GPUS \
         --process-id=$i > "$LOG_FILE" 2>&1 &
