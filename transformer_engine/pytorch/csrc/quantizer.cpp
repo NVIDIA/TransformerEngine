@@ -285,6 +285,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
                                      args.ptr(), kwargs.ptr());
@@ -603,6 +604,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
@@ -975,6 +977,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
     PyObject* result =
@@ -1379,6 +1382,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass),
                                      args.ptr(), kwargs.ptr());
@@ -1788,6 +1792,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     kwargs["fp4_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
 
@@ -2184,7 +2189,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // Compute amax.
   if (this->with_rht) {
     if (input.dtype() != DType::kBFloat16) {
-      NVTE_CHECK(false, "RHT is only supported for bfloat16 input");
+      NVTE_ERROR("RHT is only supported for bfloat16 input, got dtype enum value ",
+                 static_cast<int>(input.dtype()));
     }
     if (this->with_post_rht_amax) {
       // We need:
@@ -2196,7 +2202,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       });
     } else {
       // raise error since it's not supported yet
-      NVTE_CHECK(false, "Pre-RHT amax is not supported yet");
+      NVTE_ERROR(
+          "Pre-RHT amax is not supported yet. "
+          "Use with_post_rht_amax=true instead.");
     }
   } else {  // Without RHT
     if (compute_amax) {

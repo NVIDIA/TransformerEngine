@@ -301,6 +301,22 @@ if (NVTE_WITH_CUBLASMP)
   message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
 endif()
 
+# Number of philox4x32 rounds for stochastic rounding (build-time constant).
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)
+  set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR "10")
+endif()
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR
+          "Environment variable NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer, "
+          "but got '${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR}'.")
+endif()
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS ${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR})
+
+target_compile_definitions(transformer_engine
+                           PUBLIC NVTE_BUILD_NUM_PHILOX_ROUNDS=${NVTE_BUILD_NUM_PHILOX_ROUNDS})
+message(STATUS "Philox rounds for stochastic rounding: ${NVTE_BUILD_NUM_PHILOX_ROUNDS}")
+
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 
