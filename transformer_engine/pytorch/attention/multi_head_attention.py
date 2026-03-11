@@ -647,6 +647,8 @@ class MultiheadAttention(torch.nn.Module):
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
+        score_mod: Optional[Callable] = None,
+        score_mod_bprop: Optional[Callable] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
@@ -721,6 +723,10 @@ class MultiheadAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor], default = None
                     Bias tensor for :math:`Q \cdot K^T`, shape ``[1, num_head, max_seqlen_q, max_seqlen_kv]``.
                     It should be ``None`` for ``"no_bias"`` and ``"alibi"`` bias types.
+        score_mod: Optional[Callable], default = None
+                    Optional cuDNN flexible-graph score modifier callback.
+        score_mod_bprop: Optional[Callable], default = None
+                    Optional cuDNN flexible-graph score modifier backward callback.
         alibi_slopes: Optional[torch.Tensor], default = None
                      ALiBi slopes in FP32 and shape ``[nheads]`` or ``[batch_size, nheads]``.
                      It adds a bias of ``(-alibi_slope * (i + seqlen_k - seqlen_q - j))``
@@ -1041,6 +1047,8 @@ class MultiheadAttention(torch.nn.Module):
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
+            score_mod=score_mod,
+            score_mod_bprop=score_mod_bprop,
             alibi_slopes=alibi_slopes,
             fast_zero_fill=fast_zero_fill,
             inference_params=inference_params,

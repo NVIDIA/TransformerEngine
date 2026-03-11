@@ -143,6 +143,7 @@ def fused_attn_fwd(
     softmax_offset: torch.Tensor = None,
     return_max_logit: bool = False,
     cuda_graph: bool = False,
+    score_mod=None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
 
@@ -223,6 +224,8 @@ def fused_attn_fwd(
     softmax_offset : torch.Tensor, default = None
                 softmax offset tensor of shape [1, h_q, 1, 1].
                 See softmax_type in DotProductAttention for details.
+    score_mod : Callable, default = None
+                Optional cuDNN flexible-graph score modifier callback.
     return_max_logit : bool, default = False
                       whether to return the maximum attention score
     cuda_graph : bool, default = False
@@ -289,6 +292,11 @@ def fused_attn_fwd(
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
 
+    if score_mod is not None:
+        assert (
+            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+        ), "score_mod is only supported by the cuDNN F16_arbitrary_seqlen backend."
+
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
         rng_elts_per_thread = (
@@ -345,6 +353,7 @@ def fused_attn_fwd(
         o_quantizer,
         attn_bias,
         softmax_offset,
+        score_mod,
         rng_gen,
         rng_elts_per_thread,
         return_max_logit,
@@ -398,6 +407,8 @@ def fused_attn_bwd(
     bottom_right_diagonal: bool = None,
     deterministic: bool = False,
     cuda_graph: bool = False,
+    score_mod=None,
+    score_mod_bprop=None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -473,6 +484,10 @@ def fused_attn_bwd(
                 bottom right (True) corner of the softmax matrix.
     deterministic : bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
+    score_mod : Callable, default = None
+                Optional cuDNN flexible-graph score modifier callback.
+    score_mod_bprop : Callable, default = None
+                Optional cuDNN flexible-graph score modifier backward callback.
     cuda_graph : bool, default = False
                 whether or not cuda graph capture is enabled.
 
@@ -508,6 +523,11 @@ def fused_attn_bwd(
             f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
+
+    if score_mod is not None or score_mod_bprop is not None:
+        assert (
+            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+        ), "score_mod and score_mod_bprop are only supported by the cuDNN F16_arbitrary_seqlen backend."
 
     if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
         if len(aux_ctx_tensors) < 1:
@@ -568,6 +588,8 @@ def fused_attn_bwd(
         s_quantizer,
         dp_quantizer,
         dqkv_quantizer,
+        score_mod,
+        score_mod_bprop,
         cuda_graph,
     )
 

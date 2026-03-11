@@ -192,8 +192,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         ragged_offset_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
         dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, false,
         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
-        window_size_left, window_size_right, bottom_right_diagonal, query_workspace_tensor.data(),
-        nullptr);
+        window_size_left, window_size_right, bottom_right_diagonal, nullptr,
+        query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
@@ -329,7 +329,8 @@ static void FusedAttnForwardImpl(
       k_seq_offsets_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
       rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, false,
       scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
-      window_size_left, window_size_right, bottom_right_diagonal, workspace_tensor.data(), stream);
+      window_size_left, window_size_right, bottom_right_diagonal, nullptr,
+      workspace_tensor.data(), stream);
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
 }
@@ -479,8 +480,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
                         dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                         q_max_seqlen, kv_max_seqlen, scaling_factor, dropout_probability,
                         qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
-                        window_size_right, bottom_right_diagonal, deterministic, false,
-                        query_workspace_tensor.data(), nullptr);
+                        window_size_right, bottom_right_diagonal, deterministic, false, nullptr,
+                        nullptr, query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
@@ -606,7 +607,8 @@ static void FusedAttnBackwardImpl(
                       q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(), q_max_seqlen,
                       kv_max_seqlen, scaling_factor, dropout_probability, qkv_layout, bias_type,
                       mask_type, softmax_type, window_size_left, window_size_right,
-                      bottom_right_diagonal, deterministic, false, workspace_tensor.data(), stream);
+                      bottom_right_diagonal, deterministic, false, nullptr, nullptr,
+                      workspace_tensor.data(), stream);
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
 }

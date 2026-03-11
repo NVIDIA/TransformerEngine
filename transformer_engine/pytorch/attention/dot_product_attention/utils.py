@@ -234,6 +234,10 @@ class AttentionParams:
         The type of softmax operation. See DotProductAttention for details.
     return_max_logit : bool, default = False
         Whether to output max_logit.
+    has_score_mod : bool, default = False
+        Whether a cuDNN flexible-graph score modifier callback is present.
+    has_score_mod_bprop : bool, default = False
+        Whether a cuDNN flexible-graph score modifier backward callback is present.
     cuda_graph : bool, default = `False`
         Whether support for cuda graph capture is needed or not.
     num_splits : int, default = 1
@@ -268,6 +272,8 @@ class AttentionParams:
     inference_params: Optional[InferenceParams] = None
     softmax_type: str = "vanilla"
     return_max_logit: bool = False
+    has_score_mod: bool = False
+    has_score_mod_bprop: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
 
@@ -345,6 +351,8 @@ def get_attention_backend(
     inference_params = attention_params.inference_params
     softmax_type = attention_params.softmax_type
     return_max_logit = attention_params.return_max_logit
+    has_score_mod = attention_params.has_score_mod
+    has_score_mod_bprop = attention_params.has_score_mod_bprop
     cuda_graph = attention_params.cuda_graph
     num_splits = attention_params.num_splits
 
@@ -533,6 +541,17 @@ def get_attention_backend(
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention for num_splits")
             use_unfused_attention = False
+
+    if has_score_mod or has_score_mod_bprop:
+        if use_flash_attention:
+            logger.debug("Disabling FlashAttention for score_mod callbacks")
+        use_flash_attention = False
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention for score_mod callbacks")
+        use_unfused_attention = False
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            logger.debug("Disabling FusedAttention for score_mod callbacks in FP8")
+            use_fused_attention = False
 
     # Filter: Return max_logit
     if return_max_logit:
@@ -1007,6 +1026,17 @@ def get_attention_backend(
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
+            use_fused_attention = False
+            fused_attention_backend = None
+        if (
+            use_fused_attention
+            and (has_score_mod or has_score_mod_bprop)
+            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
+        ):
+            logger.debug(
+                "Disabling FusedAttention as score_mod callbacks require the F16_arbitrary_seqlen"
+                " sub-backend"
+            )
             use_fused_attention = False
             fused_attention_backend = None
         if (

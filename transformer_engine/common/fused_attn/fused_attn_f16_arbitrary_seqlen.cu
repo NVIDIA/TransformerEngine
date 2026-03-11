@@ -8,10 +8,13 @@
 #include <cuda_fp16.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
+#include <pybind11/cast.h>
+#include <pybind11/pybind11.h>
 
 #include <map>
 #include <vector>
 
+#include "../../../3rdparty/cudnn-frontend/python/pygraph/pygraph.h"
 #include "../common.h"
 #include "../cudnn_utils.h"
 #include "../util/cuda_runtime.h"
@@ -48,6 +51,30 @@
 
 namespace transformer_engine {
 namespace fused_attn {
+namespace py = pybind11;
+
+namespace {
+
+auto make_attention_score_modifier(void *callback)
+    -> cudnn_frontend::graph::SDPA_attributes::AttentionScoreModifier_t {
+  if (callback == nullptr) {
+    return nullptr;
+  }
+
+  auto *py_callback = reinterpret_cast<PyObject *>(callback);
+  return [py_callback](std::shared_ptr<cudnn_frontend::graph::Graph> graph,
+                       std::shared_ptr<cudnn_frontend::graph::Tensor_attributes> score_tensor) {
+    py::gil_scoped_acquire gil;
+    py::module_::import("cudnn");
+    auto py_graph = std::make_shared<cudnn_frontend::python_bindings::PyGraph>(graph);
+    py::object result = py::reinterpret_borrow<py::object>(py_callback)(
+        py::cast(py_graph), py::cast(score_tensor));
+    return result.cast<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>>();
+  };
+}
+
+}  // namespace
+
 void fused_attn_arbitrary_seqlen_fwd_impl(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d_qk, int64_t d_v,
     int64_t max_b, int64_t max_t_q, int64_t max_t_kv, int64_t num_pages_k, int64_t num_pages_v,
@@ -56,8 +83,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     bool is_training, bool return_max_logit, float scaling_factor, float dropout_probability,
     NVTE_QKV_Layout layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrBias,
-    void *devPtrSoftmaxOffset, void *devPtrS1, void *devPtrS2, void *devPtrO,
+    bool bottom_right_diagonal, void *score_mod, void *devPtrQ, void *devPtrK, void *devPtrV,
+    void *devPtrBias, void *devPtrSoftmaxOffset, void *devPtrS1, void *devPtrS2, void *devPtrO,
     void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *devPtrCuSeqlensQ,
     void *devPtrCuSeqlensKV, void *devPtrPageTableK, void *devPtrPageTableV,
     void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV, cudnn_frontend::DataType_t tensorType,
@@ -257,6 +284,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                          .set_causal_mask(is_causal)
                          .set_causal_mask_bottom_right(is_bottom_right)
                          .set_attn_scale(attn_scale);
+      if (score_mod != nullptr) {
+        sdpa_options.set_score_mod(make_attention_score_modifier(score_mod));
+      }
 
       fe::DiagonalAlignment_t const &diagonal_alignment =
           bottom_right_diagonal ? fe::DiagonalAlignment_t::BOTTOM_RIGHT
@@ -555,13 +585,14 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     int64_t bias_sq, int64_t bias_skv, float scaling_factor, float dropout_probability,
     NVTE_QKV_Layout layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic, void *devPtrQ, void *devPtrKTranspose,
-    void *devPtrVTranspose, void *devPtrO, void *devPtrSoftmaxStats, void *devPtrBias,
-    void *devPtrSoftmaxOffset, void *devPtrdQ, void *devPtrdK, void *devPtrdV, void *devPtrdO,
-    void *devPtrdBias, void *devPtrdSoftmaxOffset, void *devPtrDropoutSeed,
-    void *devPtrDropoutOffset, void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
-    void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV, cudnn_frontend::DataType_t tensorType,
-    void *workspace, size_t *workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
+    bool bottom_right_diagonal, bool deterministic, void *score_mod, void *score_mod_bprop,
+    void *devPtrQ, void *devPtrKTranspose, void *devPtrVTranspose, void *devPtrO,
+    void *devPtrSoftmaxStats, void *devPtrBias, void *devPtrSoftmaxOffset, void *devPtrdQ,
+    void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias,
+    void *devPtrdSoftmaxOffset, void *devPtrDropoutSeed, void *devPtrDropoutOffset,
+    void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV, void *devPtrSeqOffsetsQ,
+    void *devPtrSeqOffsetsKV, cudnn_frontend::DataType_t tensorType, void *workspace,
+    size_t *workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -790,6 +821,13 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                   .set_causal_mask(is_causal)
                                   .set_causal_mask_bottom_right(is_bottom_right)
                                   .set_attn_scale(attn_scale);
+      if (score_mod != nullptr) {
+        sdpa_backward_options.set_score_mod(make_attention_score_modifier(score_mod));
+      }
+      if (score_mod_bprop != nullptr) {
+        sdpa_backward_options.set_score_mod_bprop(
+            make_attention_score_modifier(score_mod_bprop));
+      }
 
       if (is_ragged_q && cudnn_runtime_version >= 90600) {
         sdpa_backward_options.set_max_total_seq_len_q(s_q);
@@ -1069,8 +1107,9 @@ void fused_attn_arbitrary_seqlen_fwd(
     bool return_max_logit, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V, const Tensor *input_Bias,
-    const Tensor *input_SoftmaxOffset, Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors,
+    void *score_mod, const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V,
+    const Tensor *input_Bias, const Tensor *input_SoftmaxOffset, Tensor *output_O,
+    NVTETensorPack *Aux_CTX_Tensors,
     const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
     const Tensor *cu_seqlens_kv_padded, const Tensor *page_table_k, const Tensor *page_table_v,
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
@@ -1208,11 +1247,11 @@ void fused_attn_arbitrary_seqlen_fwd(
       max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
       page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, bias_sq, bias_skv,
       is_training, return_max_logit, attn_scale, p_dropout, qkv_layout, bias_type, mask_type,
-      softmax_type, window_size_left, window_size_right, bottom_right_diagonal, devPtrQ, devPtrK,
-      devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO, devPtrDropoutSeed,
-      devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV,
-      devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
-      &workspace_size, stream, handle);
+      softmax_type, window_size_left, window_size_right, bottom_right_diagonal, score_mod, devPtrQ,
+      devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO,
+      devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV,
+      devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
+      get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size, stream, handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
@@ -1235,10 +1274,11 @@ void fused_attn_arbitrary_seqlen_bwd(
     size_t num_tokens_kv, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    bool deterministic, const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V,
-    const Tensor *input_O, const Tensor *input_dO, const Tensor *input_Bias,
-    const Tensor *input_SoftmaxOffset, Tensor *output_S, Tensor *output_dQ, Tensor *output_dK,
-    Tensor *output_dV, Tensor *output_dBias, Tensor *output_dSoftmaxOffset,
+    bool deterministic, void *score_mod, void *score_mod_bprop, const Tensor *input_Q,
+    const Tensor *input_K, const Tensor *input_V, const Tensor *input_O, const Tensor *input_dO,
+    const Tensor *input_Bias, const Tensor *input_SoftmaxOffset, Tensor *output_S,
+    Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV, Tensor *output_dBias,
+    Tensor *output_dSoftmaxOffset,
     const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
     const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state, Tensor *workspace,
     cudaStream_t stream, cudnnHandle_t handle) {
@@ -1306,11 +1346,12 @@ void fused_attn_arbitrary_seqlen_bwd(
       batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
       max_batch_size, max_tokens_q, max_tokens_kv, bias_b, bias_h, bias_sq, bias_skv, attn_scale,
       p_dropout, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
-      window_size_right, bottom_right_diagonal, deterministic, devPtrQ, devPtrK, devPtrV, devPtrO,
-      devPtrSoftmaxStats, devPtrBias, devPtrSoftmaxOffset, devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
-      devPtrdBias, devPtrdSoftmaxOffset, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
-      devPtrCuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type),
-      workspace->data.dptr, &workspace_size, stream, handle);
+      window_size_right, bottom_right_diagonal, deterministic, score_mod, score_mod_bprop, devPtrQ,
+      devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias, devPtrSoftmaxOffset, devPtrdQ,
+      devPtrdK, devPtrdV, devPtrdO, devPtrdBias, devPtrdSoftmaxOffset, devPtrDropoutSeed,
+      devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrSeqOffsetsQ,
+      devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size,
+      stream, handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {

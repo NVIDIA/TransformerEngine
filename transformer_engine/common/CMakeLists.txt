@@ -97,6 +97,7 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(pybind11 CONFIG REQUIRED)
 
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
@@ -259,6 +260,7 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+target_link_libraries(transformer_engine PRIVATE Python::Module pybind11::headers)
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -268,6 +270,9 @@ target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_
 target_include_directories(transformer_engine PRIVATE
                           ${CUTLASS_INCLUDE_DIR}
                           ${CUTLASS_TOOLS_INCLUDE_DIR})
+target_include_directories(transformer_engine PRIVATE
+                          ${Python_INCLUDE_DIRS}
+                          "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/python/pygraph")
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)

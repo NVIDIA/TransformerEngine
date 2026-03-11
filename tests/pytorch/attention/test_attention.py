@@ -99,6 +99,11 @@ if is_bf16_available():
     param_types.append(torch.bfloat16)
 param_types_lean = [torch.bfloat16]
 
+
+def _identity_score_mod(_graph, score_tensor):
+    return score_tensor
+
+
 model_configs_base = {
     # test: ModelConfig(b, sq, hq, dqk)
     "base_1_0": ModelConfig(8, 128, 16, 64),
@@ -1414,6 +1419,98 @@ def test_transformer_layer(
         logging.info("[test_transformer_layer]: fused attn vs flash attn")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
+
+
+@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
+def test_fused_attn_score_mod_smoke():
+    pytest.importorskip("cudnn")
+
+    batch_size, seqlen, num_heads, head_dim = 2, 64, 4, 64
+    dtype = torch.float16
+    device = "cuda"
+    cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, seqlen, device=device, dtype=torch.int32)
+
+    q = torch.randn(batch_size, seqlen, num_heads, head_dim, device=device, dtype=dtype)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+
+    out, aux_ctx_tensors = fused_attn_fwd(
+        True,
+        seqlen,
+        seqlen,
+        cu_seqlens,
+        cu_seqlens,
+        q,
+        k,
+        v,
+        dtype,
+        FusedAttnBackend["F16_arbitrary_seqlen"],
+        qkv_layout="bshd_bshd_bshd",
+        attn_mask_type="no_mask",
+        dropout=0.0,
+        score_mod=_identity_score_mod,
+    )
+
+    dq, dk, dv, *_ = fused_attn_bwd(
+        seqlen,
+        seqlen,
+        cu_seqlens,
+        cu_seqlens,
+        q,
+        k,
+        v,
+        out,
+        torch.randn_like(out),
+        dtype,
+        tex.DType.kFloat16,
+        aux_ctx_tensors,
+        FusedAttnBackend["F16_arbitrary_seqlen"],
+        qkv_layout="bshd_bshd_bshd",
+        attn_mask_type="no_mask",
+        dropout=0.0,
+        score_mod=_identity_score_mod,
+        score_mod_bprop=_identity_score_mod,
+    )
+
+    assert dq.shape == q.shape
+    assert dk.shape == k.shape
+    assert dv.shape == v.shape
+
+
+@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
+def test_multihead_attention_score_mod_forces_fused_backend():
+    pytest.importorskip("cudnn")
+
+    _attention_backends["attention_params"] = None
+    _attention_backends["backend_selection_requires_update"] = True
+
+    hidden_size = 256
+    num_heads = 4
+    seq_len = 64
+    batch_size = 2
+    mha = MultiheadAttention(
+        hidden_size=hidden_size,
+        num_attention_heads=num_heads,
+        attention_dropout=0.0,
+        params_dtype=torch.float16,
+        device="cuda",
+        qkv_format="sbhd",
+    ).cuda()
+    mha.train()
+
+    hidden_states = torch.randn(
+        seq_len, batch_size, hidden_size, device="cuda", dtype=torch.float16, requires_grad=True
+    )
+    output = mha(
+        hidden_states,
+        attn_mask_type="causal",
+        score_mod=_identity_score_mod,
+        score_mod_bprop=_identity_score_mod,
+    )
+    output.sum().backward()
+
+    assert _attention_backends["use_fused_attention"]
+    assert not _attention_backends["use_flash_attention"]
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
