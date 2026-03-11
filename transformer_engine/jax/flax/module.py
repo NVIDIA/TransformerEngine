@@ -1445,7 +1445,8 @@ def make_dot_general_cls(quantization_recipe):
 
 def make_grouped_dense_cls(quantization_recipe):
     """Creates a grouped dense (grouped GEMM) instance for use with TE state module."""
-    assert quantization_recipe is None, "Ragged dot grouped GEMM does not support quantization yet"
+    if quantization_recipe is not None:
+        raise ValueError("Ragged dot grouped GEMM does not support quantization yet")
 
     def te_grouped_dot_general(generate_quantizer_set, x, kernel, group_sizes, **kwargs):
         del kwargs  # Unused

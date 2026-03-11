@@ -327,11 +327,14 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
 
         # If both rowwise and columnwise are requested, create columnwise from rowwise if needed
         if rowwise_usage and columnwise_usage:
-            assert (
-                self._rowwise_data is not None
-                and self._rowwise_scale_inv is not None
-                and self._amax_rowwise is not None
-            ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
+            if (
+                self._rowwise_data is None
+                or self._rowwise_scale_inv is None
+                or self._amax_rowwise is None
+            ):
+                raise RuntimeError(
+                    "Cannot update to rowwise and columnwise usage because rowwise data is None."
+                )
             if self._columnwise_data is None or self._columnwise_scale_inv is None:
                 self._create_columnwise()
                 return
@@ -381,16 +384,16 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         """
         Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
         """
-        assert (
-            self._quantizer is not None and self._quantizer.with_2d_quantization
-        ), "Cannot create columnwise data without 2D quantization enabled."
+        if self._quantizer is None or not self._quantizer.with_2d_quantization:
+            raise RuntimeError("Cannot create columnwise data without 2D quantization enabled.")
         rowwise_data = self._rowwise_data
         if not rowwise_data.is_contiguous():
             rowwise_data = rowwise_data.contiguous()
         # NVFP4 requires a specialized transpose that handles nibble repacking
         self._columnwise_data = tex.nvfp4_data_transpose(rowwise_data, out=self._columnwise_data)
         if self._columnwise_scale_inv is None:
-            assert self._quantizer is not None
+            if self._quantizer is None:
+                raise RuntimeError("Cannot create columnwise scale inverse: quantizer is None.")
             # Use logical shape (self.size()), not packed byte shape (rowwise_data.shape)
             # NVFP4 packs 2 elements per byte, so rowwise_data.shape[-1] is K/2
             logical_shape = self.size()
@@ -400,8 +403,18 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
                 dtype=self._rowwise_scale_inv.dtype,
                 device=self._rowwise_scale_inv.device,
             )
-        assert len(self._rowwise_scale_inv.shape) == 2
-        assert len(self._columnwise_scale_inv.shape) == 2
+        if len(self._rowwise_scale_inv.shape) != 2:
+            raise ValueError(
+                "Expected rowwise_scale_inv to be 2D, but got"
+                f" {len(self._rowwise_scale_inv.shape)}D with shape"
+                f" {self._rowwise_scale_inv.shape}."
+            )
+        if len(self._columnwise_scale_inv.shape) != 2:
+            raise ValueError(
+                "Expected columnwise_scale_inv to be 2D, but got"
+                f" {len(self._columnwise_scale_inv.shape)}D with shape"
+                f" {self._columnwise_scale_inv.shape}."
+            )
 
         # rowwise_scale_inv has shape [M_padded, K_tiles] where each tile's scale
         # is repeated 16 times (once per row in the 16x16 tile).
