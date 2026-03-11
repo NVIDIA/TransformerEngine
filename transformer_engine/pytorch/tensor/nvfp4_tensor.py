@@ -6,6 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
+import warnings
 from typing import Dict, Optional, Tuple, Union
 import functools
 
@@ -156,6 +157,12 @@ class NVFP4Quantizer(Quantizer):
             with_random_sign_mask, torch.cuda.current_device()
         )
         self.rht_matrix = get_rht_matrix(with_random_sign_mask, torch.cuda.current_device())
+
+    def __getstate__(self):
+        """Exclude unpicklable process group from serialized state."""
+        state = self.__dict__.copy()
+        state["amax_reduction_group"] = None
+        return state
 
     def update_quantized(
         self,
@@ -785,10 +792,14 @@ class _ViewFunc(torch.autograd.Function):
                     shape[i] = d_inferred
                     break
         if shape[-1] != cur_shape[-1]:
-            raise RuntimeError(
+            warnings.warn(
                 "NVFP4Tensor does not support reshaping inner dimension "
-                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                "then ignore this warning since this view is not going to be used anywhere.",
+                stacklevel=2,
             )
+            return tensor.dequantize().view(*shape)
 
         # Reshape data
         new_rowwise_data = None
@@ -907,10 +918,14 @@ class _ReshapeFunc(torch.autograd.Function):
                     shape[i] = d_inferred
                     break
         if shape[-1] != cur_shape[-1]:
-            raise RuntimeError(
+            warnings.warn(
                 "NVFP4Tensor does not support reshaping inner dimension "
-                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                "then ignore this warning since this view is not going to be used anywhere.",
+                stacklevel=2,
             )
+            return tensor.dequantize().reshape(*shape)
 
         # Reshape data
         new_rowwise_data = None
