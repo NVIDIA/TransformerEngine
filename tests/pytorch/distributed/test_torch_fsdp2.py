@@ -116,7 +116,7 @@ def _run_fused_adam_test(test_name, recipe="delayed_scaling"):
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
 def test_fsdp2_fused_adam_fp8_master_weights(fp_recipe):
     """FusedAdam(master_weights=True) + FSDP2 + quantized_model_init."""
-    if fp_recipe in ("Float8BlockScaling", "MXFP8BlockScaling", "NVFP4BlockScaling"):
+    if fp_recipe in ("Float8BlockScaling", "NVFP4BlockScaling"):
         pytest.xfail(
             f"{fp_recipe}: quantized_model_init and FSDP2 is not currently supported, since the "
             "block tensor is dequantized before we flatten it for FSDP2."

@@ -71,13 +71,29 @@ def _setup():
 
 
 def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None):
-    """Build a Sequential of TransformerLayers, optionally with FP8 init."""
+    """Build a Sequential of TransformerLayers, optionally with FP8 init.
+
+    When fp8_init=True, the model is created on the meta device to avoid
+    FSDP2 incompatibility with QuantizedTensor wrapper subclasses (e.g.
+    MXFP8Tensor) whose storage is inaccessible via data_ptr().  Parameters
+    are materialized after FSDP2 sharding via reset_parameters() in
+    _shard_model().
+    """
     if fp8_init:
         ctx = te.quantized_model_init(enabled=True, recipe=recipe)
     else:
         from contextlib import nullcontext
 
         ctx = nullcontext()
+    kwargs = dict(
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+        fuse_qkv_params=True,
+        params_dtype=torch.bfloat16,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+    )
+    if fp8_init:
+        kwargs["device"] = "meta"
     with ctx:
         model = torch.nn.Sequential(
             *[
@@ -85,11 +101,7 @@ def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None):
                     HIDDEN_SIZE,
                     FFN_HIDDEN_SIZE,
                     NUM_ATTENTION_HEADS,
-                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
-                    fuse_qkv_params=True,
-                    params_dtype=torch.bfloat16,
-                    hidden_dropout=0.0,
-                    attention_dropout=0.0,
+                    **kwargs,
                 )
                 for _ in range(NUM_LAYERS)
             ]
@@ -98,13 +110,22 @@ def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None):
 
 
 def _shard_model(model, world_size):
-    """Apply FSDP2 sharding with save/restore custom attrs."""
+    """Apply FSDP2 sharding with save/restore custom attrs.
+
+    If the model was created on the meta device (e.g. for FP8 init),
+    parameters are materialized after sharding via reset_parameters().
+    """
+    has_meta_params = any(p.is_meta for p in model.parameters())
     custom_attrs = save_custom_attrs(model)
     mesh = DeviceMesh("cuda", list(range(world_size)))
     for child in model.children():
         fully_shard(child, mesh=mesh)
     fully_shard(model, mesh=mesh)
     restore_custom_attrs(model, custom_attrs)
+    if has_meta_params:
+        for module in model.modules():
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
     return model
 
 
@@ -119,18 +140,11 @@ def test_fused_adam_fp8_master_weights(recipe=None):
     world_size, _, device = _setup()
 
     model = _build_model(fp8_init=True, recipe=recipe)
-
-    # Verify FP8 params created
-    qt_count = sum(1 for _, p in model.named_parameters() if isinstance(p, QuantizedTensor))
-    assert qt_count > 0, "No QuantizedTensor local tensors before training"
-
     model = _shard_model(model, world_size)
 
-    # Verify params are DTensors
+    # Verify params are DTensors with QuantizedTensor local shards
     for name, param in model.named_parameters():
         assert isinstance(param, DTensor), f"{name} is not DTensor"
-
-    # Verify FP8 params after sharding
     qt_count = sum(
         1
         for _, p in model.named_parameters()
