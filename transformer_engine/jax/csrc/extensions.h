@@ -45,6 +45,16 @@ struct ActivationConfig {
   ClampedSwigluConfig clamped_swiglu;
 };
 
+struct GemmConfig {
+  JAXX_Scaling_Mode scaling_mode;
+  JAXX_Collective_Op collective_op;
+  int64_t lhs_axis_boundary;
+  int64_t rhs_axis_boundary;
+  bool lhs_transposed;
+  bool rhs_transposed;
+  bool use_split_accumulator;
+};
+
 struct GroupedGemmV2Config {
   bool lhs_is_trans;
   bool rhs_is_trans;
@@ -147,7 +157,9 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmV2Handler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmInitV2Handler);
 
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
@@ -183,6 +195,16 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(transformer_engine::jax::ClampedSwigluConf
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::ActivationConfig,
     ::xla::ffi::StructMember<transformer_engine::jax::ClampedSwigluConfig>("clamped_swiglu"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::GemmConfig,
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"),
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Collective_Op>("collective_op"),
+    ::xla::ffi::StructMember<int64_t>("lhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("rhs_axis_boundary"),
+    ::xla::ffi::StructMember<bool>("lhs_transposed"),
+    ::xla::ffi::StructMember<bool>("rhs_transposed"),
+    ::xla::ffi::StructMember<bool>("use_split_accumulator"));
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::GroupedGemmV2Config,
