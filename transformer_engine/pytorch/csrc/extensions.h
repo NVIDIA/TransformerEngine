@@ -413,7 +413,7 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
                              std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
 
-void multi_tensor_scale_tensor_cuda(int chunk_size, at::Tensor noop_flag,
+void multi_tensor_scale_tensor_cuda(int chunk_size, at::Tensor is_infinite,
                                     std::vector<std::vector<at::Tensor>> tensor_lists,
                                     at::Tensor scale);
 
