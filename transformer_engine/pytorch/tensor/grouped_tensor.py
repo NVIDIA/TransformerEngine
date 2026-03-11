@@ -205,7 +205,8 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         # Parameter construction calls detach()/alias-like paths.
         if func in (torch.ops.aten.detach.default, torch.ops.aten.alias.default):
             src = args[0]
-            assert isinstance(src, GroupedTensor)
+            if not isinstance(src, GroupedTensor):
+                raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
             if func == torch.ops.aten.detach.default:
                 return make_wrapper_like(src, requires_grad=False)
             return make_wrapper_like(src, requires_grad=src.requires_grad)
@@ -214,7 +215,8 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         # Handle this explicitly so grouped parameters can be created safely.
         if func == torch.ops.aten.expand.default:
             src = args[0]
-            assert isinstance(src, GroupedTensor)
+            if not isinstance(src, GroupedTensor):
+                raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
             expanded_shape = tuple(args[1])
             src_shape = tuple(src.shape)
             if len(expanded_shape) == len(src_shape):
@@ -230,7 +232,8 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         if func == torch.ops.aten.expand_as.default:
             src = args[0]
             other = args[1]
-            assert isinstance(src, GroupedTensor)
+            if not isinstance(src, GroupedTensor):
+                raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
             if other is src:
                 return _GroupedIdentityFunc.apply(src)
             if tuple(other.shape) == tuple(src.shape):
@@ -242,7 +245,8 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         # returning a flat view of grouped backing storage.
         if func in (torch.ops.aten.view.default, torch.ops.aten._unsafe_view.default):
             src = args[0]
-            assert isinstance(src, GroupedTensor)
+            if not isinstance(src, GroupedTensor):
+                raise TypeError(f"Expected GroupedTensor, got {type(src).__name__}")
             target_shape = tuple(args[1])
             if target_shape in ((-1,), (src.numel(),)):
                 if src.rowwise_data is not None:
@@ -319,7 +323,11 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             for arg, new_arg, schema_arg in zip(args, new_args, schema_args):
                 maybe_update_inplace(arg, new_arg, schema_arg)
             for kwarg, new_kwarg, schema_arg in zip(kwargs, new_kwargs, schema_args[args_len:]):
-                assert kwarg == new_kwarg == schema_arg.name, "name of kwarg should match schema"
+                if kwarg != new_kwarg or kwarg != schema_arg.name:
+                    raise RuntimeError(
+                        f"Name of kwarg should match schema, got kwarg={kwarg!r},"
+                        f" new_kwarg={new_kwarg!r}, schema_arg.name={schema_arg.name!r}"
+                    )
                 maybe_update_inplace(kwargs[kwarg], new_kwargs[new_kwarg], schema_arg)
             return None
 

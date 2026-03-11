@@ -1644,7 +1644,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
         return tuple(
-            DebugQuantizer(self.name, name, q, self.tp_group)
+            DebugQuantizer(self.name, name, q, self.tp_group, self.tp_size)
             for name, q in zip(names, original_quantizers)
         )
 
