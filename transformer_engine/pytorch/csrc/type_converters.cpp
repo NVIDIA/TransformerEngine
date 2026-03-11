@@ -206,11 +206,13 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   py::handle quantizer = py::none();
   DType quantizer_dtype = DType::kNumTypes;
   NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+  bool with_gemm_swizzled_scales = false;
   if (!tensor.attr("quantizer").is_none()) {
     quantizer = tensor.attr("quantizer");
     if (!quantizer.is_none()) {
       scaling_mode = ScalingModeFromQuantizer(quantizer);
       quantizer_dtype = quantizer.attr("dtype").cast<DType>();
+      with_gemm_swizzled_scales = quantizer.attr("optimize_for_gemm").cast<bool>();
     }
   }
   auto ret = GroupedTensorWrapper(num_tensors, logical_shape, scaling_mode);
@@ -281,6 +283,8 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
                            GetTransformerEngineDType(tensor_offsets.scalar_type()),
                            getTensorShape(tensor_offsets));
   }
+
+  ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
 
   return ret;
 }

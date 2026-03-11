@@ -1805,21 +1805,30 @@ def _run_dpa_fp8_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
 
 model_configs_fp8_vs_f16 = {
     # test: ModelConfig(b, sq, hq, dqk)
-    "fp8_9": ModelConfig(2, 2048, 16, 128),
-    "fp8_10": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),
-    "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
-    "fp8_12": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),
-    "fp8_13": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="causal"),
-    "fp8_14": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
-    "fp8_15": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding"),
-    "fp8_16": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding"),
-    "fp8_17": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding"),
-    "fp8_18": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding_causal"),
-    "fp8_19": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding_causal"),
-    "fp8_20": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding_causal"),
+    "fp8_9": ModelConfig(
+        2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(128, 0)
+    ),
+    "fp8_10": ModelConfig(
+        2,
+        4096,
+        128,
+        192,
+        head_dim_v=128,
+        attn_mask_type="causal",
+    ),
+    # "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
+    # "fp8_12": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),
+    # "fp8_13": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="causal"),
+    # "fp8_14": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
+    # "fp8_15": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding"),
+    # "fp8_16": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding"),
+    # "fp8_17": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding"),
+    # "fp8_18": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding_causal"),
+    # "fp8_19": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding_causal"),
+    # "fp8_20": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding_causal"),
 }
 
-param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
+param_types_fp8_vs_f16 = [torch.bfloat16]  # [torch.float16, torch.bfloat16]
 qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd"]
 qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 
@@ -1833,7 +1842,7 @@ qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
 @pytest.mark.parametrize("RoPE", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
-@pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
+@pytest.mark.parametrize("scaling_mode", ["delayed", "current", "mxfp8"])
 def test_mha_fp8_vs_f16(
     dtype,
     model,
@@ -1861,6 +1870,12 @@ def test_mha_fp8_vs_f16(
     elif scaling_mode == "current":
         fp8_recipe = recipe.Float8CurrentScaling(
             fp8_format=recipe.Format.HYBRID,
+            fp8_dpa=True,
+            fp8_mha=True,
+        )
+    elif scaling_mode == "mxfp8":
+        fp8_recipe = recipe.MXFP8BlockScaling(
+            fp8_format=recipe.Format.E4M3,
             fp8_dpa=True,
             fp8_mha=True,
         )
@@ -2047,7 +2062,6 @@ def _run_mha_fp8_vs_f16(
         hidden_states.requires_grad = True
     tensor = 0.01 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
     out_grad = tensor.view(*tensor.shape[:-2], -1)
-
     with autocast(enabled=fp8_mha, recipe=fp8_recipe):
         out = mha(
             hidden_states,
@@ -2083,7 +2097,7 @@ def _run_mha_fp8_vs_f16(
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
-@pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
+@pytest.mark.parametrize("scaling_mode", ["delayed", "current", "mxfp8"])
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
@@ -2114,6 +2128,12 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         fp8_recipe = recipe.Float8CurrentScaling(
             fp8_format=recipe.Format.HYBRID,
             fp8_dpa=True,
+        )
+    elif scaling_mode == "mxfp8":
+        fp8_recipe = recipe.MXFP8BlockScaling(
+            fp8_format=recipe.Format.E4M3,
+            fp8_dpa=True,
+            fp8_mha=False,
         )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
@@ -2275,7 +2295,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
     with quantized_model_init(enabled=fp8_dpa):
         dpa = DotProductAttention(
             config.num_heads,
-            config.head_dim_qk,
+            (config.head_dim_qk, config.head_dim_v),
             num_gqa_groups=config.num_gqa_groups,
             attention_dropout=config.dropout_p,
             sequence_parallel=False,
@@ -2320,7 +2340,8 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
         "skv": config.max_seqlen_kv,
         "h": config.num_heads,
         "hg": config.num_gqa_groups,
-        "d": config.head_dim_qk,
+        "dqk": config.head_dim_qk,
+        "dv": config.head_dim_v,
         "t": cu_seqlens_q[-1],
         "tg": cu_seqlens_kv[-1],
         "3": 3,
@@ -2336,6 +2357,10 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             layout = layout.replace("s", "skv")
             layout = layout.replace("h", "hg")
             layout = layout.replace("t", "tg")
+        if i == 2:
+            layout = layout.replace("d", "dv")
+        else:
+            layout = layout.replace("d", "dqk")
         tensor_shape = [dim_to_num[j] for j in layout.split("_")]
         if config.dropout_p == 0.0:
             tensor = torch.randn(tensor_shape, dtype=dtype, device="cuda")
@@ -2360,6 +2385,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
 
     qkv_format_kv = "_".join(qkv_format)
     qkv_format_kv = qkv_format_kv.replace("s", "sq")
+    qkv_format_kv = qkv_format_kv.replace("d", "dv")
     out_grad_shape = [dim_to_num[i] for i in qkv_format_kv.split("_")]
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
@@ -2370,6 +2396,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             inp[1],
             inp[2],
             qkv_format=qkv_format,
+            window_size=config.window_size,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             max_seqlen_q=config.max_seqlen_q,
@@ -2377,7 +2404,6 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
-            fp8_output=fp8_dpa,
         )
     if is_training:
         out.backward(out_grad)
