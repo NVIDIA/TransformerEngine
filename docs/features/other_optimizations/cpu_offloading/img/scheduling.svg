@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 480" width="100%" style="max-width: 900px;">
+  <defs>
+    <style>
+      .title { font: bold 14px sans-serif; fill: #333; }
+      .label { font: 11px sans-serif; fill: #555; text-anchor: end; }
+      .block-text { font: bold 11px sans-serif; fill: #333; text-anchor: middle; }
+      .param-label { font: bold 11px monospace; fill: #555; text-anchor: middle; }
+      
+      .fwd-block { fill: #9db4d0; stroke: #333; stroke-width: 1; }
+      .bwd-block { fill: #b8a9c9; stroke: #333; stroke-width: 1; }
+      .offload-block { fill: #d9a066; stroke: #333; stroke-width: 1; }
+      .reload-block { fill: #a8d99c; stroke: #333; stroke-width: 1; }
+      
+      .model-block { fill: #e8e8e8; stroke: #333; stroke-width: 1; }
+      
+      .offload-bracket { fill: none; stroke: #d97706; stroke-width: 2; }
+      .section-divider { stroke: #ccc; stroke-width: 1; stroke-dasharray: 6,4; }
+    </style>
+  </defs>
+
+  <!-- ===== MODEL ===== -->
+  <text x="450" y="25" class="title" text-anchor="middle">Model (model_layers = 5)</text>
+
+  <!-- Model layer blocks -->
+  <rect x="160" y="45" width="100" height="35" class="model-block"/>
+  <text x="210" y="67" class="block-text">Layer 1</text>
+
+  <rect x="270" y="45" width="100" height="35" class="model-block"/>
+  <text x="320" y="67" class="block-text">Layer 2</text>
+
+  <rect x="380" y="45" width="100" height="35" class="model-block"/>
+  <text x="430" y="67" class="block-text">Layer 3</text>
+
+  <rect x="490" y="45" width="100" height="35" class="model-block"/>
+  <text x="540" y="67" class="block-text">Layer 4</text>
+
+  <rect x="600" y="45" width="100" height="35" class="model-block"/>
+  <text x="650" y="67" class="block-text">Layer 5</text>
+
+  <!-- Bracket for offloaded layers -->
+  <path d="M 160 88 L 160 95 L 370 95 L 370 88" class="offload-bracket"/>
+  <text x="265" y="110" class="param-label">num_layers = 2 (offloaded)</text>
+
+  <!-- Divider after model -->
+  <line x1="50" y1="125" x2="850" y2="125" class="section-divider"/>
+
+  <!-- ===== FORWARD PASS ===== -->
+  <text x="450" y="150" class="title" text-anchor="middle">Forward Pass</text>
+  
+  <!-- Stream labels -->
+  <text x="140" y="185" class="label">compute stream</text>
+  <text x="140" y="250" class="label">offload stream</text>
+
+  <!-- Compute stream blocks (forward) - width=80 -->
+  <rect x="160" y="165" width="80" height="40" class="fwd-block"/>
+  <text x="200" y="190" class="block-text">Layer 1 fwd</text>
+
+  <rect x="240" y="165" width="80" height="40" class="fwd-block"/>
+  <text x="280" y="190" class="block-text">Layer 2 fwd</text>
+
+  <rect x="320" y="165" width="80" height="40" class="fwd-block"/>
+  <text x="360" y="190" class="block-text">Layer 3 fwd</text>
+
+  <rect x="400" y="165" width="80" height="40" class="fwd-block"/>
+  <text x="440" y="190" class="block-text">Layer 4 fwd</text>
+
+  <rect x="480" y="165" width="80" height="40" class="fwd-block"/>
+  <text x="520" y="190" class="block-text">Layer 5 fwd</text>
+
+  <!-- Offload stream blocks - start at middle of Layer 1 (200), width=120 -->
+  <rect x="200" y="230" width="120" height="40" class="offload-block"/>
+  <text x="260" y="255" class="block-text">Layer 1 offload</text>
+
+  <rect x="320" y="230" width="120" height="40" class="offload-block"/>
+  <text x="380" y="255" class="block-text">Layer 2 offload</text>
+
+  <!-- Divider -->
+  <line x1="50" y1="295" x2="850" y2="295" class="section-divider"/>
+
+  <!-- ===== BACKWARD PASS ===== -->
+  <text x="450" y="320" class="title" text-anchor="middle">Backward Pass</text>
+
+  <!-- Stream labels -->
+  <text x="140" y="360" class="label">compute stream</text>
+  <text x="140" y="425" class="label">reload stream</text>
+
+  <!-- Compute stream blocks (backward) - width=110 (longer than fwd) -->
+  <rect x="160" y="340" width="110" height="40" class="bwd-block"/>
+  <text x="215" y="365" class="block-text">Layer 5 bwd</text>
+
+  <rect x="270" y="340" width="110" height="40" class="bwd-block"/>
+  <text x="325" y="365" class="block-text">Layer 4 bwd</text>
+
+  <rect x="380" y="340" width="110" height="40" class="bwd-block"/>
+  <text x="435" y="365" class="block-text">Layer 3 bwd</text>
+
+  <rect x="490" y="340" width="110" height="40" class="bwd-block"/>
+  <text x="545" y="365" class="block-text">Layer 2 bwd</text>
+
+  <rect x="600" y="340" width="110" height="40" class="bwd-block"/>
+  <text x="655" y="365" class="block-text">Layer 1 bwd</text>
+
+  <!-- Reload stream blocks - start right after Layer 5 bwd (270), width=140 -->
+  <rect x="270" y="405" width="140" height="40" class="reload-block"/>
+  <text x="340" y="430" class="block-text">Layer 2 reload</text>
+
+  <rect x="410" y="405" width="140" height="40" class="reload-block"/>
+  <text x="480" y="430" class="block-text">Layer 1 reload</text>
+
+</svg>
