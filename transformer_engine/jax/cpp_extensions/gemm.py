@@ -688,9 +688,17 @@ class GemmPrimitive(BasePrimitive):
                     lhs.shape[lhs_flatten_axis:]
                 )
                 assert lhs_first % 128 == 0 and lhs_last % 128 == 0, (
-                    "MXFP8 + Collective AG requires LHS dimensions before and after the flatten"
+                    "MXFP8 + Collective AG/RS requires LHS dimensions before and after the flatten"
                     f" axis to be multiples of 128. Got lhs.shape={lhs.shape},"
                     f" lhs_flatten_axis={lhs_flatten_axis}"
+                )
+                rhs_first, rhs_last = math.prod(rhs.shape[:rhs_flatten_axis]), math.prod(
+                    rhs.shape[rhs_flatten_axis:]
+                )
+                assert rhs_first % 128 == 0 and rhs_last % 128 == 0, (
+                    "MXFP8 + Collective AG/RS requires LHS dimensions before and after the flatten"
+                    f" axis to be multiples of 128. Got rhs.shape={rhs.shape},"
+                    f" rhs_flatten_axis={rhs_flatten_axis}"
                 )
                 # The scale needs to be in good shape for reordering
                 assert lhs_scale_inv.shape[sequence_dim] % tpsp_axis_size() == 0, (
@@ -1295,7 +1303,7 @@ def _te_gemm(
     if not collective_op.is_none:
         assert not scaling_mode.is_nvfp4_scaling, (
             f"Collective GEMM is not yet supported with {scaling_mode} quantization. "
-            "Only DELAYED_TENSOR_SCALING and CURRENT_TENSOR_SCALING are supported."
+            "Only DELAYED_TENSOR_SCALING, CURRENT_TENSOR_SCALING, and MXFP8_1D_SCALING are supported."
         )
 
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype

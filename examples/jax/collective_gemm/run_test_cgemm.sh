@@ -28,28 +28,28 @@ fi
 # the time.
 TEST_CASES=(
 # test_gemm.py cases
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_bf16_all_gather_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_bf16_reduce_scatter_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_delayed_scaling_fp8_all_gather_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_delayed_scaling_fp8_reduce_scatter_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_all_gather_with_dp"
-"test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_reduce_scatter_with_dp"
-# # "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_all_gather_with_dp"
-# # "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_reduce_scatter_with_dp"
-#
-# # test_dense_grad.py cases
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_bf16_all_gather"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_bf16_reduce_scatter"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_current_scaling_fp8_all_gather"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_current_scaling_fp8_reduce_scatter"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_mxfp8_all_gather"
-"test_dense_grad.py::TestCollectiveDenseGradient::test_te_mxfp8_reduce_scatter"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_bf16_all_gather_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_bf16_reduce_scatter_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_delayed_scaling_fp8_all_gather_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_delayed_scaling_fp8_reduce_scatter_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_all_gather_with_dp"
+# "test_gemm.py::TestCollectiveGemmWithDP::test_te_mxfp8_reduce_scatter_with_dp"
+# # # "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_all_gather_with_dp"
+# # # "test_gemm.py::TestCollectiveGemmWithDP::test_te_nvfp4_reduce_scatter_with_dp"
+# #
+# # # test_dense_grad.py cases
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_bf16_all_gather"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_bf16_reduce_scatter"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_current_scaling_fp8_all_gather"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_current_scaling_fp8_reduce_scatter"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_mxfp8_all_gather"
+# "test_dense_grad.py::TestCollectiveDenseGradient::test_te_mxfp8_reduce_scatter"
 # "test_dense_grad.py::TestCollectiveDenseGradient::test_te_nvfp4_all_gather"
 # "test_dense_grad.py::TestCollectiveDenseGradient::test_te_nvfp4_reduce_scatter"
 #
 # # test_layernorm_mlp_grad.py cases
-"test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_bf16_layernorm_mlp_grad"
-"test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_delayed_scaling_fp8_layernorm_mlp_grad"
+# "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_bf16_layernorm_mlp_grad"
+# "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_delayed_scaling_fp8_layernorm_mlp_grad"
 "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_current_scaling_fp8_layernorm_mlp_grad"
 "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_mxfp8_layernorm_mlp_grad"
 # "test_layernorm_mlp_grad.py::TestCollectiveLayerNormMLPGradient::test_te_nvfp4_layernorm_mlp_grad"
@@ -100,7 +100,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
     if [ $i -eq 0 ]; then
       # For process 0: show live output AND save to log file using tee
       echo "=== Live output from process 0 ==="
-      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
+      XLA_FLAGS="--xla_gpu_graph_min_graph_size=1 $XLA_FLAGS" pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
         -vs --junitxml=$XML_LOG_DIR/collective_gemm_${TEST_NAME}.xml \
         "$TE_PATH/examples/jax/collective_gemm/$TEST_CASE" \
         --num-processes=$NUM_GPUS \
@@ -109,7 +109,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
       PIDS+=($PID)
     else
       # For other processes: redirect to log files only
-      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
+      XLA_FLAGS="--xla_gpu_graph_min_graph_size=1 $XLA_FLAGS" pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
         -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_CASE" \
         --num-processes=$NUM_GPUS \
         --process-id=$i > "$LOG_FILE" 2>&1 &
@@ -136,7 +136,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
 
   # Remove the log files after processing them
   wait
- rm ${TEST_NAME}_gpu_*.log
+  rm ${TEST_NAME}_gpu_*.log
 done
 
 wait

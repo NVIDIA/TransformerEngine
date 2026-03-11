@@ -164,32 +164,6 @@ def is_scaling_mode_supported(
     return _is_scaling_mode_supported[scaling_mode], _reason_for_no_scaling_mode[scaling_mode]
 
 
-_RECIPE_NAME_TO_SCALING_MODE = {
-    "DelayedScaling": ScalingMode.DELAYED_TENSOR_SCALING,
-    "Float8CurrentScaling": ScalingMode.CURRENT_TENSOR_SCALING,
-    "MXFP8BlockScaling": ScalingMode.MXFP8_1D_SCALING,
-    "NVFP4BlockScaling": ScalingMode.NVFP4_1D_SCALING,
-}
-
-
-def is_quantize_recipe_supported(recipe_name: str, gpu_id=None) -> Tuple[bool, str]:
-    """Check if the given quantization recipe (by name) is supported on the current GPU.
-
-    Args:
-        recipe_name: Name of the recipe, e.g. "DelayedScaling", "Float8CurrentScaling",
-            "MXFP8BlockScaling", "NVFP4BlockScaling".
-        gpu_id: Optional GPU ID to check a specific device (default: all local devices).
-
-    Returns:
-        A tuple of (supported: bool, reason: str).
-    """
-    scaling_mode = _RECIPE_NAME_TO_SCALING_MODE.get(recipe_name)
-    if scaling_mode is None:
-        valid = list(_RECIPE_NAME_TO_SCALING_MODE)
-        return False, f"Unknown quantization recipe '{recipe_name}'. Valid options: {valid}"
-    return is_scaling_mode_supported(scaling_mode, gpu_id)
-
-
 _RECIPE_NAME_TO_RECIPE = {
     "DelayedScaling": DelayedScaling,
     "Float8CurrentScaling": Float8CurrentScaling,
@@ -216,6 +190,26 @@ def get_quantization_recipe(name: str) -> Recipe:
         valid = list(_RECIPE_NAME_TO_RECIPE)
         raise ValueError(f"Invalid quantization recipe '{name}'. Valid options: {valid}")
     return recipe_cls()
+
+
+def is_quantize_recipe_supported(recipe_name: str) -> Tuple[bool, str]:
+    """Check if the given quantization recipe (by name) is supported on the current GPU.
+
+    Args:
+        recipe_name: Name of the recipe, e.g. "DelayedScaling", "Float8CurrentScaling",
+            "MXFP8BlockScaling", "NVFP4BlockScaling".
+
+    Returns:
+        A tuple of (supported: bool, reason: str).
+    """
+    recipe = get_quantization_recipe(recipe_name)
+    config = get_quantize_config_with_recipe(recipe)
+    for tensor_source in TensorSource:
+         scaling_mode = config.get_scaling_mode(tensor_source)
+         is_supported, reason = is_scaling_mode_supported(scaling_mode)
+         if not is_supported:
+              return is_supported, reason
+    return True, None
 
 
 def is_fp8_available(
