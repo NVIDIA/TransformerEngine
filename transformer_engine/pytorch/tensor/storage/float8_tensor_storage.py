@@ -38,7 +38,7 @@ class _FromFloat8Func(torch.autograd.Function):
             if tensor._data.is_cpu:
                 # CPU fallback: reinterpret uint8 as FP8, cast to target dtype, scale
                 fp8_torch_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
-                return (tensor._data.view(fp8_torch_dtype).float() * tensor._scale_inv).to(dtype)
+                return (tensor._data.view(fp8_torch_dtype).float() * tensor._scale_inv.to(tensor._data.device)).to(dtype)
             # Cast from FP8
             return tex.dequantize(tensor, te_dtype)
 
