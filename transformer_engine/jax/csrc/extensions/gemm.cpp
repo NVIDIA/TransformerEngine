@@ -766,7 +766,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   else if (is_rhs_last_ragged)
     num_gemms = rhs_last_dims.dimensions()[0];
   else
-    num_gemms = 1;  // degenerate batched; legacy batched not a tested use case
+    NVTE_CHECK(false, "GroupedGemmFFI (v1): At least one of the group size buffers must be non-empty to determine num_gemms.");
 
   const Buffer_Type *active_gs_ptr = nullptr;
   if (is_lhs_first_ragged)
