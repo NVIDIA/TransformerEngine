@@ -30,7 +30,7 @@ from transformer_engine.pytorch.quantization import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
 )
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import (
@@ -110,6 +110,13 @@ layers as follows.
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
+| MXFP8             | FP8DS     | Pass MXFP8 to autocast();                                                         |
+|                   |           | Attention FP8DS reuses the fp8_format, fp8_dpa, fp8_mha values from linear MXFP8; |
+|                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
 | NVFP4             | FP8DS     | Pass NVFP4 to autocast();                                                         |
 |                   |           | Attention FP8DS reuses the fp8_dpa, fp8_mha values from linear NVFP4;             |
 |                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
@@ -130,6 +137,14 @@ layers as follows.
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
+| MXFP8             | FP8CS     | Pass MXFP8 to autocast();                                                         |
+|                   |           | Attention creates a new FP8CS recipe based on fp8_format, fp8_dpa, fp8_mha from   |
+|                   |           | linear MXFP8, and:                                                                |
+|                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
 | NVFP4             | FP8CS     | Pass NVFP4 to autocast();                                                         |
 |                   |           | Attention creates a new FP8CS recipe for QKV, O, dO, dQKV, and a new FP8DS recipe |
 |                   |           | for S, dP, based on the fp8_dpa, fp8_mha values from linear NVFP4 and:            |
@@ -138,6 +153,13 @@ layers as follows.
 |                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8DS/FP8CS       | MXFP8     | Pass FP8DS/FP8CS to autocast();                                                   |
+|                   |           | Attention creates a new MXFP8 recipe based on fp8_format, fp8_dpa, fp8_mha from   |
+|                   |           | linear FP8DS/FP8CS                                                                |
+|                   |           | export NVTE_DPA_FP8_RECIPE="MXFP8BlockScaling"    # switch to MXFP8BS             |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| MXFP8             | MXFP8     | Pass MXFP8 to autocast();                                                         |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
 | NVFP4             | MXFP8     | Pass NVFP4 to autocast();                                                         |
 |                   |           | Attention MXFP8 reuses the fp8_dpa, fp8_mha values from linear NVFP4;             |
@@ -605,7 +627,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             # ignore the recipe from autocast, set fp8_dpa = False, fp8_mha = False
             fp8_recipe.fp8_dpa = False
             fp8_recipe.fp8_mha = False
-        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "DelayedScaling":
+        elif (fp8_recipe.float8_current_scaling() or fp8_recipe.mxfp8()) and _dpa_fp8_recipe == "DelayedScaling":
             # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a DS recipe
             fake_recipe = DelayedScaling(
                 fp8_format=fp8_recipe.fp8_format,
@@ -658,6 +680,25 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
             fp8_recipe_dpa = fake_recipe
             fp8_recipes = [fp8_recipe, fp8_recipe_dpa]
+        elif fp8_recipe.mxfp8() and _dpa_fp8_recipe == "Float8CurrentScaling":
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a CS+DS recipe
+            fake_recipes = [
+                Float8CurrentScaling(
+                    fp8_format=fp8_recipe.fp8_format,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                ),
+                DelayedScaling(
+                    fp8_format=fp8_recipe.fp8_format,
+                    amax_history_len=_dpa_fp8ds_amax_histlen,
+                    amax_compute_algo=_dpa_fp8ds_amax_algo,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                    reduce_amax=_dpa_fp8ds_reduce_amax,
+                )
+            ]
+            fp8_recipe_dpa = fake_recipes[1]
+            fp8_recipes = fake_recipes
         elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "Float8CurrentScaling":
             # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format
             # construct a CS recipe for QKV, O, dO, dQKV and a DS recipe for S, dP
@@ -678,6 +719,15 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
+        elif (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()) and _dpa_fp8_recipe == "MXFP8BlockScaling":
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a MXFP8 recipe
+            fake_recipe = MXFP8BlockScaling(
+                fp8_format=fp8_recipe.fp8_format,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+            )
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = fp8_recipe_dpa
         elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "MXFP8BlockScaling":
             # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format; construct a MXFP8 recipe
             fake_recipe = MXFP8BlockScaling(
@@ -1212,7 +1262,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded = None
 
             # get qkv's memory layout
-            if all(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
+            if all(isinstance(x, Float8TensorStorage) for x in [query_layer, key_layer, value_layer]):
                 (
                     qkv_layout,
                     query_layer._data,
@@ -1374,6 +1424,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
                 cp_comm_type=self.cp_comm_type,
+                cp_size=cp_size,
                 deterministic=self.deterministic,
                 is_training=self.training,
                 fp8=self.fp8,

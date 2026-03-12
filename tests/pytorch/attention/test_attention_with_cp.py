@@ -304,7 +304,7 @@ def test_cp_with_fused_attention(
     if qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
         pytest.skip("No support for THD format with cp_comm_type={all_gather, a2a+p2p}!")
 
-    if (config.window_size != (-1, 0) or config.window_size != (-1, -1)) and cp_comm_type in [
+    if (config.window_size[0] != -1 and config.window_size[1] not in [-1, 0]) and cp_comm_type in [
         "p2p",
         "a2a+p2p",
     ]:
