@@ -376,8 +376,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
                                             int transa, const NVTEGroupedTensor B, int transb,
                                             const NVTEGroupedTensor C, NVTEGroupedTensor D,
                                             const NVTETensor alpha, const NVTETensor beta,
-                                            NVTETensor workspace_setup,
-                                            NVTETensor workspace_cublas,
+                                            NVTETensor workspace_setup, NVTETensor workspace_cublas,
                                             NVTEGroupedMatmulConfig config, cudaStream_t stream);
 
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
