@@ -708,8 +708,8 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_inputA(
-        te_A_vector.data(), num_tensors, transa, grouped_B.data(), transb,
-        grouped_D.data(), grouped_D.data(), gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
+        te_A_vector.data(), num_tensors, transa, grouped_B.data(), transb, grouped_D.data(),
+        grouped_D.data(), gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
         gemm_config.te_workspace_setup.data(), gemm_config.te_workspace_cublas.data(),
         gemm_config.matmul_config.has_value()
             ? static_cast<NVTEGroupedMatmulConfig>(*gemm_config.matmul_config)
