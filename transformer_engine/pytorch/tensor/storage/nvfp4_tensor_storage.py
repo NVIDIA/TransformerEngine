@@ -93,6 +93,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
+    # Default storage of 1 byte.
+    _default_storage: torch.UntypedStorage
 
     def __new__(
         cls,
@@ -124,6 +126,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._amax_rowwise = amax_rowwise
         instance._amax_columnwise = amax_columnwise
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
+        instance._default_storage = torch.UntypedStorage(1)
 
         return instance
 

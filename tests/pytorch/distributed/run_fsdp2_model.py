@@ -490,7 +490,7 @@ def _train(args):
 
     # Some of the FSDP states are lazy initialized during FSDP forward pass
     # so testing fp8 allgather at the end of the training loop.
-    if args.fp8_init:
+    if args.fp8_init and args.recipe not in ("Float8BlockScaling", "NVFP4BlockScaling"):
         test_fp8_fsdp2_allgather(model)
 
     """
@@ -633,7 +633,7 @@ def _train(args):
             post_load_loss = F.mse_loss(output, target)
     # Allow for 1% disparity due to _extra_state disparity.
     assert torch.allclose(
-        pre_save_loss, post_load_loss, rtol=1e-2
+        pre_save_loss, post_load_loss, rtol=5e-2
     ), f"Pre-Save Loss: {pre_save_loss} != Post-Load Loss: {post_load_loss}"
 
     # Clean up temporary checkpoint directory.

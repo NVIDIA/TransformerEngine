@@ -2005,7 +2005,7 @@ def _convert_param_to_dtensor_param(
     # We overwrite the original DTensor's distributed configuration.
     param_tensor = param
     if isinstance(param, DTensor):
-        param_tensor = param.to_local()
+        param_tensor = param._local_tensor
     # Convert the parameter to a DTensor.
     new_param = torch.nn.Parameter(
         DTensor.from_local(
@@ -2025,19 +2025,44 @@ def _convert_param_to_dtensor_param(
     return new_param
 
 
+class _ToLocalIdentity(torch.autograd.Function):
+    """Extract the local tensor from a DTensor, preserving object identity.
+
+    Unlike DTensor.to_local(), this returns the exact same _local_tensor
+    object so that FSDP2's in-place attribute updates (e.g. after all-gather)
+    remain visible through any reference stored elsewhere (e.g. in ctx).
+    """
+
+    @staticmethod
+    def forward(ctx, dtensor_param: DTensor) -> torch.Tensor:
+        ctx.device_mesh = dtensor_param.device_mesh
+        ctx.placements = dtensor_param.placements
+        ctx.set_materialize_grads(False)
+        return dtensor_param._local_tensor
+
+    @staticmethod
+    def backward(ctx, grad_local):
+        if grad_local is None:
+            return None
+        return DTensor.from_local(
+            grad_local,
+            device_mesh=ctx.device_mesh,
+            placements=ctx.placements,
+            run_check=False,
+        )
+
+
 def _extract_trainable_tensor_from_dtensor(dtensor_param: DTensor) -> torch.Tensor:
     """
     Retrieves the local Tensor from a trainable DTensor Parameter.
 
-    Calls DTensor.to_local() and sets `requires_grad_(DTensor.requires_grad)`,
-    to inherit `requires_grad` from the DTensor parameter. This is necessary
-    because DTensor.from_local(Tensor) (in `_convert_param_to_dtensor_param`)
-    resets the `requires_grad` attribute in the local Tensor, and consequently
-    deactivates gradient computation / differentiation in TransformerEngine.
+    Uses _ToLocalIdentity to preserve object identity between the returned
+    tensor and DTensor._local_tensor, ensuring FSDP2's in-place updates
+    remain visible. Sets `requires_grad_(DTensor.requires_grad)` to inherit
+    `requires_grad` from the DTensor parameter, since DTensor.from_local()
+    resets it on the local Tensor.
     """
-    # Extract the local compute Tensor.
-    compute_param = dtensor_param.to_local()
-    # Set requires_grad on local Tensor based on DTensor.
+    compute_param = _ToLocalIdentity.apply(dtensor_param)
     compute_param.requires_grad_(dtensor_param.requires_grad)
     return compute_param
 
