@@ -69,7 +69,7 @@ void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input,
  *  \param[in,out] output       Output grouped tensor which hosts swizzled scale_inv.
  *  \param[in]     stream       CUDA stream used for the operation.
  *
- *  Requirements:
+ *  Requirements(for now, more features will be added later):
  *  - scaling mode must be MXFP8 1D scaling.
  *  - scale_inv is stored in row-major per group.
  *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.

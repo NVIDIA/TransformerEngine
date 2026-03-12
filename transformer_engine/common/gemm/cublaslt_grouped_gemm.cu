@@ -202,79 +202,72 @@ struct GroupedGemmSetupWorkspace {
  }
 };
 
-// -----------------------------------------------------------------------------
-// Helper routines to keep nvte_grouped_gemm readable
-// -----------------------------------------------------------------------------
-inline size_t validate_grouped_gemm_input_list(
-   size_t num_tensors, std::initializer_list<const transformer_engine::GroupedTensor *> inputs,
-   const transformer_engine::Tensor *alpha_tensor, const transformer_engine::Tensor *beta_tensor,
-   const char *dtype_error) {
- NVTE_CHECK(num_tensors >= 1, "Grouped GEMM: number of tensors must be at least 1");
- for (const auto *tensor : inputs) {
-   NVTE_CHECK(tensor->num_tensors == num_tensors,
-              "Grouped GEMM: inputs must have the same number of tensors");
- }
 
- const size_t alpha_numel = alpha_tensor->data.numel();
- const size_t beta_numel = beta_tensor->data.numel();
- NVTE_CHECK(alpha_numel == num_tensors, "Grouped GEMM: alpha must have num_tensors (", num_tensors,
-            ") elements, got ", alpha_numel);
- NVTE_CHECK(beta_numel == num_tensors, "Grouped GEMM: beta must have num_tensors (", num_tensors,
-            ") elements, got ", beta_numel);
+inline size_t validate_grouped_gemm_inputs(
+    size_t num_tensors, std::initializer_list<const transformer_engine::GroupedTensor *> inputs,
+    const transformer_engine::Tensor *alpha_tensor, const transformer_engine::Tensor *beta_tensor) {
+  NVTE_CHECK(num_tensors >= 1, "Grouped GEMM: number of tensors must be at least 1");
+  for (const auto *tensor : inputs) {
+    NVTE_CHECK(tensor->num_tensors == num_tensors,
+               "Grouped GEMM: inputs must have the same number of tensors");
+  }
 
- auto is_supported_input_dtype = [](transformer_engine::DType dtype) {
-   return dtype == transformer_engine::DType::kFloat8E4M3 ||
-          dtype == transformer_engine::DType::kFloat8E5M2 ||
-          dtype == transformer_engine::DType::kBFloat16 ||
-          dtype == transformer_engine::DType::kFloat16;
- };
- bool dtype_ok = true;
- for (const auto *tensor : inputs) {
-   dtype_ok = dtype_ok && is_supported_input_dtype(tensor->dtype());
- }
- NVTE_CHECK(dtype_ok, dtype_error);
- for (const auto *tensor : inputs) {
-   NVTE_CHECK(tensor->has_data() || tensor->has_columnwise_data(),
-              "Grouped GEMM: input tensor is missing both row-wise and column-wise data");
- }
- return num_tensors;
+  const size_t alpha_numel = alpha_tensor->data.numel();
+  const size_t beta_numel = beta_tensor->data.numel();
+  NVTE_CHECK(alpha_numel == num_tensors, "Grouped GEMM: alpha must have num_tensors (", num_tensors,
+             ") elements, got ", alpha_numel);
+  NVTE_CHECK(beta_numel == num_tensors, "Grouped GEMM: beta must have num_tensors (", num_tensors,
+             ") elements, got ", beta_numel);
+
+  auto is_supported_input_dtype = [](transformer_engine::DType dtype) {
+    return dtype == transformer_engine::DType::kFloat8E4M3 ||
+           dtype == transformer_engine::DType::kFloat8E5M2 ||
+           dtype == transformer_engine::DType::kBFloat16 ||
+           dtype == transformer_engine::DType::kFloat16;
+  };
+  bool dtype_ok = true;
+  for (const auto *tensor : inputs) {
+    dtype_ok = dtype_ok && is_supported_input_dtype(tensor->dtype());
+  }
+  NVTE_CHECK(dtype_ok, "Grouped GEMM inputs must be FP8, BF16, or FP16.");
+  for (const auto *tensor : inputs) {
+    NVTE_CHECK(tensor->has_data() || tensor->has_columnwise_data(),
+               "Grouped GEMM: input tensor is missing both row-wise and column-wise data");
+  }
+
+  // Cross-operand consistency across all inputs.
+  const auto *ref = *inputs.begin();
+  const bool ref_is_fp8 = is_fp8_dtype(ref->dtype());
+  const bool ref_is_mxfp8 = transformer_engine::is_mxfp_scaling(ref->scaling_mode);
+  for (const auto *tensor : inputs) {
+    NVTE_CHECK(is_fp8_dtype(tensor->dtype()) == ref_is_fp8,
+               "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
+    NVTE_CHECK(transformer_engine::is_mxfp_scaling(tensor->scaling_mode) == ref_is_mxfp8,
+               "Grouped GEMM: A and B must both use MXFP8 scaling or both use tensor scaling.");
+    if (ref_is_mxfp8) {
+      NVTE_CHECK(tensor->with_gemm_swizzled_scales,
+                 "MXFP8 grouped GEMM: scales must be swizzled for GEMM.");
+    }
+  }
+  return num_tensors;
 }
 
-inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor *inputA,
-                                        const transformer_engine::GroupedTensor *inputB,
-                                        const transformer_engine::GroupedTensor *inputC,
-                                        const transformer_engine::GroupedTensor *outputD,
-                                        const transformer_engine::Tensor *alpha_tensor,
-                                        const transformer_engine::Tensor *beta_tensor) {
- const size_t num_tensors = validate_grouped_gemm_input_list(
-     inputA->num_tensors, {inputA, inputB}, alpha_tensor, beta_tensor,
-     "Grouped GEMM inputs must be FP8, BF16, or FP16.");
- auto is_output_dtype = [](transformer_engine::DType dtype) {
-   return dtype == transformer_engine::DType::kBFloat16 ||
-          dtype == transformer_engine::DType::kFloat16 ||
-          dtype == transformer_engine::DType::kFloat32;
- };
- NVTE_CHECK(is_fp8_dtype(inputA->dtype()) == is_fp8_dtype(inputB->dtype()),
-            "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
- NVTE_CHECK(transformer_engine::is_mxfp_scaling(inputA->scaling_mode) ==
-                transformer_engine::is_mxfp_scaling(inputB->scaling_mode),
-            "Grouped GEMM: A and B must both use MXFP8 scaling or both use tensor scaling, "
-            "mixed configurations are not supported.");
- if (transformer_engine::is_mxfp_scaling(inputA->scaling_mode)) {
-   NVTE_CHECK(inputA->with_gemm_swizzled_scales,
-              "MXFP8 grouped GEMM: A scales must be swizzled for GEMM");
-   NVTE_CHECK(inputB->with_gemm_swizzled_scales,
-              "MXFP8 grouped GEMM: B scales must be swizzled for GEMM");
- }
- // C can be NULL (will use D as C when beta=0)
- if (inputC != nullptr) {
-   NVTE_CHECK(inputC->num_tensors == num_tensors,
-              "Grouped GEMM: A and C must have the same number of tensors");
-   NVTE_CHECK(is_output_dtype(inputC->dtype()), "Grouped GEMM: C must be BF16, FP16, or FP32.");
- }
- NVTE_CHECK(outputD->num_tensors == num_tensors,
-            "Grouped GEMM: A and D must have the same number of tensors");
- NVTE_CHECK(is_output_dtype(outputD->dtype()), "Grouped GEMM: D must be BF16, FP16, or FP32.");
+inline void validate_grouped_gemm_outputs(
+    size_t num_tensors, std::initializer_list<const transformer_engine::GroupedTensor *> outputs) {
+  auto is_output_dtype = [](transformer_engine::DType dtype) {
+    return dtype == transformer_engine::DType::kBFloat16 ||
+           dtype == transformer_engine::DType::kFloat16 ||
+           dtype == transformer_engine::DType::kFloat32;
+  };
+  for (const auto *tensor : outputs) {
+    if (tensor == nullptr) {
+      continue;
+    }
+    NVTE_CHECK(tensor->num_tensors == num_tensors,
+               "Grouped GEMM: outputs must have the same number of tensors as inputs");
+    NVTE_CHECK(is_output_dtype(tensor->dtype()),
+               "Grouped GEMM: outputs must be BF16, FP16, or FP32.");
+  }
 }
 
 inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
@@ -1056,12 +1049,14 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
  // Parse config (if provided)
  GroupedMatmulConfig config_ = parse_grouped_gemm_config(config);
 
- // Validate inputs and num_tensors; returns dtype properties shared by A and B.
- validate_grouped_gemm_inputs(inputA, inputB, inputC_raw, outputD, alpha_tensor, beta_tensor);
+ // Validate inputs and outputs.
+ const size_t num_tensors =
+     validate_grouped_gemm_inputs(inputA->num_tensors, {inputA, inputB}, alpha_tensor, beta_tensor);
+ validate_grouped_gemm_outputs(num_tensors, {inputC_raw, outputD});
 
  // If C is NULL, use D as C (valid when beta=0, cuBLAS won't read C data)
  const GroupedTensor *inputC = (inputC_raw != nullptr) ? inputC_raw : outputD;
- const size_t num_tensors = inputA->num_tensors;
+ // num_tensors validated above.
  // Select operand storage (row-wise vs column-wise) and adjust transpose flags to
  // mirror the non-grouped GEMM logic for FP8 layout constraints.
  auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
@@ -1115,24 +1110,10 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
  // Parse config (if provided)
  GroupedMatmulConfig config_ = parse_grouped_gemm_config(config);
 
- // Validate inputs and num_tensors
- const size_t num_tensors =
-     validate_grouped_gemm_input_list(num_a_tensors, {inputB}, alpha_tensor, beta_tensor,
-                                      "Grouped GEMM: B must be FP8, BF16, or FP16.");
- auto is_output_dtype = [](transformer_engine::DType dtype) {
-   return dtype == transformer_engine::DType::kBFloat16 ||
-          dtype == transformer_engine::DType::kFloat16 ||
-          dtype == transformer_engine::DType::kFloat32;
- };
- if (inputC_raw != nullptr) {
-   NVTE_CHECK(inputC_raw->num_tensors == num_tensors,
-              "Grouped GEMM: A_list and C must have the same number of tensors");
-   NVTE_CHECK(is_output_dtype(inputC_raw->dtype()),
-              "Grouped GEMM: C must be BF16, FP16, or FP32.");
- }
- NVTE_CHECK(outputD->num_tensors == num_tensors,
-            "Grouped GEMM: A_list and D must have the same number of tensors");
- NVTE_CHECK(is_output_dtype(outputD->dtype()), "Grouped GEMM: D must be BF16, FP16, or FP32.");
+  // Validate inputs and outputs.
+  const size_t num_tensors =
+      validate_grouped_gemm_inputs(num_a_tensors, {inputB}, alpha_tensor, beta_tensor);
+  validate_grouped_gemm_outputs(num_tensors, {inputC_raw, outputD});
 
  // If C is NULL, use D as C (valid when beta=0, cuBLAS won't read C data)
  const GroupedTensor *inputC = (inputC_raw != nullptr) ? inputC_raw : outputD;
@@ -1150,6 +1131,20 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
  };
  NVTE_CHECK(is_fp8_or_16bit(A_list_info.all_row ? A_list_info.row_dtype : A_list_info.col_dtype),
             "Grouped GEMM: A_list tensors must be FP8, BF16, or FP16.");
+
+  // Cross-operand consistency (mirrors validate_grouped_gemm_inputs).
+  const DType a_rep_dtype = A_list_info.all_row ? A_list_info.row_dtype : A_list_info.col_dtype;
+  NVTE_CHECK(is_fp8_dtype(a_rep_dtype) == is_fp8_dtype(inputB->dtype()),
+             "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
+  NVTE_CHECK(transformer_engine::is_mxfp_scaling(A_list_info.scaling_mode) ==
+                 transformer_engine::is_mxfp_scaling(inputB->scaling_mode),
+             "Grouped GEMM: A and B must both use MXFP8 scaling or both use tensor scaling.");
+  if (transformer_engine::is_mxfp_scaling(A_list_info.scaling_mode)) {
+    NVTE_CHECK(A_list_info.with_gemm_swizzled_scales,
+               "MXFP8 grouped GEMM: A scales must be swizzled for GEMM.");
+    NVTE_CHECK(inputB->with_gemm_swizzled_scales,
+               "MXFP8 grouped GEMM: B scales must be swizzled for GEMM.");
+  }
 
  // Select operand storage for B (row-wise vs column-wise)
  auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
@@ -1238,9 +1233,8 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
  const Tensor *d0 = convertNVTETensorCheck(D_list[0]);
  const DType d_dtype = d0->dtype();
 
- const size_t num_tensors = validate_grouped_gemm_input_list(
-     inputA->num_tensors, {inputA, inputB}, alpha_tensor, beta_tensor,
-     "Grouped GEMM inputs must be FP8, BF16, or FP16.");
+  const size_t num_tensors =
+      validate_grouped_gemm_inputs(inputA->num_tensors, {inputA, inputB}, alpha_tensor, beta_tensor);
  NVTE_CHECK(num_d_tensors == num_tensors, "Grouped GEMM: D_list must have num_tensors (",
             num_tensors, ") entries, got ", num_d_tensors);
  if (num_c_tensors > 0) {
