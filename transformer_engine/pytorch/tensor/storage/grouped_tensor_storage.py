@@ -649,7 +649,9 @@ class GroupedTensorStorage:
             offsets=offsets,
             scale_inv_offsets=scale_inv_offsets,
             columnwise_scale_inv_offsets=columnwise_scale_inv_offsets,
-            with_gemm_swizzled_scales=quantizer.optimize_for_gemm if quantizer is not None else False,
+            with_gemm_swizzled_scales=(
+                quantizer.optimize_for_gemm if quantizer is not None else False
+            ),
         )
 
         grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()

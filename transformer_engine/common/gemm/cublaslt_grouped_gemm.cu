@@ -28,8 +28,8 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 
 }  // namespace
 
-// MXFP8 support for grouped GEMM requires cuBLAS 13.3+
-#define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130100
+// MXFP8 support for grouped GEMM requires cuBLAS 13.2+
+#define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130200
 
 #if CUBLAS_VERSION >= 130200
 
@@ -247,10 +247,9 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
                                          const transformer_engine::GroupedTensor *outputD,
                                          const transformer_engine::Tensor *alpha_tensor,
                                          const transformer_engine::Tensor *beta_tensor) {
-  const size_t num_tensors =
-      validate_grouped_gemm_input_list(inputA->num_tensors, {inputA, inputB}, alpha_tensor,
-                                       beta_tensor,
-                                       "Grouped GEMM inputs must be FP8, BF16, or FP16.");
+  const size_t num_tensors = validate_grouped_gemm_input_list(
+      inputA->num_tensors, {inputA, inputB}, alpha_tensor, beta_tensor,
+      "Grouped GEMM inputs must be FP8, BF16, or FP16.");
   auto is_output_dtype = [](transformer_engine::DType dtype) {
     return dtype == transformer_engine::DType::kBFloat16 ||
            dtype == transformer_engine::DType::kFloat16 ||
@@ -766,9 +765,9 @@ inline GroupedGemmWorkspace setup_grouped_gemm_workspace(transformer_engine::Ten
   const size_t setup_workspace_size = grouped_gemm_setup_workspace_size(num_tensors);
   const size_t cublas_workspace_size = kGroupedGemmCublasWorkspaceSize;
   void *setup_workspace_ptr = validate_and_get_workspace_ptr(wspace_setup, setup_workspace_size,
-                                                            "Grouped GEMM setup workspace");
+                                                             "Grouped GEMM setup workspace");
   void *cublas_workspace_ptr = validate_and_get_workspace_ptr(wspace_cublas, cublas_workspace_size,
-                                                             "Grouped GEMM cuBLAS workspace");
+                                                              "Grouped GEMM cuBLAS workspace");
   auto setup_workspace = GroupedGemmSetupWorkspace::from_buffers(
       static_cast<char *>(setup_workspace_ptr), num_tensors);
   return {std::move(setup_workspace), cublas_workspace_ptr, num_tensors};
@@ -778,9 +777,9 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                                  const GroupedOperandSelection &A_sel,
                                  const GroupedOperandSelection &B_sel,
                                  transformer_engine::DType d_dtype, size_t num_tensors,
-                                 bool use_split_accumulator, bool use_fp8,
-                                 int64_t avg_m_val, int64_t avg_n_val, int64_t avg_k_val,
-                                 void *cublas_workspace_ptr, cudaStream_t stream) {
+                                 bool use_split_accumulator, bool use_fp8, int64_t avg_m_val,
+                                 int64_t avg_n_val, int64_t avg_k_val, void *cublas_workspace_ptr,
+                                 cudaStream_t stream) {
   using cublasHandleManager =
       transformer_engine::detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
@@ -1116,8 +1115,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
       config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
   const bool use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
-                       config_.use_split_accumulator, use_fp8,
-                       avg_m_val, avg_n_val, avg_k_val, workspace.cublas_workspace_ptr, stream);
+                       config_.use_split_accumulator, use_fp8, avg_m_val, avg_n_val, avg_k_val,
+                       workspace.cublas_workspace_ptr, stream);
 }
 
 void nvte_grouped_gemm_with_discrete_inputA(
@@ -1270,10 +1269,9 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   const Tensor *d0 = convertNVTETensorCheck(D_list[0]);
   const DType d_dtype = d0->dtype();
 
-  const size_t num_tensors =
-      validate_grouped_gemm_input_list(inputA->num_tensors, {inputA, inputB}, alpha_tensor,
-                                       beta_tensor,
-                                       "Grouped GEMM inputs must be FP8, BF16, or FP16.");
+  const size_t num_tensors = validate_grouped_gemm_input_list(
+      inputA->num_tensors, {inputA, inputB}, alpha_tensor, beta_tensor,
+      "Grouped GEMM inputs must be FP8, BF16, or FP16.");
   NVTE_CHECK(num_d_tensors == num_tensors, "Grouped GEMM: D_list must have num_tensors (",
              num_tensors, ") entries, got ", num_d_tensors);
   if (num_c_tensors > 0) {
@@ -1314,8 +1312,9 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   int64_t avg_k_val =
       config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
   const bool use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
-  execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors, config_.use_split_accumulator, use_fp8, avg_m_val,
-                       avg_n_val, avg_k_val, workspace.cublas_workspace_ptr, stream);
+  execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors,
+                       config_.use_split_accumulator, use_fp8, avg_m_val, avg_n_val, avg_k_val,
+                       workspace.cublas_workspace_ptr, stream);
 }
 
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,

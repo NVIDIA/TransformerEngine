@@ -641,10 +641,9 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
   [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
 
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb,
-                      grouped_D.data(), grouped_D.data(), gemm_config.te_alpha.data(),
-                      gemm_config.te_beta.data(), gemm_config.te_workspace_setup.data(),
-                      gemm_config.te_workspace_cublas.data(),
+    nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb, grouped_D.data(),
+                      grouped_D.data(), gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
+                      gemm_config.te_workspace_setup.data(), gemm_config.te_workspace_cublas.data(),
                       gemm_config.matmul_config.has_value()
                           ? static_cast<NVTEGroupedMatmulConfig>(*gemm_config.matmul_config)
                           : nullptr,
@@ -662,10 +661,12 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
   return py::reinterpret_borrow<py::object>(D);
 }
 
-py::object te_general_grouped_gemm_for_discrete_in(
-    py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
-    at::Tensor alpha, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
-    bool use_split_accumulator, int math_sm_count) {
+py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py::handle B,
+                                                   bool transb, py::handle D, py::object bias,
+                                                   at::Tensor alpha, at::Tensor beta,
+                                                   at::Tensor workspace_setup,
+                                                   at::Tensor workspace_cublas,
+                                                   bool use_split_accumulator, int math_sm_count) {
   using namespace transformer_engine::pytorch::detail;
 
   init_extension();
@@ -706,9 +707,15 @@ py::object te_general_grouped_gemm_for_discrete_in(
   [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
 
   NVTE_SCOPED_GIL_RELEASE({
+<<<<<<< HEAD
     nvte_grouped_gemm_with_discrete_inputA(
         te_A_vector.data(), num_tensors, transa, grouped_B.data(), transb,
         grouped_D.data(), grouped_D.data(), gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
+=======
+    nvte_grouped_gemm_with_discrete_in(
+        te_A_vector.data(), num_tensors, transa, grouped_B.data(), transb, grouped_D.data(),
+        grouped_D.data(), gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
+>>>>>>> f1e0a3e080e14a27d52890d43aaa55d4ff10aac3
         gemm_config.te_workspace_setup.data(), gemm_config.te_workspace_cublas.data(),
         gemm_config.matmul_config.has_value()
             ? static_cast<NVTEGroupedMatmulConfig>(*gemm_config.matmul_config)
@@ -727,10 +734,12 @@ py::object te_general_grouped_gemm_for_discrete_in(
   return py::reinterpret_borrow<py::object>(D);
 }
 
-py::object te_general_grouped_gemm_for_discrete_out(
-    py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
-    at::Tensor alpha, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
-    bool use_split_accumulator, int math_sm_count) {
+py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, py::handle B,
+                                                    bool transb, py::handle D, py::object bias,
+                                                    at::Tensor alpha, at::Tensor beta,
+                                                    at::Tensor workspace_setup,
+                                                    at::Tensor workspace_cublas,
+                                                    bool use_split_accumulator, int math_sm_count) {
   using namespace transformer_engine::pytorch::detail;
 
   init_extension();
@@ -771,10 +780,9 @@ py::object te_general_grouped_gemm_for_discrete_out(
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_out(
-        grouped_A.data(), transa, grouped_B.data(), transb, te_D_vector.data(),
-        num_tensors, te_D_vector.data(), num_tensors, gemm_config.te_alpha.data(),
-        gemm_config.te_beta.data(), gemm_config.te_workspace_setup.data(),
-        gemm_config.te_workspace_cublas.data(),
+        grouped_A.data(), transa, grouped_B.data(), transb, te_D_vector.data(), num_tensors,
+        te_D_vector.data(), num_tensors, gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
+        gemm_config.te_workspace_setup.data(), gemm_config.te_workspace_cublas.data(),
         gemm_config.matmul_config.has_value()
             ? static_cast<NVTEGroupedMatmulConfig>(*gemm_config.matmul_config)
             : nullptr,

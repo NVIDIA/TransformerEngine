@@ -2911,7 +2911,11 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
         bias_last_dim = n
     else:  # layout == "NT" or "NN"
         bias_last_dim = k
-    bias = [torch.randn(1, bias_last_dim, dtype=dtype, device="cuda") for _ in range(z)] if case != "discrete_out" else None
+    bias = (
+        [torch.randn(1, bias_last_dim, dtype=dtype, device="cuda") for _ in range(z)]
+        if case != "discrete_out"
+        else None
+    )
     # Bias add in grouped kernel accumulates in FP32 for BF16/FP16.
     out_ref = (
         [(o.float() + b.float()).to(dtype) for o, b in zip(out_ref_no_bias, bias)]
@@ -2926,23 +2930,31 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
     grouped_out_no_bias = [o.clone() for o in out]
     grouped_bias = None
     if layout == "TN":
-        grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype) if case != "discrete_in" else A # weight
+        grouped_A = (
+            _make_grouped_tensor_uniform(z, n, k, device, dtype) if case != "discrete_in" else A
+        )  # weight
         grouped_B = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)  # input
         if case != "discrete_out":
-            grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype) # output
+            grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # output
             grouped_out_bias = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
             grouped_out_no_bias = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
     elif layout == "NN":
-        grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype) if case != "discrete_in" else A # weight
+        grouped_A = (
+            _make_grouped_tensor_uniform(z, n, k, device, dtype) if case != "discrete_in" else A
+        )  # weight
         grouped_B = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # grad_output
         if case != "discrete_out":
             grouped_out = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
             grouped_out_bias = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
             grouped_out_no_bias = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
     else:  # layout == "NT"
-        grouped_A = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype) if case != "discrete_in" else A # input
+        grouped_A = (
+            _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+            if case != "discrete_in"
+            else A
+        )  # input
         grouped_B = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # grad_output
-        if case != "discrete_out": 
+        if case != "discrete_out":
             grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)  # wgrad
             grouped_out_bias = _make_grouped_tensor_uniform(z, n, k, device, dtype)
             grouped_out_no_bias = _make_grouped_tensor_uniform(z, n, k, device, dtype)
@@ -2957,7 +2969,6 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
     if bias is not None:
         grouped_bias = _make_grouped_tensor_uniform(z, 1, bias_last_dim, device, dtype)
         _pack_grouped_tensor(grouped_bias, bias)
-
 
     general_grouped_gemm_for_grouped_tensor(
         grouped_A,
@@ -2997,6 +3008,7 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
     if bias is not None:
         for o, o_ref in zip(out_grouped_bias, out_grouped_manual_bias):
             torch.testing.assert_close(o, o_ref, **tols)
+
 
 def _make_grouped_tensor_quantized_mxfp8(
     tensors: List[torch.Tensor],
@@ -3068,9 +3080,7 @@ def test_grouped_gemm_grouped_tensor_mxfp8(shape, accumulate, layout: str, dtype
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    grouped_A = _make_grouped_tensor_quantized_mxfp8(
-        A, is_a=True, transposed=transa, device="cuda"
-    )
+    grouped_A = _make_grouped_tensor_quantized_mxfp8(A, is_a=True, transposed=transa, device="cuda")
     grouped_B = _make_grouped_tensor_quantized_mxfp8(
         B, is_a=False, transposed=transb, device="cuda"
     )
@@ -3109,7 +3119,7 @@ def test_grouped_gemm_grouped_tensor_mxfp8(shape, accumulate, layout: str, dtype
     )
 
     out_grouped = grouped_out.split_into_quantized_tensors()
-    tols = dict(rtol=0.125, atol=0.0675) #mxfp8 tolerance
+    tols = dict(rtol=0.125, atol=0.0675)  # mxfp8 tolerance
 
     for o, o_ref in zip(out_grouped, out_ref):
         torch.testing.assert_close(o, o_ref, **tols)

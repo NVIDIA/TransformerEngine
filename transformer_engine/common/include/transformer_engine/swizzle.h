@@ -76,8 +76,8 @@ void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input,
  *  - data is quantitized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  *  - all tensors in the grouped tensor must have the same shape.
  */
- void nvte_swizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-    cudaStream_t stream);
+void nvte_swizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                          cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
