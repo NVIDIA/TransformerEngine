@@ -10,6 +10,8 @@ from typing import Any, Dict, Tuple, Union
 import pytest
 import torch
 
+import cudnn
+
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, get_fp8_te_dtype
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
@@ -100,8 +102,20 @@ if is_bf16_available():
 param_types_lean = [torch.bfloat16]
 
 
-def _identity_score_mod(_graph, score_tensor):
+def _identity_score_mod(sdpa_graph, score_tensor):
     return score_tensor
+
+def foo_score_mod(sdpa_graph, q_kt_tensor):
+    row_index = sdpa_graph.gen_index(input=q_kt_tensor, axis=2)
+    row_index.set_data_type(cudnn.data_type.INT32)
+
+    col_index = sdpa_graph.gen_index(input=q_kt_tensor, axis=3)
+    col_index.set_data_type(cudnn.data_type.INT32)
+
+    d = sdpa_graph.sub(row_index, col_index)
+    ret = sdpa_graph.add(q_kt_tensor, d)
+    return ret
+
 
 
 model_configs_base = {
@@ -1448,7 +1462,7 @@ def test_fused_attn_score_mod_smoke():
         qkv_layout="bshd_bshd_bshd",
         attn_mask_type="no_mask",
         dropout=0.0,
-        score_mod=_identity_score_mod,
+        score_mod=foo_score_mod,
     )
 
     dq, dk, dv, *_ = fused_attn_bwd(
