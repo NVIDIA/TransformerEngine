@@ -205,10 +205,25 @@ struct GroupedGemmSetupWorkspace {
 // -----------------------------------------------------------------------------
 // Helper routines to keep nvte_grouped_gemm readable
 // -----------------------------------------------------------------------------
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
 inline size_t validate_grouped_gemm_input_list(
     size_t num_tensors, std::initializer_list<const transformer_engine::GroupedTensor *> inputs,
     const transformer_engine::Tensor *alpha_tensor, const transformer_engine::Tensor *beta_tensor,
     const char *dtype_error) {
+=======
+struct GroupedGemmInputProperties {
+  bool is_fp8;
+  bool is_mxfp8;
+};
+
+inline GroupedGemmInputProperties validate_grouped_gemm_inputs(
+    const transformer_engine::GroupedTensor *inputA,
+    const transformer_engine::GroupedTensor *inputB,
+    const transformer_engine::GroupedTensor *inputC,
+    const transformer_engine::GroupedTensor *outputD,
+    const transformer_engine::Tensor *alpha_tensor, const transformer_engine::Tensor *beta_tensor) {
+  const size_t num_tensors = inputA->num_tensors;
+>>>>>>> main
   NVTE_CHECK(num_tensors >= 1, "Grouped GEMM: number of tensors must be at least 1");
   for (const auto *tensor : inputs) {
     NVTE_CHECK(tensor->num_tensors == num_tensors,
@@ -225,8 +240,7 @@ inline size_t validate_grouped_gemm_input_list(
   auto is_supported_input_dtype = [](transformer_engine::DType dtype) {
     return dtype == transformer_engine::DType::kFloat8E4M3 ||
            dtype == transformer_engine::DType::kFloat8E5M2 ||
-           dtype == transformer_engine::DType::kBFloat16 ||
-           dtype == transformer_engine::DType::kFloat16;
+           dtype == transformer_engine::DType::kBFloat16;
   };
   bool dtype_ok = true;
   for (const auto *tensor : inputs) {
@@ -251,9 +265,9 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
       "Grouped GEMM inputs must be FP8, BF16, or FP16.");
   auto is_output_dtype = [](transformer_engine::DType dtype) {
     return dtype == transformer_engine::DType::kBFloat16 ||
-           dtype == transformer_engine::DType::kFloat16 ||
            dtype == transformer_engine::DType::kFloat32;
   };
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
   // C can be NULL (will use D as C when beta=0)
   if (inputC != nullptr) {
     NVTE_CHECK(inputC->num_tensors == num_tensors,
@@ -285,6 +299,34 @@ inline transformer_engine::GroupedMatmulConfig parse_grouped_gemm_config(
     config_ = *reinterpret_cast<transformer_engine::GroupedMatmulConfig *>(config);
   }
   return config_;
+=======
+  NVTE_CHECK(is_supported_input_dtype(inputA->dtype()) && is_supported_input_dtype(inputB->dtype()),
+             "Grouped GEMM inputs must be FP8 or BF16.");
+  NVTE_CHECK(is_fp8_dtype(inputA->dtype()) == is_fp8_dtype(inputB->dtype()),
+             "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
+  NVTE_CHECK(transformer_engine::is_mxfp_scaling(inputA->scaling_mode) ==
+                 transformer_engine::is_mxfp_scaling(inputB->scaling_mode),
+             "Grouped GEMM: A and B must both use MXFP8 scaling or both use tensor scaling, "
+             "mixed configurations are not supported.");
+  const bool is_fp8 = is_fp8_dtype(inputA->dtype());
+  const bool is_mxfp8 = transformer_engine::is_mxfp_scaling(inputA->scaling_mode);
+  if (is_mxfp8) {
+    NVTE_CHECK(inputA->with_gemm_swizzled_scales,
+               "MXFP8 grouped GEMM: A scales must be swizzled for GEMM");
+    NVTE_CHECK(inputB->with_gemm_swizzled_scales,
+               "MXFP8 grouped GEMM: B scales must be swizzled for GEMM");
+  }
+  // Only check C dtype if C is provided
+  if (inputC != nullptr) {
+    NVTE_CHECK(is_output_dtype(inputC->dtype()), "Grouped GEMM: C must be BF16 or FP32.");
+  }
+  NVTE_CHECK(is_output_dtype(outputD->dtype()), "Grouped GEMM: D must be BF16 or FP32.");
+  NVTE_CHECK(inputA->has_data() || inputA->has_columnwise_data(),
+             "Grouped GEMM: A tensor is missing both row-wise and column-wise data");
+  NVTE_CHECK(inputB->has_data() || inputB->has_columnwise_data(),
+             "Grouped GEMM: B tensor is missing both row-wise and column-wise data");
+  return {is_fp8, is_mxfp8};
+>>>>>>> main
 }
 
 // Select row-wise vs column-wise storage and adjust transpose flag for grouped GEMM.
@@ -562,6 +604,8 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   sel.scaling_mode = sm;
   sel.with_gemm_swizzled_scales = t->with_gemm_swizzled_scales;
   sel.trans = trans;
+  sel.scaling_mode = sm;
+  sel.with_gemm_swizzled_scales = t->with_gemm_swizzled_scales;
 
   const DType rep_dtype = has_row ? row_dtype : col_dtype;
   const bool is_fp8 = is_fp8_dtype(rep_dtype);
@@ -586,6 +630,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
     sel.shape = create_shape_info(t, /*swap_dims=*/false);
   };
 
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
   const auto choice = choose_grouped_operand_storage(trans, is_A, mxfp8, is_fp8, non_tn_fp8_ok,
                                                      has_row, has_col, is_A ? "A" : "B");
   sel.trans = choice.trans;
@@ -593,6 +638,58 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
     use_rowwise();
   } else {
     use_columnwise(choice.swap_dims);
+=======
+  // MXFP8: Row-wise and column-wise data are scaled along different dimensions.
+  if (mxfp8) {
+    if (is_A) {
+      if (trans) {
+        NVTE_CHECK(has_row, "Grouped GEMM: MXFP8 transposed A is missing row-wise data");
+        use_rowwise();
+      } else {
+        NVTE_CHECK(has_col, "Grouped GEMM: MXFP8 non-transposed A is missing column-wise data");
+        use_columnwise(/*swap_dims=*/false);
+      }
+    } else {  // B
+      if (trans) {
+        NVTE_CHECK(has_col, "Grouped GEMM: MXFP8 transposed B is missing column-wise data");
+        use_columnwise(/*swap_dims=*/false);
+      } else {
+        NVTE_CHECK(has_row, "Grouped GEMM: MXFP8 non-transposed B is missing row-wise data");
+        use_rowwise();
+      }
+    }
+    return sel;
+  }
+
+  // Hopper-style TN-only FP8: force TN by switching layout and flipping transpose when needed.
+  if (is_fp8 && !non_tn_fp8_ok) {
+    if (is_A) {
+      if (!sel.trans) {
+        NVTE_CHECK(has_col, "Grouped GEMM: A is missing column-wise data needed for FP8 TN layout");
+        use_columnwise();
+        sel.trans = true;  // using pre-transposed storage
+        return sel;
+      }
+    } else {  // B
+      if (sel.trans) {
+        NVTE_CHECK(has_col, "Grouped GEMM: B is missing column-wise data needed for FP8 TN layout");
+        use_columnwise();
+        sel.trans = false;  // using pre-transposed storage
+        return sel;
+      }
+    }
+  }
+
+  // If only column-wise data is available, mirror the transpose flag (pre-transposed storage).
+  if (!has_row && has_col) {
+    // On Hopper FP8, this would break TN requirement - should have been handled above
+    NVTE_CHECK(
+        !is_fp8 || non_tn_fp8_ok,
+        "Grouped GEMM: FP8 on Hopper requires row-wise data for this transpose configuration");
+    use_columnwise();
+    sel.trans = !trans;  // flip transpose for pre-transposed storage
+    return sel;
+>>>>>>> main
   }
   return sel;
 }
@@ -646,6 +743,7 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
                                                    CUBLASLT_MATMUL_DESC_BETA_BATCH_STRIDE,
                                                    &alphabeta_batch_stride, sizeof(int64_t)));
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
 
   // Fast accumulation is only supported for FP8 (mirrors non-grouped GEMM logic).
   int8_t fastAccuMode = use_split_accumulator ? 0 : static_cast<int8_t>(use_fp8);
@@ -653,6 +751,15 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
                                                    &fastAccuMode, sizeof(fastAccuMode)));
 }
 
+=======
+
+  // Fast accumulation is only supported for FP8 (mirrors non-grouped GEMM logic).
+  int8_t fastAccuMode = use_split_accumulator ? 0 : static_cast<int8_t>(use_fp8);
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
+                                                   &fastAccuMode, sizeof(fastAccuMode)));
+}
+
+>>>>>>> main
 // Configures cuBLAS for MXFP8 grouped GEMM: sets VEC32_UE8M0 scale mode and scale pointers
 // for both A and B.
 inline void set_mxfp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
@@ -676,6 +783,26 @@ inline void set_mxfp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
   NVTE_CHECK(false, "MXFP8 grouped GEMM requires cuBLAS ", CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
              "+, but compile-time cuBLAS version is ", CUBLAS_VERSION);
 #endif  // CUBLAS_VERSION >= CUBLAS_MXFP8_GROUPED_GEMM_VERSION
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
+=======
+}
+
+// Configures cuBLAS for tensor-scaling FP8 grouped GEMM: sets PER_BATCH_SCALAR_32F scale mode
+// and scale pointers for A and B. Both operands are guaranteed FP8 by the caller.
+inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc, void **a_scale_inv_ptrs,
+                                   void **b_scale_inv_ptrs) {
+  const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_PER_BATCH_SCALAR_32F;
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
+                                                   &scale_mode, sizeof(scale_mode)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                   &a_scale_inv_ptrs, sizeof(a_scale_inv_ptrs)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
+                                                   &scale_mode, sizeof(scale_mode)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                   &b_scale_inv_ptrs, sizeof(b_scale_inv_ptrs)));
+>>>>>>> main
 }
 
 // Configures cuBLAS for tensor-scaling FP8 grouped GEMM: sets PER_BATCH_SCALAR_32F scale mode
@@ -859,12 +986,17 @@ __global__ void setup_grouped_gemm_kernel(
     char *a_base, char *b_base, char *c_base, char *d_base, TensorShapeInfo A_meta,
     TensorShapeInfo B_meta, TensorShapeInfo C_meta, TensorShapeInfo D_meta, size_t a_elem_size,
     size_t b_elem_size, size_t c_elem_size, size_t d_elem_size, float *alpha_ptr, float *beta_ptr,
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
     // Scale inputs: for tensor scaling, pass float* and set mxfp8_base to nullptr
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
     float *a_scale_base, float *b_scale_base, NVTEScalingMode scaling_mode, size_t num_tensors,
     MultiTensorGroupGemmInputArgs a_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs c_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs d_multi_tensor_args) {
+=======
+    // Scale inputs: contiguous scale buffers and the shared scaling recipe for A and B
+    void *a_scale_base, void *b_scale_base, NVTEScalingMode scaling_mode, size_t num_tensors) {
+>>>>>>> main
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_tensors) return;
 
@@ -926,6 +1058,7 @@ __global__ void setup_grouped_gemm_kernel(
   //   otherwise             : one float per tensor, indexed by tensor index
   if (a_scale_base) {
     if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
       a_scale_inv_ptrs[idx] = reinterpret_cast<void *>(
           static_cast<char *>(static_cast<void *>(a_scale_base)) + a_offset / 32);
     } else {
@@ -943,6 +1076,19 @@ __global__ void setup_grouped_gemm_kernel(
     }
   } else {
     b_scale_inv_ptrs[idx] = a_multi_tensor_args.scale_inv_ptrs[idx];
+=======
+      a_scale_inv_ptrs[idx] = static_cast<char *>(a_scale_base) + a_offset / 32;
+    } else {
+      a_scale_inv_ptrs[idx] = static_cast<float *>(a_scale_base) + idx;
+    }
+  }
+  if (b_scale_base) {
+    if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      b_scale_inv_ptrs[idx] = static_cast<char *>(b_scale_base) + b_offset / 32;
+    } else {
+      b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + idx;
+    }
+>>>>>>> main
   }
 }
 
@@ -1007,9 +1153,14 @@ inline void launch_grouped_gemm_setup(
       ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
       A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size,
       b_elem_size, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
       static_cast<float *>(beta_tensor->data.dptr), reinterpret_cast<float *>(A_sel.scale_inv),
       reinterpret_cast<float *>(B_sel.scale_inv), A_sel.scaling_mode, num_tensors,
       a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args);
+=======
+      static_cast<float *>(beta_tensor->data.dptr), A_sel.scale_inv, B_sel.scale_inv,
+      A_sel.scaling_mode, num_tensors);
+>>>>>>> main
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -1046,7 +1197,12 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   GroupedMatmulConfig config_ = parse_grouped_gemm_config(config);
 
   // Validate inputs and num_tensors; returns dtype properties shared by A and B.
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
   validate_grouped_gemm_inputs(inputA, inputB, inputC_raw, outputD, alpha_tensor, beta_tensor);
+=======
+  const auto [is_fp8, is_mxfp8] =
+      validate_grouped_gemm_inputs(inputA, inputB, inputC_raw, outputD, alpha_tensor, beta_tensor);
+>>>>>>> main
 
   // If C is NULL, use D as C (valid when beta=0, cuBLAS won't read C data)
   const GroupedTensor *inputC = (inputC_raw != nullptr) ? inputC_raw : outputD;
@@ -1065,6 +1221,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                             /*C_list=*/nullptr, /*D_list=*/nullptr, A_sel.dptr, inputC->dtype(),
                             outputD->dtype());
 
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
   // Compute average dimensions for heuristics
   // K dimension: if transa, K is A's first dim; if not, K is A's last dim
   // Use original inputA and transa for heuristics (not modified A_sel.trans)
@@ -1077,6 +1234,13 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                        config_.use_split_accumulator, use_fp8, avg_m_val, avg_n_val, avg_k_val,
                        workspace.cublas_workspace_ptr, stream);
 }
+=======
+  auto setup_workspace = GroupedGemmSetupWorkspace::from_buffers(
+      static_cast<char *>(setup_workspace_ptr), num_tensors);
+
+  launch_grouped_gemm_setup(setup_workspace, A_sel, B_sel, inputC, outputD, alpha_tensor,
+                            beta_tensor, num_tensors, stream);
+>>>>>>> main
 
 void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
                                             int transa, const NVTEGroupedTensor B, int transb,
@@ -1093,6 +1257,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   NVTE_CHECK(A_list != nullptr, "Grouped GEMM: A_list is null.");
   NVTE_CHECK(num_a_tensors > 0, "Grouped GEMM: num_a_tensors must be > 0.");
 
+<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
   const GroupedTensor *inputB = convertNVTEGroupedTensorCheck(B);
   const GroupedTensor *inputC_raw = convertNVTEGroupedTensor(C);  // Can be NULL
   GroupedTensor *outputD = convertNVTEGroupedTensorCheck(D);
@@ -1185,6 +1350,18 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
                             beta_tensor, num_tensors, stream, a_multi_tensor_args,
                             /*C_list=*/nullptr, /*D_list=*/nullptr, nullptr, inputC->dtype(),
                             outputD->dtype());
+=======
+  // Create matmul descriptor
+  cublasLtMatmulDescOpaque_t matmulDesc;
+  init_matmul_desc(matmulDesc, op_A, op_B, is_fp8, config_.use_split_accumulator);
+  if (is_mxfp8) {
+    set_mxfp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
+                             setup_workspace.b_scale_inv_ptrs);
+  } else if (is_fp8) {
+    set_fp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
+                           setup_workspace.b_scale_inv_ptrs);
+  }
+>>>>>>> main
 
   // Compute average dimensions for heuristics
   int64_t avg_m_val = config_.avg_m.value_or(compute_avg_first_dim(outputD));
