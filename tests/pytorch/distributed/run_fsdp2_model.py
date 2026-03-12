@@ -548,6 +548,22 @@ def _train(args):
         loss.backward()
         optimizer.step()
 
+    # Verify model weights have diverged from the original
+    # model state after extra training steps.
+    s_post_train = model.state_dict()
+    for key in s1.keys() & s_post_train.keys():
+        if key.endswith("_extra_state"):
+            continue
+        v1 = s1[key]
+        if isinstance(v1, DTensor):
+            v1 = v1.to_local()
+        v_pt = s_post_train[key]
+        if isinstance(v_pt, DTensor):
+            v_pt = v_pt.to_local()
+        assert not torch.allclose(v1, v_pt), (
+            f"[{key}] Model weights should have changed after extra training steps"
+        )
+
     # Load the checkpoint.
     state_dict = {"app": AppState(model=model, optimizer=optimizer)}
     torch.distributed.checkpoint.load(state_dict=state_dict, checkpoint_id=str(CKPT_DIR))
