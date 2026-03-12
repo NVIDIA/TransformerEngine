@@ -860,8 +860,8 @@ __global__ void setup_grouped_gemm_kernel(
     size_t b_elem_size, size_t c_elem_size, size_t d_elem_size, float *alpha_ptr, float *beta_ptr,
     // Scale inputs: for tensor scaling, pass float* and set mxfp8_base to nullptr
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
-    float *a_scale_base, float *b_scale_base, NVTEScalingMode scaling_mode,
-    size_t num_tensors, MultiTensorGroupGemmInputArgs a_multi_tensor_args,
+    float *a_scale_base, float *b_scale_base, NVTEScalingMode scaling_mode, size_t num_tensors,
+    MultiTensorGroupGemmInputArgs a_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs c_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs d_multi_tensor_args) {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -925,26 +925,22 @@ __global__ void setup_grouped_gemm_kernel(
   //   otherwise             : one float per tensor, indexed by tensor index
   if (a_scale_base) {
     if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-      a_scale_inv_ptrs[idx] =
-          reinterpret_cast<void *>(static_cast<char *>(static_cast<void *>(a_scale_base)) +
-                                   a_offset / 32);
+      a_scale_inv_ptrs[idx] = reinterpret_cast<void *>(
+          static_cast<char *>(static_cast<void *>(a_scale_base)) + a_offset / 32);
     } else {
       a_scale_inv_ptrs[idx] = static_cast<float *>(a_scale_base) + idx;
     }
-  }
-  else {
+  } else {
     a_scale_inv_ptrs[idx] = a_multi_tensor_args.scale_inv_ptrs[idx];
   }
   if (b_scale_base) {
     if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-      b_scale_inv_ptrs[idx] =
-          reinterpret_cast<void *>(static_cast<char *>(static_cast<void *>(b_scale_base)) +
-                                   b_offset / 32);
+      b_scale_inv_ptrs[idx] = reinterpret_cast<void *>(
+          static_cast<char *>(static_cast<void *>(b_scale_base)) + b_offset / 32);
     } else {
       b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + idx;
     }
-  }
-  else {
+  } else {
     b_scale_inv_ptrs[idx] = a_multi_tensor_args.scale_inv_ptrs[idx];
   }
 }
@@ -1010,9 +1006,9 @@ inline void launch_grouped_gemm_setup(
       ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
       A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size,
       b_elem_size, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
-      static_cast<float *>(beta_tensor->data.dptr),
-      reinterpret_cast<float *>(A_sel.scale_inv), reinterpret_cast<float *>(B_sel.scale_inv),
-      A_sel.scaling_mode, num_tensors, a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args);
+      static_cast<float *>(beta_tensor->data.dptr), reinterpret_cast<float *>(A_sel.scale_inv),
+      reinterpret_cast<float *>(B_sel.scale_inv), A_sel.scaling_mode, num_tensors,
+      a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
