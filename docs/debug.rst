@@ -1,0 +1,16 @@
+..
+    Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+    See LICENSE for license information.
+
+Precision debug tools
+=====================
+
+.. toctree::
+   :caption: Precision debug tools
+
+   debug/1_getting_started.rst
+   debug/2_config_file_structure.rst
+   debug/api
+   debug/4_distributed.rst
+   debug/5_custom_feature_tutorial.ipynb

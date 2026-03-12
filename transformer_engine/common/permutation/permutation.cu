@@ -1,10 +1,12 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <transformer_engine/permutation.h>
+
+#include <cub/cub.cuh>
 
 #include "../common.h"
 
@@ -241,11 +243,13 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
 
     moe_permute_row_map<<<blocks, threads, 0, stream>>>(sorted_row_id, row_id_map, num_rows, topK,
                                                         num_out_tokens);
+    NVTE_CHECK_CUDA(cudaGetLastError());
 
     blocks = num_rows;
     threads = std::min(num_cols / kElementsPerAccess, 1024);
     moe_permute_kernel<T, TCompute, 128, false><<<blocks, threads, 0, stream>>>(
         input, nullptr, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     // moe_unpermute_bwd
 
@@ -257,6 +261,7 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
 
       moe_permute_kernel<T, TCompute, 1, false><<<blocks, threads, 0, stream>>>(
           input, input_fwd, output, nullptr, nullptr, row_id_map, num_rows, topK, num_cols);
+      NVTE_CHECK_CUDA(cudaGetLastError());
     } else {
       // moe_unpermute_bwd with probs
 
@@ -280,6 +285,7 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
       } else {
         NVTE_ERROR("topK cannot exceed 128.");
       }
+      NVTE_CHECK_CUDA(cudaGetLastError());
     }
   }
 }
@@ -304,11 +310,13 @@ void nvte_unpermute_launcher(const T *input, T *output, int *row_id_map, const f
 
     moe_unpermute_kernel<T, TCompute, false><<<blocks, threads, smem_bytes, stream>>>(
         input, output, row_id_map, nullptr, num_rows, topK, num_cols);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     // moe_unpermute_fwd with probs
 
     moe_unpermute_kernel<T, TCompute, true><<<blocks, threads, smem_bytes, stream>>>(
         input, output, row_id_map, prob, num_rows, topK, num_cols);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -316,24 +324,18 @@ void nvte_permute(const NVTETensor input, NVTETensor output, const NVTETensor so
                   NVTETensor row_id_map, const NVTETensor prob, NVTETensor prob_grad,
                   const NVTETensor input_fwd, const int num_rows, const int topK,
                   const int num_cols, const int num_out_tokens, cudaStream_t stream) {
+  using namespace transformer_engine;
   NVTE_API_CALL(nvte_permute);
 
-  const transformer_engine::Tensor *input_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(input);
-  const transformer_engine::Tensor *output_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(output);
-  const transformer_engine::Tensor *sorted_row_id_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(sorted_row_id);
-  const transformer_engine::Tensor *row_id_map_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(row_id_map);
-  const transformer_engine::Tensor *prob_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(prob);
-  const transformer_engine::Tensor *prob_grad_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(prob_grad);
-  const transformer_engine::Tensor *input_fwd_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(input_fwd);
+  const Tensor *input_cu = convertNVTETensorCheck(input);
+  const Tensor *output_cu = convertNVTETensorCheck(output);
+  const Tensor *sorted_row_id_cu = convertNVTETensorCheck(sorted_row_id);
+  const Tensor *row_id_map_cu = convertNVTETensorCheck(row_id_map);
+  const Tensor *prob_cu = convertNVTETensorCheck(prob);
+  const Tensor *prob_grad_cu = convertNVTETensorCheck(prob_grad);
+  const Tensor *input_fwd_cu = convertNVTETensorCheck(input_fwd);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,
       nvte_permute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
                             reinterpret_cast<T *>(output_cu->data.dptr),
@@ -348,22 +350,27 @@ void nvte_permute(const NVTETensor input, NVTETensor output, const NVTETensor so
 void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id_map,
                     const NVTETensor prob, const int num_rows, const int topK, const int num_cols,
                     cudaStream_t stream) {
+  using namespace transformer_engine;
   NVTE_API_CALL(nvte_unpermute);
 
-  const transformer_engine::Tensor *input_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(input);
-  const transformer_engine::Tensor *output_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(output);
-  const transformer_engine::Tensor *row_id_map_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(row_id_map);
-  const transformer_engine::Tensor *prob_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(prob);
+  const Tensor *input_cu = convertNVTETensorCheck(input);
+  const Tensor *output_cu = convertNVTETensorCheck(output);
+  const Tensor *row_id_map_cu = convertNVTETensorCheck(row_id_map);
+  const Tensor *prob_cu = convertNVTETensorCheck(prob);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,
       nvte_unpermute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
                               reinterpret_cast<T *>(output_cu->data.dptr),
                               reinterpret_cast<int *>(row_id_map_cu->data.dptr),
                               reinterpret_cast<const float *>(prob_cu->data.dptr), num_rows, topK,
                               num_cols, stream););
+}
+
+void nvte_device_radix_sort_pairs(void *temp_storage, size_t *temp_storage_bytes, int *keys_in,
+                                  int *keys_out, int *values_in, int *values_out,
+                                  size_t num_items) {
+  NVTE_API_CALL(nvte_device_radix_sort_pairs);
+  cub::DeviceRadixSort::SortPairs(temp_storage, *temp_storage_bytes, keys_in, keys_out, values_in,
+                                  values_out, num_items);
 }

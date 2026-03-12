@@ -1,0 +1,11 @@
+test_switch_to_nondebug_mode:
+  enabled: True
+  layers:
+    layer_name_regex_pattern: .*
+  transformer_engine:
+    TestDummyFeature:
+      enabled: True
+      inspect_only_once: True
+      tensors: [weight, activation, gradient, output, wgrad, dgrad]
+      gemms: [wgrad, dgrad, fprop]
+

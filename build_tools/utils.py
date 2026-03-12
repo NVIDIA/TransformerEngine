@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -12,21 +12,35 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 from pathlib import Path
+from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
+
+
+# Needs to stay consistent with .pre-commit-config.yaml config.
+def min_python_version() -> Tuple[int]:
+    """Minimum supported Python version."""
+    return (3, 10, 0)
+
+
+def min_python_version_str() -> str:
+    """String representing minimum supported Python version."""
+    return ".".join(map(str, min_python_version()))
+
+
+if sys.version_info < min_python_version():
+    raise RuntimeError(
+        f"Transformer Engine requires Python {min_python_version_str()} or newer, "
+        f"but found Python {platform.python_version()}."
+    )
 
 
 @functools.lru_cache(maxsize=None)
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
-    for arg in sys.argv:
-        if arg == "--debug":
-            sys.argv.remove(arg)
-            return True
-    if int(os.getenv("NVTE_BUILD_DEBUG", "0")):
-        return True
-    return False
+    return bool(int(os.getenv("NVTE_BUILD_DEBUG", "0")))
 
 
 @functools.lru_cache(maxsize=None)
@@ -55,7 +69,7 @@ def all_files_in_dir(path, name_extension=None):
     all_files = []
     for dirname, _, names in os.walk(path):
         for name in names:
-            if name_extension is not None and name_extension not in name:
+            if name_extension is not None and not name.endswith(f".{name_extension}"):
                 continue
             all_files.append(Path(dirname, name))
     return all_files
@@ -162,8 +176,30 @@ def found_pybind11() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def cuda_path() -> Tuple[str, str]:
-    """CUDA root path and NVCC binary path as a tuple.
+def cuda_toolkit_include_path() -> Tuple[str, str]:
+    """Returns root path for cuda toolkit includes.
+
+    return `None` if CUDA is not found."""
+    # Try finding CUDA
+    cuda_home: Optional[Path] = None
+    if cuda_home is None and os.getenv("CUDA_HOME"):
+        # Check in CUDA_HOME
+        cuda_home = Path(os.getenv("CUDA_HOME")) / "include"
+    if cuda_home is None:
+        # Check in NVCC
+        nvcc_bin = shutil.which("nvcc")
+        if nvcc_bin is not None:
+            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc")) / "include"
+    if cuda_home is None:
+        # Last-ditch guess in /usr/local/cuda
+        if Path("/usr/local/cuda").is_dir():
+            cuda_home = Path("/usr/local/cuda") / "include"
+    return cuda_home
+
+
+@functools.lru_cache(maxsize=None)
+def nvcc_path() -> Tuple[str, str]:
+    """Returns the NVCC binary path.
 
     Throws FileNotFoundError if NVCC is not found."""
     # Try finding NVCC
@@ -185,33 +221,85 @@ def cuda_path() -> Tuple[str, str]:
     if not nvcc_bin.is_file():
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
-    return cuda_home, nvcc_bin
+    return nvcc_bin
+
+
+@functools.lru_cache(maxsize=None)
+def get_cuda_include_dirs() -> Tuple[str, str]:
+    """Returns the CUDA header directory."""
+
+    force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
+    # If cuda is installed via toolkit, all necessary headers
+    # are bundled inside the top level cuda directory.
+    if not force_wheels and cuda_toolkit_include_path() is not None:
+        return [cuda_toolkit_include_path()]
+
+    # Use pip wheels to include all headers.
+    try:
+        import nvidia
+    except ModuleNotFoundError as e:
+        raise RuntimeError("CUDA not found.")
+
+    if nvidia.__file__ is not None:
+        cuda_root = Path(nvidia.__file__).parent
+    else:
+        cuda_root = Path(nvidia.__path__[0])  # namespace
+    return [
+        subdir / "include"
+        for subdir in cuda_root.iterdir()
+        if subdir.is_dir() and (subdir / "include").is_dir()
+    ]
 
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
-    return os.getenv("NVTE_CUDA_ARCHS", "70;80;89;90")
+    archs = os.getenv("NVTE_CUDA_ARCHS")
+    if archs is None:
+        version = cuda_version()
+        if version >= (13, 0):
+            archs = "75;80;89;90;100;120"
+        elif version >= (12, 8):
+            archs = "70;80;89;90;100;120"
+        else:
+            archs = "70;80;89;90"
+    return archs
 
 
 def cuda_version() -> Tuple[int, ...]:
-    """CUDA Toolkit version as a (major, minor) tuple."""
-    # Query NVCC for version info
-    _, nvcc_bin = cuda_path()
-    output = subprocess.run(
-        [nvcc_bin, "-V"],
-        capture_output=True,
-        check=True,
-        universal_newlines=True,
-    )
-    match = re.search(r"release\s*([\d.]+)", output.stdout)
-    version = match.group(1).split(".")
-    return tuple(int(v) for v in version)
+    """CUDA Toolkit version as a (major, minor) tuple.
+
+    Try to get cuda version by locating the nvcc executable and running nvcc --version. If
+    nvcc is not found, look for the cuda runtime package pip `nvidia-cuda-runtime-cu12`
+    and check pip version.
+    """
+
+    try:
+        nvcc_bin = nvcc_path()
+    except FileNotFoundError as e:
+        pass
+    else:
+        output = subprocess.run(
+            [nvcc_bin, "-V"],
+            capture_output=True,
+            check=True,
+            universal_newlines=True,
+        )
+        match = re.search(r"release\s*([\d.]+)", output.stdout)
+        version = match.group(1).split(".")
+        return tuple(int(v) for v in version)
+
+    try:
+        version_str = get_version("nvidia-cuda-runtime-cu12")
+        version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
+        return version_tuple
+    except importlib.metadata.PackageNotFoundError:
+        raise RuntimeError("Could neither find NVCC executable nor CUDA runtime Python package.")
 
 
 def get_frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []
-    supported_frameworks = ["pytorch", "jax", "paddle"]
+    supported_frameworks = ["pytorch", "jax"]
 
     # Check environment variable
     if os.getenv("NVTE_FRAMEWORK"):
@@ -237,12 +325,6 @@ def get_frameworks() -> List[str]:
             pass
         else:
             _frameworks.append("jax")
-        try:
-            import paddle
-        except ImportError:
-            pass
-        else:
-            _frameworks.append("paddle")
 
     # Special framework names
     if "all" in _frameworks:
@@ -292,26 +374,3 @@ def copy_common_headers(
         new_path = dst_dir / path.relative_to(src_dir)
         new_path.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(path, new_path)
-
-
-def install_and_import(package):
-    """Install a package via pip (if not already installed) and import into globals."""
-    main_package = package.split("[")[0]
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-    globals()[main_package] = importlib.import_module(main_package)
-
-
-def uninstall_te_wheel_packages():
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "uninstall",
-            "-y",
-            "transformer_engine_cu12",
-            "transformer_engine_torch",
-            "transformer_engine_paddle",
-            "transformer_engine_jax",
-        ]
-    )

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -9,9 +9,10 @@ from typing import Optional
 
 import torch
 
-from ...tensor import Float8Tensor, QuantizedTensor
+from ...distributed import gather_along_first_dim
+from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
-from .._common import convert_tensor
+from ...tensor import Quantizer
 
 
 class ReduceScatter(BasicOperation):
@@ -22,7 +23,7 @@ class ReduceScatter(BasicOperation):
 
     Parameters
     ----------
-    process_group: torch.distributed.ProcessGroup, default = world group
+    process_group : torch.distributed.ProcessGroup, default = world group
         Process group for communication
 
     """
@@ -39,13 +40,13 @@ class ReduceScatter(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
 
         # Trivial case
         if self.process_group_size == 1:
-            return input_
+            return input_.detach()
 
         # Tensor dimensions
         input_dims = input_.size()
@@ -59,10 +60,7 @@ class ReduceScatter(BasicOperation):
         output_dims[0] //= self.process_group_size
 
         # Check input tensor
-        x = input_
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize()
-        x = x.contiguous()
+        x = maybe_dequantize(input_.contiguous())
 
         # Perform reduce-scatter
         y = torch.empty(output_dims, dtype=x.dtype, device=x.device)
@@ -74,47 +72,9 @@ class ReduceScatter(BasicOperation):
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[()]]:
-
-        # Trivial case
+        grad_input: torch.Tensor
         if self.process_group_size == 1:
-            return grad_output, ()
-
-        # Tensor dimensions
-        output_dims = grad_output.size()
-        if not output_dims:
-            raise RuntimeError(
-                "Attempted to all-gather a tensor "
-                f"with shape={list(output_dims)} "
-                f"over {self.process_group_size} processes"
-            )
-        input_dims = list(output_dims)
-        input_dims[0] *= self.process_group_size
-
-        # Perform all-gather
-        dy = convert_tensor(grad_output, memory_format=torch.contiguous_format)
-        dx = None
-        if isinstance(dy, Float8Tensor):
-            dx = Float8Tensor.make_like(
-                dy,
-                data=torch.empty(
-                    input_dims,
-                    dtype=torch.uint8,
-                    device=dy.device,
-                ),
-            )
-            torch.distributed.all_gather_into_tensor(
-                dx._data,
-                dy._data,
-                group=self.process_group,
-            )
+            grad_input = grad_output.detach()
         else:
-            if isinstance(dy, QuantizedTensor):
-                dy = dy.dequantize()
-            dx = torch.empty(input_dims, dtype=dy.dtype, device=dy.device)
-            torch.distributed.all_gather_into_tensor(
-                dx,
-                dy,
-                group=self.process_group,
-            )
-
-        return dx, ()
+            grad_input, _ = gather_along_first_dim(grad_output, self.process_group)
+        return grad_input, ()

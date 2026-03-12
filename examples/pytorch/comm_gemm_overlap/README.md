@@ -16,7 +16,7 @@
 Forward and backward passes with layer weights distributed over all GPUs in a single node.
 
 ```bash
-$ torchrun --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) ln_mlp_with_overlap.py
+$ torchrun --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) te_layer_with_overlap.py
 
 # Sample output on 8x H100s:
 #   [rank0:node0] |-- Created tensor-parallel group: [0, 1, 2, 3, 4, 5, 6, 7]
@@ -70,7 +70,7 @@ Uses `torch.nn.parallel.DistributedDataParallel` for replicatin the model across
 groups in a single node.
 
 ```bash
-$ torchrun --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) ln_mlp_overlap.py --num-replicas 2
+$ torchrun --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) te_layer_with_overlap.py --num-replicas 2
 
 # Sample output on 8x H100s:
 #   [rank0:node0] |-- Created tensor-parallel group: [0, 1, 2, 3]

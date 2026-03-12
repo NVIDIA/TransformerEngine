@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -39,6 +39,25 @@ jobs:
            || github.actor == 'pggPL'
            || github.actor == 'vasunvidia'
            || github.actor == 'erhoo82'
+           || github.actor == 'kocchop'
+           || github.actor == 'youngeunkwon0405'
+           || github.actor == 'KshitijLakhani'
+           || github.actor == 'jberchtold-nvidia'
+           || github.actor == 'sanandaraj5597'
+           || github.actor == 'negvet'
+           || github.actor == 'zhongbozhu'
+           || github.actor == 'kwyss-nvidia'
+           || github.actor == 'BestJuly'
+           || github.actor == 'xiaopoc'
+           || github.actor == 'jreiffers'
+           || github.actor == 'lhb8125'
+           || github.actor == 'kunlunl'
+           || github.actor == 'pstjohn'
+           || github.actor == 'vcherepanov-nv'
+           || github.actor == 'tdophung'
+           || github.actor == 'vthumbe1503'
+           || github.actor == 'shengfangd'
+           || github.actor == 'kainzhong'
          )
     steps:
       - name: Check if comment is issued by authorized person

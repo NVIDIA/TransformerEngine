@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -93,68 +93,107 @@ struct FADescriptor_v1 {
   std::int64_t s_kv;
   std::int64_t d_qk;
   std::int64_t d_v;
+  std::int64_t num_pages_k;
+  std::int64_t num_pages_v;
+  std::int64_t page_size_k;
+  std::int64_t page_size_v;
+  std::int64_t max_pages_per_seq_k;
+  std::int64_t max_pages_per_seq_v;
   std::int64_t bias_b;
   std::int64_t bias_h;
+  std::int64_t bias_sq;
+  std::int64_t bias_skv;
   float attnScale;
   bool isTraining;
   float dropoutProbability;
   NVTE_QKV_Layout layout;
   NVTE_Bias_Type bias_type;
   NVTE_Mask_Type mask_type;
+  NVTE_Softmax_Type softmax_type;
   std::int64_t window_size_left;
   std::int64_t window_size_right;
+  bool bottom_right_diagonal;
   bool deterministic;
-  cudnn_frontend::DataType_t fwd_tensor_type;
-  cudnn_frontend::DataType_t bwd_tensor_type;
+  cudnn_frontend::DataType_t qkv_tensor_type;
+  cudnn_frontend::DataType_t o_tensor_type;
+  cudnn_frontend::DataType_t do_tensor_type;
+  cudnn_frontend::DataType_t dqkv_tensor_type;
+  bool generate_max_sum_exp;
 
   bool operator<(const FADescriptor_v1 &rhs) const {
-    return std::tie(b, h, hg, s_q, s_kv, d_qk, d_v, bias_b, bias_h, attnScale, isTraining,
-                    dropoutProbability, layout, mask_type, window_size_left, window_size_right,
-                    deterministic, bias_type, fwd_tensor_type, bwd_tensor_type) <
-           std::tie(rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d_qk, rhs.d_v, rhs.bias_b,
-                    rhs.bias_h, rhs.attnScale, rhs.isTraining, rhs.dropoutProbability, rhs.layout,
-                    rhs.mask_type, rhs.window_size_left, rhs.window_size_right, rhs.deterministic,
-                    rhs.bias_type, rhs.fwd_tensor_type, rhs.bwd_tensor_type);
+    return std::tie(b, h, hg, s_q, s_kv, d_qk, d_v, num_pages_k, num_pages_v, page_size_k,
+                    page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, bias_sq,
+                    bias_skv, attnScale, isTraining, dropoutProbability, layout, mask_type,
+                    softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
+                    deterministic, bias_type, qkv_tensor_type, o_tensor_type, do_tensor_type,
+                    dqkv_tensor_type, generate_max_sum_exp) <
+           std::tie(rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d_qk, rhs.d_v, rhs.num_pages_k,
+                    rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
+                    rhs.max_pages_per_seq_v, rhs.bias_b, rhs.bias_h, rhs.bias_sq, rhs.bias_skv,
+                    rhs.attnScale, rhs.isTraining, rhs.dropoutProbability, rhs.layout,
+                    rhs.mask_type, rhs.softmax_type, rhs.window_size_left, rhs.window_size_right,
+                    rhs.bottom_right_diagonal, rhs.deterministic, rhs.bias_type,
+                    rhs.qkv_tensor_type, rhs.o_tensor_type, rhs.do_tensor_type,
+                    rhs.dqkv_tensor_type, rhs.generate_max_sum_exp);
   }
 };
 
-__global__ void cu_seqlens_to_offsets(size_t b, size_t h, size_t d, int32_t *cu_seqlens_q,
+__global__ void cu_seqlens_to_offsets(int64_t b, int64_t h, int64_t d, int32_t *cu_seqlens_q,
                                       int32_t *actual_seqlens_q, int32_t *qkv_ragged_offset,
                                       int32_t *o_ragged_offset);
 
-__global__ void cu_seqlens_to_actual_seqlens(size_t b, int32_t const *const q_cu_seqlens,
+__global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
+                                             int32_t const *const q_cu_seqlens,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,
                                              int32_t *kv_seqlens);
 
-__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, size_t b, size_t h,
-                                             size_t hg, size_t d_qk, size_t d_v,
-                                             int32_t *cu_seqlens_q_padded,
-                                             int32_t *cu_seqlens_kv_padded, int32_t *offsets_q,
-                                             int32_t *offsets_k, int32_t *offsets_v,
-                                             int32_t *offsets_o);
-}  // namespace fused_attn
+__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, int64_t actual_b,
+                                             int64_t max_b, int64_t h, int64_t hg, int64_t d_qk,
+                                             int64_t d_v, const int32_t *cu_seqlens_q_padded,
+                                             const int32_t *cu_seqlens_kv_padded,
+                                             DType offset_dtype, void *offsets_q, void *offsets_k,
+                                             void *offsets_v, void *offsets_o, void *offsets_s);
 
-cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t);
-cudnn_frontend::DataType_t get_cudnn_fe_dtype(const transformer_engine::DType t);
+DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_attn_heads,
+                              int64_t num_gqa_groups, int64_t max_seqlen_q, int64_t max_seqlen_kv,
+                              int64_t head_dim_qk, int64_t head_dim_v);
 
-class cudnnExecutionPlanManager {
+size_t get_max_batch_size(size_t batch_size);
+size_t get_max_tokens(size_t num_tokens);
+
+class FusedAttnOffsetManager {
  public:
-  static cudnnExecutionPlanManager &Instance() {
-    static thread_local cudnnExecutionPlanManager instance;
+  static FusedAttnOffsetManager &Instance() {
+    static thread_local FusedAttnOffsetManager instance;
     return instance;
   }
 
-  cudnnHandle_t GetCudnnHandle() {
-    static thread_local std::once_flag flag;
-    std::call_once(flag, [&] { cudnnCreate(&handle_); });
-    return handle_;
+  size_t GetAndUpdateOffset(size_t increment) {
+    size_t ret = offset_;
+    offset_ += increment;
+    return ret;
   }
 
-  ~cudnnExecutionPlanManager() {}
+  FusedAttnOffsetManager(FusedAttnOffsetManager const &) = delete;
+  void operator=(FusedAttnOffsetManager const &) = delete;
 
  private:
-  cudnnHandle_t handle_ = nullptr;
+  FusedAttnOffsetManager() {}
+  size_t offset_ = 0;
 };
+
+__global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t *const seed,
+                                          int64_t offset);
+
+__global__ void get_runtime_num_segments_kernel(int32_t *cu_seqlen, size_t len, uint32_t *out);
+
+void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
+                           size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
+                           cudaStream_t stream);
+
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
+
+}  // namespace fused_attn
 }  // namespace transformer_engine
 
 #endif

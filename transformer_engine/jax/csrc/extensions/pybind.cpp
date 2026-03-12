@@ -1,18 +1,16 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
+#include "../extensions.h"
+#include "cgemm_helper.h"
+#include "common/util/cuda_runtime.h"
+#include "transformer_engine/gemm.h"
 
 namespace transformer_engine {
 namespace jax {
-
-template <typename T>
-pybind11::capsule EncapsulateFunction(T *fn) {
-  return pybind11::capsule(reinterpret_cast<void *>(fn), "xla._CUSTOM_CALL_TARGET");
-}
 
 template <typename T>
 pybind11::capsule EncapsulateFFI(T *fn) {
@@ -23,63 +21,107 @@ pybind11::capsule EncapsulateFFI(T *fn) {
 
 pybind11::dict Registrations() {
   pybind11::dict dict;
-  dict["te_transpose"] = EncapsulateFunction(Transpose);
-  dict["te_cast_transpose"] = EncapsulateFunction(CastTranspose);
 
-  dict["te_act_lu"] = EncapsulateFunction(ActLu);
-  dict["te_act_lu_fp8"] = EncapsulateFunction(ActLuFP8);
-  dict["te_dact_lu"] = EncapsulateFunction(DActLu);
-  dict["te_dbias_cast_transpose"] = EncapsulateFunction(DBiasCastTranspose);
-  dict["te_dact_lu_dbias_cast_transpose"] = EncapsulateFunction(DActLuDBiasCastTranspose);
-  dict["te_dgated_act_lu_cast_transpose"] = EncapsulateFunction(DGatedActLuCastTranspose);
+  // Activation
+  dict["te_act_lu_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(ActLuInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(ActLuHandler));
+  dict["te_dact_dbias_quantize_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(DActLuDBiasQuantizeInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(DActLuDBiasQuantizeHandler));
 
-  dict["te_layernorm_forward"] = EncapsulateFunction(LayerNormForward);
-  dict["te_layernorm_forward_fp8"] = EncapsulateFunction(LayerNormForwardFP8);
-  dict["te_layernorm_backward"] = EncapsulateFunction(LayerNormBackward);
-  dict["te_rmsnorm_forward"] = EncapsulateFunction(RMSNormForward);
-  dict["te_rmsnorm_forward_fp8"] = EncapsulateFunction(RMSNormForwardFP8);
-  dict["te_rmsnorm_backward"] = EncapsulateFunction(RMSNormBackward);
-  dict["te_quantize"] = EncapsulateFunction(Quantize);
-  dict["te_dequantize"] = EncapsulateFunction(Dequantize);
-  dict["te_scaled_softmax_forward"] = EncapsulateFunction(ScaledSoftmaxForward);
-  dict["te_scaled_softmax_backward"] = EncapsulateFunction(ScaledSoftmaxBackward);
-  dict["te_scaled_masked_softmax_forward"] = EncapsulateFunction(ScaledMaskedSoftmaxForward);
-  dict["te_scaled_masked_softmax_backward"] = EncapsulateFunction(ScaledMaskedSoftmaxBackward);
-  dict["te_scaled_upper_triang_masked_softmax_forward"] =
-      EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForward);
-  dict["te_scaled_upper_triang_masked_softmax_backward"] =
-      EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
-  dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
-  dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
+  // Quantization
+  dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
+  dict["te_grouped_quantize_ffi"] = EncapsulateFFI(GroupedQuantizeHandler);
+  dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
-  dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
-  dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
-  dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
+  // Softmax
+  dict["te_scaled_softmax_forward_ffi"] = EncapsulateFFI(ScaledSoftmaxForwardHandler);
+  dict["te_scaled_softmax_backward_ffi"] = EncapsulateFFI(ScaledSoftmaxBackwardHandler);
+  dict["te_scaled_masked_softmax_forward_ffi"] = EncapsulateFFI(ScaledMaskedSoftmaxForwardHandler);
+  dict["te_scaled_masked_softmax_backward_ffi"] =
+      EncapsulateFFI(ScaledMaskedSoftmaxBackwardHandler);
+  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] =
+      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] =
+      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+
+  // Normalization
+  dict["te_norm_forward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormForwardInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(NormForwardHandler));
+  dict["te_norm_backward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormBackwardInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(NormBackwardHandler));
+
+  // Attention
+  dict["te_fused_attn_forward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnForwardHandler));
+  dict["te_fused_attn_backward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
+
+  // GEMM
+  dict["te_gemm_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CollectiveGemmInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
+
+  dict["te_gemm_v2_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(GemmInitV2Handler),
+                     pybind11::arg("execute") = EncapsulateFFI(GemmV2Handler));
+
+  // Grouped GEMM
+  dict["te_grouped_gemm_d2h_group_sizes_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmD2HGroupSizesHandler));
+  dict["te_grouped_gemm_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
+  dict["te_grouped_gemm_v2_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmV2Handler));
+
+  // Amax
+  dict["te_rht_amax_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
+
+  dict["te_inspect_ffi"] =
+      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
+
+  // Router
+  dict["te_fused_topk_with_score_function_forward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionForwardHandler);
+  dict["te_fused_topk_with_score_function_backward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionBackwardHandler);
+  dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
+  dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
+
   return dict;
 }
 
 PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("registrations", &Registrations);
-  m.def("pack_common_descriptor", &PackCustomCallCommonDescriptor, pybind11::arg(), pybind11::arg(),
-        pybind11::arg(), pybind11::arg("act_num") = 0);
-  m.def("pack_common_wk_descriptor", &PackCustomCallCommonWkDescriptor, pybind11::arg(),
-        pybind11::arg(), pybind11::arg(), pybind11::arg(), pybind11::arg(),
-        pybind11::arg("act_num") = 0);
-  m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
-  m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
-  m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
   m.def("get_fused_attn_backend", &GetFusedAttnBackend);
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
+  m.def("get_num_compute_streams", &nvte_get_num_compute_streams);
   m.def("get_cublasLt_version", &cublasLtGetVersion);
-  m.def("get_dact_dbias_ct_workspace_sizes", &GetDActDBiasCastTransposeWorkspaceSizes);
-  m.def("get_dbias_ct_workspace_sizes", &GetDBiasCastTransposeWorkspaceSizes);
-  m.def("get_layernorm_fwd_workspace_sizes", &GetLayerNormForwardWorkspaceSizes);
-  m.def("get_layernorm_bwd_workspace_sizes", &GetLayerNormBackwardWorkspaceSizes);
+  m.def("get_dact_dbias_quantize_workspace_sizes", &GetDActDBiasQuantizeWorkspaceSizes);
+  m.def("get_dbias_quantize_workspace_sizes", &GetDBiasQuantizeWorkspaceSizes);
+  m.def("get_norm_fwd_workspace_sizes", &GetNormForwardWorkspaceSizes);
+  m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
+  m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
+  m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
+  m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
+  m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
@@ -89,7 +131,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("kFloat16", DType::kFloat16)
       .value("kBFloat16", DType::kBFloat16)
       .value("kFloat8E4M3", DType::kFloat8E4M3)
-      .value("kFloat8E5M2", DType::kFloat8E5M2);
+      .value("kFloat8E5M2", DType::kFloat8E5M2)
+      .value("kFloat8E8M0", DType::kFloat8E8M0)
+      .value("kFloat4E2M1", DType::kFloat4E2M1);
 
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
@@ -118,9 +162,15 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
       .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
 
+  pybind11::enum_<NVTE_Softmax_Type>(m, "NVTE_Softmax_Type", pybind11::module_local())
+      .value("NVTE_VANILLA_SOFTMAX", NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)
+      .value("NVTE_OFF_BY_ONE_SOFTMAX", NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX)
+      .value("NVTE_LEARNABLE_SOFTMAX", NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX);
+
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
       .value("GELU", NVTE_Activation_Type::GELU)
       .value("GEGLU", NVTE_Activation_Type::GEGLU)
+      .value("GLU", NVTE_Activation_Type::GLU)
       .value("SILU", NVTE_Activation_Type::SILU)
       .value("SWIGLU", NVTE_Activation_Type::SWIGLU)
       .value("RELU", NVTE_Activation_Type::RELU)
@@ -129,6 +179,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
       .value("SRELU", NVTE_Activation_Type::SRELU)
       .value("SREGLU", NVTE_Activation_Type::SREGLU)
+      .value("CLAMPED_SWIGLU", NVTE_Activation_Type::CLAMPED_SWIGLU)
       .export_values();
 
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
@@ -136,6 +187,37 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8);
+
+  pybind11::enum_<NVTE_Norm_Type>(m, "NVTE_Norm_Type", pybind11::module_local())
+      .value("LayerNorm", NVTE_Norm_Type::LayerNorm)
+      .value("RMSNorm", NVTE_Norm_Type::RMSNorm)
+      .export_values();
+
+  pybind11::enum_<JAXX_Scaling_Mode>(m, "JAXX_Scaling_Mode", pybind11::module_local())
+      .value("NO_SCALING", JAXX_Scaling_Mode::NO_SCALING)
+      .value("DELAYED_TENSOR_SCALING", JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
+      .value("MXFP8_1D_SCALING", JAXX_Scaling_Mode::MXFP8_1D_SCALING)
+      .value("CURRENT_TENSOR_SCALING", JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING)
+      .value("NVFP4_1D_SCALING", JAXX_Scaling_Mode::NVFP4_1D_SCALING)
+      .value("NVFP4_2D_SCALING", JAXX_Scaling_Mode::NVFP4_2D_SCALING)
+      .export_values();
+
+  pybind11::enum_<JAXX_Quantize_Layout>(m, "JAXX_Quantize_Layout", pybind11::module_local())
+      .value("ROWWISE", JAXX_Quantize_Layout::ROWWISE)
+      .value("COLWISE", JAXX_Quantize_Layout::COLWISE)
+      .value("ROWWISE_COLWISE", JAXX_Quantize_Layout::ROWWISE_COLWISE)
+      .export_values();
+
+  pybind11::enum_<JAXX_Score_Function>(m, "JAXX_Score_Function", pybind11::module_local())
+      .value("SIGMOID", JAXX_Score_Function::SIGMOID)
+      .value("SOFTMAX", JAXX_Score_Function::SOFTMAX)
+      .export_values();
+
+  pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
+      .value("NONE", JAXX_Collective_Op::NONE)
+      .value("ALL_GATHER", JAXX_Collective_Op::ALL_GATHER)
+      .value("REDUCE_SCATTER", JAXX_Collective_Op::REDUCE_SCATTER)
+      .export_values();
 }
 
 }  // namespace jax

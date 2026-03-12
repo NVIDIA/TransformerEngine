@@ -1,10 +1,13 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Installation script."""
 
+from importlib import metadata
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -16,13 +19,10 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
-    found_cmake,
-    found_ninja,
-    found_pybind11,
+    cuda_version,
     get_frameworks,
-    install_and_import,
     remove_dups,
-    uninstall_te_wheel_packages,
+    min_python_version_str,
 )
 
 frameworks = get_frameworks()
@@ -35,14 +35,12 @@ os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
-elif "paddle" in frameworks:
-    from paddle.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
-    install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
+archs = cuda_archs()
 
 
 class TimedBdist(bdist_wheel):
@@ -57,24 +55,51 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
+    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+        assert (
+            os.getenv("MPI_HOME") is not None
+        ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+        cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+
+    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
+        assert (
+            os.getenv("NVSHMEM_HOME") is not None
+        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+        cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+
+    if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
+        cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
+
+    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
+        cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
+        cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
+            f"nvidia-cublasmp-cu{cuda_version()[0]}"
+        ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
+        cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
+
+    # Add custom CMake arguments from environment variable
+    nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
+    if nvte_cmake_extra_args:
+        cmake_flags.extend(nvte_cmake_extra_args.split())
+
     # Project directory root
     root_path = Path(__file__).resolve().parent
 
     return CMakeExtension(
         name="transformer_engine",
         cmake_path=root_path / Path("transformer_engine/common"),
-        cmake_flags=["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())],
+        cmake_flags=cmake_flags,
     )
 
 
-def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
+def setup_requirements() -> Tuple[List[str], List[str]]:
     """Setup Python dependencies
 
-    Returns dependencies for build, runtime, and testing.
+    Returns dependencies for runtime and testing.
     """
 
     # Common requirements
-    setup_reqs: List[str] = []
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
@@ -82,31 +107,79 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
-    # Requirements that may be installed outside of Python
-    if not found_cmake():
-        setup_reqs.append("cmake>=3.21")
-    if not found_ninja():
-        setup_reqs.append("ninja")
-    if not found_pybind11():
-        setup_reqs.append("pybind11")
-
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch"])
-            test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
-        if "jax" in frameworks:
-            install_reqs.extend(["jax", "flax>=0.7.1"])
-            test_reqs.extend(["numpy", "praxis"])
-        if "paddle" in frameworks:
-            install_reqs.append("paddlepaddle-gpu")
-            test_reqs.append("numpy")
+            from build_tools.pytorch import install_requirements, test_requirements
 
-    return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
+            install_reqs.extend(install_requirements())
+            test_reqs.extend(test_requirements())
+        if "jax" in frameworks:
+            from build_tools.jax import install_requirements, test_requirements
+
+            install_reqs.extend(install_requirements())
+            test_reqs.extend(test_requirements())
+
+    return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
+
+
+def git_check_submodules() -> None:
+    """
+    Attempt to checkout git submodules automatically during setup.
+
+    This runs successfully only if the submodules are
+    either in the correct or uninitialized state.
+
+    Note to devs: With this, any updates to the submodules itself, e.g. moving to a newer
+    commit, must be commited before build. This also ensures that stale submodules aren't
+    being silently used by developers.
+    """
+
+    # Provide an option to skip these checks for development.
+    if bool(int(os.getenv("NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD", "0"))):
+        return
+
+    # Require git executable.
+    if shutil.which("git") is None:
+        return
+
+    # Require a .gitmodules file.
+    if not (current_file_path / ".gitmodules").exists():
+        return
+
+    try:
+        submodules = subprocess.check_output(
+            ["git", "submodule", "status", "--recursive"],
+            cwd=str(current_file_path),
+            text=True,
+        ).splitlines()
+
+        for submodule in submodules:
+            # '-' start is for an uninitialized submodule.
+            # ' ' start is for a submodule on the correct commit.
+            assert submodule[0] in (
+                " ",
+                "-",
+            ), (
+                "Submodules are initialized incorrectly. If this is intended, set the "
+                "environment variable `NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD` to a "
+                "non-zero value to skip these checks during development. Otherwise, "
+                "run `git submodule update --init --recursive` to checkout the correct"
+                " submodule commits."
+            )
+
+        subprocess.check_call(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            cwd=str(current_file_path),
+        )
+    except subprocess.CalledProcessError:
+        return
 
 
 if __name__ == "__main__":
     __version__ = te_version()
+
+    git_check_submodules()
 
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
@@ -117,28 +190,24 @@ if __name__ == "__main__":
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
         ext_modules = []
-        cmdclass = {}
         package_data = {}
         include_package_data = False
-        setup_requires = []
-        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
+        install_requires = []
         extras_require = {
+            "core": [f"transformer_engine_cu12=={__version__}"],
+            "core_cu12": [f"transformer_engine_cu12=={__version__}"],
+            "core_cu13": [f"transformer_engine_cu13=={__version__}"],
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
-            "paddle": [f"transformer_engine_paddle=={__version__}"],
         }
     else:
-        setup_requires, install_requires, test_requires = setup_requirements()
+        install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         package_data = {"": ["VERSION.txt"]}
         include_package_data = True
         extras_require = {"test": test_requires}
 
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-            # Remove residual FW packages since compiling from source
-            # results in a single binary with FW extensions included.
-            uninstall_te_wheel_packages()
             if "pytorch" in frameworks:
                 from build_tools.pytorch import setup_pytorch_extension
 
@@ -156,16 +225,6 @@ if __name__ == "__main__":
                     setup_jax_extension(
                         "transformer_engine/jax/csrc",
                         current_file_path / "transformer_engine" / "jax" / "csrc",
-                        current_file_path / "transformer_engine",
-                    )
-                )
-            if "paddle" in frameworks:
-                from build_tools.paddle import setup_paddle_extension
-
-                ext_modules.append(
-                    setup_paddle_extension(
-                        "transformer_engine/paddle/csrc",
-                        current_file_path / "transformer_engine" / "paddle" / "csrc",
                         current_file_path / "transformer_engine",
                     )
                 )
@@ -187,15 +246,8 @@ if __name__ == "__main__":
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
-        python_requires=">=3.8, <3.13",
-        classifiers=[
-            "Programming Language :: Python :: 3.8",
-            "Programming Language :: Python :: 3.9",
-            "Programming Language :: Python :: 3.10",
-            "Programming Language :: Python :: 3.11",
-            "Programming Language :: Python :: 3.12",
-        ],
-        setup_requires=setup_requires,
+        python_requires=f">={min_python_version_str()}",
+        classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,
         license_files=("LICENSE",),
         include_package_data=include_package_data,

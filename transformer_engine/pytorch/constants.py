@@ -1,8 +1,9 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Enums for e2e transformer"""
+from types import SimpleNamespace
 import torch
 import torch.distributed
 import transformer_engine_torch as tex
@@ -16,11 +17,48 @@ with enum in transformer_engine.h
 """
 TE_DType = {
     torch.uint8: tex.DType.kByte,
+    torch.float8_e4m3fn: tex.DType.kFloat8E4M3,
+    torch.float8_e5m2: tex.DType.kFloat8E5M2,
     torch.int32: tex.DType.kInt32,
     torch.float32: tex.DType.kFloat32,
     torch.half: tex.DType.kFloat16,
     torch.bfloat16: tex.DType.kBFloat16,
 }
+
+"""
+This is a map: int -> torch.dtype
+Used for resolving cuda extension types to torch.
+Has one to one mapping with enum in
+transformer_engine.h
+"""
+TE_DType_To_Torch = {
+    tex.DType.kByte: torch.uint8,
+    tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
+    tex.DType.kFloat8E5M2: torch.float8_e5m2,
+    tex.DType.kInt32: torch.int32,
+    tex.DType.kFloat32: torch.float32,
+    tex.DType.kFloat16: torch.half,
+    tex.DType.kBFloat16: torch.bfloat16,
+}
+
+# Cache enum -> int conversions to avoid repeated PyObject lookups.
+FP8FwdTensorIdx = SimpleNamespace(
+    GEMM1_INPUT=int(tex.FP8FwdTensors.GEMM1_INPUT),
+    GEMM1_WEIGHT=int(tex.FP8FwdTensors.GEMM1_WEIGHT),
+    GEMM1_OUTPUT=int(tex.FP8FwdTensors.GEMM1_OUTPUT),
+    GEMM2_INPUT=int(tex.FP8FwdTensors.GEMM2_INPUT),
+    GEMM2_WEIGHT=int(tex.FP8FwdTensors.GEMM2_WEIGHT),
+    GEMM2_OUTPUT=int(tex.FP8FwdTensors.GEMM2_OUTPUT),
+    GEMM3_OUTPUT=int(tex.FP8FwdTensors.GEMM3_OUTPUT),
+)
+FP8BwdTensorIdx = SimpleNamespace(
+    GRAD_INPUT1=int(tex.FP8BwdTensors.GRAD_INPUT1),
+    GRAD_INPUT2=int(tex.FP8BwdTensors.GRAD_INPUT2),
+    GRAD_INPUT3=int(tex.FP8BwdTensors.GRAD_INPUT3),
+    GRAD_OUTPUT1=int(tex.FP8BwdTensors.GRAD_OUTPUT1),
+    GRAD_OUTPUT2=int(tex.FP8BwdTensors.GRAD_OUTPUT2),
+    GRAD_OUTPUT3=int(tex.FP8BwdTensors.GRAD_OUTPUT3),
+)
 
 AttnMaskTypes = (
     "no_mask",
@@ -52,6 +90,16 @@ QKVLayouts = (
     "thd_t2hd",
     "thd_th2d",
     "thd_thd_thd",
+    "sbhd_bshd_bshd",
+    "bshd_sbhd_sbhd",
+    "thd_bshd_bshd",
+    "thd_sbhd_sbhd",
+    "paged_kv_bshd_bshd_bshd",
+    "paged_kv_bshd_sbhd_sbhd",
+    "paged_kv_sbhd_bshd_bshd",
+    "paged_kv_sbhd_sbhd_sbhd",
+    "paged_kv_thd_bshd_bshd",
+    "paged_kv_thd_sbhd_sbhd",
 )
 
 LayerTypes = ("encoder", "decoder")
@@ -59,3 +107,7 @@ LayerTypes = ("encoder", "decoder")
 GemmParallelModes = ("row", "column", None)
 
 dist_group_type = torch.distributed.ProcessGroup
+
+MXFP8_BLOCK_SCALING_SIZE = 32
+
+NVFP4_BLOCK_SCALING_SIZE = 16

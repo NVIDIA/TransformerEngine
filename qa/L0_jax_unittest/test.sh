@@ -1,24 +1,50 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
-set -xe
+set -x
 
-pip install "nltk>=3.8.2"
-pip install pytest==8.2.1
+function error_exit() {
+    echo "Error: $1"
+    exit 1
+}
+
+function test_fail() {
+    RET=1
+    FAILED_CASES="$FAILED_CASES $1"
+    echo "Error: sub-test failed: $1"
+}
+
+RET=0
+FAILED_CASES=""
+
+export NVTE_JAX_TEST_TIMING=1
+
+pip3 install "nltk>=3.8.2" || error_exit "Failed to install nltk"
+pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+
 : ${TE_PATH:=/opt/transformerengine}
+: ${XML_LOG_DIR:=/logs}
+mkdir -p "$XML_LOG_DIR"
 
-pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/tests/jax -k 'not distributed'
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_not_distributed.xml $TE_PATH/tests/jax -k 'not distributed' || test_fail "tests/jax/*not_distributed_*"
+NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_fused_attn_with_determinism.xml $TE_PATH/tests/jax/test_fused_attn.py -k "TestFusedAttnWithDeterminism" || test_fail "tests/jax/test_fused_attn.py"
 
-# Test without custom calls
-NVTE_CUSTOM_CALLS_RE="" pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/tests/jax/test_custom_call_compute.py
+pip3 install -r $TE_PATH/examples/jax/mnist/requirements.txt || error_exit "Failed to install mnist requirements"
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_mnist.xml $TE_PATH/examples/jax/mnist || test_fail "mnist"
 
-pip install -r $TE_PATH/examples/jax/mnist/requirements.txt
-pip install -r $TE_PATH/examples/jax/encoder/requirements.txt
-
-pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/examples/jax/mnist
-
+pip3 install -r $TE_PATH/examples/jax/encoder/requirements.txt || error_exit "Failed to install encoder requirements"
 # Make encoder tests to have run-to-run deterministic to have the stable CI results
 export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_deterministic_ops"
-pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/examples/jax/encoder --ignore=$TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py
-pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_test_single_gpu_encoder.xml $TE_PATH/examples/jax/encoder/test_single_gpu_encoder.py || test_fail "test_single_gpu_encoder.py"
+# Test without custom calls
+export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_deterministic_ops"
+NVTE_JAX_CUSTOM_CALLS="false" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_test_single_gpu_encoder_without_custom_call.xml $TE_PATH/examples/jax/encoder/test_single_gpu_encoder.py || test_fail "test_single_gpu_encoder.py without custom calls"
+
+if [ $RET -ne 0 ]; then
+    echo "Error: some sub-tests failed: $FAILED_CASES"
+    exit 1
+fi
+echo "All tests passed"
+exit 0

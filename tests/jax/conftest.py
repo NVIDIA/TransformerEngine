@@ -1,12 +1,20 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """conftest for tests/jax"""
 import os
 import jax
 import pytest
+from collections import defaultdict
+import time
 
-from transformer_engine.transformer_engine_jax import get_device_compute_capability
+
+import transformer_engine.jax
+from transformer_engine_jax import get_device_compute_capability
+from transformer_engine.jax.version_utils import (
+    TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_extension_supported,
+)
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -20,16 +28,87 @@ def clear_live_arrays():
 
 
 @pytest.fixture(autouse=True, scope="module")
-def enable_fused_attn():
+def enable_fused_attn_after_hopper():
     """
     Enable fused attn for hopper+ arch.
     Fused attn kernels on pre-hopper arch are not deterministic.
     """
     if get_device_compute_capability(0) >= 90:
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
     yield
     if "NVTE_FUSED_ATTN" in os.environ:
         del os.environ["NVTE_FUSED_ATTN"]
-    if "NVTE_ALLOW_NONDETERMINISTIC_ALGO" in os.environ:
-        del os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"]
+
+
+class TestTimingPlugin:
+    """
+    Plugin to measure test execution time. Enable test timing by setting NVTE_JAX_TEST_TIMING=1
+    in the environment.
+    """
+
+    def __init__(self):
+        self.test_timings = defaultdict(list)
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_setup(self, item):
+        item._timing_start = time.time()
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_runtest_teardown(self, item, nextitem):
+        if hasattr(item, "_timing_start"):
+            duration = time.time() - item._timing_start
+
+            # Extract base function name without parameters
+            test_name = item.name
+            if "[" in test_name:
+                base_name = test_name.split("[")[0]
+            else:
+                base_name = test_name
+
+            self.test_timings[base_name].append(duration)
+
+    def pytest_sessionfinish(self, session, exitstatus):
+        print("\n" + "=" * 80)
+        print("TEST RUNTIME SUMMARY (grouped by function)")
+        print("=" * 80)
+
+        total_overall = 0
+        for test_name, durations in sorted(self.test_timings.items()):
+            total_time = sum(durations)
+            count = len(durations)
+            avg_time = total_time / count if count > 0 else 0
+            total_overall += total_time
+
+            print(f"{test_name:<60} | {count:3}x | {total_time:7.2f}s | avg: {avg_time:6.2f}s")
+
+        print("=" * 80)
+        print(f"{'TOTAL RUNTIME':<60} | {'':>3}  | {total_overall:7.2f}s |")
+        print("=" * 80)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "triton: mark test (or test class) as requiring JAX Triton kernel support"
+        f" (JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION})."
+        " Apply per test/class with @pytest.mark.triton so non-Triton tests in the same file run on"
+        " old JAX.",
+    )
+    if os.getenv("NVTE_JAX_TEST_TIMING", "0") == "1":
+        config.pluginmanager.register(TestTimingPlugin(), "test_timing")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip tests marked 'triton' when JAX is too old for Triton kernel dispatch."""
+    if is_triton_extension_supported():
+        return
+    skip_triton = pytest.mark.skip(
+        reason=(
+            f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for Triton kernel support. "
+            "Triton kernel dispatch segfaults with older jaxlib. "
+            "Upgrade with: pip install --upgrade jax jaxlib"
+        )
+    )
+    for item in items:
+        if item.get_closest_marker("triton"):
+            item.add_marker(skip_triton)

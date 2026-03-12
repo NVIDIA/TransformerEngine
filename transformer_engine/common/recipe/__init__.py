@@ -1,12 +1,13 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """This module provides predefined FP8 recipes."""
 from __future__ import annotations
-import warnings
+import os
 from enum import Enum
-from typing import Literal, Optional, Union, Callable, NamedTuple
+from typing import Any, Literal, Optional, Union, Callable, NamedTuple
+from dataclasses import field
 from pydantic.dataclasses import dataclass
 
 
@@ -22,9 +23,12 @@ class _FormatHelper(NamedTuple):
 class Format(Enum):
     """
     Supported FP8 formats.
+    Supported FP4 formats.
 
     Values
     ------
+    E2M1 :
+          All FP4 tensors are in e2m1 format
     E4M3 :
           All FP8 tensors are in e4m3 format
     E5M2 :
@@ -34,24 +38,94 @@ class Format(Enum):
             FP8 tensors in the backward pass are in e5m2 format
     """
 
+    E2M1 = _FormatHelper(max_fwd=6, max_bwd=6)
     E4M3 = _FormatHelper(max_fwd=448, max_bwd=448)
     E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
     HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
 
 
-class _OverrideLinearPrecision(NamedTuple):
-    """
-    Whether or not the execute the `fprop`, `dgrad`, and `wgrad`
-    GEMMs in higher precision when using FP8.
+@dataclass(frozen=True)
+class MMParams:
+    """Matrix multiplication options.
+
+    Parameters
+    ----------
+    use_split_accumulator : bool, default = True
+        Use FP8 fast accumulation on Hopper or Ada. For more details,
+        see CUBLASLT_MATMUL_DESC_FAST_ACCUM option for cublasLtMatmul.
     """
 
-    fprop: bool = False
-    dgrad: bool = False
-    wgrad: bool = False
+    use_split_accumulator: bool = True
+
+
+@dataclass(frozen=True)
+class QParams:
+    """Quantization parameters.
+    power_2_scale: use power of 2 scale parameter
+    amax_epsilon: optional minimum value of abs max
+    random_hadamard_transform: whether to use random hadamard transform
+    stochastic_rounding: whether to use stocastic rounding
+    """
+
+    power_2_scale: bool = False
+    amax_epsilon: float = 0.0
+    random_hadamard_transform: bool = False
+    stochastic_rounding: bool = False
+    fp4_2d_quantization: bool = False
+
+    def __repr__(self) -> str:
+        return (
+            f"Qparams(\npower_2_scale={self.power_2_scale},\n"
+            f"amax_epsilon={self.amax_epsilon},\n"
+            f"random_hadamard_transform={self.random_hadamard_transform},\n"
+            f"stochastic_rounding={self.stochastic_rounding},\n"
+            f"fp4_2d_quantization={self.fp4_2d_quantization}\n)"
+        )
+
+
+class Recipe:
+    """
+    Base recipe class.
+    """
+
+    @classmethod
+    def nvfp4(cls):
+        """Whether the given recipe is NVFP4 1D block scaling."""
+        return issubclass(cls, NVFP4BlockScaling)
+
+    @classmethod
+    def mxfp8(cls):
+        """Whether the given recipe is MXFP8 block scaling."""
+        return issubclass(cls, MXFP8BlockScaling)
+
+    @classmethod
+    def delayed(cls):
+        """Whether the given recipe is delayed scaling."""
+        return issubclass(cls, DelayedScaling)
+
+    @classmethod
+    def float8_current_scaling(cls):
+        """Whether the given recipe is (per-tensor) current scaling."""
+        return issubclass(cls, Float8CurrentScaling)
+
+    @classmethod
+    def float8_per_tensor_scaling(cls):
+        """Whether the given recipe is per-tensor scaling."""
+        return issubclass(cls, (DelayedScaling, Float8CurrentScaling))
+
+    @classmethod
+    def float8_block_scaling(cls):
+        """Whether the given recipe is float8 blockwise scaling."""
+        return issubclass(cls, Float8BlockScaling)
+
+    @classmethod
+    def custom(cls):
+        """Whether the given recipe is custom."""
+        return issubclass(cls, CustomRecipe)
 
 
 @dataclass()
-class DelayedScaling:
+class DelayedScaling(Recipe):
     """
     Use the delayed scaling factor strategy. Use scale factor from previous
     iteration and record amax history of `amax_history_len` steps.
@@ -92,24 +166,21 @@ class DelayedScaling:
                                                               recipe: DelayedScaling) -> Tensor
 
                                  where `Tensor` is a framework tensor type.
-    override_linear_precision: Tuple(bool, bool, bool), default=(False, False, False)
-                              Whether or not to execute the `fprop`, `dgrad`, and `wgrad`
-                              GEMMs (respectively) in higher precision when using FP8.
-    reduce_amax: bool, default = `True`
+    reduce_amax: bool, default = True
                 By default, if `torch.distributed` is initialized, the `amax` value for FP8
-                tensors is reduced across the `fp8_group` (specified in the `fp8_autocast`
+                tensors is reduced across the `amax_reduction_group` (specified in the `autocast`
                 call). This keeps the amaxes and scaling factors synced across the given
                 distributed group. If set to `False`, this reduction is skipped and every
                 GPU maintains local amaxes and scaling factors. To ensure results are
                 numerically identical across checkpointing boundaries in this case, all
                 ranks must checkpoint in order to store the local tensors.
-    fp8_dpa: bool, default = `False`
+    fp8_dpa: bool, default = False
              Whether to enable FP8 dot product attention (DPA). When the model is placed in an
-             `fp8_autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
+             `autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
              inputs from higher precision to FP8, performs attention in FP8, and casts tensors
              back to higher precision as outputs. FP8 DPA currently is only supported in the
              `FusedAttention` backend.
-    fp8_mha: bool, default = `False`
+    fp8_mha: bool, default = False
             Whether to enable FP8 multi-head attention (MHA). When `True`, it removes the casting
             operations mentioned above at the DPA boundaries. Currently only standard MHA modules
             i.e. `LayerNormLinear/Linear + DPA + Linear`, are supported for this feature. When
@@ -133,11 +204,9 @@ class DelayedScaling:
     """
 
     margin: int = 0
-    interval: int = -1
     fp8_format: Format = Format.HYBRID
     amax_history_len: int = 1024
     amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max"
-    override_linear_precision: _OverrideLinearPrecision = _OverrideLinearPrecision()
     scaling_factor_compute_algo: Optional[Callable] = None
     reduce_amax: bool = True
     fp8_dpa: bool = False
@@ -145,23 +214,310 @@ class DelayedScaling:
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
-        assert self.override_linear_precision in (
-            (False, False, False),
-            (False, False, True),
-        ), "Only wgrad GEMM override is currently supported."
-        if self.interval >= 0:
-            warnings.warn(
-                "`interval` argument is deprecated and unused. "
-                "It will be removed in an upcoming release.",
-                DeprecationWarning,
-            )
 
     def __repr__(self) -> str:
         return (
+            f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"amax_history_len={self.amax_history_len}, "
-            f"wgrad_override={self.override_linear_precision.wgrad}, "
+            f"reduce_amax={self.reduce_amax}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
+
+
+@dataclass()
+class Float8CurrentScaling(Recipe):
+    """
+    Use the per-tensor current scaling factor strategy.
+
+    Parameters
+    ----------
+    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
+                Controls the FP8 data format used during forward and backward
+                pass.
+    """
+
+    use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
+    fp8_format: Format = Format.HYBRID
+    fp8_quant_fwd_inp = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
+    fp8_quant_fwd_weight = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
+    fp8_quant_bwd_grad = QParams(power_2_scale=use_power_2_scales, amax_epsilon=0.0)
+    fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=False)
+    fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
+    fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __post_init__(self) -> None:
+        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+
+    def __repr__(self) -> str:
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"fp8_quant_fwd_inp={self.fp8_quant_fwd_inp}, "
+            f"fp8_quant_fwd_weight={self.fp8_quant_fwd_weight}, "
+            f"fp8_quant_bwd_grad={self.fp8_quant_bwd_grad}, "
+            f"fp8_gemm_fprop={self.fp8_gemm_fprop}, "
+            f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
+            f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
+            f"fp8_dpa={self.fp8_dpa}, "
+            f"fp8_mha={self.fp8_mha}"
+        )
+
+
+@dataclass()
+class MXFP8BlockScaling(Recipe):
+    """
+    Use the MXFP8 scaling factor strategy.
+
+    In this strategy, tensors are scaled in blockwise fashion. Each group
+    of 32 consecutive values is scaled together using their own scaling
+    factor. The type of the scaling factor is E8M0 (8 bits of exponent,
+    0 bits of mantissa), equivalent to scaling by a power of 2.
+
+    Since the scaling happens in a particular direction (either rowwise
+    or columnwise), in this recipe the quantized tensor and its transpose
+    are not numerically equivalent. Due to this, when Transformer Engine
+    needs both the MXFP8 tensor and its transpose (e.g. to calculate both
+    forward and backward pass), during the quantization both versions are
+    computed from the high precision input to avoid double quantization
+    errors.
+
+    Parameters
+    ----------
+    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
+                Controls the FP8 data format used during forward and backward
+                pass.
+    """
+
+    margin: int = 0
+    fp8_format: Format = Format.E4M3
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __post_init__(self) -> None:
+        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+
+    def __repr__(self) -> str:
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"margin={self.margin}, "
+            f"format={str(self.fp8_format).split('.')[1]}"
+        )
+
+
+@dataclass()
+class Float8BlockScaling(Recipe):
+    """
+    Use block-wise scaling for FP8 tensors.
+
+    In this strategy, tensors are scaled in blockwise fashion. Values within
+    each block share a common scaling factor. The block dimensionality
+    can be configured. The scaling factors are float32 containers. They
+    will by default be constrained to powers of 2.
+
+    Since the scaling happens in a particular direction (either rowwise
+    or columnwise), the quantized tensor and its transpose are not numerically
+    equivalent. Due to this, when Transformer Engine needs both the FP8 tensor
+    and its transpose (e.g. to calculate both forward and backward pass),
+    during the quantization both versions are computed from the high precision
+    input to avoid double quantization errors.
+
+    NOTE: To relax the default constraint that scales be powers of 2, set env variable
+    NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it for the recipe defaults.
+
+    Parameters
+    ----------
+    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
+                Controls the FP8 data format used during forward and backward
+                pass.
+    """
+
+    use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
+
+    fp8_format: Format = Format.E4M3
+    fp8_quant_fwd_inp = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
+    fp8_quant_fwd_weight = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
+    fp8_quant_bwd_grad = QParams(power_2_scale=not use_f32_scales, amax_epsilon=0.0)
+    x_block_scaling_dim: int = 1
+    w_block_scaling_dim: int = 2
+    grad_block_scaling_dim: int = 1
+    fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=True)
+    fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
+    fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __post_init__(self) -> None:
+        assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
+        assert self.w_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for w"
+        assert self.grad_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for grad"
+        assert not (
+            self.x_block_scaling_dim == 2 and self.w_block_scaling_dim == 2
+        ), "2D by 2D block gemm not supported."
+        assert not (
+            self.x_block_scaling_dim == 2 and self.grad_block_scaling_dim == 2
+        ), "2D by 2D block gemm not supported."
+        assert not (
+            self.w_block_scaling_dim == 2 and self.grad_block_scaling_dim == 2
+        ), "2D by 2D block gemm not supported."
+        assert self.fp8_gemm_fprop.use_split_accumulator, "Split accumulator required for fprop."
+        assert self.fp8_gemm_dgrad.use_split_accumulator, "Split accumulator required for dgrad."
+        assert self.fp8_gemm_wgrad.use_split_accumulator, "Split accumulator required for wgrad."
+        assert (
+            not self.fp8_dpa and not self.fp8_mha
+        ), "FP8 attention is not supported for Float8BlockScaling."
+        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+
+    def __repr__(self) -> str:
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"fp8_quant_fwd_inp={self.fp8_quant_fwd_inp}, "
+            f"fp8_quant_fwd_weight={self.fp8_quant_fwd_weight}, "
+            f"fp8_quant_bwd_grad={self.fp8_quant_bwd_grad}, "
+            f"x_block_scaling_dim={self.x_block_scaling_dim}, "
+            f"w_block_scaling_dim={self.w_block_scaling_dim}, "
+            f"grad_block_scaling_dim={self.grad_block_scaling_dim}, "
+            f"fp8_gemm_fprop={self.fp8_gemm_fprop}, "
+            f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
+            f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
+            f"fp8_dpa={self.fp8_dpa}, "
+            f"fp8_mha={self.fp8_mha}"
+        )
+
+
+@dataclass()
+class NVFP4BlockScaling(Recipe):
+    """
+    Use the NVFP4 scaling strategy.
+
+    This is a 2-level block scaling strategy. In level 1, each group of
+    16 consecutive values is scaled together using their own scaling
+    factor. The type of the scaling factor is E4M3 (4 bits of exponent,
+    3 bits of mantissa). In level 2, a global per tensor FP32 scaling
+    factor is used to scale the entire tensor.
+
+    Since the scaling happens in a particular direction (either rowwise
+    or columnwise), in this recipe the quantized tensor and its transpose
+    are not numerically equivalent. Due to this, when Transformer Engine
+    needs both the tensor and its transpose (e.g. to calculate both
+    forward and backward pass), during the quantization both versions are
+    computed from the high precision input to avoid double quantization
+    errors.
+
+    The default NVFP4 training recipe implements 3 techniques for quantizing
+    to a narrow format (4-bit):
+
+    - For weight tensors a variant of the NVFP4 quantization is used,
+      where a single scaling factor is shared by a 2D block of 16x16 elements.
+    - When quantizing gradients, stochastic rounding is applied to avoid the bias
+      introduced by quantization. With this, values are rounded probabilistically
+      to one of their two nearest representable numbers, with probabilities
+      inversely proportional to their distances.
+    - When quantizing inputs and gradients, random Hadamard transforms are applied
+      (16x16 Hadamard matrix) to smooth outliers in the tensor distributions
+      and make them easier to represent accurately in NVFP4.
+
+    These techniques are described more comprehensively in the NVFP4 paper titled
+    'Pretraining Large Language Models with NVFP4' (https://arxiv.org/abs/2509.25149v1).
+
+    Parameters
+    ----------
+    fp4_format : {Format.E2M1}, default = Format.E2M1
+             FP4 data type.
+    disable_rht : bool, default = False
+             If set to `True`, random Hadamard transforms are not applied to any tensor.
+    disable_stochastic_rounding : bool, default = False
+             If set to `True`, stochastic rounding is disabled during quantization for all tensors.
+    disable_2d_quantization : bool, default = False
+             If set to `True`, 1D block scaling with block size 16 is used for all tensors.
+    """
+
+    # Configuration envvars
+    disable_rht: bool = os.getenv("NVTE_NVFP4_DISABLE_RHT", "0") == "1"
+    disable_stochastic_rounding: bool = (
+        os.getenv("NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING", "0") == "1"
+    )
+    disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
+
+    fp4_format: Format = Format.E2M1
+    fp8_format: Format = Format.E4M3
+
+    # Not applying quantization to attention for now
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __post_init__(self) -> None:
+        assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
+        assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
+
+        # Quantization params
+        # Note: RHT is currently only applied to column-wise usage so that
+        # it can be used for wgrad GEMM.
+        self.fp4_quant_fwd_inp = QParams(
+            random_hadamard_transform=not self.disable_rht,
+            stochastic_rounding=False,
+            fp4_2d_quantization=False,
+        )
+        self.fp4_quant_fwd_weight = QParams(
+            random_hadamard_transform=False,
+            stochastic_rounding=False,
+            fp4_2d_quantization=not self.disable_2d_quantization,
+        )
+        self.fp4_quant_bwd_grad = QParams(
+            random_hadamard_transform=not self.disable_rht,
+            stochastic_rounding=not self.disable_stochastic_rounding,
+            fp4_2d_quantization=False,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"fp4_format={str(self.fp4_format).split('.')[1]}, "
+            f"fp8_format={str(self.fp8_format).split('.')[1]}, "
+            f"fp8_dpa={self.fp8_dpa}, "
+            f"fp8_mha={self.fp8_mha}, "
+            f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
+            f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
+            f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
+        )
+
+
+@dataclass()
+class CustomRecipe(Recipe):
+    """
+    Custom recipe that allows users to provide quantizer factories.
+
+    .. warning::
+        **EXPERIMENTAL**: Custom recipe is experimental, still under active development,
+        and the API is subject to change without notice. Use at your own risk.
+
+    Parameters
+    ----------
+    qfactory : Callable
+        Factory callable that returns a quantizer instance for a
+        given semantic tensor role.
+        The callable is typically invoked as::
+
+            qfactory(
+                role: str,
+            )
+
+        Where `role` is one of the following strings for e.g. te.Linear
+        (stable public contract):
+
+        - forward:  "linear_input", "linear_weight", "linear_output"
+        - backward: "linear_grad_output", "linear_grad_input"
+    """
+
+    qfactory: Callable[..., Any]
+
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __repr__(self) -> str:
+        return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"

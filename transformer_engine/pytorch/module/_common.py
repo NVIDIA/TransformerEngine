@@ -1,32 +1,25 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Internal function used by multiple modules."""
 
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable
-from dataclasses import dataclass
+import dataclasses
+import queue
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
+from ..constants import TE_DType
 from ..export import is_in_onnx_export_mode
-from ..fp8 import get_fp8_te_dtype
 from ..utils import get_default_init_method
 
 
-def _get_normalization_func(
-    normalization: str, fp8_output: bool, is_grad_enabled: bool, forward: bool
-):
+def _get_normalization_func(normalization: str, forward: bool):
     fwd_normalization_funcs = {
-        ("LayerNorm", True, True): tex.layernorm_fwd_fp8,
-        ("LayerNorm", True, False): tex.layernorm_fwd_fp8_inf,
-        ("LayerNorm", False, True): tex.layernorm_fwd_noalloc,
-        ("LayerNorm", False, False): tex.layernorm_fwd_inf,
-        ("RMSNorm", True, True): tex.rmsnorm_fwd_fp8,
-        ("RMSNorm", True, False): tex.rmsnorm_fwd_fp8_inf,
-        ("RMSNorm", False, True): tex.rmsnorm_fwd_noalloc,
-        ("RMSNorm", False, False): tex.rmsnorm_fwd_inf,
+        "LayerNorm": tex.layernorm_fwd,
+        "RMSNorm": tex.rmsnorm_fwd,
     }
     bwd_normalization_funcs = {
         "LayerNorm": tex.layernorm_bwd,
@@ -34,81 +27,36 @@ def _get_normalization_func(
     }
 
     if forward:
-        return fwd_normalization_funcs[(normalization, fp8_output, is_grad_enabled)]
-    assert not fp8_output, "FP8 output is not supported in backward normalization!"
-    assert is_grad_enabled, "Gradient has to be enabled to call backward normalization!"
+        return fwd_normalization_funcs[normalization]
     return bwd_normalization_funcs[normalization]
 
 
-def _apply_normalization(
+def apply_normalization(
     inputmat: torch.Tensor,
     ln_out: torch.Tensor,
     ln_weight: torch.Tensor,
     ln_bias: Union[torch.Tensor, None],
     eps: float,
-    fp8_out: bool,
-    fp8_meta: Dict[str, Any],
+    output_quantizer,
+    output_dtype,
     normalization: str,
     fwd_ln_sm_margin: int,
     zero_centered_gamma: bool,
-    is_grad_enabled: bool,
-    fp8_scale: Optional[torch.Tensor] = None,
-    fp8_amax: Optional[torch.Tensor] = None,
-    fp8_scale_inv: Optional[torch.Tensor] = None,
 ):
-    normalization_func = _get_normalization_func(normalization, fp8_out, is_grad_enabled, True)
+    """Apply normalization to input."""
+    normalization_func = _get_normalization_func(normalization, True)
 
     inputs = (inputmat, ln_weight) if ln_bias is None else (inputmat, ln_weight, ln_bias)
-    if fp8_out:
-        fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
-        if is_grad_enabled:
-            output_key = "ln_out" if normalization == "LayerNorm" else "rmsnorm_out"
-            output_kwarg = {output_key: ln_out}
-            output = normalization_func(
-                *inputs,
-                eps,
-                fp8_meta["scaling_fwd"],
-                tex.FP8FwdTensors.GEMM1_INPUT,
-                fp8_dtype_forward,
-                fwd_ln_sm_margin,
-                zero_centered_gamma,
-                scale=fp8_scale,
-                amax=fp8_amax,
-                scale_inv=fp8_scale_inv,
-                **output_kwarg,
-            )
-        else:
-            return (
-                normalization_func(
-                    *inputs,
-                    eps,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                    fwd_ln_sm_margin,
-                    zero_centered_gamma,
-                    scale=fp8_scale,
-                    amax=fp8_amax,
-                    scale_inv=fp8_scale_inv,
-                ),
-                None,
-                None,
-            )
-    else:
-        if is_grad_enabled:
-            output = normalization_func(*inputs, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma)
-        else:
-            return (
-                normalization_func(*inputs, eps, fwd_ln_sm_margin, zero_centered_gamma),
-                None,
-                None,
-            )
-    if normalization == "RMSNorm":
-        output = (ln_out, None, output[1])
-    elif normalization == "LayerNorm":
-        output = (ln_out, output[1], output[2])
-    return output
+    return normalization_func(
+        *inputs,
+        eps,
+        ln_out,
+        output_quantizer,
+        TE_DType[output_dtype] if output_dtype in TE_DType else output_dtype,
+        fwd_ln_sm_margin,
+        zero_centered_gamma,
+    )
 
 
 class _NoopCatFunc(torch.autograd.Function):
@@ -129,6 +77,8 @@ class _NoopCatFunc(torch.autograd.Function):
         # Check first tensor
         if not tensors:
             raise ValueError("Attempted to concatenate 0 tensors")
+
+        # Check concat dim
         num_dims = tensors[0].dim()
         if not -num_dims <= dim < num_dims:
             raise ValueError(
@@ -161,11 +111,24 @@ class _NoopCatFunc(torch.autograd.Function):
         ctx.dim = dim
         ctx.split_ranges = split_ranges
 
-        # Out-of-place concatenation if needed
+        # Tensor properties from first tensor
         dtype = tensors[0].dtype
         device = tensors[0].device
         strides = tensors[0].stride()
         data_ptr_stride = strides[dim] * tensors[0].element_size()
+
+        # Out-of-place concatenation when view tensors have different storage
+        # Note: This works around an edge case with the split_quantize
+        # function, which might allocate a buffer and construct
+        # subviews. However, in order to reduce CPU overheads, these
+        # views are configured manually outside of PyTorch. PyTorch
+        # doesn't know these views share the same memory, and it
+        # blocks us from reconstructing the full tensor because it
+        # thinks we are accessing out-of-bounds memory.
+        if tensors[0].untyped_storage().nbytes() < out_shape[dim] * data_ptr_stride:
+            return torch.cat(tensors, dim=dim)
+
+        # Out-of-place concatenation if tensor properties do not match
         data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
         for tensor in tensors[1:]:
             if (
@@ -178,13 +141,7 @@ class _NoopCatFunc(torch.autograd.Function):
             data_ptr += tensor.size(dim) * data_ptr_stride
 
         # No-op concatenation
-        out = tensors[0].new()
-        out.set_(
-            tensors[0].untyped_storage(),
-            tensors[0].storage_offset(),
-            out_shape,
-            strides,
-        )
+        out = tensors[0].as_strided(out_shape, strides)
         out.requires_grad = any(tensor.requires_grad for tensor in tensors)
         return out
 
@@ -202,7 +159,7 @@ class _NoopCatFunc(torch.autograd.Function):
         return None, *grad_inputs
 
 
-def _noop_cat(
+def noop_cat(
     tensors: List[torch.Tensor],
     dim: int = 0,
 ) -> torch.Tensor:
@@ -222,7 +179,7 @@ def _noop_cat(
     return _NoopCatFunc.apply(dim, *tensors)
 
 
-@dataclass
+@dataclasses.dataclass
 class _ParameterInitMeta:
     """
     Stores essential metadata needed to support deferred parameter initialization.
@@ -236,3 +193,79 @@ class _ParameterInitMeta:
         """Safeguard reference to the parameter's parent module and initialization function."""
         if self.init_fn is None:
             self.init_fn = get_default_init_method()
+
+
+class WeightGradStore:
+    """
+    A class to manage weight gradient storage and computation in Transformer modules.
+    This class enables split backward propagation for better memory efficiency.
+    """
+
+    def __init__(self, delay_wgrad_compute=False, ub_bulk_wgrad=False):
+        """
+        Initialize the WeightGradStore.
+
+        Args:
+            delay_wgrad_compute (bool): Whether to delay weight gradient computation
+            ub_bulk_wgrad (bool): Whether to enable bulk weight gradient computation
+        """
+        if delay_wgrad_compute:
+            self.context = queue.Queue()
+            assert (
+                ub_bulk_wgrad is False
+            ), "ub_bulk_wgrad is not supported when enabling delay_wgrad_compute"
+            self.enabled = delay_wgrad_compute
+        else:
+            self.context = None
+            self.enabled = False
+
+    def delay_wgrad_compute(self):
+        """
+        Get the current split backward propagation status.
+
+        Returns:
+            bool: True if split backward is enabled, False otherwise
+        """
+        return self.enabled
+
+    def enable_delay_wgrad_compute(self):
+        """Enable split backward propagation."""
+        self.enabled = True
+
+    def disable_delay_wgrad_compute(self):
+        """Disable split backward propagation."""
+        self.enabled = False
+
+    def put(self, tensor_list, func):
+        """
+        Store tensors and computation function for later execution.
+
+        Args:
+            tensor_list (list): List of tensors needed for computation
+            func (callable): Function to be executed with the tensors
+        """
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
+        self.context.put([tensor_list, func])
+
+    def pop(self):
+        """
+        Execute the stored computation with the stored tensors.
+        Raises an exception if the queue is empty.
+        """
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
+        if self.context.qsize() > 0:
+            tensor_list, func = self.context.get()
+            return func(*tensor_list), tensor_list
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            raise RuntimeError(f"Pop empty queue. rank {rank}")
+        raise RuntimeError("Pop empty queue. No distributed environment detected.")
+
+    def assert_empty(self):
+        """
+        Assert that the queue is empty.
+        Used for debugging and ensuring proper cleanup.
+        """
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
+        rank = torch.distributed.get_rank()
+        assert self.context.empty(), f"Queue is not empty. rank {rank}"

@@ -1,10 +1,8 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
-from dataclasses import dataclass
-import itertools
-from typing import Iterable, List, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
 
 import torch
@@ -13,54 +11,93 @@ from transformer_engine.pytorch import (
     LayerNormLinear,
     LayerNormMLP,
     Linear,
-    make_graphed_callables,
     MultiheadAttention,
     TransformerLayer,
-    fp8_autocast,
-    fp8_model_init,
+    autocast,
+    quantized_model_init,
+    make_graphed_callables,
+    is_fp8_available,
+    is_fp8_block_scaling_available,
+    is_mxfp8_available,
+    is_bf16_available,
 )
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.common import recipe
+from utils import ModelConfig, reset_rng_states
+
+# Check if FP8 is supported.
+fp8_available = is_fp8_available()
+fp8_block_scaling_available = is_fp8_block_scaling_available()
+mxfp8_available = is_mxfp8_available()
+
+# Reset RNG states.
+reset_rng_states()
+
+model_configs = {
+    "small": ModelConfig(2, 32, 2, 32),
+}
 
 
-# Only run FP8 tests on H100.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+def nvfp4_vanilla():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
 
 
-seed = 1234
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-# Record initial RNG state from script run.
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
+def nvfp4_rht_and_2d_quantization():
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams(
+        random_hadamard_transform=False, fp4_2d_quantization=True
+    )
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams(
+        random_hadamard_transform=True, fp4_2d_quantization=False
+    )
+    return nvfp4_recipe
 
 
-@dataclass
-class ModelConfig:
-    """Data tensor dimensions within Transformer model"""
+def check_rht_usage(recipe: recipe.Recipe) -> bool:
+    # if using RHT, we can only support bf16
+    # check fp4_quant_fwd_inp, fp4_quant_fwd_weight, fp4_quant_bwd_grad
+    if recipe.nvfp4():
+        if (
+            recipe.fp4_quant_fwd_inp.random_hadamard_transform
+            or recipe.fp4_quant_fwd_weight.random_hadamard_transform
+            or recipe.fp4_quant_bwd_grad.random_hadamard_transform
+        ):
+            return True
+    return False
 
-    sequence_length: int
-    batch_size: int
-    hidden_size: int
-    num_heads: int
-    kv_channels: int
+
+def get_nvfp4_inp_supported_dtypes(recipe: recipe.Recipe, dtype: torch.dtype) -> bool:
+    supported_input_dtypes = []
+    if recipe.nvfp4():
+        supported_input_dtypes.append(torch.bfloat16)
+        # if not using RHT, we can add fp32 as well
+    if not check_rht_usage(recipe):
+        supported_input_dtypes.append(torch.float32)
+    return supported_input_dtypes
 
 
-model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
+fp8_recipes = []
+if mxfp8_available:
+    fp8_recipes.append(recipe.MXFP8BlockScaling())
+    fp8_recipes.append(nvfp4_rht_and_2d_quantization())
+if fp8_block_scaling_available:
+    fp8_recipes.append(recipe.Float8BlockScaling())
+if fp8_available:
+    fp8_recipes.append(recipe.Float8CurrentScaling())
+    fp8_recipes.append(recipe.DelayedScaling())
 
-modules = ["transformer", "layernorm_mlp", "layernorm_linear", "linear", "mha", "dpa"]
-
-all_boolean = [True, False]
-
-dtypes = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+# Supported data types
+dtypes: List[torch.dtype] = [torch.float32, torch.float16]
+if is_bf16_available():  # bf16 requires sm_80 or higher
     dtypes.append(torch.bfloat16)
-
-
-def reset_rng_states() -> None:
-    """revert back to initial RNG state."""
-    torch.set_rng_state(_cpu_rng_state)
-    torch.cuda.set_rng_state(_cuda_rng_state)
 
 
 @pytest.fixture(autouse=True)
@@ -70,64 +107,40 @@ def reset_global_fp8_state():
 
 
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
-    """Ensures two lists are equal."""
+    """Check that two lists of tensors match exactly."""
     assert len(l1) == len(l2), "Unequal number of outputs."
-    failed = False
-    failed_tensors = ""
+    failure_message = "Output mismatches in:"
+    failed_tensors = []
     for i, (t1, t2) in enumerate(zip(l1, l2)):
         if not torch.equal(t1, t2):
-            failed = True
-            failed_tensors += (
-                f"    {names[i]}\n" if names is not None else f"    tensor at idx={i}\n"
-            )
-    assert not failed, "Output mismatches in:\n" + failed_tensors
+            failure_message += "\n    "
+            if names is None:
+                failure_message += f"tensor at idx={i}"
+            else:
+                failure_message += names[i]
+            failed_tensors.append((t1, t2))
+    if failed_tensors:
+        print(failure_message)
+        t1, t2 = failed_tensors[0]
+        torch.testing.assert_close(t1, t2, rtol=0, atol=0)
 
 
 def generate_data(
-    config: ModelConfig,
+    model_config: ModelConfig,
     dtype: torch.dtype,
-    dpa: bool = False,
     warmup: bool = False,
-    return_grad_output: bool = False,
-) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    requires_grad: bool = True,
+) -> torch.Tensor:
     """Generate synthetic data."""
     gen_func = torch.ones if warmup else torch.randn
-    if dpa:
-        inputs = [
-            gen_func(
-                config.sequence_length,
-                config.batch_size,
-                config.num_heads,
-                config.kv_channels,
-                device="cuda",
-                requires_grad=True,
-                dtype=dtype,
-            )
-            for _ in range(3)
-        ]
-    else:
-        inputs = [
-            gen_func(
-                config.sequence_length,
-                config.batch_size,
-                config.hidden_size,
-                device="cuda",
-                requires_grad=True,
-                dtype=dtype,
-            )
-        ]
-
-    if not return_grad_output:
-        return inputs
-
-    grad_output = torch.randn(
-        config.sequence_length,
-        config.batch_size,
-        config.hidden_size,
+    return gen_func(
+        model_config.max_seqlen_q,
+        model_config.batch_size,
+        model_config.hidden_size,
         device="cuda",
+        requires_grad=requires_grad,
         dtype=dtype,
     )
-    return inputs, grad_output
 
 
 def get_outputs(
@@ -147,6 +160,20 @@ def get_outputs(
     return values
 
 
+def reset_graphs(
+    graphed_callables: Union[Callable, Tuple[Callable, ...], Dict[Tuple[int, int], Callable]],
+) -> None:
+    """Reset CUDA graphs."""
+    if isinstance(graphed_callables, tuple) or isinstance(graphed_callables, list):
+        for callable in graphed_callables:
+            callable.reset()
+    elif isinstance(graphed_callables, dict):
+        for callable in graphed_callables.values():
+            callable.reset()
+    else:
+        graphed_callables.reset()
+
+
 class _Sequential(torch.nn.Sequential):
     """Sequential model that forwards keyword arguments to modules"""
 
@@ -157,30 +184,48 @@ class _Sequential(torch.nn.Sequential):
         return x
 
 
+# Supported modules
+_test_cuda_graphs_modules: List[str] = [
+    # Put linear first to test the case where the cuda context might not be set in
+    # creating TMA descriptor for MXFP8 quantization.
+    "linear",
+    "transformer",
+    "layernorm_mlp_nocheckpoint",
+    "layernorm_mlp_checkpoint",
+    "layernorm_linear",
+    "mha",
+    "linear_op",
+]
+
+
 def _test_cuda_graphs(
     *,
-    config: ModelConfig,
+    graph_mode: str,
+    module: str,
+    model_config: ModelConfig,
     num_layers: int,
     dtype: torch.dtype,
     fp8: bool,
     fp8_params: bool,
     fp8_weight_caching: bool,
-    module: str,
-    graph_mode: str,
+    fp8_recipe: recipe.Recipe,
 ) -> List[torch.Tensor]:
     """Helper function for CUDA graph test."""
     reset_rng_states()
     FP8GlobalStateManager.reset()
-    dpa = module == "dpa"
 
-    with fp8_model_init(enabled=fp8_params):
-        # Create modules.
+    # Operation-based API does not support FP8 weight caching.
+    if module == "linear_op":
+        fp8_weight_caching = False
+
+    # Create modules.
+    with quantized_model_init(enabled=fp8_params, recipe=fp8_recipe):
         if module == "transformer":
             modules = [
                 TransformerLayer(
-                    config.hidden_size,
-                    config.hidden_size,
-                    config.num_heads,
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    model_config.num_heads,
                     hidden_dropout=0.0,
                     attention_dropout=0.0,
                     fuse_qkv_params=True,
@@ -188,39 +233,69 @@ def _test_cuda_graphs(
                 )
                 for _ in range(num_layers)
             ]
-        elif module == "layernorm_mlp":
+        elif module == "layernorm_mlp_nocheckpoint":
             modules = [
-                LayerNormMLP(config.hidden_size, config.hidden_size, params_dtype=dtype)
+                LayerNormMLP(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    params_dtype=dtype,
+                    checkpoint=False,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "layernorm_mlp_checkpoint":
+            modules = [
+                LayerNormMLP(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    params_dtype=dtype,
+                    checkpoint=True,
+                )
                 for _ in range(num_layers)
             ]
         elif module == "layernorm_linear":
             modules = [
-                LayerNormLinear(config.hidden_size, config.hidden_size, params_dtype=dtype)
+                LayerNormLinear(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    params_dtype=dtype,
+                )
                 for _ in range(num_layers)
             ]
         elif module == "mha":
             modules = [
                 MultiheadAttention(
-                    config.hidden_size,
-                    config.num_heads,
+                    model_config.hidden_size,
+                    model_config.num_heads,
                     attention_dropout=0.0,
                     params_dtype=dtype,
                     fuse_qkv_params=True,
                 )
                 for _ in range(num_layers)
             ]
-        elif dpa:
-            assert config.hidden_size % config.num_heads == 0, "Err."
-            assert num_layers == 1, "Err."
+        elif module == "linear":
             modules = [
-                DotProductAttention(config.num_heads, config.kv_channels, attention_dropout=0.0)
+                Linear(
+                    model_config.hidden_size,
+                    model_config.hidden_size,
+                    device="cuda",
+                    params_dtype=dtype,
+                )
+                for _ in range(num_layers)
+            ]
+        elif module == "linear_op":
+            modules = [
+                te_ops.Sequential(
+                    te_ops.Linear(
+                        model_config.hidden_size,
+                        model_config.hidden_size,
+                        dtype=dtype,
+                    ),
+                )
                 for _ in range(num_layers)
             ]
         else:
-            modules = [
-                Linear(config.hidden_size, config.hidden_size, device="cuda", params_dtype=dtype)
-                for _ in range(num_layers)
-            ]
+            raise ValueError(f"Unknown module type ({module})")
 
         # Initialize gradient buffers.
         for module in modules:
@@ -230,111 +305,246 @@ def _test_cuda_graphs(
         # Generate model and wrap API to return graphed version.
         if graph_mode == "full":
             # Graph entire model at once.
-            model = modules[0] if dpa else torch.nn.Sequential(*modules)
+            model = torch.nn.Sequential(*modules)
             model = make_graphed_callables(
                 model,
-                generate_data(config, dtype, dpa=dpa, warmup=True),
+                (generate_data(model_config, dtype, warmup=True),),
                 num_warmup_iters=10,
-                fp8_enabled=fp8,
-                fp8_weight_caching=fp8_weight_caching,
+                enabled=fp8,
+                cache_quantized_params=fp8_weight_caching,
+                recipe=fp8_recipe,
             )
         elif graph_mode == "individual":
-            # Graph individual modules
+            # Graph individual modules.
             modules = [
                 make_graphed_callables(
                     module,
-                    generate_data(config, dtype, dpa=dpa, warmup=True),
+                    (generate_data(model_config, dtype, warmup=True),),
                     num_warmup_iters=10,
-                    fp8_enabled=fp8,
-                    fp8_weight_caching=fp8_weight_caching,
+                    enabled=fp8,
+                    cache_quantized_params=fp8_weight_caching,
+                    recipe=fp8_recipe,
                 )
                 for module in modules
             ]
-            model = modules[0] if dpa else _Sequential(*modules)
+            model = _Sequential(*modules)
         else:
-            model = modules[0] if dpa else _Sequential(*modules)
+            model = _Sequential(*modules)
 
     # Optimizer.
-    if not dpa:
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
 
-    # Launch.
+    # Training steps.
     for _ in range(3):
-        if not dpa:
-            optimizer.zero_grad(set_to_none=False)
+        optimizer.zero_grad(set_to_none=False)
         for grad_accumulation_step in range(2):
-            inputs, grad_output = generate_data(config, dtype, dpa=dpa, return_grad_output=True)
-            with fp8_autocast(enabled=fp8):
+            input_ = generate_data(model_config, dtype)
+            grad_output = generate_data(model_config, dtype, requires_grad=False)
+            with autocast(enabled=fp8, recipe=fp8_recipe):
                 kwargs = {}
                 if fp8_weight_caching:
                     kwargs["is_first_microbatch"] = grad_accumulation_step == 0
-                output = model(*inputs, **kwargs)
+                output = model(input_, **kwargs)
             output.backward(grad_output)
-        if not dpa:
-            optimizer.step()
+        optimizer.step()
 
-    return get_outputs(model, output)
+    outputs = get_outputs(model, output)
+    if graph_mode == "full":
+        reset_graphs(model)
+    elif graph_mode == "individual":
+        reset_graphs(modules)
+    return outputs
 
 
+@pytest.mark.parametrize("module", _test_cuda_graphs_modules)
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("model", model_configs.keys())
-@pytest.mark.parametrize("num_layers", [1, 3])
-@pytest.mark.parametrize("fp8", all_boolean)
-@pytest.mark.parametrize("fp8_params", all_boolean)
-@pytest.mark.parametrize("fp8_weight_caching", all_boolean)
-@pytest.mark.parametrize("module", modules)
-def test_gpt_make_graphed_callables(
-    dtype: torch.dtype,
-    model: str,
-    num_layers: int,
-    fp8: bool,
-    fp8_params: bool,
-    fp8_weight_caching: bool,
+@pytest.mark.parametrize("fp8_params", (False, True))
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=lambda r: type(r).__name__)
+def test_make_graphed_callables(
+    *,
     module: str,
+    model_config: str = "small",
+    num_layers: int = 3,
+    dtype: torch.dtype,
+    fp8_params: bool,
+    fp8_recipe: recipe.Recipe,
+    fp8_weight_caching: bool = False,
 ) -> None:
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
+
+    fp8 = fp8_recipe is not None
     if fp8_params and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
-    if module == "dpa" and num_layers > 1:
-        pytest.skip("Max 1 layer for DPA.")
+    if fp8 and (fp8_recipe.float8_block_scaling() or fp8_recipe.nvfp4()) and module == "linear_op":
+        pytest.skip(
+            f"Module not yet supported for {fp8_recipe.__class__.__name__} with CUDA graphs"
+        )
+    if fp8 and fp8_recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(fp8_recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe"
+                f" {fp8_recipe.__class__.__name__}"
+            )
+        if fp8_params:
+            pytest.skip("NVFP4 params not supported")
+    if (
+        fp8
+        and fp8_recipe.delayed()
+        and torch.cuda.get_device_capability() >= (10, 0)
+        and module == "layernorm_mlp_checkpoint"
+    ):
+        pytest.skip(
+            "CUDA graphs not supported for LayerNormMLP "
+            "with checkpoint=True, SM>=10, "
+            "and DelayedScaling recipe"
+        )
 
-    config = model_configs[model]
-
+    # Run model with different CUDA graph settings.
+    model_config = model_configs[model_config]
     kwargs = dict(
-        config=config,
+        module=module,
+        model_config=model_config,
         num_layers=num_layers,
         dtype=dtype,
         fp8=fp8,
         fp8_params=fp8_params,
         fp8_weight_caching=fp8_weight_caching,
-        module=module,
+        fp8_recipe=fp8_recipe,
     )
-    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
+    # Put graphed callables first to test the case where the cuda context might not be set in
+    # creating TMA descriptor for MXFP8 quantization.
     graph_outputs_mode1 = _test_cuda_graphs(graph_mode="full", **kwargs)
     graph_outputs_mode2 = _test_cuda_graphs(graph_mode="individual", **kwargs)
+    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
 
-    # Check that results match
+    # Check that results match.
     assert_all_equal(outputs, graph_outputs_mode1)
     assert_all_equal(outputs, graph_outputs_mode2)
 
 
+_test_make_graphed_callables_with_fp8_weight_caching_modules = [
+    "transformer",
+    "layernorm_mlp_nocheckpoint",
+    "layernorm_mlp_checkpoint",
+    "layernorm_linear",
+    "linear",
+    "mha",
+]
+
+
+@pytest.mark.parametrize(
+    "module",
+    _test_make_graphed_callables_with_fp8_weight_caching_modules,
+)
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("fp8_params", (False, True))
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=lambda r: type(r).__name__)
+def test_make_graphed_callables_with_fp8_weight_caching(
+    *,
+    module: str,
+    dtype: torch.dtype,
+    fp8_params: bool,
+    fp8_recipe: recipe.Recipe,
+) -> None:
+    test_make_graphed_callables(
+        module=module,
+        dtype=dtype,
+        fp8_params=fp8_params,
+        fp8_recipe=fp8_recipe,
+        fp8_weight_caching=True,
+    )
+
+
+def generate_data_for_dot_product_attention(
+    model_config: ModelConfig,
+    dtype: torch.dtype,
+    warmup: bool = False,
+) -> List[torch.Tensor]:
+    """Generate synthetic data for dot product attention."""
+    gen_func = torch.ones if warmup else torch.randn
+    return [
+        gen_func(
+            model_config.max_seqlen_q,
+            model_config.batch_size,
+            model_config.num_heads,
+            model_config.kv_channels,
+            device="cuda",
+            requires_grad=True,
+            dtype=dtype,
+        )
+        for _ in range(3)
+    ]
+
+
+def _test_cuda_graphs_with_dot_product_attention(
+    *,
+    with_graph: bool,
+    model_config: ModelConfig,
+    dtype: torch.dtype,
+) -> List[torch.Tensor]:
+    """Helper function for CUDA graph test."""
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    # Create dot product attention module.
+    assert model_config.hidden_size % model_config.num_heads == 0
+    model = DotProductAttention(
+        model_config.num_heads,
+        model_config.kv_channels,
+        attention_dropout=0.0,
+    )
+
+    # Graph model if needed.
+    if with_graph:
+        model = make_graphed_callables(
+            model,
+            generate_data_for_dot_product_attention(model_config, dtype, warmup=True),
+            num_warmup_iters=10,
+            enabled=False,
+        )
+
+    # Forward and backward passes.
+    for _ in range(3):
+        inputs = generate_data_for_dot_product_attention(model_config, dtype)
+        grad_output = generate_data(model_config, dtype, requires_grad=False)
+        output = model(*inputs)
+        output.backward(grad_output)
+
+    outputs = get_outputs(model, output)
+    if with_graph:
+        reset_graphs(model)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", dtypes)
+def test_make_graphed_callables_with_dot_product_attention(
+    *,
+    model_config: str = "small",
+    dtype: torch.dtype,
+) -> None:
+    """Test CUDA graphs with dot product attention."""
+    model_config = model_configs[model_config]
+    kwargs = dict(model_config=model_config, dtype=dtype)
+    outputs = _test_cuda_graphs_with_dot_product_attention(with_graph=False, **kwargs)
+    graph_outputs = _test_cuda_graphs_with_dot_product_attention(with_graph=True, **kwargs)
+    assert_all_equal(outputs, graph_outputs)
+
+
 def _test_cuda_graphs_with_kwargs(
     *,
-    config: ModelConfig,
-    dtype: torch.dtype,
     with_graph: bool,
+    model_config: ModelConfig,
+    dtype: torch.dtype,
 ) -> List[torch.Tensor]:
-    """Simulate Megatron-LM interleaved pipeline parallelism."""
+    """Helper function for CUDA graph test with keyword arguments."""
     reset_rng_states()
 
     # Initialize model.
     model = TransformerLayer(
-        config.hidden_size,
-        config.hidden_size,
-        config.num_heads,
+        model_config.hidden_size,
+        model_config.hidden_size,
+        model_config.num_heads,
         hidden_dropout=0.0,
         attention_dropout=0.0,
         self_attn_mask_type="arbitrary",
@@ -349,13 +559,18 @@ def _test_cuda_graphs_with_kwargs(
     # Make graphed version of model if needed.
     if with_graph:
         attn_mask = torch.zeros(
-            (config.batch_size, 1, config.sequence_length, config.sequence_length),
+            (
+                model_config.batch_size,
+                1,
+                model_config.max_seqlen_q,
+                model_config.max_seqlen_kv,
+            ),
             dtype=torch.bool,
             device="cuda",
         )
         model = make_graphed_callables(
             model,
-            generate_data(config, dtype, warmup=True),
+            (generate_data(model_config, dtype, warmup=True),),
             sample_kwargs=dict(attention_mask=attn_mask),
             allow_unused_input=True,
         )
@@ -367,27 +582,37 @@ def _test_cuda_graphs_with_kwargs(
     for _ in range(3):
         optimizer.zero_grad(set_to_none=False)
         for grad_accumulation_step in range(2):
-            inputs, grad_output = generate_data(config, dtype, return_grad_output=True)
+            input_ = generate_data(model_config, dtype)
+            grad_output = generate_data(model_config, dtype, requires_grad=False)
             attn_mask = torch.randint(
                 2,
-                (config.batch_size, 1, config.sequence_length, config.sequence_length),
+                (
+                    model_config.batch_size,
+                    1,
+                    model_config.max_seqlen_q,
+                    model_config.max_seqlen_kv,
+                ),
                 dtype=torch.bool,
                 device="cuda",
             )
-            output = model(*inputs, attention_mask=attn_mask)
+            output = model(input_, attention_mask=attn_mask)
             output.backward(grad_output)
         optimizer.step()
 
-    return get_outputs(model, output)
+    outputs = get_outputs(model, output)
+    if with_graph:
+        reset_graphs(model)
+    return outputs
 
 
 def test_make_graphed_callables_with_kwargs(
+    *,
+    model_config: str = "small",
     dtype: torch.dtype = torch.float32,
-    model: str = "small",
 ) -> None:
     """Test CUDA graphs with keyword arguments."""
-    config = model_configs[model]
-    kwargs = dict(config=config, dtype=dtype)
+    model_config = model_configs[model_config]
+    kwargs = dict(model_config=model_config, dtype=dtype)
     outputs = _test_cuda_graphs_with_kwargs(with_graph=False, **kwargs)
     graph_outputs = _test_cuda_graphs_with_kwargs(with_graph=True, **kwargs)
     assert_all_equal(outputs, graph_outputs)
@@ -395,9 +620,9 @@ def test_make_graphed_callables_with_kwargs(
 
 def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
     *,
-    config: ModelConfig,
-    dtype: torch.dtype,
     with_graph: bool,
+    model_config: ModelConfig,
+    dtype: torch.dtype,
 ) -> List[torch.Tensor]:
     """Simulate Megatron-LM interleaved pipeline parallelism."""
     reset_rng_states()
@@ -411,8 +636,8 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
     model = torch.nn.ModuleList(
         [
             Linear(
-                config.hidden_size,
-                config.hidden_size,
+                model_config.hidden_size,
+                model_config.hidden_size,
                 params_dtype=dtype,
             )
             for _ in range(num_layers)
@@ -430,7 +655,8 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
     }
     if with_graph:
         sample_args = tuple(
-            generate_data(config, dtype, warmup=True) for _ in range(num_layers * num_microbatches)
+            (generate_data(model_config, dtype, warmup=True),)
+            for _ in range(num_layers * num_microbatches)
         )
         layer_forwards = make_graphed_callables(
             tuple(model),
@@ -455,9 +681,10 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         grad_outputs = {}
         for layer_idx in range(num_layers):
             for microbatch_idx in range(num_microbatches):
-                x, dy = generate_data(config, dtype, return_grad_output=True)
+                x = generate_data(model_config, dtype)
+                dy = generate_data(model_config, dtype, requires_grad=False)
                 idxs = (layer_idx, microbatch_idx)
-                inputs[idxs] = x[0]
+                inputs[idxs] = x
                 grad_outputs[idxs] = dy
 
         # Cache for layer outputs.
@@ -490,16 +717,20 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         optimizer.step()
 
     outputs = [y for _, y in sorted(outputs.items())]
-    return get_outputs(model, outputs)
+    outputs = get_outputs(model, outputs)
+    if with_graph:
+        reset_graphs(layer_forwards)
+    return outputs
 
 
 def test_make_graphed_callables_with_interleaved_pipeline_parallelism(
+    *,
+    model_config: str = "small",
     dtype: torch.dtype = torch.float16,
-    model: str = "small",
 ) -> None:
     """Test CUDA graphs with Megatron-LM interleaved pipeline parallelism."""
-    config = model_configs[model]
-    kwargs = dict(config=config, dtype=dtype)
+    model_config = model_configs[model_config]
+    kwargs = dict(model_config=model_config, dtype=dtype)
     outputs = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         with_graph=False,
         **kwargs,

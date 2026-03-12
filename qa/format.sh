@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,5 +11,5 @@ set -e
 
 cd $TE_PATH
 
-pip install pre-commit
-pre-commit run --all-files
+pip3 install pre-commit
+python3 -m pre_commit run --all-files

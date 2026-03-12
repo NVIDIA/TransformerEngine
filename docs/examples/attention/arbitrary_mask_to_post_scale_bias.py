@@ -1,11 +1,11 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import os
 import torch
 from typing import Tuple
-from tests.pytorch.fused_attn.test_fused_attn import ModelConfig
+from tests.pytorch.utils import ModelConfig
 from transformer_engine.pytorch.attention import DotProductAttention
 
 # Initialize RNG state

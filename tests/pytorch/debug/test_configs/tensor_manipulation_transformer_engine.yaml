@@ -1,0 +1,45 @@
+# This config is used when FP8 training is ON
+
+transformer_engine_fc1_manipulation:
+  enabled: True
+  layers:
+    layer_name_regex_pattern: .*(fc1) # Select layers if they end in fc1
+  transformer_engine: # namespace
+    DisableFP8GEMM: # Disable FP8 GEMM. FProp run in high precision
+      enabled: True
+      gemms: [fprop]
+    PerTensorScaling: # Scale DGrad gradients using per tensor current scaling and run FP8 GEMM
+      enabled: True
+      gemms: [dgrad]
+      tensors: [gradient]
+    FakeQuant: # Disable FP8 GEMM for Wgrad. Fake quantize activations to Wgrad and run high precision GEMM
+      enabled: True
+      gemms: [fprop]
+      tensors_struct:
+        - tensor: activation
+          quant_format: FP8E4M3
+        - tensor: weight
+          quant_format: FP8E4M3
+
+transformer_engine_fc2_manipulation:
+  enabled: True
+  layers:
+    layer_name_regex_pattern: .*(fc2) # Select layers if they end in fc2
+  transformer_engine: # namespace
+    PerTensorScaling: # Scale WGrad and Fprop inputs using per tensor current scaling and run FP8 GEMM
+      enabled: True
+      gemms_struct:
+        - gemm: fprop
+          tensors_struct:
+            - tensor: activation
+            - tensor: weight
+        - gemm: wgrad
+          tensors_struct:
+            - tensor: activation
+            - tensor: gradient
+    FakeQuant: # Disable FP8 GEMM for DGrad. Fake quantize weights and gradients to DGrad and run high precision GEMM
+      enabled: True
+      gemms_struct:
+        - gemm: dgrad
+          tensors: [weight, gradient]
+          quant_format: FP8E5M2

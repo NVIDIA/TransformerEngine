@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -11,7 +11,12 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 
+#if CUDA_VERSION >= 12080
+#include <cuda_fp4.h>
+#endif
+
 #if !defined(__CUDACC_RTC__)
+#include <cassert>
 #include <cstdint>
 #else
 // Importing C++ standard headers is a pain with NVRTC
@@ -28,6 +33,26 @@ static_assert(sizeof(uint64_t) == 8);
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 constexpr uint32_t THREADS_PER_WARP = 32;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Device-side error
+#define NVTE_DEVICE_ERROR(message)                                                                 \
+  do {                                                                                             \
+    printf("%s:%d in function %s (thread (%d,%d,%d), block (%d,%d,%d)): %s\n", __FILE__, __LINE__, \
+           __func__, threadIdx.x, threadIdx.y, threadIdx.z, blockIdx.x, blockIdx.y, blockIdx.z,    \
+           (message));                                                                             \
+    assert(0);                                                                                     \
+  } while (false)
+
+// Device-side error on thread 0
+#define NVTE_DEVICE_THREAD0_ERROR(message)                                           \
+  do {                                                                               \
+    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && \
+        threadIdx.y == 0 && threadIdx.z == 0) {                                      \
+      NVTE_DEVICE_ERROR(message);                                                    \
+    }                                                                                \
+  } while (false)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -819,6 +844,21 @@ __device__ __forceinline__ float warp_reduce_max(const float m) {
   return tmp;
 }
 
+__forceinline__ __device__ float warp_reduce_max_broadcast(const float val) {
+  float val_tmp = val;
+#pragma unroll
+  for (int offset = THREADS_PER_WARP / 2; offset > 0; offset /= 2) {
+    const float val_other = __shfl_down_sync(0xFFFFFFFF, val_tmp, offset);
+    __builtin_assume(val_tmp >= 0);
+    __builtin_assume(val_other >= 0);
+    val_tmp = fmaxf(val_tmp, val_other);
+  }
+  // Broadcast the amax to other threads of the subwarp from the zero subwarp lane_id
+  constexpr int subwarp_lane_zero = 0;
+  val_tmp = __shfl_sync(0xFFFFFFFF, val_tmp, subwarp_lane_zero);
+  return val_tmp;
+}
+
 template <int num_warps, typename compute_t>
 __device__ __forceinline__ compute_t reduce_max(const compute_t m, const int warpid) {
   __shared__ float staging[num_warps];
@@ -829,12 +869,35 @@ __device__ __forceinline__ compute_t reduce_max(const compute_t m, const int war
     staging[warpid] = my_warp_max;
   }
   __syncthreads();
-  compute_t result = 0;
+  compute_t result = 0.f;
   if (warpid == 0) {
     const float my_max = threadIdx.x < num_warps ? staging[threadIdx.x] : 0;
     result = warp_reduce_max<num_warps>(my_max);
   }
   return result;
+}
+
+/**
+ * Max reduction in subwarps
+ * E.g., if nvec=4, each warp processes 128 elements (32 x 4), that covers four MXFP8 scaling factors.
+ * To compute an actual scaling factor for 32 consequentive elements, only 8 threads need to participate,
+ * thus splitting the warp into 4x smaller subwarps 8-thread width.
+ * 'Butterfly' reduction is used inside subwarps.
+ */
+template <int subwarp_width>
+__forceinline__ __device__ float subwarp_reduce_max_broadcast(const float val) {
+  float val_tmp = val;
+#pragma unroll
+  for (int offset = subwarp_width / 2; offset > 0; offset /= 2) {
+    const float val_other = __shfl_down_sync(0xFFFFFFFF, val_tmp, offset, subwarp_width);
+    __builtin_assume(val_tmp >= 0);
+    __builtin_assume(val_other >= 0);
+    val_tmp = fmaxf(val_tmp, val_other);
+  }
+  // Broadcast the amax to other threads of the subwarp from the zero subwarp lane_id
+  constexpr int subwarp_lane_zero = 0;
+  val_tmp = __shfl_sync(0xFFFFFFFF, val_tmp, subwarp_lane_zero, subwarp_width);
+  return val_tmp;
 }
 
 // Works only on positive values
@@ -856,6 +919,38 @@ template <>
 __device__ __forceinline__ void reciprocal<float>(float *value_inv, const float value) {
   *value_inv = __frcp_rn(value);
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+using fp8e4m3 = __nv_fp8_e4m3;
+using fp8e5m2 = __nv_fp8_e5m2;
+using e8m0_t = uint8_t;
+
+enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENSIONAL = 2 };
+
+template <typename T>
+struct Numeric_Traits;
+
+template <>
+struct Numeric_Traits<fp8e4m3> {
+  static constexpr int maxUnbiasedExponent = 8;
+  static constexpr double maxNorm = 448;
+};
+
+template <>
+struct Numeric_Traits<fp8e5m2> {
+  static constexpr int maxUnbiasedExponent = 15;
+  static constexpr double maxNorm = 57344;
+};
+
+template <typename T>
+struct Quantized_Limits {
+  static constexpr int max_unbiased_exponent = Numeric_Traits<T>::maxUnbiasedExponent;
+  static constexpr float max_norm = Numeric_Traits<T>::maxNorm;
+  static constexpr float max_norm_rcp = 1.0 / max_norm;
+  static constexpr float emax = 1 << max_unbiased_exponent;
+  static constexpr float emax_rcp = 1.0 / emax;
+};
 
 }  // namespace transformer_engine
 

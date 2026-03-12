@@ -1,12 +1,12 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Encoder training with multi-GPU, multiprocessing, and tensor parallelism"""
 import argparse
-import multiprocessing as mp
 import os
 import unittest
 from functools import partial
+import pytest
 
 import flax
 import jax
@@ -21,8 +21,19 @@ from flax.training import train_state
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec, NamedSharding
 
+from common import (
+    is_bf16_supported,
+    is_fp8_supported,
+    is_mxfp8_supported,
+    is_nvfp4_supported,
+    get_quantization_recipe_from_name_string,
+    unpack_cached_datasets_if_available,
+)
 import transformer_engine.jax as te
+import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
+
+unpack_cached_datasets_if_available()
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 DEVICE_DP_AXIS = "data"
@@ -31,6 +42,7 @@ NAMED_BROADCAST_AXIS = "my_broadcast_axis"
 NAMED_TP_AXIS = "my_tp_axis"
 PARAMS_KEY = "params"
 PARAMS_AXES_KEY = PARAMS_KEY + "_axes"
+SR_KEY = "sr_rng"
 DROPOUT_KEY = "dropout"
 INPUT_KEY = "input_rng"
 
@@ -55,7 +67,6 @@ class Net(nn.Module):
             layer_type=te_flax.TransformerLayerType.ENCODER,
             self_attn_mask_type="padding",
             enable_relative_embedding=False,
-            dtype=jnp.bfloat16,
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
@@ -65,17 +76,15 @@ class Net(nn.Module):
             features=256,
             kernel_axes=(NAMED_BROADCAST_AXIS, NAMED_TP_AXIS),
             bias_axes=(NAMED_TP_AXIS,),
-            dtype=jnp.bfloat16,
         )(x)
 
         x = te_flax.DenseGeneral(
             features=256,
             kernel_axes=(NAMED_TP_AXIS, NAMED_BROADCAST_AXIS),
             bias_axes=(NAMED_BROADCAST_AXIS,),
-            dtype=jnp.bfloat16,
         )(x)
 
-        x = nn.Dense(features=2, dtype=jnp.bfloat16)(x)
+        x = nn.Dense(features=2)(x)
         return x
 
 
@@ -170,6 +179,8 @@ def train_epoch(
     epoch_accuracy = []
 
     for perm in perms:
+        # Split and reassign to 'rngs' to ensure unique rng for each step
+        rngs = {key: jax.random.split(rngs[key])[1] for key in rngs}
         batch_input = sentence[perm, ...]
         batch_mask = mask[perm, ...]
         batch_label = label[perm, ...]
@@ -195,11 +206,11 @@ def train_epoch(
     return state, avg_loss, avg_accuracy, var_collect
 
 
-def eval_step(state, inputs, masks, labels, var_collect):
+def eval_step(state, inputs, masks, labels, var_collect, rngs):
     """Computes loss and accuracy for a single batch."""
 
     def loss_fn(var_collect, disable_dropout=False):
-        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout)
+        logits = state.apply_fn(var_collect, inputs, masks, disable_dropout, rngs=rngs)
         one_hot = jax.nn.one_hot(labels, 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
@@ -211,7 +222,16 @@ def eval_step(state, inputs, masks, labels, var_collect):
 
 
 def eval_model(
-    state, test_ds, batch_size, var_collect, eval_fn, mesh, inputs_pspec, masks_pspec, labels_pspec
+    state,
+    test_ds,
+    batch_size,
+    var_collect,
+    eval_fn,
+    mesh,
+    inputs_pspec,
+    masks_pspec,
+    labels_pspec,
+    rngs,
 ):
     """Evaluation loop."""
     global_input_shape, input_named_sharding, sentence = shard_array_wrapper(
@@ -228,7 +248,8 @@ def eval_model(
     all_accuracy = []
 
     for batch_input, batch_mask, batch_label in zip(sentence, mask, label):
-
+        # Split and reassign to 'rngs' to ensure unique rng for each step
+        rngs = {key: jax.random.split(rngs[key])[1] for key in rngs}
         shard_input = jax.make_array_from_single_device_arrays(
             global_input_shape, input_named_sharding, [batch_input]
         )
@@ -239,7 +260,7 @@ def eval_model(
             global_label_shape, label_named_sharding, [batch_label]
         )
 
-        loss, accuracy = eval_fn(state, shard_input, shard_mask, shard_label, var_collect)
+        loss, accuracy = eval_fn(state, shard_input, shard_mask, shard_label, var_collect, rngs)
         all_loss.append(loss)
         all_accuracy.append(accuracy)
 
@@ -250,7 +271,6 @@ def eval_model(
 
 def data_preprocess(dataset, vocab, word_id, max_seq_len):
     """Convert tokens to numbers."""
-    nltk.download("punkt_tab")
     dataset_size = len(dataset["sentence"])
     output = np.zeros((dataset_size, max_seq_len), dtype=np.int32)
     mask_3d = np.ones((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
@@ -287,11 +307,11 @@ def get_datasets(max_seq_len):
     vocab = {}
     word_id = 0
 
-    train_ds = load_dataset("glue", "cola", split="train")
+    train_ds = load_dataset("nyu-mll/glue", "cola", split="train")
     train_ds.set_format(type="np")
     train_ds, vocab, word_id = data_preprocess(train_ds, vocab, word_id, max_seq_len)
 
-    test_ds = load_dataset("glue", "cola", split="validation")
+    test_ds = load_dataset("nyu-mll/glue", "cola", split="validation")
     test_ds.set_format(type="np")
     test_ds, vocab, word_id = data_preprocess(test_ds, vocab, word_id, max_seq_len)
     return train_ds, test_ds, word_id
@@ -299,10 +319,9 @@ def get_datasets(max_seq_len):
 
 def check_fp8(state, var_collect, inputs, masks, labels):
     "Check if model includes FP8."
-    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
-    assert "fp8_" in str(
-        jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs)
-    )
+    rngs = {DROPOUT_KEY: jax.random.PRNGKey(0), SR_KEY: jax.random.PRNGKey(0)}
+    func_jaxpr = str(jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs))
+    assert "f8_e5m2" in func_jaxpr or "f8_e4m3" in func_jaxpr
 
 
 def get_params_sharding(sharding_rules, abs_var_collect, mesh):
@@ -319,7 +338,7 @@ def get_params_sharding(sharding_rules, abs_var_collect, mesh):
     )
     params_axes_sharding = flax.core.unfreeze(params_axes_sharding)
     params_sharding = jax.tree_util.tree_map(
-        lambda x: NamedSharding(mesh, ()), abs_var_collect[PARAMS_KEY]
+        lambda x: NamedSharding(mesh, PartitionSpec(None)), abs_var_collect[PARAMS_KEY]
     )
     params_sharding = {**params_sharding, **params_axes_sharding}
     return params_sharding
@@ -340,6 +359,9 @@ def get_state_sharding(state, params_sharding):
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
     print(args)
+    if args.process_id == 0:
+        nltk.download("punkt_tab")
+
     train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
 
     jax.distributed.initialize(
@@ -358,35 +380,50 @@ def train_and_evaluate(args):
         num_gpu_dp = 1
         num_gpu_tp = 1
 
-    assert args.batch_size % num_gpu_dp == 0, f"Batch size needs to be multiple of {num_gpu_dp}"
-    assert (
-        args.test_batch_size % num_gpu_dp == 0
-    ), f"Test batch size needs to be multiple of {num_gpu_dp}"
+    if args.fp8_recipe == "MXFP8BlockScaling":
+        assert args.batch_size % 32 == 0, "Batch size needs to be multiple of 32 for MXFP8"
+        assert (
+            args.test_batch_size % 32 == 0
+        ), "Test batch size needs to be multiple of 32 for MXFP8"
+
+    if args.use_fp8:
+        fp8_recipe = get_quantization_recipe_from_name_string(args.fp8_recipe)
+    else:
+        fp8_recipe = None
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
     with jax.sharding.Mesh(
         devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)
-    ) as mesh:
-
+    ) as mesh, te.autocast(
+        enabled=args.use_fp8,
+        recipe=fp8_recipe,
+        mesh_resource=te.MeshResource(
+            dp_resource=DEVICE_DP_AXIS,
+            tpsp_resource=DEVICE_TP_AXIS,
+        ),
+    ):
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
         rng, dropout_rng = jax.random.split(rng)
-        init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
+        rng, sr_rng = jax.random.split(rng)
+        init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
 
         input_shape = [args.batch_size, args.max_seq_len]
         mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
         label_shape = [args.batch_size]
 
-        with te.fp8_autocast(
-            args.use_fp8, mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None, None)
-        ):
+        # Create custom Flax logical axis rules for sharding.
+        customized_rules = ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
+        # Extend the logical axis rules with TE's rules. This must be done inside autocast.
+        sharding_rules = te_flax.extend_logical_axis_rules(customized_rules)
+
+        with flax.linen.logical_axis_rules(sharding_rules):
+
             encoder = Net(num_embed)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
 
-            customized_rules = ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
-            sharding_rules = te_flax.extend_logical_axis_rules(tuple()) + customized_rules
             params_sharding = get_params_sharding(sharding_rules, abs_var_collect, mesh)
             inputs_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
             masks_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None, None)
@@ -397,7 +434,9 @@ def train_and_evaluate(args):
             out_shardings = {
                 key: params_sharding if key is PARAMS_KEY else None for key in abs_var_collect
             }
-            jit_encoder_init = jax.jit(encoder.init, in_shardings, out_shardings)
+            jit_encoder_init = jax.jit(
+                encoder.init, in_shardings=in_shardings, out_shardings=out_shardings
+            )
             var_collect = jit_encoder_init(init_rngs, inputs, masks)
 
             optimizer = optax.adamw(args.lr)
@@ -417,11 +456,22 @@ def train_and_evaluate(args):
                 None,
             )
             out_shardings = (state_sharding, None, None, None)
-            jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
+            jit_train_step = jax.jit(
+                train_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
-            in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
+            in_shardings = (
+                state_sharding,
+                inputs_sharding,
+                masks_sharding,
+                labels_sharding,
+                None,
+                None,
+            )
             out_shardings = (None, None)
-            jit_eval_step = jax.jit(eval_step, in_shardings, out_shardings)
+            jit_eval_step = jax.jit(
+                eval_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
             if args.use_fp8:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
@@ -429,14 +479,16 @@ def train_and_evaluate(args):
 
             if args.dry_run:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
-                rngs = {DROPOUT_KEY: dropout_rng}
+                rngs = {DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng_state}
                 jit_train_step(state, inputs, masks, labels, var_collect, rngs)
                 print("PASSED")
             else:
                 for epoch in range(1, args.epochs + 1):
+                    # Split and reassign to 'rng' to ensure unique rng for each step
                     rng, input_rng = jax.random.split(rng)
                     rng, dropout_rng = jax.random.split(rng)
-                    rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
+                    rng, sr_rng = jax.random.split(rng)
+                    rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng, SR_KEY: sr_rng}
 
                     state, train_loss, train_accuracy, var_collect = train_epoch(
                         state,
@@ -461,6 +513,7 @@ def train_and_evaluate(args):
                         inputs_pspec,
                         masks_pspec,
                         labels_sharding.spec,
+                        rngs,
                     )
                     if args.process_id == 0:
                         print(
@@ -481,23 +534,23 @@ def encoder_parser(args):
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=64,
+        default=256,
         metavar="N",
-        help="input batch size for training (default: 64)",
+        help="input batch size for training (default: 256)",
     )
     parser.add_argument(
         "--test-batch-size",
         type=int,
-        default=64,
+        default=256,
         metavar="N",
-        help="input batch size for testing (default: 64)",
+        help="input batch size for testing (default: 256)",
     )
     parser.add_argument(
         "--max-seq-len",
         type=int,
-        default=32,
+        default=64,
         metavar="N",
-        help="maximum sequence length (default: 32)",
+        help="maximum sequence length (default: 64)",
     )
     parser.add_argument(
         "--epochs",
@@ -527,12 +580,18 @@ def encoder_parser(args):
         help="Use FP8 for inference and training without recalibration",
     )
     parser.add_argument(
+        "--fp8-recipe",
+        action="store_true",
+        default="DelayedScaling",
+        help="Use FP8 recipe (default: DelayedScaling)",
+    )
+    parser.add_argument(
         "--coordinator-address",
         type=str,
         default="127.0.0.1:1234",
         help=(
-            "the IP address of process 0 and a port on                              which that"
-            " process should launch a coordinator service                              (default:"
+            "the IP address of process 0 and a port on which that"
+            " process should launch a coordinator service (default:"
             " 127.0.0.1:1234)"
         ),
     )
@@ -549,67 +608,66 @@ def encoder_parser(args):
     return parser.parse_args(args)
 
 
-def query_gpu(q):
-    """Query GPU info on the system"""
-    gpu_has_fp8, reason = te.fp8.is_fp8_available()
-    num_gpu = len(jax.devices())
-    q.put([num_gpu, gpu_has_fp8, reason])
-
-
-def unittest_query_gpu():
-    r"""
-    It is only used by TestEncoder.
-    The `jax.distributed.initialize` must be called before any other JAX or Flax API,
-    otherwise `jax.local_devices` will be incorrect.
-    Thus, fork another process to query number of GPUs and FP8 capability.
-    """
-    q = mp.Queue()
-    p = mp.Process(target=query_gpu, args=(q,))
-    p.start()
-    num_gpu, gpu_has_fp8, reason = q.get()
-    p.join()
-    return num_gpu, gpu_has_fp8, reason
-
-
+@pytest.mark.usefixtures("multiprocessing_parses")
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    num_gpu, gpu_has_fp8, reason = unittest_query_gpu()
+    def exec(self, use_fp8, fp8_recipe):
+        """Run 5 epochs for testing"""
+        args = encoder_parser(["--epochs", "5"])
 
-    def exec(self, use_fp8):
-        """Run 3 epochs for testing"""
-        num_gpu = self.num_gpu
+        num_gpu = self.num_process
         tp_size = 2 if num_gpu > 1 and num_gpu % 2 == 0 else 1
         dp_size = num_gpu // tp_size
-        batch_size = 64 // dp_size
+        assert args.batch_size % dp_size == 0, f"Batch size needs to be multiple of {dp_size}"
+        batch_size = args.batch_size // dp_size
 
-        arg_list = []
-        for i in range(num_gpu):
-            args = encoder_parser([])
-            args.num_process = num_gpu
-            args.use_fp8 = use_fp8
-            args.batch_size = batch_size
-            args.test_batch_size = batch_size
-            args.process_id = i
-            arg_list.append(args)
+        args.use_fp8 = use_fp8
+        args.batch_size = batch_size
+        args.test_batch_size = batch_size
+        args.num_process = num_gpu
+        args.process_id = self.process_id
+        args.fp8_recipe = fp8_recipe
 
-        with mp.Pool(self.num_gpu) as p:
-            results = p.map(train_and_evaluate, arg_list)
+        return train_and_evaluate(args)
 
-        return results
-
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
-        results = self.exec(False)
-        actual = results[0]
-        assert actual[0] < 0.45 and actual[1] > 0.79
+        result = self.exec(False, None)
+        assert result[0] < 0.43 and result[1] > 0.80
 
-    @unittest.skipIf(not gpu_has_fp8, reason)
-    def test_te_fp8(self):
-        """Test Transformer Engine with FP8"""
-        results = self.exec(True)
-        actual = results[0]
-        assert actual[0] < 0.45 and actual[1] > 0.79
+    @unittest.skipIf(
+        not is_fp8_supported(), "Device compute capability 9.0+ is required for DelayedScaling FP8"
+    )
+    def test_te_delayed_scaling_fp8(self):
+        """Test Transformer Engine with DelayedScaling FP8"""
+        result = self.exec(True, "DelayedScaling")
+        assert result[0] < 0.43 and result[1] > 0.80
+
+    @unittest.skipIf(
+        not is_fp8_supported(), "Device compute capability 9.0+ is required for CurrentScaling FP8"
+    )
+    def test_te_current_scaling_fp8(self):
+        """Test Transformer Engine with CurrentScaling FP8"""
+        result = self.exec(True, "Float8CurrentScaling")
+        assert result[0] < 0.432 and result[1] > 0.80
+
+    @unittest.skipIf(
+        not is_mxfp8_supported(), "Device compute capability 10.0+ is required for MXFP8"
+    )
+    def test_te_mxfp8(self):
+        """Test Transformer Engine with MXFP8"""
+        result = self.exec(True, "MXFP8BlockScaling")
+        assert result[0] < 0.43 and result[1] > 0.80
+
+    @unittest.skipIf(
+        not is_nvfp4_supported(), "Device compute capability 10.0+ is required for NVFP4"
+    )
+    def test_te_nvfp4(self):
+        """Test Transformer Engine with NVFP4"""
+        result = self.exec(True, "NVFP4BlockScaling")
+        assert result[0] < 0.451 and result[1] > 0.787
 
 
 if __name__ == "__main__":

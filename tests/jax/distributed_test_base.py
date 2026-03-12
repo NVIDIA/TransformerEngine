@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 import operator
@@ -8,48 +8,62 @@ from itertools import product
 import pytest
 
 import jax
-from jax.experimental.pjit import pjit, _UNSPECIFIED
+from jax._src.sharding_impls import UNSPECIFIED as _UNSPECIFIED
 
 from transformer_engine.jax.sharding import MeshResource
 
-from utils import assert_allclose, is_devices_enough
+from utils import assert_allclose, is_devices_enough, is_devices_equal
 
 
 def generate_configs():
     configs = []
-    if is_devices_enough(2):
-        configs.append([2, (2,), "dp", MeshResource(dp_resource="dp")])
-        configs.append([2, (2,), "tp", MeshResource(tp_resource="tp")])
-
     if is_devices_enough(4):
-        TP_size = 2
-        DP_size = 2
         configs.append(
-            [4, (DP_size, TP_size), ("dp", "tp"), MeshResource(dp_resource="dp", tp_resource="tp")]
+            pytest.param(
+                4,
+                (2, 2),
+                ("dp", "tpsp"),
+                MeshResource(dp_resource="dp", tpsp_resource="tpsp"),
+                id="n4_dp2_tp2",
+            )
         )
 
+    if is_devices_enough(2):
+        configs.append(
+            pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1")
+        )
+        configs.append(
+            pytest.param(2, (2,), ("tpsp",), MeshResource(tpsp_resource="tpsp"), id="n2_dp1_tp2"),
+        )
     return configs
 
 
-def generate_context_parallel_configs():
-    configs = []
-
+def generate_context_parallel_configs_for_attn():
+    """Generate CP combinations along with TP+DP for TestDistributedContextParallelSelfAttn only"""
+    configsL1 = []
+    configsL2 = []
+    mr = MeshResource(dp_resource="dp", cp_resource="cp", tpsp_resource="tpsp")
+    axes = ("dp", "cp", "tpsp")
     DP_sizes = (1, 2)
     CP_sizes = (1, 2, 4, 8)
     TP_sizes = (1, 2)
     for dp, cp, tp in product(DP_sizes, CP_sizes, TP_sizes):
         ndev = cp * tp * dp
-        if is_devices_enough(ndev):
-            configs.append(
-                pytest.param(
-                    ndev,
-                    (dp, cp, tp),
-                    ("dp", "cp", "tp"),
-                    MeshResource(dp_resource="dp", cp_resource="cp", tp_resource="tp"),
-                    id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}",
+        # Run only those dp,cp,tp combinations which require exactly ndev GPUs.
+        # For e.g., if num_GPUs is 8 and ndev=8 , all the dp,cp,tp combinations fulfilling ndev = cp * tp * dp are picked.
+        # However, if num_GPUs is 8 and ndev=4, then all the dp,cp,tp combinations fulfilling ndev = cp * tp * dp are ignored.
+        # To explicitly pick combinations associated with ndev=4, one can set CUDA_VISIBLE_DEVICES=0,1,2,3, thereby forcing num_GPUs to 4 instead of 8.
+        if is_devices_equal(ndev):
+            # Do not run cp1 case in L1 as that is already covered in TestDistributedSelfAttn and TestDistributedCrossAttn (as these do not have any cp combinations)
+            if cp != 1:
+                configsL1.append(
+                    pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}")
                 )
-            )
-
+            else:
+                configsL2.append(
+                    pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}")
+                )
+    configs = {"L0": [], "L1": configsL1, "L2": configsL2}
     return configs
 
 
@@ -79,7 +93,7 @@ def assert_equal_collectives(target_hlo, coll_count_ref):
                 'i32[1024]{0}',
                 'bf16[1024,1024]{0}'
             """
-            match = re.search(r"(i|f)(\d+).*\[([0-9,]*)\]", t)
+            match = re.search(r"(i|f|u)(\d+).*\[([0-9,]*)\]", t)
             _, bits_of_type, shape = match.groups()
             bytes_of_type = int(bits_of_type) // 8
             if shape == "":
@@ -144,13 +158,15 @@ def compare_ops(
         grad_args = tuple(range(len(inputs)))
 
     target_grad_func = jax.value_and_grad(target_func, argnums=grad_args)
-    target_pjitter = pjit(target_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
-    target_fwd, target_grads = target_pjitter(*inputs, **kwargs)
-    target_hlo = target_pjitter.lower(*inputs, **kwargs).compile().as_text()
+    target_jitter = jax.jit(
+        target_grad_func, in_shardings=in_shardings, out_shardings=out_shardings
+    )
+    target_fwd, target_grads = target_jitter(*inputs, **kwargs)
+    target_hlo = target_jitter.lower(*inputs, **kwargs).compile().as_text()
 
     ref_grad_func = jax.value_and_grad(ref_func, argnums=grad_args)
-    ref_pjitter = pjit(ref_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
-    ref_fwd, ref_grads = ref_pjitter(*inputs, **kwargs)
+    ref_jitter = jax.jit(ref_grad_func, in_shardings=in_shardings, out_shardings=out_shardings)
+    ref_fwd, ref_grads = ref_jitter(*inputs, **kwargs)
 
     assert_allclose(target_fwd, ref_fwd, dtype=metric_fwd_dtype)
 

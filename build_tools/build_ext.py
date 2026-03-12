@@ -1,10 +1,9 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Installation script."""
 
-import ctypes
 import os
 import subprocess
 import sys
@@ -23,7 +22,7 @@ from .utils import (
     debug_build_enabled,
     found_ninja,
     get_frameworks,
-    cuda_path,
+    nvcc_path,
     get_max_jobs_for_parallel_build,
 )
 
@@ -58,9 +57,16 @@ class CMakeExtension(setuptools.Extension):
             build_dir,
             f"-DPython_EXECUTABLE={sys.executable}",
             f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
+            f"-DPython_SITEARCH={sysconfig.get_path('platlib')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
+        if bool(int(os.getenv("NVTE_USE_CCACHE", "0"))):
+            ccache_bin = os.getenv("NVTE_CCACHE_BIN", "ccache")
+            configure_command += [
+                f"-DCMAKE_CXX_COMPILER_LAUNCHER={ccache_bin}",
+                f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache_bin}",
+            ]
         configure_command += self.cmake_flags
 
         import pybind11
@@ -94,7 +100,9 @@ class CMakeExtension(setuptools.Extension):
         print(f"Time for build_ext: {total_time:.2f} seconds")
 
 
-def get_build_ext(extension_cls: Type[setuptools.Extension]):
+def get_build_ext(
+    extension_cls: Type[setuptools.Extension], framework_extension_only: bool = False
+):
     class _CMakeBuildExtension(extension_cls):
         """Setuptools command with support for CMake extension modules"""
 
@@ -129,81 +137,29 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
             super().run()
             self.extensions = all_extensions
 
-            paddle_ext = None
-            if "paddle" in get_frameworks():
-                for ext in self.extensions:
-                    if "paddle" in ext.name:
-                        paddle_ext = ext
-                        break
-
-            # Manually write stub file for Paddle extension
-            if paddle_ext is not None:
-                # Load libtransformer_engine.so to avoid linker errors
-                if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-                    # Source compilation from top-level (--editable)
-                    search_paths = list(Path(__file__).resolve().parent.parent.iterdir())
-                    # Source compilation from top-level
-                    search_paths.extend(list(Path(self.build_lib).iterdir()))
-
-                    # Dynamically load required_libs.
-                    from transformer_engine.common import _load_cudnn, _load_nvrtc
-
-                    _load_cudnn()
-                    _load_nvrtc()
-                else:
-                    # Only during release bdist build for paddlepaddle.
-                    import transformer_engine
-
-                    search_paths = list(Path(transformer_engine.__path__[0]).iterdir())
-                    del transformer_engine
-
-                common_so_path = ""
-                for path in search_paths:
-                    if path.name.startswith("libtransformer_engine."):
-                        common_so_path = str(path)
-                assert common_so_path, "Could not find libtransformer_engine"
-                ctypes.CDLL(common_so_path, mode=ctypes.RTLD_GLOBAL)
-
-                # Figure out stub file path
-                module_name = paddle_ext.name
-                assert module_name.endswith(
-                    "_pd_"
-                ), "Expected Paddle extension module to end with '_pd_'"
-                stub_name = module_name[:-4]  # remove '_pd_'
-                stub_path = os.path.join(self.build_lib, "transformer_engine", stub_name + ".py")
-                Path(stub_path).parent.mkdir(exist_ok=True, parents=True)
-
-                # Figure out library name
-                # Note: This library doesn't actually exist. Paddle
-                # internally reinserts the '_pd_' suffix.
-                so_path = self.get_ext_fullpath(module_name)
-                _, so_ext = os.path.splitext(so_path)
-                lib_name = stub_name + so_ext
-
-                # Write stub file
-                print(f"Writing Paddle stub for {lib_name} into file {stub_path}")
-                from paddle.utils.cpp_extension.extension_utils import custom_write_stub
-
-                custom_write_stub(lib_name, stub_path)
+            # Ensure that shared objects files for source and PyPI installations live
+            # in separate directories to avoid conflicts during install and runtime.
+            lib_dir = (
+                "wheel_lib"
+                if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or framework_extension_only
+                else ""
+            )
 
             # Ensure that binaries are not in global package space.
-            target_dir = install_dir / "transformer_engine"
-            target_dir.mkdir(exist_ok=True, parents=True)
+            # For editable/inplace builds this is not a concern as
+            # the SOs will be in a local directory anyway.
+            if not self.inplace:
+                target_dir = install_dir / "transformer_engine" / lib_dir
+                target_dir.mkdir(exist_ok=True, parents=True)
 
-            for ext in Path(self.build_lib).glob("*.so"):
-                self.copy_file(ext, target_dir)
-                os.remove(ext)
-
-            # For paddle, the stub file needs to be copied to the install location.
-            if paddle_ext is not None:
-                stub_path = Path(self.build_lib) / "transformer_engine"
-                for stub in stub_path.glob("transformer_engine_paddle.py"):
-                    self.copy_file(stub, target_dir)
+                for ext in Path(self.build_lib).glob("*.so"):
+                    self.copy_file(ext, target_dir)
+                    os.remove(ext)
 
         def build_extensions(self):
-            # BuildExtensions from PyTorch and PaddlePaddle already handle CUDA files correctly
-            # so we don't need to modify their compiler. Only the pybind11 build_ext needs to be fixed.
-            if "pytorch" not in get_frameworks() and "paddle" not in get_frameworks():
+            # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
+            # to handle CUDA files correctly.
+            if "pytorch" not in get_frameworks():
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
                 for ext in self.extensions:
@@ -214,17 +170,21 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
 
                 # Define new _compile method that redirects to NVCC for .cu and .cuh files.
                 original_compile_fn = self.compiler._compile
-                self.compiler.src_extensions += [".cu", ".cuh"]
+                if not framework_extension_only:
+                    self.compiler.src_extensions += [".cu", ".cuh"]
 
                 def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
                     # Copy before we make any modifications.
                     cflags = copy.deepcopy(extra_postargs)
                     original_compiler = self.compiler.compiler_so
                     try:
-                        _, nvcc_bin = cuda_path()
                         original_compiler = self.compiler.compiler_so
 
-                        if os.path.splitext(src)[1] in [".cu", ".cuh"]:
+                        if (
+                            os.path.splitext(src)[1] in [".cu", ".cuh"]
+                            and not framework_extension_only
+                        ):
+                            nvcc_bin = nvcc_path()
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]
@@ -236,7 +196,6 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                             # Forward unknown options
                             if not any("--forward-unknown-opts" in flag for flag in cflags):
                                 cflags.append("--forward-unknown-opts")
-
                         elif isinstance(cflags, dict):
                             cflags = cflags["cxx"]
 

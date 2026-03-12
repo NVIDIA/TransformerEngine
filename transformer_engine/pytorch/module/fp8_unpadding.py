@@ -1,16 +1,16 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """FP8 Padding API"""
 
-from typing import List
+from typing import List, Optional, Tuple
 
 import torch
 
-from ..cpp_extensions import (
-    multi_padding_fused,
-)
+import transformer_engine_torch as tex
+
+from ..quantization import FP8GlobalStateManager, get_align_size_for_quantization
 from ..jit import no_torch_dynamo
 
 
@@ -24,15 +24,21 @@ class _Fp8Unpadding(torch.autograd.Function):
     def forward(
         ctx,
         inp: torch.Tensor,
-        m_splits: List[int],
-        padded_m_splits: List[int],
-        is_grad_enabled: bool,
+        non_tensor_args: Tuple,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        inputmats = torch.split(inp.view(-1, inp.shape[-1]), padded_m_splits)
-        out_ret = torch.cat(
-            [grad_output_mat[: m_splits[i]] for i, grad_output_mat in enumerate(inputmats)], dim=0
-        )
+
+        # Reduce number of arguments to autograd function in order
+        # to reduce CPU overhead due to pytorch arg checking.
+        (m_splits, padded_m_splits, is_grad_enabled) = non_tensor_args
+
+        in_features = inp.shape[-1]
+
+        # Allocate cast and transpose output tensor
+        total_row = sum(m_splits)
+        out_ret = torch.empty([total_row, in_features], dtype=inp.dtype, device=inp.device)
+
+        tex.fused_multi_row_unpadding(inp.view(-1, in_features), out_ret, padded_m_splits, m_splits)
 
         if is_grad_enabled:
             ctx.m_splits = m_splits
@@ -56,11 +62,11 @@ class _Fp8Unpadding(torch.autograd.Function):
                 [total_row, in_features], dtype=grad_output.dtype, device=grad_output.device
             )
             # FP8 pad input for forward, FP8 input transpose for backward wgrad
-            multi_padding_fused(
-                grad_output.view(-1, in_features), ctx.m_splits, ctx.padded_m_splits, grad_input
+            tex.fused_multi_row_padding(
+                grad_output.view(-1, in_features), grad_input, ctx.m_splits, ctx.padded_m_splits
             )
 
-        return (grad_input, None, None, None)
+        return grad_input, None
 
 
 class Fp8Unpadding(torch.nn.Module):
@@ -69,17 +75,23 @@ class Fp8Unpadding(torch.nn.Module):
 
     Parameters
     ----------
-    num_gemms: int
-               number of GEMMs to be performed simutaneously.
+    num_gemms : int
+                number of GEMMs to be performed simultaneously.
+    align_size : int, optional
+                 The alignment size for the input tensor. If not provided, the alignment size will
+                 be automatically determined based on the FP8/FP4 recipe in the first forward pass:
+                 32 for MXFP8 or NVFP4, otherwise 16.
     """
 
     def __init__(
         self,
-        num_gemms,
+        num_gemms: int,
+        align_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
         self.num_gemms = num_gemms
+        self.align_size = align_size
 
     @no_torch_dynamo()
     def forward(
@@ -99,23 +111,32 @@ class Fp8Unpadding(torch.nn.Module):
         """
 
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
+        if self.align_size is None:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            self.align_size = get_align_size_for_quantization(recipe)
 
         # FP8 padding calculate
-        padded_m_splits = [(m + 15) // 16 * 16 for m in m_splits]
+        padded_m_splits = [
+            (m + self.align_size - 1) // self.align_size * self.align_size for m in m_splits
+        ]
+        # no padding needed
+        if m_splits == padded_m_splits:
+            return inp
 
-        if torch.is_grad_enabled():
+        is_grad_enabled = torch.is_grad_enabled()
+
+        if is_grad_enabled:
             fn = _Fp8Unpadding.apply
-            args = []
+            autograd_ctx = []
         else:
             fn = _Fp8Unpadding.forward
-            args = [None]
+            autograd_ctx = [None]
 
-        args += (
-            inp,
+        non_tensor_args = (
             m_splits,
             padded_m_splits,
-            torch.is_grad_enabled(),
+            is_grad_enabled,
         )
-        out = fn(*args)
+        out = fn(*autograd_ctx, inp, non_tensor_args)
 
         return out

@@ -1,15 +1,35 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Single tensor operations supported by the operation fuser."""
 
-from .add_in_place import AddInPlace
+from .activation import (
+    GELU,
+    GEGLU,
+    GLU,
+    QGELU,
+    QGEGLU,
+    ReLU,
+    ReGLU,
+    SReLU,
+    SReGLU,
+    SiLU,
+)
+from .add_extra_input import AddExtraInput
 from .all_gather import AllGather
 from .all_reduce import AllReduce
 from .basic_linear import BasicLinear
 from .bias import Bias
+from .constant_scale import ConstantScale
+from .dropout import Dropout
+from .grouped_linear import GroupedLinear
 from .identity import Identity
+from .l2normalization import L2Normalization
+from .layer_norm import LayerNorm
 from .make_extra_output import MakeExtraOutput
+from .quantize import Quantize
 from .reduce_scatter import ReduceScatter
 from .reshape import Reshape
+from .rmsnorm import RMSNorm
+from .swiglu import ClampedSwiGLU, ScaledSwiGLU, SwiGLU

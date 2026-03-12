@@ -1,100 +1,235 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include "extensions.h"
-#include "transformer_engine/layer_norm.h"
-#include "transformer_engine/rmsnorm.h"
+#include "transformer_engine/normalization.h"
+
+#include <cuda_runtime.h>
+
+#include "../extensions.h"
 
 namespace transformer_engine {
 namespace jax {
 
-pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                  DType in_dtype, DType w_dtype, DType out_dtype,
-                                                  bool is_layer_norm, bool zero_centered_gamma,
-                                                  float eps, int sm_margin) {
+pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
+                                             DType w_dtype, DType out_dtype,
+                                             NVTE_Norm_Type norm_type,
+                                             JAXX_Scaling_Mode scaling_mode,
+                                             bool zero_centered_gamma, float epsilon, int sm_margin,
+                                             bool is_training) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto weight_shape = std::vector<size_t>{hidden_size};
   auto intermediates_shape = std::vector<size_t>{batch_size};
 
   // empty tensor wrappers are okay just to get workspace size
   auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
-  auto gamma_tensor = TensorWrapper(nullptr, weight_shape, in_dtype);
-  auto output_tensor = TensorWrapper(nullptr, input_shape, out_dtype);
+  auto gamma_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
   auto rsigma_tensor = TensorWrapper(nullptr, intermediates_shape, DType::kFloat32);
 
+  auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
+  output_tensor.set_rowwise_data(nullptr, out_dtype, input_shape);
+  output_tensor.set_amax(nullptr, DType::kFloat32, std::vector<size_t>{1});
+
+  // WAR: NVTE Norms query the is_training from whereas columwise_data is allocated
+  if (is_training && scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
+    int temp = 1;
+    output_tensor.set_columnwise_data(static_cast<void *>(&temp), out_dtype, input_shape);
+  }
+
   // dummy tensor wrappers that will carry workspace size info later
-  TensorWrapper dummy_work_tensor, dummy_barrier_tensor;
+  TensorWrapper dummy_work_tensor;
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
-  auto layernorm_fwd_func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
-  if (is_layer_norm) {
+  if (norm_type == NVTE_Norm_Type::LayerNorm) {
     auto beta_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
     auto mu_tensor = TensorWrapper(nullptr, intermediates_shape, DType::kFloat32);
 
-    layernorm_fwd_func(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
-                       output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(), nullptr,
-                       num_sm, dummy_work_tensor.data(), dummy_barrier_tensor.data());
+    nvte_layernorm_fwd(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), epsilon,
+                       output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
+                       dummy_work_tensor.data(), num_sm, zero_centered_gamma, nullptr);
   } else {
-    NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
-    nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), eps, output_tensor.data(),
-                     rsigma_tensor.data(), nullptr, num_sm, dummy_work_tensor.data(),
-                     dummy_barrier_tensor.data());
+    NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || !zero_centered_gamma,
+               "rmsnorm doesn't support zero_centered_gamma.");
+    nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), epsilon, output_tensor.data(),
+                     rsigma_tensor.data(), dummy_work_tensor.data(), num_sm, zero_centered_gamma,
+                     nullptr);
   }
 
   auto work_shape = MakeShapeVector(dummy_work_tensor.shape());
-  auto barrier_shape = MakeShapeVector(dummy_barrier_tensor.shape());
-  return pybind11::make_tuple(std::make_pair(work_shape, dummy_work_tensor.dtype()),
-                              std::make_pair(barrier_shape, dummy_barrier_tensor.dtype()));
+  return pybind11::make_tuple(std::make_pair(work_shape, dummy_work_tensor.dtype()));
 }
 
-void LayerNormForwardImpl(size_t batch_size, size_t hidden_size, size_t workspace_size,
-                          size_t barrier_size, bool zero_centered_gamma, float eps, void *input,
-                          DType in_dtype, void *weight, DType w_dtype, void *bias, void *output,
-                          DType out_dtype, void *workspace, DType work_dtype, void *barrier,
-                          DType barrier_dtype, void *mu, void *rsigma, float *amax, float *scale,
-                          float *scale_inv, int sm_margin, cudaStream_t stream) {
+Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf,
+                          Buffer_Type amax_buf, Buffer_Type gamma_buf, Buffer_Type beta_buf,
+                          Result_Type output_buf, Result_Type colwise_output_buf,
+                          Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
+                          Result_Type updated_amax_buf, Result_Type mu_buf, Result_Type rsigma_buf,
+                          Result_Type wkspace_buf, int norm_type, bool zero_centered_gamma,
+                          double epsilon, int64_t sm_margin, JAXX_Scaling_Mode scaling_mode,
+                          JAXX_Quantize_Layout quantize_layout, bool output_amax_when_no_scaling) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
+  auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
+  auto wkspace_dtype = convert_ffi_datatype_to_te_dtype(wkspace_buf->element_type());
+
+  auto *input = x_buf.untyped_data();
+  auto *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
+  auto *gamma = gamma_buf.untyped_data();
+  auto *beta = beta_buf.untyped_data();
+  auto *output = output_buf->untyped_data();
+  auto *rsigma = rsigma_buf->untyped_data();
+  auto *mu = mu_buf->untyped_data();
+  auto *workspace = wkspace_buf->untyped_data();
+
+  auto *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
+  auto *updated_amax = reinterpret_cast<float *>(updated_amax_buf->untyped_data());
+  NVTE_CHECK(amax == updated_amax && amax != nullptr, "amax and updated_amax should be aliased");
+
+  auto _norm_type = static_cast<NVTE_Norm_Type>(norm_type);
+
+  auto x_size = product(x_buf.dimensions());
+  auto gamma_size = product(gamma_buf.dimensions());
+  auto workspace_size = product(wkspace_buf->dimensions());
+  auto hidden_size = gamma_size;
+  auto batch_size = x_size / gamma_size;
+
+  float _epsilon = static_cast<float>(epsilon);
+  int _sm_margin = static_cast<int>(sm_margin);
+
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
-  auto weight_shape = std::vector<size_t>{hidden_size};
+  auto gamma_shape = std::vector<size_t>{hidden_size};
   auto intermediates_shape = std::vector<size_t>{batch_size};
   auto workspace_shape = std::vector<size_t>{workspace_size};
-  auto barrier_shape = std::vector<size_t>{barrier_size};
-  auto is_layer_norm = (bias) ? true : false;
 
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
-  auto gamma_tensor = TensorWrapper(weight, weight_shape, in_dtype);
+  auto gamma_tensor = TensorWrapper(gamma, gamma_shape, w_dtype);
 
-  // assume output dtype = input dtype
-  // If we need mixed I/O precision in the future, we need an additional
-  // parameter for output type
-  auto output_tensor = TensorWrapper(output, input_shape, out_dtype, amax, scale, scale_inv);
   auto rsigma_tensor = TensorWrapper(rsigma, intermediates_shape, DType::kFloat32);
+  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - _sm_margin;
+  auto workspace_tensor = TensorWrapper(workspace, workspace_shape, wkspace_dtype);
 
-  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
-  auto layernorm_fwd_func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
+  auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
+  output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), input_shape);
+  if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
+      (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
+    output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
+  }
 
-  auto workspace_tensor = TensorWrapper(workspace, workspace_shape, work_dtype);
-  auto barrier_tensor = TensorWrapper(barrier, barrier_shape, barrier_dtype);
+  NVTE_CHECK(
+      scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
+      "Current tensor scaling does not support fused operations yet. Please call this primitive "
+      "in higher-precision then quantize with current scaling.");
 
-  if (is_layer_norm) {
-    auto beta_tensor = TensorWrapper(bias, weight_shape, w_dtype);
+  if (is_fp8_dtype(out_dtype)) {
+    output_tensor.set_rowwise_scale_inv(
+        scale_inv_buf->untyped_data(),
+        convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
+        std::vector<size_t>{
+            product(scale_inv_buf->dimensions(), 0, scale_inv_buf->dimensions().size() - 1),
+            static_cast<size_t>(scale_inv_buf->dimensions().back())});
+  }
+
+  if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING && is_fp8_dtype(out_dtype)) {
+    output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
+  }
+
+  if (is_quantize_2x2x(quantize_layout)) {
+    output_tensor.set_columnwise_data(colwise_output_buf->untyped_data(),
+                                      static_cast<DType>(out_dtype), input_shape);
+    output_tensor.set_columnwise_scale_inv(
+        colwise_scale_inv_buf->untyped_data(),
+        convert_ffi_datatype_to_te_dtype(colwise_scale_inv_buf->element_type()),
+        std::vector<size_t>{product(colwise_scale_inv_buf->dimensions(), 0,
+                                    colwise_scale_inv_buf->dimensions().size() - 1),
+                            static_cast<size_t>(colwise_scale_inv_buf->dimensions().back())});
+  }
+
+  if (_norm_type == NVTE_Norm_Type::LayerNorm) {
+    NVTE_CHECK(w_dtype == convert_ffi_datatype_to_te_dtype(beta_buf.element_type()),
+               "gamma and beta must have the same data type.");
+    auto beta_tensor = TensorWrapper(beta, gamma_shape, w_dtype);
     auto mu_tensor = TensorWrapper(mu, intermediates_shape, DType::kFloat32);
 
-    layernorm_fwd_func(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
-                       output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(), stream, num_sm,
-                       workspace_tensor.data(), barrier_tensor.data());
+    nvte_layernorm_fwd(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), _epsilon,
+                       output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
+                       workspace_tensor.data(), num_sm, zero_centered_gamma, stream);
   } else {
-    NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
-    nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), eps, output_tensor.data(),
-                     rsigma_tensor.data(), stream, num_sm, workspace_tensor.data(),
-                     barrier_tensor.data());
+    NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || !zero_centered_gamma,
+               "rmsnorm doesn't support zero_centered_gamma.");
+    nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), _epsilon, output_tensor.data(),
+                     rsigma_tensor.data(), workspace_tensor.data(), num_sm, zero_centered_gamma,
+                     stream);
   }
+  return ffi_with_cuda_error_check();
 }
 
-pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                   DType in_dtype, DType w_dtype,
-                                                   bool is_layer_norm, bool zero_centered_gamma,
-                                                   float eps, int sm_margin) {
+XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardHandler, NormForwardFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // amax
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Arg<Buffer_Type>()      // beta
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // colwise_output
+                                  .Ret<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>()      // colwise_scale_inv
+                                  .Ret<Buffer_Type>()      // updated_amax
+                                  .Ret<Buffer_Type>()      // mu
+                                  .Ret<Buffer_Type>()      // rsigma
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Attr<int64_t>("norm_type")
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<double>("epsilon")
+                                  .Attr<int64_t>("sm_margin")
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
+                                  .Attr<bool>("output_amax_when_no_scaling"),
+                              FFI_CudaGraph_Traits);
+
+Error_Type NormForwardInitializeFFI(
+    cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf, Buffer_Type amax_buf,
+    Buffer_Type gamma_buf, Buffer_Type beta_buf, Result_Type output_buf,
+    Result_Type colwise_output_buf, Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
+    Result_Type updated_amax_buf, Result_Type mu_buf, Result_Type rsigma_buf,
+    Result_Type wkspace_buf, int norm_type, bool zero_centered_gamma, double epsilon,
+    int64_t sm_margin, JAXX_Scaling_Mode scaling_mode, JAXX_Quantize_Layout quantize_layout,
+    bool output_amax_when_no_scaling) {
+  return wrapInStreamCapture(std::function(NormForwardFFI), stream, x_buf, scale_buf, amax_buf,
+                             gamma_buf, beta_buf, output_buf, colwise_output_buf, scale_inv_buf,
+                             colwise_scale_inv_buf, updated_amax_buf, mu_buf, rsigma_buf,
+                             wkspace_buf, norm_type, zero_centered_gamma, epsilon, sm_margin,
+                             scaling_mode, quantize_layout, output_amax_when_no_scaling);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardInitializeHandler, NormForwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // amax
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Arg<Buffer_Type>()      // beta
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // colwise_output
+                                  .Ret<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>()      // colwise_scale_inv
+                                  .Ret<Buffer_Type>()      // updated_amax
+                                  .Ret<Buffer_Type>()      // mu
+                                  .Ret<Buffer_Type>()      // rsigma
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Attr<int64_t>("norm_type")
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<double>("epsilon")
+                                  .Attr<int64_t>("sm_margin")
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<JAXX_Quantize_Layout>("quantize_layout")
+                                  .Attr<bool>("output_amax_when_no_scaling"));
+
+pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
+                                              DType w_dtype, NVTE_Norm_Type norm_type,
+                                              bool zero_centered_gamma, int sm_margin) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto weight_shape = std::vector<size_t>{hidden_size};
   auto intermediates_shape = std::vector<size_t>{batch_size};
@@ -109,55 +244,60 @@ pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hid
   auto wgrad_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
 
   // dummy tensor wrappers that will carry workspace size info later
-  TensorWrapper dummy_work_tensor, dummy_barrier_tensor;
-  TensorWrapper dummy_dgamma_part_tensor, dummy_dbeta_part_tensor;
+  TensorWrapper dummy_work_tensor;
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
-  auto layernorm_bwd_func = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
 
-  // initialize dBeta information here -- layernorm will modify but RMSnorm will not
-  std::vector<size_t> dbeta_part_shape;
-  if (is_layer_norm) {
+  if (norm_type == NVTE_Norm_Type::LayerNorm) {
     auto mu_tensor = TensorWrapper(nullptr, intermediates_shape, intermediates_dtype);
     auto dbeta_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
 
-    layernorm_bwd_func(dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
+    nvte_layernorm_bwd(dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
                        gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
-                       dbeta_tensor.data(), dummy_dgamma_part_tensor.data(),
-                       dummy_dbeta_part_tensor.data(), nullptr, num_sm, dummy_work_tensor.data(),
-                       dummy_barrier_tensor.data());
+                       dbeta_tensor.data(), dummy_work_tensor.data(), num_sm, zero_centered_gamma,
+                       nullptr);
 
-    dbeta_part_shape = MakeShapeVector(dummy_dbeta_part_tensor.shape());
   } else {
     NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_bwd(dz_tensor.data(), x_tensor.data(), rsigma_tensor.data(), gamma_tensor.data(),
-                     xgrad_tensor.data(), wgrad_tensor.data(), dummy_dgamma_part_tensor.data(),
-                     nullptr, num_sm, dummy_work_tensor.data(), dummy_barrier_tensor.data());
-
-    dbeta_part_shape = std::vector<size_t>{0, 0};
+                     xgrad_tensor.data(), wgrad_tensor.data(), dummy_work_tensor.data(), num_sm,
+                     zero_centered_gamma, nullptr);
   }
 
   auto work_shape = MakeShapeVector(dummy_work_tensor.shape());
-  auto barrier_shape = MakeShapeVector(dummy_barrier_tensor.shape());
-  auto dgamma_part_shape = MakeShapeVector(dummy_dgamma_part_tensor.shape());
-  return pybind11::make_tuple(std::make_pair(work_shape, dummy_work_tensor.dtype()),
-                              std::make_pair(barrier_shape, dummy_barrier_tensor.dtype()),
-                              std::make_pair(dgamma_part_shape, dummy_dgamma_part_tensor.dtype()),
-                              std::make_pair(dbeta_part_shape, dummy_dbeta_part_tensor.dtype()));
+  return pybind11::make_tuple(std::make_pair(work_shape, dummy_work_tensor.dtype()));
 }
 
-void LayerNormBackwardImpl(size_t batch_size, size_t hidden_size, size_t wkspace_size,
-                           size_t barrier_size, Shape dgamma_part_shape, Shape dbeta_part_shape,
-                           bool zero_centered_gamma, float eps, void *input, DType in_dtype,
-                           void *weight, DType w_dtype, void *ograd, void *workspace,
-                           DType wkspace_dtype, void *barrier, DType barrier_dtype, void *mu,
-                           void *rsigma, void *xgrad, void *wgrad, void *dbeta, void *dgamma_part,
-                           DType dgamma_dtype, void *dbeta_part, DType dbeta_dtype, int sm_margin,
-                           cudaStream_t stream) {
+Error_Type NormBackwardFFI(cudaStream_t stream, Buffer_Type dz_buf, Buffer_Type x_buf,
+                           Buffer_Type mu_buf, Buffer_Type rsigma_buf, Buffer_Type gamma_buf,
+                           Result_Type xgrad_buf, Result_Type wgrad_buf, Result_Type dbeta_buf,
+                           Result_Type wkspace_buf, int64_t norm_type, bool zero_centered_gamma,
+                           int64_t sm_margin) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
+  auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
+  auto wkspace_dtype = convert_ffi_datatype_to_te_dtype(wkspace_buf->element_type());
+
+  auto *ograd = dz_buf.untyped_data();
+  auto *input = x_buf.untyped_data();
+  void *mu = mu_buf.untyped_data();
+  auto *rsigma = rsigma_buf.untyped_data();
+  auto *gamma = gamma_buf.untyped_data();
+  auto *xgrad = xgrad_buf->untyped_data();
+  auto *wgrad = wgrad_buf->untyped_data();
+  void *dbeta = dbeta_buf->untyped_data();
+  auto *workspace = wkspace_buf->untyped_data();
+
+  auto x_size = product(x_buf.dimensions());
+  auto gamma_size = product(gamma_buf.dimensions());
+  auto wkspace_size = product(wkspace_buf->dimensions());
+  auto hidden_size = gamma_size;
+  auto batch_size = x_size / gamma_size;
+
+  int _sm_margin = static_cast<int>(sm_margin);
+
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto weight_shape = std::vector<size_t>{hidden_size};
   auto intermediates_shape = std::vector<size_t>{batch_size};
   auto intermediates_dtype = DType::kFloat32;
-  auto is_layer_norm = (dbeta) ? true : false;
 
   // assume input type = output type
   auto *grad_output = ograd;
@@ -166,259 +306,78 @@ void LayerNormBackwardImpl(size_t batch_size, size_t hidden_size, size_t wkspace
 
   auto rsigma_tensor = TensorWrapper(rsigma, intermediates_shape, intermediates_dtype);
 
-  auto *x = input;
-  auto x_tensor = TensorWrapper(x, input_shape, x_dtype);
+  auto x_tensor = TensorWrapper(input, input_shape, x_dtype);
 
-  auto gamma_tensor = TensorWrapper(weight, weight_shape, w_dtype);
+  auto gamma_tensor = TensorWrapper(gamma, weight_shape, w_dtype);
   auto xgrad_tensor = TensorWrapper(xgrad, input_shape, x_dtype);
   auto wgrad_tensor = TensorWrapper(wgrad, weight_shape, w_dtype);
 
-  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
-  auto layernorm_bwd_func = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
+  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - _sm_margin;
 
   auto workspace_shape = std::vector<size_t>{wkspace_size};
   auto workspace_tensor = TensorWrapper(workspace, workspace_shape, wkspace_dtype);
-  auto barrier_shape = std::vector<size_t>{barrier_size};
-  auto barrier_tensor = TensorWrapper(barrier, barrier_shape, barrier_dtype);
-  auto dgamma_part_tensor = TensorWrapper(dgamma_part, dgamma_part_shape.to_vector(), dgamma_dtype);
 
-  if (is_layer_norm) {
+  if (static_cast<NVTE_Norm_Type>(norm_type) == NVTE_Norm_Type::LayerNorm) {
     auto mu_tensor = TensorWrapper(mu, intermediates_shape, intermediates_dtype);
     auto dbeta_tensor = TensorWrapper(dbeta, weight_shape, w_dtype);
-    auto dbeta_part_tensor = TensorWrapper(dbeta_part, dbeta_part_shape.to_vector(), dbeta_dtype);
 
-    layernorm_bwd_func(dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
+    nvte_layernorm_bwd(dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
                        gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
-                       dbeta_tensor.data(), dgamma_part_tensor.data(), dbeta_part_tensor.data(),
-                       stream, num_sm, workspace_tensor.data(), barrier_tensor.data());
+                       dbeta_tensor.data(), workspace_tensor.data(), num_sm, zero_centered_gamma,
+                       stream);
   } else {
     NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_bwd(dz_tensor.data(), x_tensor.data(), rsigma_tensor.data(), gamma_tensor.data(),
-                     xgrad_tensor.data(), wgrad_tensor.data(), dgamma_part_tensor.data(), stream,
-                     num_sm, workspace_tensor.data(), barrier_tensor.data());
+                     xgrad_tensor.data(), wgrad_tensor.data(), workspace_tensor.data(), num_sm,
+                     zero_centered_gamma, stream);
   }
+
+  return ffi_with_cuda_error_check();
 }
 
-void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque,
-                         size_t opaque_len) {
-  auto *input = buffers[0];
-  auto *weight = buffers[1];
-  auto *bias = buffers[2];
-  auto *amax = reinterpret_cast<float *>(buffers[3]);
-  auto *scale = reinterpret_cast<float *>(buffers[4]);
-  auto *scale_inv = reinterpret_cast<float *>(buffers[5]);
-  auto *output = buffers[6];
-  auto *mu = buffers[7];
-  auto *rsigma = buffers[8];
-  auto *amax_out = buffers[9];
-  auto *workspace = buffers[10];
-  auto *barrier = buffers[11];
-  NVTE_CHECK(amax_out == amax,
-             "amax not bound to amax_out in TE/JAX LayerNormForwardFP8 primitive");
+XLA_FFI_DEFINE_HANDLER_SYMBOL(NormBackwardHandler, NormBackwardFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // dz
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // mu
+                                  .Arg<Buffer_Type>()      // rsigma
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Ret<Buffer_Type>()      // xgrad
+                                  .Ret<Buffer_Type>()      // wgrad
+                                  .Ret<Buffer_Type>()      // dbeta
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Attr<int64_t>("norm_type")
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<int64_t>("sm_margin"),
+                              FFI_CudaGraph_Traits);
 
-  const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
-  auto batch_size = desc.batch_size;
-  auto hidden_size = desc.hidden_size;
-  auto wkspace_size = desc.wkspace_size;
-  auto barrier_size = desc.barrier_size;
-  auto in_dtype = desc.x_dtype;
-  auto w_dtype = desc.w_dtype;
-  auto wkspace_dtype = desc.wkspace_dtype;
-  auto barrier_dtype = desc.barrier_dtype;
-  auto eps = desc.eps;
-  auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
-
-  auto out_dtype = DType::kFloat8E4M3;
-
-  LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
-                       eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
-                       wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
-                       sm_margin, stream);
+Error_Type NormBackwardInitializeFFI(cudaStream_t stream, Buffer_Type dz_buf, Buffer_Type x_buf,
+                                     Buffer_Type mu_buf, Buffer_Type rsigma_buf,
+                                     Buffer_Type gamma_buf, Result_Type xgrad_buf,
+                                     Result_Type wgrad_buf, Result_Type dbeta_buf,
+                                     Result_Type wkspace_buf, int64_t norm_type,
+                                     bool zero_centered_gamma, int64_t sm_margin) {
+  return wrapInStreamCapture(std::function(NormBackwardFFI), stream, dz_buf, x_buf, mu_buf,
+                             rsigma_buf, gamma_buf, xgrad_buf, wgrad_buf, dbeta_buf, wkspace_buf,
+                             norm_type, zero_centered_gamma, sm_margin);
 }
 
-void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
-  auto *input = buffers[0];
-  auto *weight = buffers[1];
-  auto *bias = buffers[2];
-  auto *output = buffers[3];
-  auto *mu = buffers[4];
-  auto *rsigma = buffers[5];
-  auto *workspace = buffers[6];
-  auto *barrier = buffers[7];
-
-  float *amax = nullptr;
-  float *scale = nullptr;
-  float *scale_inv = nullptr;
-
-  const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
-  auto batch_size = desc.batch_size;
-  auto hidden_size = desc.hidden_size;
-  auto wkspace_size = desc.wkspace_size;
-  auto barrier_size = desc.barrier_size;
-  auto in_dtype = desc.x_dtype;
-  auto w_dtype = desc.w_dtype;
-  auto wkspace_dtype = desc.wkspace_dtype;
-  auto barrier_dtype = desc.barrier_dtype;
-  auto eps = desc.eps;
-  auto out_dtype = in_dtype;
-  auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
-
-  LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
-                       eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
-                       wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
-                       sm_margin, stream);
-}
-
-void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
-  const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
-
-  auto batch_size = desc.batch_size;
-  auto hidden_size = desc.hidden_size;
-  auto wkspace_size = desc.wkspace_size;
-  auto barrier_size = desc.barrier_size;
-  auto dgamma_part_shape = desc.dgamma_part_shape;
-  auto dbeta_part_shape = desc.dbeta_part_shape;
-  auto in_dtype = desc.x_dtype;
-  auto w_dtype = desc.w_dtype;
-  auto wkspace_dtype = desc.wkspace_dtype;
-  auto barrier_dtype = desc.barrier_dtype;
-  auto dgamma_part_dtype = desc.dgamma_part_dtype;
-  auto dbeta_part_dtype = desc.dbeta_part_dtype;
-  auto eps = desc.eps;
-  auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
-
-  auto *ograd = buffers[0];
-  auto *mu = buffers[1];
-  auto *rsigma = buffers[2];
-  auto *input = buffers[3];
-  auto *weight = buffers[4];
-  auto *xgrad = buffers[5];
-  auto *wgrad = buffers[6];
-  auto *dbeta = buffers[7];
-  auto *workspace = buffers[8];
-  auto *barrier = buffers[9];
-  auto *dgamma_part = buffers[10];
-  auto *dbeta_part = buffers[11];
-
-  LayerNormBackwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, dgamma_part_shape,
-                        dbeta_part_shape, zero_centered_gamma, eps, input, in_dtype, weight,
-                        w_dtype, ograd, workspace, wkspace_dtype, barrier, barrier_dtype, mu,
-                        rsigma, xgrad, wgrad, dbeta, dgamma_part, dgamma_part_dtype, dbeta_part,
-                        dbeta_part_dtype, sm_margin, stream);
-}
-
-void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
-  auto *input = buffers[0];
-  auto *weight = buffers[1];
-  auto *amax = reinterpret_cast<float *>(buffers[2]);
-  auto *scale = reinterpret_cast<float *>(buffers[3]);
-  auto *scale_inv = reinterpret_cast<float *>(buffers[4]);
-  auto *output = buffers[5];
-  auto *rsigma = buffers[6];
-  auto *amax_out = buffers[7];
-  auto *workspace = buffers[8];
-  auto *barrier = buffers[9];
-  NVTE_CHECK(amax_out == amax, "amax not bound to amax_out in TE/JAX RSMNormForwardFP8 primitive.");
-
-  void *bias = nullptr;
-  void *mu = nullptr;
-
-  const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
-  auto batch_size = desc.batch_size;
-  auto hidden_size = desc.hidden_size;
-  auto wkspace_size = desc.wkspace_size;
-  auto barrier_size = desc.barrier_size;
-  auto in_dtype = desc.x_dtype;
-  auto w_dtype = desc.w_dtype;
-  auto wkspace_dtype = desc.wkspace_dtype;
-  auto barrier_dtype = desc.barrier_dtype;
-  auto eps = desc.eps;
-  auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
-  auto out_dtype = DType::kFloat8E4M3;
-
-  LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
-                       eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
-                       wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
-                       sm_margin, stream);
-}
-
-void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
-  auto *input = buffers[0];
-  auto *weight = buffers[1];
-  auto *output = buffers[2];
-  auto *rsigma = buffers[3];
-  auto *workspace = buffers[4];
-  auto *barrier = buffers[5];
-
-  void *bias = nullptr;
-  void *mu = nullptr;
-  float *amax = nullptr;
-  float *scale = nullptr;
-  float *scale_inv = nullptr;
-
-  const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
-  auto batch_size = desc.batch_size;
-  auto hidden_size = desc.hidden_size;
-  auto wkspace_size = desc.wkspace_size;
-  auto barrier_size = desc.barrier_size;
-  auto in_dtype = desc.x_dtype;
-  auto w_dtype = desc.w_dtype;
-  auto wkspace_dtype = desc.wkspace_dtype;
-  auto barrier_dtype = desc.barrier_dtype;
-  auto eps = desc.eps;
-  auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
-  auto out_dtype = in_dtype;
-
-  LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
-                       eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
-                       wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
-                       sm_margin, stream);
-}
-
-void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
-  auto *ograd = buffers[0];
-  auto *rsigma = buffers[1];
-  auto *input = buffers[2];
-  auto *weight = buffers[3];
-  auto *xgrad = buffers[4];
-  auto *wgrad = buffers[5];
-  auto *workspace = buffers[6];
-  auto *barrier = buffers[7];
-  auto *dgamma_part = buffers[8];
-
-  void *mu = nullptr;
-  void *dbeta = nullptr;
-  void *dbeta_part = nullptr;
-
-  const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
-  auto batch_size = desc.batch_size;
-  auto hidden_size = desc.hidden_size;
-  auto wkspace_size = desc.wkspace_size;
-  auto barrier_size = desc.barrier_size;
-  auto dgamma_part_shape = desc.dgamma_part_shape;
-  Shape dbeta_part_shape;
-  dbeta_part_shape.from_vector({0, 0});
-  auto in_dtype = desc.x_dtype;
-  auto w_dtype = desc.w_dtype;
-  auto wkspace_dtype = desc.wkspace_dtype;
-  auto barrier_dtype = desc.barrier_dtype;
-  auto dgamma_part_dtype = desc.dgamma_part_dtype;
-  auto dbeta_part_dtype = DType::kByte;
-  auto eps = desc.eps;
-  auto zero_centered_gamma = desc.zero_centered_gamma;
-  auto sm_margin = desc.sm_margin;
-
-  LayerNormBackwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, dgamma_part_shape,
-                        dbeta_part_shape, zero_centered_gamma, eps, input, in_dtype, weight,
-                        w_dtype, ograd, workspace, wkspace_dtype, barrier, barrier_dtype, mu,
-                        rsigma, xgrad, wgrad, dbeta, dgamma_part, dgamma_part_dtype, dbeta_part,
-                        dbeta_part_dtype, sm_margin, stream);
-}
+XLA_FFI_DEFINE_HANDLER_SYMBOL(NormBackwardInitializeHandler, NormBackwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // dz
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // mu
+                                  .Arg<Buffer_Type>()      // rsigma
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Ret<Buffer_Type>()      // xgrad
+                                  .Ret<Buffer_Type>()      // wgrad
+                                  .Ret<Buffer_Type>()      // dbeta
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Attr<int64_t>("norm_type")
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<int64_t>("sm_margin"));
 
 }  // namespace jax
 }  // namespace transformer_engine

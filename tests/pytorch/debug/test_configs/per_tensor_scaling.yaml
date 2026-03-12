@@ -1,0 +1,19 @@
+test_per_tensor_scaling:
+  enabled: True
+  layers:
+    layer_numbers: [1]
+    layer_types: [fc1, fc2]
+  transformer_engine:
+    DisableFP8GEMM:
+      enabled: True
+      gemms: [wgrad]
+    PerTensorScaling:
+      enabled: True
+      gemms_struct:
+        - gemm: fprop
+          tensors_struct:
+            - tensor: activation
+            - tensor: weight
+        - gemm: dgrad
+          tensors_struct:
+            - tensor: gradient

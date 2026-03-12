@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -38,6 +38,24 @@ int sm_arch(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+/* \brief Minimum and maximum stream priorities supported on device
+ *
+ * \param[in] device_id CUDA device (default is current device)
+ *
+ * \param[out] low_priority Lowest priority value on device.
+ *
+ * \param[out] high_priority Highest priority value on device.
+ */
+void stream_priority_range(int *low_priority, int *high_priority, int device_id = -1);
+
+/* \brief CUDA Multicast support status for device
+ *
+ * \param[in] device_id CUDA device (default is current device)
+ *
+ * \return CUDA multicast support flag
+ */
+bool supports_multicast(int device_id = -1);
+
 /* \brief Path to CUDA Toolkit headers
  *
  * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
@@ -48,6 +66,18 @@ int sm_count(int device_id = -1);
  * \return Path to include directory, or an empty string if not found
  */
 const std::string &include_directory(bool required = false);
+
+/* \brief CUDA Runtime version number at run-time
+ *
+ * Versions may differ between compile-time and run-time.
+ */
+int cudart_version();
+
+/* \brief cuBLAS version number at run-time
+ *
+ * Versions may differ between compile-time and run-time.
+ */
+size_t cublas_version();
 
 }  // namespace cuda
 

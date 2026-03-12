@@ -1,20 +1,24 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX multi-head attention modules"""
-
+from __future__ import annotations
 from enum import Enum
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
+import warnings
+
 from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
+from flax.linen import make_attention_mask
 
-from transformer_engine.transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine.transformer_engine_jax import NVTE_Mask_Type
-from transformer_engine.transformer_engine_jax import NVTE_QKV_Layout
-from transformer_engine.transformer_engine_jax import NVTE_QKV_Format
-from transformer_engine.transformer_engine_jax import nvte_get_qkv_format
+from transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine_jax import NVTE_QKV_Format
+from transformer_engine_jax import nvte_get_qkv_format
+from transformer_engine_jax import NVTE_Softmax_Type
 
 from . import cpp_extensions as tex
 
@@ -46,6 +50,71 @@ class AttnMaskType(Enum):
     CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_CAUSAL_BOTTOM_RIGHT_MASK
     PADDING_CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK
 
+    def is_causal(self):
+        """Returns True if the mask is a causal mask"""
+        return self in [
+            AttnMaskType.CAUSAL_MASK,
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
+    def is_padding(self):
+        """Returns True if the mask includes padding"""
+        return self in [
+            AttnMaskType.PADDING_MASK,
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
+    def is_bottom_right(self):
+        """Returns True if the causal mask is calculated from the bottom-right section"""
+        return self in [
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
+
+class AttnSoftmaxType(Enum):
+    """
+    VANILLA_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+    OFF_BY_ONE_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)),
+    LEARNABLE_SOFTMAX: S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+    where alpha is a learnable parameter in shape [H].
+    """
+
+    VANILLA_SOFTMAX = NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX
+    OFF_BY_ONE_SOFTMAX = NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX
+    LEARNABLE_SOFTMAX = NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX
+
+    @classmethod
+    def from_str(cls, softmax_type: str) -> "AttnSoftmaxType":
+        """Convert string to AttnSoftmaxType: 'vanilla', 'off_by_one', or 'learnable'."""
+        softmax_type_map = {
+            "vanilla": cls.VANILLA_SOFTMAX,
+            "off_by_one": cls.OFF_BY_ONE_SOFTMAX,
+            "learnable": cls.LEARNABLE_SOFTMAX,
+        }
+        result = softmax_type_map.get(softmax_type)
+        if result is None:
+            raise ValueError(
+                f"Unknown softmax_type: {softmax_type}. "
+                "Valid options: 'vanilla', 'off_by_one', 'learnable'"
+            )
+        return result
+
+
+class QKVFormat(Enum):
+    """
+    SBHD: q,k,v memory layout with [s, b, ..., h, d]
+    BSHD: q,k,v memory layout with [b, s, ..., h, d]
+    THD: q,k,v memory layout is same as BSHD, but allow multiple segments packed in a sequence.
+    """
+
+    SBHD = NVTE_QKV_Format.NVTE_SBHD
+    BSHD = NVTE_QKV_Format.NVTE_BSHD
+    THD = NVTE_QKV_Format.NVTE_THD
+
 
 class QKVLayout(Enum):
     """
@@ -66,84 +135,162 @@ class QKVLayout(Enum):
     THD_T2HD = NVTE_QKV_Layout.NVTE_THD_T2HD
     THD_THD_THD = NVTE_QKV_Layout.NVTE_THD_THD_THD
 
+    def get_qkv_format(self):
+        """
+        Return the corresponding qkv_format (BSHD, SBHD, THD)
+        """
+        return QKVFormat(nvte_get_qkv_format(self.value))
 
-class QKVFormat(Enum):
-    """
-    SBHD: q,k,v memory layout with [s, b, ..., h, d]
-    BSHD: q,k,v memory layout with [b, s, ..., h, d]
-    THD: q,k,v memory layout is same as BSHD, but allow multiple segments packed in a sequence.
+    def is_qkvpacked(self):
+        """
+        Return True if the query, key, value is packed
+        """
+        return self in [QKVLayout.BS3HD, QKVLayout.T3HD]
+
+    def is_kvpacked(self):
+        """
+        Return True if the key, value is packed
+        """
+        return self in [QKVLayout.BSHD_BS2HD, QKVLayout.THD_T2HD]
+
+    def is_separate(self):
+        """
+        Return True if the query, key, value are three separate tensors
+        """
+        return self in [QKVLayout.BSHD_BSHD_BSHD, QKVLayout.THD_THD_THD]
+
+    def is_thd(self):
+        """
+        Return True if the layout belongs to THD
+        """
+        return self in [QKVLayout.T3HD, QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD]
+
+    def to_qkvpacked(self):
+        """
+        Return the corresponding qkvpacked format, useful when adjusting q, k, v layout
+        """
+        qkv_format = self.get_qkv_format()
+        if qkv_format == QKVFormat.BSHD:
+            return QKVLayout.BS3HD
+        if qkv_format == QKVFormat.THD:
+            return QKVLayout.T3HD
+        raise ValueError(f"Unsupported {qkv_format=}")
+
+    def to_kvpacked(self):
+        """
+        Return the corresponding kvpacked format, useful when adjusting q, k, v layout
+        """
+        qkv_format = self.get_qkv_format()
+        if qkv_format == QKVFormat.BSHD:
+            return QKVLayout.BSHD_BS2HD
+        if qkv_format == QKVFormat.THD:
+            return QKVLayout.THD_T2HD
+        raise ValueError(f"Unsupported {qkv_format=}")
+
+    def to_separate(self):
+        """
+        Return the corresponding separate format, useful when adjusting q, k, v layout
+        """
+        qkv_format = self.get_qkv_format()
+        if qkv_format == QKVFormat.BSHD:
+            return QKVLayout.BSHD_BSHD_BSHD
+        if qkv_format == QKVFormat.THD:
+            return QKVLayout.THD_THD_THD
+        raise ValueError(f"Unsupported {qkv_format=}")
+
+
+class CPStrategy(Enum):
+    """Defines the context parallel strategies of Jax fused attention.
+
+    DEFAULT: Default strategy will choose automatically if context parallel axis is sharded.
+    ALL_GATHER: All-gather/reduce scatter implementation.
+    RING: Ring attention implementation (https://arxiv.org/abs/2310.01889).
     """
 
-    SBHD = NVTE_QKV_Format.NVTE_SBHD
-    BSHD = NVTE_QKV_Format.NVTE_BSHD
-    THD = NVTE_QKV_Format.NVTE_THD
+    DEFAULT = 0
+    ALL_GATHER = 1
+    RING = 2
 
 
-def get_qkv_format(qkv_layout):
+class ReorderStrategy(Enum):
     """
-    Get qkv_format from qkv_layout
+    Defines the tokens re-order strategy for context parallel load balancing for causal mask.
+
+    - DualChunkSwap: This strategy splits each query into two chunks and do the mirror swap between
+    GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
+    multiple of 2 * cp_size.
+      Examples:
+      - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
+      - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
+
+    - Striped: This strategy distributes the tokens in a striped (interleaved) manner across
+      the sequence. This is currently used for THD load balance.
+      Example: Consider 4 GPUs with seqlens=16.
+      - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; ...; GPU3: [12, 13, 14, 15]
+      - After reorder: GPU0: [0, 4, 8, 12]; GPU1: [1, 5, 9, 13]; ...; GPU3: [3, 7, 11, 15]
     """
-    return QKVFormat(nvte_get_qkv_format(qkv_layout.value))
+
+    DualChunkSwap = 0
+    Striped = 1
 
 
 def make_swa_mask(
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
+    segment_pos_q: jnp.ndarray,
+    segment_pos_kv: jnp.ndarray,
     window_size: Optional[Tuple[int, int]] = None,
-    attn_mask_type: AttnMaskType = AttnMaskType.NO_MASK,
     dtype: jax.typing.DTypeLike = jnp.float32,
+    segment_ids_q: jnp.ndarray = None,
+    segment_ids_kv: jnp.ndarray = None,
 ):
     """
-    Generate sliding window mask. `True` or `1` means keep the element.
+    Generate a sliding window mask (1 = attend, 0 = masked).
 
-    For `CAUSAL_BOTTOM_RIGHT_MASK` and `PADDING_CAUSAL_BOTTOM_RIGHT_MASK` mask type,
-    the sliding window diagonal is aligned to the bottom right corner, and for other
-    mask types, the top left corner.
+    Args:
+        segment_pos_q (jnp.ndarray):
+            Query positions within each segment. For example, a batch with segment_ids =
+            [[1, 1, 1, 2, 2, 2, 2, 2]] yields segment_pos =
+            [[0, 1, 2, 0, 1, 2, 3, 4]].
+        segment_pos_kv (jnp.ndarray):
+            Key/value positions within each segment.
+        window_size (Optional[Tuple[int, int]], optional):
+            Sliding window size for local attention, where query at position i attends to keys
+            in [i - window_size[0], i + window_size[1]] inclusive. A negative number means an
+            infinite window; None means no sliding window.
+            Defaults to None.
+        dtype (jax.typing.DTypeLike, optional):
+            Mask data type. Defaults to jnp.float32.
+        segment_ids_q (jnp.ndarray):
+            Query segment id that each token belongs to
+        segment_ids_kv (jnp.ndarray):
+            Key/value segment id that each token belongs to
 
-    Parameters
-    ----------
-    max_seqlen_q: int
-        Maximum sequence length for queries.
-    max_seqlen_kv: int
-        Maximum sequence length for keys and values.
-    window_size: Optional[Tuple[int, int]] = None
-        Sliding window size for local attention, where query at position i attends to keys
-        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-        + window_size[1]] inclusive. Negative number in window size means infinity window.
-        `None` means no sliding window.
-    attn_mask_type: AttnMaskType, default = AttnMaskType.NO_MASK
-    dtype: jax.typing.DTypeLike, default=jnp.float32
-        The mask data type.
-    Returns
-    ----------
-    swa_mask: jax.numpy.tensor
-        Matrix with shape [max_seqlen_q, max_seqlen_kv]. Elements with value 1 are the positions
-        that will get attention, value 0 are the masked out positions.
+    Returns:
+        jnp.ndarray:
+            The mask with shape [b, 1, max_seqlen_q, max_seqlen_kv].
     """
-    swa_mask = jnp.ones((max_seqlen_q, max_seqlen_kv), dtype=dtype)
-    if window_size is None:
-        return swa_mask
-    bottom_right_masks = [
-        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
-    ]
-    left_window, right_window = window_size
-    if attn_mask_type in bottom_right_masks:
-        if left_window < 0:
-            left_window = max_seqlen_kv
-        if right_window < 0:
-            right_window = max_seqlen_kv
-        bottom_right_shift = max_seqlen_kv - max_seqlen_q
-        swa_mask = jnp.triu(swa_mask, k=-left_window + bottom_right_shift)
-        swa_mask = jnp.tril(swa_mask, k=right_window + bottom_right_shift)
+    if window_size is not None:
+        left_window, right_window = window_size
     else:
-        if left_window < 0:
-            left_window = max_seqlen_q
-        if right_window < 0:
-            right_window = max_seqlen_q
-        swa_mask = jnp.triu(swa_mask, k=-left_window)
-        swa_mask = jnp.tril(swa_mask, k=right_window)
-    return swa_mask
+        left_window = right_window = jnp.inf
+    left_window = jnp.inf if left_window < 0 else left_window
+    right_window = jnp.inf if right_window < 0 else right_window
+    pos_q = jnp.expand_dims(segment_pos_q, axis=-1)
+    pos_kv = jnp.expand_dims(segment_pos_kv, axis=-2)
+    # For Bottom Right Causal Mask (BRCM)
+    if segment_ids_q is not None and segment_ids_kv is not None:
+        run_length_q = run_length_fill(segment_ids_q)
+        run_length_kv = run_length_fill(segment_ids_kv)
+        run_length_q_exp = jnp.expand_dims(run_length_q, axis=-1)
+        run_length_kv_exp = jnp.expand_dims(run_length_kv, axis=-2)
+        bottom_right_inv_swa_mask = (
+            run_length_q_exp - pos_q + left_window >= run_length_kv_exp - pos_kv
+        )
+        bottom_right_inv_swa_mask = jnp.expand_dims(bottom_right_inv_swa_mask, axis=-3)
+        return bottom_right_inv_swa_mask.astype(dtype)
+    # All other cases other than BRCM
+    inv_swa_mask = (pos_kv >= pos_q - left_window) & (pos_kv <= pos_q + right_window)
+    inv_swa_mask = jnp.expand_dims(inv_swa_mask, axis=-3)
+    return inv_swa_mask.astype(dtype)
 
 
 def canonicalize_attn_mask_type(attn_mask_type: str):
@@ -178,140 +325,643 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
 
 
 def is_fused_attn_kernel_available(
+    is_training,
     q_dtype,
     kv_dtype,
     qkv_layout,
     attn_bias_type,
     attn_mask_type,
+    softmax_type,
     dropout_probability,
     q_num_heads,
     kv_num_heads,
     q_max_seqlen,
     kv_max_seqlen,
-    head_dim,
+    head_dim_qk,
+    head_dim_v,
     window_size: Optional[Tuple[int, int]] = None,
-    is_context_parallel: bool = False,
 ):
     """
     To check whether the fused attention kernel is supported
     """
+    window_size_tuple = (-1, -1) if window_size is None else window_size
 
     def make_helper(attn_mask_type):
         return tex.FusedAttnHelper(
+            is_training,
             q_dtype,
             kv_dtype,
-            qkv_layout.value,
-            attn_bias_type.value,
-            attn_mask_type.value,
+            qkv_layout,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
             dropout_probability,
             q_num_heads,
             kv_num_heads,
             q_max_seqlen,
             kv_max_seqlen,
-            head_dim,
-            (-1, -1) if window_size is None else window_size,
+            head_dim_qk,
+            head_dim_v,
+            window_size_tuple,
         )
 
-    if not make_helper(attn_mask_type).is_fused_attn_kernel_available():
-        return False
-
-    # For context parallel need to check additional masking types
-    if is_context_parallel and attn_mask_type == AttnMaskType.CAUSAL_MASK:
-        if not make_helper(AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK).is_fused_attn_kernel_available():
-            return False
-
-    return True
+    return make_helper(attn_mask_type).is_fused_attn_kernel_available()
 
 
 def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
-    match qkv_layout:
-        case QKVLayout.BS3HD | QKVLayout.T3HD:
-            assert len(qkv) == 1, f"qkv must be (qkvpacked,) with {qkv_layout=}"
-            batch, q_max_seqlen, *_ = qkv[0].shape
-            kv_max_seqlen = q_max_seqlen
-        case QKVLayout.BSHD_BS2HD | QKVLayout.THD_T2HD:
-            assert len(qkv) == 2, f"qkv must be (query, kvpacked) with {qkv_layout=}"
-            batch, q_max_seqlen, *_ = qkv[0].shape
-            kv_max_seqlen = qkv[1].shape[1]
-        case QKVLayout.BSHD_BSHD_BSHD | QKVLayout.THD_THD_THD:
-            assert len(qkv) == 3, f"qkv must be (query, key, value) with {qkv_layout=}"
-            batch, q_max_seqlen, *_ = qkv[0].shape
-            kv_max_seqlen = qkv[1].shape[1]
-        case _:
-            raise ValueError(f"Unsupported {qkv_layout=}")
+    if qkv_layout.is_qkvpacked():
+        assert len(qkv) == 1, f"qkv must be (qkvpacked,) with {qkv_layout=}"
+        batch, q_max_seqlen, *_ = qkv[0].shape
+        kv_max_seqlen = q_max_seqlen
+    elif qkv_layout.is_kvpacked():
+        assert len(qkv) == 2, f"qkv must be (query, kvpacked) with {qkv_layout=}"
+        batch, q_max_seqlen, *_ = qkv[0].shape
+        kv_max_seqlen = qkv[1].shape[1]
+    elif qkv_layout.is_separate():
+        assert len(qkv) == 3, f"qkv must be (query, key, value) with {qkv_layout=}"
+        batch, q_max_seqlen, *_ = qkv[0].shape
+        kv_max_seqlen = qkv[1].shape[1]
+    else:
+        raise ValueError(f"Unsupported {qkv_layout=}")
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def _reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat, inverse: bool):
-    match tensor_format:
-        case QKVFormat.SBHD:
-            seq_dim = 0
-        case QKVFormat.BSHD:
-            seq_dim = 1
-        case _:
-            raise ValueError(f"{tensor_format=} is not supported for causal load balancing.")
-
-    if cp_size == 1:
-        return tensor
-
-    if cp_size % 2 != 0:
-        raise ValueError(f"{cp_size=} must be a multiple of 2.")
-
-    # Need to ensure we have 2 pairs to swap for balancing between cp ranks
-    if tensor.shape[seq_dim] % (cp_size * 2) != 0:
-        raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
-
-    # [B, S, H, D] -> [B, 2*cp_size, S/2*cp_size, D]
-    # [S, B, H, D] -> [2*cp_size, S/2*cp_size, B, H, D]
-    ori_tensor_shape = tensor.shape
-    tensor = tensor.reshape(
-        (
-            *ori_tensor_shape[:seq_dim],
-            2 * cp_size,
-            ori_tensor_shape[seq_dim] // (2 * cp_size),
-            *ori_tensor_shape[seq_dim + 1 :],
+def reorder_causal_load_balancing(
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_size: int | None = None
+):
+    """Reorders a tensor for load balancing the compute of causal attention."""
+    if strategy == ReorderStrategy.DualChunkSwap:
+        if stripe_size is not None:
+            raise ValueError(
+                f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
+                " None"
+            )
+        return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
+    if strategy == ReorderStrategy.Striped:
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
+        # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
+        if stripe_size is not None and stripe_size <= 0:
+            raise ValueError(
+                f"Incorrect value for CP striped reordering {stripe_size=}. stripe_size must be a"
+                " positive integer"
+            )
+        # Supporting old API defaults of stripe_size=1
+        effective_stripe_size = 1 if stripe_size is None else stripe_size
+        return tex.attention.reorder_causal_striped(
+            tensor, cp_size, seq_dim, False, effective_stripe_size
         )
+    raise ValueError(f"Unsupported {strategy=}")
+
+
+def inverse_reorder_causal_load_balancing(
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_size: int | None = None
+):
+    """Inverse operation of `reorder_causal_load_balancing`."""
+    if strategy == ReorderStrategy.DualChunkSwap:
+        if stripe_size is not None:
+            raise ValueError(
+                f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
+                " None"
+            )
+        return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
+    if strategy == ReorderStrategy.Striped:
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
+        # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
+        if stripe_size is not None and stripe_size <= 0:
+            raise ValueError(
+                f"Incorrect value for CP reordering {stripe_size=}. stripe_size must be a positive"
+                " integer"
+            )
+        # Supporting old API defaults of stripe_size=1
+        effective_stripe_size = 1 if stripe_size is None else stripe_size
+        return tex.attention.reorder_causal_striped(
+            tensor, cp_size, seq_dim, True, effective_stripe_size
+        )
+    raise ValueError(f"Unsupported {strategy=}")
+
+
+def _get_seqlens_and_offsets(segment_ids, max_segments_per_seq):
+    # bincount map with 0s
+    bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_segments_per_seq + 1))
+    seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
+    seqlens = seqlens_with_zero[..., 1:]
+
+    def _find_offsets(x):
+        same_as_previous = jnp.logical_and(x[..., 1:] != x[..., :-1], x[..., 1:] != 0)
+        first_column = x[..., :1] != 0
+        same_as_previous = jnp.hstack((first_column, same_as_previous))
+        return jax.vmap(partial(jnp.argwhere, size=(max_segments_per_seq + 1), fill_value=-1))(
+            same_as_previous
+        ).squeeze(-1)
+
+    offsets = _find_offsets(segment_ids)
+    return seqlens, offsets
+
+
+def _mask_to_seqlens_offset(mask, max_segments_per_seq):
+    assert mask.shape[1] == 1
+    row_ids = mask.squeeze(axis=1).max(axis=-1)
+    q_seqlen, q_offset = _get_seqlens_and_offsets(row_ids, max_segments_per_seq)
+    col_ids = mask.squeeze(axis=1).max(axis=-2)
+    kv_seqlen, kv_offset = _get_seqlens_and_offsets(col_ids, max_segments_per_seq)
+    return q_seqlen, q_offset, kv_seqlen, kv_offset
+
+
+def _fast_causal_adjust_seqlen_and_offsets(
+    segment_pos_q, q_len, q_offset, segment_pos_kv, kv_len, kv_offset
+):
+    # The assumption is that for any segment tokens respect causal ordering except at the ends
+    # of the segment. This allows us to tweak the length and offset by only looking at the start
+    # and end tokens between segments.
+    is_active_segment = jnp.logical_and(q_len > 0, kv_len > 0)
+
+    q_seq_id_start = jnp.take(segment_pos_q, q_offset[..., :-1], fill_value=-1)
+    kv_seq_id_start = jnp.take(segment_pos_kv, kv_offset[..., :-1], fill_value=-1)
+    skip_start_token = jnp.logical_and(kv_seq_id_start > q_seq_id_start, is_active_segment).astype(
+        jnp.int32
     )
 
-    parts = []
-    if not inverse:
-        for cp_rank in range(cp_size):
-            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-            index = jnp.array([cp_rank, (2 * cp_size - cp_rank - 1)])
-            parts.append(jnp.take(tensor, index, axis=seq_dim))
+    q_len -= skip_start_token
+    q_offset += jnp.insert(skip_start_token, skip_start_token.shape[-1], 0, axis=-1)
+
+    q_seq_id_end = jnp.take(segment_pos_q, q_offset[..., 1:] - 1, fill_value=-1)
+    kv_seq_id_end = jnp.take(segment_pos_kv, kv_offset[..., 1:] - 1, fill_value=-1)
+    skip_end_token = jnp.logical_and(kv_seq_id_end > q_seq_id_end, is_active_segment).astype(
+        jnp.int32
+    )
+
+    kv_len -= skip_end_token
+
+    return q_len, kv_len, q_offset, kv_offset
+
+
+def _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+    segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+):
+    q_len, q_offset = _get_seqlens_and_offsets(segment_ids_q, max_segments_per_seq)
+    kv_len, kv_offset = _get_seqlens_and_offsets(segment_ids_kv, max_segments_per_seq)
+    return _fast_causal_adjust_seqlen_and_offsets(
+        segment_pos_q, q_len, q_offset, segment_pos_kv, kv_len, kv_offset
+    )
+
+
+def run_length_fill_flattened(segment_ids_flattened) -> jnp.ndarray:
+    """
+    Returns an array of run-lengths of the flattened segment ids
+    """
+    # Example for run_length_fill_flattened:
+    # Input segment_ids_flattened:       [[1 1 2 2 2 0 3 0 4 4 4 4 4 0 0 0], [1 0 0 2 2 2 0 0 3 3 4 4 4 4 0 0]]
+    # run_ids:                           [[0 0 1 1 1 2 3 4 5 5 5 5 5 6 6 6], [0 1 1 2 2 2 3 3 4 4 5 5 5 5 6 6]]
+    # counts:                            [[2 3 1 1 1 5 3 0 0 0 0 0 0 0 0 0], [1 2 3 2 2 4 2 0 0 0 0 0 0 0 0 0]]
+    # Returns segment_ids_run_length_1d: [[2 2 3 3 3 0 1 0 5 5 5 5 5 0 0 0], [1 0 0 3 3 3 0 0 2 2 4 4 4 4 0 0]]
+    boundary = jnp.concatenate(
+        [jnp.broadcast_to(True, (1,)), segment_ids_flattened[1:] != segment_ids_flattened[:-1]]
+    )
+    run_ids = jnp.cumsum(boundary) - 1
+    # Each element could, in worst case, start a run
+    max_runs = segment_ids_flattened.shape[-1]
+    counts = jnp.bincount(run_ids, length=max_runs)
+    # Fill in the missing values
+    segment_ids_run_length_1d = counts[run_ids]
+    segment_ids_run_length_1d = jnp.where(segment_ids_flattened == 0, 0, segment_ids_run_length_1d)
+    return segment_ids_run_length_1d
+
+
+def run_length_fill(segment_ids) -> jnp.ndarray:
+    """
+    Returns an array of run-lengths of the segment ids, with shape preserved
+    """
+    # Example for run_length_fill:
+    # Input segment_ids:  [[1 1 2 2 2 0 3 0 4 4 4 4 4 0 0 0], [1 0 0 2 2 2 0 0 3 3 4 4 4 4 0 0]]
+    # Returns run length: [[2 2 3 3 3 0 1 0 5 5 5 5 5 0 0 0], [1 0 0 3 3 3 0 0 2 2 4 4 4 4 0 0]]
+    # Flatten all dimension except the last one prior to executing vmap run length
+    orig_shape = segment_ids.shape
+    segment_ids_flat = segment_ids.reshape(-1, orig_shape[-1])
+    run_length_segment_id_shape = jax.vmap(run_length_fill_flattened, in_axes=0)(segment_ids_flat)
+    return run_length_segment_id_shape.reshape(orig_shape)
+
+
+def _segment_ids_pos_to_seqlens_offsets(
+    segment_ids_q,
+    segment_ids_kv,
+    segment_pos_q,
+    segment_pos_kv,
+    attn_mask_type,
+    window_size,
+    max_segments_per_seq,
+):
+    # TODO(mgoldfarb-nvidia): Consider an opt-in for arbitrary masking if needed here.
+    # Computing the full mask is expensive due to quadratic expansion of Q * KV masking.
+
+    # Assumptions for cudnn causal mask correctness.
+    # 1. Segments are monotonic [4 4 4 0 0 5 5 5 6 6 0 0]
+    # 2. No intra-segment padding, only inter-segment paddding allowed
+    # 3. Only start or end token within a segment may violate the causal order relationship
+    #        1 5 9     0 4 8 10    0 4 8
+    #    0             x           x
+    #    4   x         x x         x x
+    #    8   x x       x x x       x x x
+    #
+    # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
+    # examine only O(Q+KV) elements.
+
+    # For seqlens and seqoffsets calculations, the intermediate(temp) attn_mask creation
+    # using the segment ids and pos along with mask type (causal or brcm) is sufficient.
+    # It does not need to involve SW for this mask's creation
+
+    # Currently, this function is only exercised for THD qkv_layout.
+
+    # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
+    if (attn_mask_type.is_causal() and window_size is None) or (
+        window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
+    ):
+        return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+            segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+        )
+
+    # (1 = attend, 0 = masked)
+    segment_mask = make_attention_mask(
+        segment_ids_q,
+        segment_ids_kv,
+        jnp.equal,
+    )
+    segment_mask_with_id = make_attention_mask(
+        segment_ids_q,
+        segment_ids_kv,
+        lambda x, y: jnp.equal(x, y) * x,
+    )
+    # TE JAX Attn expects the THD segments to have q_token <= kv_tokens so that a correct cross-attn type BRCM can be applied
+    attn_mask = segment_mask
+    if attn_mask_type.is_bottom_right():
+        run_length_out_q = run_length_fill(segment_ids_q)
+        run_length_out_kv = run_length_fill(segment_ids_kv)
+        # Example for brcm:
+        # run_length_out_q:  [3 3 3 0 4 4 4 4]
+        # segment_pos_q:     [0 1 2 3 0 1 2 3]
+        # segment_ids_q:     [1 1 1 0 2 2 2 2]
+        # run_length_out_kv: [4 4 4 4 0 0 10 10 10 10 10 10 10 10 10 10]
+        # segment_pos_kv:    [0 1 2 3 4 5 0 1 2 3 4 5 6 7 8 9]
+        # segment_ids_kv:    [1 1 1 1 0 0 2 2 2 2 2 2 2 2 2 2]
+        # brcm:            [[[1 1 0 0 0 0 1 1 1 1 1 1 1 1 0 0]
+        #                    [1 1 1 0 0 0 1 1 1 1 1 1 1 1 1 0]
+        #                    [1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1]
+        #                    [1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1]
+        #                    [1 0 0 0 0 0 1 1 1 1 1 1 1 0 0 0]
+        #                    [1 1 0 0 0 0 1 1 1 1 1 1 1 1 0 0]
+        #                    [1 1 1 0 0 0 1 1 1 1 1 1 1 1 1 0]
+        #                    [1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1]]]
+        # attn_mask(noswa):[[[1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+        #                    [1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0]
+        #                    [1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0]
+        #                    [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 0 0 0]
+        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 1 0 0]
+        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 0]
+        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1]]]
+        bottom_right_causal_mask = make_attention_mask(
+            run_length_out_q - segment_pos_q,
+            run_length_out_kv - segment_pos_kv,
+            jnp.less_equal,
+        )
+        attn_mask = jnp.logical_and(segment_mask, bottom_right_causal_mask)
+    elif attn_mask_type.is_causal():
+        causal_mask = make_attention_mask(
+            segment_pos_q,
+            segment_pos_kv,
+            jnp.greater_equal,
+        )
+        attn_mask = jnp.logical_and(segment_mask, causal_mask)
+
+    attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
+    q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
+        attn_mask_with_id, max_segments_per_seq
+    )
+    return q_seqlen, kv_seqlen, q_offset, kv_offset
+
+
+def _segment_ids_to_seqlens(segment_ids_q, segment_ids_kv, attn_mask_type):
+    # convert the mask to seqlens, mask doesn't support ragged offsets
+    if not attn_mask_type.is_padding():
+        q_max_seqlen = segment_ids_q.shape[-1]
+        kv_max_seqlen = segment_ids_kv.shape[-1]
+        q_seq_lens = jnp.full_like(q_max_seqlen, q_max_seqlen, dtype=jnp.int32)
+        kv_seq_lens = jnp.full_like(kv_max_seqlen, kv_max_seqlen, dtype=jnp.int32)
     else:
-        for cp_rank in range(cp_size // 2):
-            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-            base = 4 * cp_rank
-            index = jnp.array([base, base + 2])
-            parts.append(jnp.take(tensor, index, axis=seq_dim))
-        for cp_rank in range(cp_size // 2):
-            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-            base = 2 * cp_size - 1 - 4 * cp_rank
-            index = jnp.array([base, base - 2])
-            parts.append(jnp.take(tensor, index, axis=seq_dim))
-
-    # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
-    # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D]
-    combined = jnp.stack(parts, axis=seq_dim)
-
-    return combined.reshape(ori_tensor_shape)
+        q_seq_lens = jnp.sum(segment_ids_q, axis=-1).astype(jnp.int32)
+        kv_seq_lens = jnp.sum(segment_ids_kv, axis=-1).astype(jnp.int32)
+    return q_seq_lens, kv_seq_lens
 
 
-def reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
-    """Reorders a tensor for load balancing the compute of causal attention."""
-    return _reorder_causal_load_balancing(tensor, cp_size, tensor_format, False)
+@jax.tree_util.register_pytree_node_class
+class SequenceDescriptor:
+    """A class to describe the sequences with flexible initialization.
+    - SequenceDescriptor.from_seqlens
+      For non-THD (non-packed) cases, where each batch has only 1 sequence.
+    - SequenceDescriptor.from_seqlens_and_offsets
+      For THD (packed) cases, where each batch may have not only 1 sequence.
+    - SequenceDescriptor.from_segment_ids_and_pos
+      Experimental feature for BSHD (with and without reordering) and THD (packed) cases without reordering
+    """
+
+    seqlens: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
+    seq_offsets: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
+    segment_ids: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
+    segment_pos: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
+
+    def __init__(self, seqlens=None, seq_offsets=None, segment_ids=None, segment_pos=None):
+        """
+        Initialize to Tuple(jnp.zeros, jnp.zeros) because the primitive only accepts pure jax array
+        """
+        self.seqlens = (jnp.zeros(0), jnp.zeros(0)) if seqlens is None else seqlens
+        self.seq_offsets = (jnp.zeros(0), jnp.zeros(0)) if seq_offsets is None else seq_offsets
+        self.segment_ids = (jnp.zeros(0), jnp.zeros(0)) if segment_ids is None else segment_ids
+        self.segment_pos = (jnp.zeros(0), jnp.zeros(0)) if segment_pos is None else segment_pos
+
+    def tree_flatten(self):
+        """
+        Flatten method to register as a pytree node
+        """
+        return ((self.seqlens, self.seq_offsets, self.segment_ids, self.segment_pos), None)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        """
+        Unflatten method to register as a pytree node
+        """
+        del aux_data
+        return cls(*children)
+
+    def get_seqlens_and_offsets(
+        self, attn_mask_type, qkv_layout, window_size, max_segments_per_seq
+    ):
+        """
+        Acquire the seqlens/offsets for cuDNN backend.
+        """
+        q_segment_ids, kv_segment_ids = self.segment_ids
+        q_segment_pos, kv_segment_pos = self.segment_pos
+        # No segment_ids/segment_pos
+        if q_segment_ids.size + kv_segment_ids.size == 0:
+            return self.seqlens, self.seq_offsets
+
+        # Allow segment_pos to have fewer leading dims than segment_ids if vmapped segment_ids and non-vmapped segment_pos
+        # e.g. when using from_segment_ids_and_pos() for segment_pos generation from segment_ids it is acceptable to have
+        # something like : segment_ids (B, batch, seq), segment_pos (batch, seq)).
+        if q_segment_ids.ndim < q_segment_pos.ndim or kv_segment_ids.ndim < kv_segment_pos.ndim:
+            raise AssertionError(
+                "segment_ids must not have fewer dims than segment_pos; got"
+                f" q_segment_ids.ndim={q_segment_ids.ndim},"
+                f" q_segment_pos.ndim={q_segment_pos.ndim},"
+                f" kv_segment_ids.ndim={kv_segment_ids.ndim},"
+                f" kv_segment_pos.ndim={kv_segment_pos.ndim}"
+            )
+        if not (
+            q_segment_ids.shape[-q_segment_pos.ndim :] == q_segment_pos.shape
+            and kv_segment_ids.shape[-kv_segment_pos.ndim :] == kv_segment_pos.shape
+        ):
+            raise AssertionError(
+                "segment_pos trailing shape must match segment_ids; got"
+                f" q_segment_ids.shape={q_segment_ids.shape},"
+                f" q_segment_pos.shape={q_segment_pos.shape},"
+                f" kv_segment_ids.shape={kv_segment_ids.shape},"
+                f" kv_segment_pos.shape={kv_segment_pos.shape}"
+            )
+        # THD: compute seqlens/offsets.
+        if qkv_layout.is_thd():
+            # If there are more leading dims on segment_ids, e.g. vmap
+            if q_segment_ids.ndim > q_segment_pos.ndim or kv_segment_ids.ndim > kv_segment_pos.ndim:
+                # Flatten leading batch dims so that segment_ids and segment_pos have the same number of leading dims,
+                # vmap seqlens/offsets computation with segment_pos broadcast,
+                # reshape back to the original leading batch dims.
+                n_extra_batch_dims_q = q_segment_ids.ndim - q_segment_pos.ndim
+                n_extra_batch_dims_kv = kv_segment_ids.ndim - kv_segment_pos.ndim
+                extra_batch_shape_q = q_segment_ids.shape[:n_extra_batch_dims_q]
+                extra_batch_shape_kv = kv_segment_ids.shape[:n_extra_batch_dims_kv]
+                extra_flat_batch_size_q = jnp.prod(extra_batch_shape_q)
+                extra_flat_batch_size_kv = jnp.prod(extra_batch_shape_kv)
+                # vmap below requires same batch size on axis 0 for q_flat and kv_flat; JAX will raise if they differ.
+                q_flat = q_segment_ids.reshape(
+                    extra_flat_batch_size_q, *q_segment_ids.shape[n_extra_batch_dims_q:]
+                )
+                kv_flat = kv_segment_ids.reshape(
+                    extra_flat_batch_size_kv, *kv_segment_ids.shape[n_extra_batch_dims_kv:]
+                )
+
+                single_extra_batch = partial(
+                    _segment_ids_pos_to_seqlens_offsets,
+                    attn_mask_type=attn_mask_type,
+                    window_size=window_size,
+                    max_segments_per_seq=max_segments_per_seq,
+                )
+
+                q_sl, kv_sl, q_off, kv_off = jax.vmap(
+                    single_extra_batch, in_axes=(0, 0, None, None)
+                )(q_flat, kv_flat, q_segment_pos, kv_segment_pos)
+
+                q_seqlens = q_sl.reshape(*extra_batch_shape_q, *q_sl.shape[1:])
+                kv_seqlens = kv_sl.reshape(*extra_batch_shape_kv, *kv_sl.shape[1:])
+                q_offsets = q_off.reshape(*extra_batch_shape_q, *q_off.shape[1:])
+                kv_offsets = kv_off.reshape(*extra_batch_shape_kv, *kv_off.shape[1:])
+            else:
+                q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlens_offsets(
+                    q_segment_ids,
+                    kv_segment_ids,
+                    q_segment_pos,
+                    kv_segment_pos,
+                    attn_mask_type,
+                    window_size,
+                    max_segments_per_seq,
+                )
+        # BSHD: compute seqlens/offsets.
+        else:
+            q_seqlens, kv_seqlens = _segment_ids_to_seqlens(
+                q_segment_ids,
+                kv_segment_ids,
+                attn_mask_type,
+            )
+            q_offsets = kv_offsets = jnp.zeros(0)
+        return (q_seqlens, kv_seqlens), (q_offsets, kv_offsets)
+
+    @classmethod
+    def _expand_to_pair(
+        cls, value: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """
+        Internal helper to ensure a single value expands into a pair (q, kv).
+        """
+        if isinstance(value, tuple):
+            if len(value) != 2:
+                raise ValueError("Input tuple must have exactly 2 elements.")
+            return value
+
+        if isinstance(value, jnp.ndarray):
+            return value, value  # Duplicate for q=kv case
+
+        raise TypeError(
+            "Expected a jax.numpy.ndarray or a tuple of two jax.numpy.ndarray, "
+            f"but got {type(value).__name__}."
+        )
+
+    @classmethod
+    def from_seqlens(
+        cls,
+        seqlens: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
+    ) -> SequenceDescriptor:
+        """
+        Factory method for inputs with sequence lengths only (non-THD).
+        Args:
+            seqlens(Tuple(jnp.ndarray, jnp.ndarray)) = (q_seqlens, kv_seqlens):
+                - q_seqlens (jnp.ndarray):
+                  Sequence lengths for the query, with shape [batch].
+                - kv_seqlen (jnp.ndarray):
+                  Sequence lengths for the key and value, with shape [batch].
+        Return:
+            A SequenceDescriptor with only seqlens initialized.
+        """
+        q_seqlens, kv_seqlens = cls._expand_to_pair(seqlens)
+        return cls(seqlens=(q_seqlens, kv_seqlens))
+
+    @classmethod
+    def from_seqlens_and_offsets(
+        cls,
+        seqlens: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
+        seq_offsets: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
+    ) -> SequenceDescriptor:
+        """
+        Factory method for inputs with sequence lengths and offsets (THD).
+        Args:
+            seqlens(Tuple(jnp.ndarray, jnp.ndarray)) = (q_seqlens, kv_seqlens):
+                - q_seqlens (jnp.ndarray):
+                  Sequence lengths for the query, with shape [batch, max_seqlen].
+                  Unused positions are padded with -1.
+                - kv_seqlen (jnp.ndarray):
+                  Sequence lengths for the key and value, with shape [batch, max_seqlen].
+                  Unused positions are padded with -1.
+            seq_offsets(Tuple(jnp.ndarray, jnp.ndarray)) = (q_offsets, kv_offsets)
+                - q_seq_offsets (jnp.ndarray):
+                  The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
+                  Unused positions are padded with -1.
+                - kv_seq_offsets (jnp.ndarray):
+                  The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
+                  Unused positions are padded with -1.
+        Return:
+            A SequenceDescriptor with seqlens/seq_offsets initialized.
+        """
+        q_seqlens, kv_seqlens = cls._expand_to_pair(seqlens)
+        q_offsets, kv_offsets = cls._expand_to_pair(seq_offsets)
+        return cls(seqlens=(q_seqlens, kv_seqlens), seq_offsets=(q_offsets, kv_offsets))
+
+    @classmethod
+    def from_segment_ids_and_pos(
+        cls,
+        segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
+        segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
+        *,
+        is_thd: bool,
+        is_segment_ids_reordered: bool,
+    ) -> SequenceDescriptor:
+        """
+        Experimental factory method for inputs with segment IDs and optional positions.
+        segment_pos = None to be used only for: BSHD with or without load balancing and,
+                                                THD without load balancing
+        Args:
+            segment_ids(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_ids, kv_segment_ids):
+                - q_segment_ids (jnp.ndarray):
+                  Query segment ids start with 1, with shape [batch, max_seqlen].
+                  0s are treated as paddings.
+                - kv_segment_ids (jnp.ndarray):
+                  Key, value segment ids start with 1, with shape [batch, max_seqlen].
+                  0s are treated as paddings.
+            segment_pos(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_pos, kv_segment_pos)
+                - q_segment_pos (jnp.ndarray):
+                  The position inside each segment for query, with shape [batch, max_seqlen].
+                - kv_segment_pos (jnp.ndarray):
+                  The position inside each segment for key, value, with shape [batch, max_seqlen].
+            is_thd(bool): If True, QKVLayout is of type THD, else it is BSHD
+            is_segment_ids_reordered(bool): If True, the segment ids have been reordered for load balancing.
+            Only THD with load balancing is expected to have this flag set to True
+        Return:
+            A SequenceDescriptor with segment_ids/segment_pos initialized.
+        """
+        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
+
+        # Using defaults : segment pos has to be generated.
+        if segment_pos is None:
+            # THD + load balanced segment_ids are not supported in this function
+            # BSHD + load balanced segment_ids are incorrect as BSHD handles reordering within the primitive itself
+            if is_segment_ids_reordered:
+                assert not is_thd, (
+                    f"{segment_pos=} default arg is not supported for load balanced reordered"
+                    " (Striped) THD inputs. Please pass the load balanced reordered segment_pos"
+                    " and segment_ids explicitly to {from_segment_ids_and_pos.__qualname__}"
+                    " using convenience function reorder_causal_load_balancing()"
+                )
+                assert is_thd, (
+                    f"{segment_pos=} default arg is not supported for load balanced reordered (Dual"
+                    " Chunk) BSHD inputs. BSHD segment_pos and segment_ids do not need to be load"
+                    " balanced reordered. The reordering for these is performed within the"
+                    " primitive"
+                )
+
+            # Generate the default pos for THD and BSHD non-reordered segment_ids
+            def generate_default_pos(seg_ids):
+                if is_thd:
+                    batch_size, seq_size = seg_ids.shape
+                    # Assume that the first token belongs to a segment and is not a padded token
+                    first_is_segment = jnp.full((batch_size, 1), True, dtype=bool)
+                    # Get segment start positions
+                    segment_start = jnp.concatenate(
+                        [
+                            first_is_segment,
+                            (seg_ids[..., 1:] != seg_ids[..., :-1]) & (seg_ids[..., 1:] != 0),
+                        ],
+                        axis=-1,
+                    )
+                    # Get offset for location where new segment starts
+                    segment_start_idx = jax.vmap(lambda row: jnp.arange(row.size) * row)(
+                        segment_start
+                    )
+                    segment_start_offsets = jax.vmap(jnp.maximum.accumulate)(segment_start_idx)
+
+                    # Get the last non-zero index - after this everything is padding
+                    # (B,)
+                    last_nonzero_idx = jax.vmap(
+                        lambda segids_row: jnp.max(
+                            jnp.where(segids_row != 0, jnp.arange(seq_size), -1)
+                        )
+                    )(seg_ids)
+                    seg_pos_no_thd = jnp.arange(seq_size)
+                    # Get a mask which can be used to zero out all the padding at the end (after the non-zero index)
+                    mask = seg_pos_no_thd <= last_nonzero_idx[:, None]
+
+                    # Get the unmasked seg_pos for the THD sequence
+                    seg_pos = (
+                        jnp.broadcast_to(jnp.arange(seq_size), seg_ids.shape)
+                        - segment_start_offsets
+                    )
+
+                    # Use the mask to zero out the padding at the end (after the non-zero index)
+                    segment_pos = jax.vmap(
+                        lambda pos_row, mask_row: jnp.where(mask_row, pos_row, 0)
+                    )(seg_pos, mask)
+                    return segment_pos
+
+                seqlen = seg_ids.shape[-1]
+                return jnp.broadcast_to(jnp.arange(seqlen), seg_ids.shape)
+
+            q_seg_pos = generate_default_pos(q_seg_ids)
+            kv_seg_pos = generate_default_pos(kv_seg_ids)
+            segment_pos = (q_seg_pos, kv_seg_pos)
+        # Explicitly passed segment_pos
+        else:
+            segment_pos = cls._expand_to_pair(segment_pos)
+
+        return cls(
+            segment_ids=(q_seg_ids, kv_seg_ids),
+            segment_pos=segment_pos,
+        )
 
 
-def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
-    """Inverse operation of `reorder_causal_load_balancing`."""
-    return _reorder_causal_load_balancing(tensor, cp_size, tensor_format, True)
-
-
-def fused_attn(
+def _legacy_fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
     mask: Optional[jnp.ndarray],
@@ -319,12 +969,15 @@ def fused_attn(
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
     qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
     window_size: Optional[Tuple[int, int]] = None,
+    context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -345,9 +998,10 @@ def fused_attn(
             Intra-sequence padding is not valid. The padded tokens can only on the right-most.
             Otherwise the results will be wrong.
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
-        attn_bias_type (NVTE_Bias_Type): Type of attention bias.
-        attn_mask_type (NVTE_Mask_Type): Type of attention mask.
-        qkv_layout (NVTE_QKV_Layout): Layout of the QKV tensors.
+        attn_bias_type (AttnBiasType): Type of attention bias.
+        attn_mask_type (AttnMaskType): Type of attention mask.
+        softmax_type (AttnSoftmaxType): Type of attention softmax.
+        qkv_layout (QKVLayout): Layout of the QKV tensors.
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
@@ -359,28 +1013,26 @@ def fused_attn(
         (jnp.ndarray): The output tensor from the fused attention.
     """
     assert (
-        get_qkv_format(qkv_layout) != QKVFormat.THD
+        not qkv_layout.is_thd()
     ), "Please use transformer_engine.jax.attention.fused_attn_thd for THD format."
 
     # Check inputs qkv
     match qkv_layout:
-        case NVTE_QKV_Layout.NVTE_BS3HD:
+        case QKVLayout.BS3HD:
             assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
-        case NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
+        case QKVLayout.BSHD_BS2HD:
             assert (
                 len(qkv) == 2
             ), f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
-        case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
+        case QKVLayout.BSHD_BSHD_BSHD:
             assert (
                 len(qkv) == 3
             ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
+        case _:
+            raise ValueError(f"Unknown {qkv_layout=}")
 
     # convert the mask to seqlens, mask doesn't support ragged offsets
-    if attn_mask_type in [
-        AttnMaskType.NO_MASK,
-        AttnMaskType.CAUSAL_MASK,
-        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-    ]:
+    if not attn_mask_type.is_padding():
         batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
         q_seq_lens = jnp.full((batch,), q_max_seqlen, dtype=jnp.int32)
         kv_seq_lens = jnp.full((batch,), kv_max_seqlen, dtype=jnp.int32)
@@ -397,19 +1049,19 @@ def fused_attn(
     output = _fused_attn(
         qkv,
         bias,
-        q_seq_lens,
-        kv_seq_lens,
-        None,
-        None,
+        softmax_offset,
+        SequenceDescriptor.from_seqlens((q_seq_lens, kv_seq_lens)),
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type,
         qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=1,
         window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -433,11 +1085,260 @@ def fused_attn_thd(
     is_training: bool,
     max_segments_per_seq: int = 1,
     window_size: Optional[Tuple[int, int]] = None,
+    context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
-    (Experimental) Perform THD (packed) cuDNN fused attention.
+    Deprecated THD fused attn, please use fusd_attn with SequenceDescriptor
+    """
+    warnings.warn(
+        "fused_attn_thd is deprecated, please use fused_attn with SequenceDescriptor",
+        DeprecationWarning,
+    )
+
+    assert (
+        qkv_layout.is_thd()
+    ), "Please use transformer_engine.jax.attention.fused_attn for non-THD format."
+
+    # Check inputs qkv
+    match qkv_layout:
+        case QKVLayout.T3HD:
+            assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
+        case QKVLayout.THD_T2HD:
+            assert (
+                len(qkv) == 2
+            ), f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
+        case QKVLayout.THD_THD_THD:
+            assert (
+                len(qkv) == 3
+            ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
+        case _:
+            raise ValueError(f"Unknown {qkv_layout=}")
+
+    batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
+    assert q_seq_lens.shape == (batch, q_max_seqlen)
+    assert kv_seq_lens.shape == (batch, kv_max_seqlen)
+    assert q_seq_offsets.shape == (batch, q_max_seqlen + 1)
+    assert kv_seq_offsets.shape == (batch, kv_max_seqlen + 1)
+
+    output = _fused_attn(
+        qkv,
+        bias,
+        softmax_offset,
+        SequenceDescriptor.from_seqlens_and_offsets(
+            (q_seq_lens, kv_seq_lens), (q_seq_offsets, kv_seq_offsets)
+        ),
+        seed,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+        window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
+    )
+
+    return output
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
+def _fused_attn(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    softmax_offset: Optional[jnp.ndarray],
+    sequence_descriptor: SequenceDescriptor,
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+    window_size: Optional[Tuple[int, int]],
+    context_parallel_strategy: CPStrategy,
+    context_parallel_causal_load_balanced: bool,
+    context_parallel_axis: str,
+    context_checkpoint_name: str = "context",
+    stripe_size: int | None = None,
+):
+    output, _ = _fused_attn_fwd_rule(
+        qkv,
+        bias,
+        softmax_offset,
+        sequence_descriptor,
+        seed,
+        attn_bias_type,
+        attn_mask_type,
+        qkv_layout,
+        softmax_type,
+        scaling_factor,
+        dropout_probability,
+        is_training,
+        max_segments_per_seq,
+        window_size,
+        context_parallel_strategy,
+        context_parallel_causal_load_balanced,
+        context_parallel_axis,
+        context_checkpoint_name=context_checkpoint_name,
+        stripe_size=stripe_size,
+    )
+    return output
+
+
+def _fused_attn_fwd_rule(
+    qkv,
+    bias,
+    softmax_offset,
+    sequence_descriptor,
+    seed,
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    softmax_type,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+    window_size,
+    context_parallel_strategy,
+    context_parallel_causal_load_balanced,
+    context_parallel_axis,
+    context_checkpoint_name,
+    stripe_size,
+):
+    output, softmax_aux, rng_state = tex.fused_attn_fwd(
+        qkv,
+        bias,
+        softmax_offset,
+        sequence_descriptor,
+        seed,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+        window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
+        stripe_size=stripe_size,
+    )
+    output = checkpoint_name(output, context_checkpoint_name)
+    softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
+    rng_state = checkpoint_name(rng_state, context_checkpoint_name)
+    return output, (
+        qkv,
+        bias,
+        sequence_descriptor,
+        softmax_aux,
+        rng_state,
+        softmax_offset,
+        output,
+    )
+
+
+def _fused_attn_bwd_rule(
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    softmax_type,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+    window_size,
+    context_parallel_strategy,
+    context_parallel_causal_load_balanced,
+    context_parallel_axis,
+    context_checkpoint_name,
+    stripe_size,
+    ctx,
+    dz,
+):
+    del context_checkpoint_name
+    (
+        qkv,
+        bias,
+        sequence_descriptor,
+        softmax_aux,
+        rng_state,
+        softmax_offset,
+        output,
+    ) = ctx
+    grad_qkv, grad_bias, grad_softmax_offset = tex.fused_attn_bwd(
+        qkv,
+        bias,
+        softmax_offset,
+        softmax_aux,
+        rng_state,
+        output,
+        dz,
+        sequence_descriptor,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+        window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
+        stripe_size=stripe_size,
+    )
+    if attn_bias_type == AttnBiasType.NO_BIAS:
+        grad_bias = None
+    if softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX:
+        grad_softmax_offset = None
+    return (
+        grad_qkv,
+        grad_bias,
+        grad_softmax_offset,
+        None,
+        None,
+    )
+
+
+_fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
+
+
+def fused_attn(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    sequence_descriptor: SequenceDescriptor,
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int = 1,
+    window_size: Optional[Tuple[int, int]] = None,
+    context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
+    context_parallel_causal_load_balanced: bool = False,
+    context_parallel_axis: str = "",
+    context_checkpoint_name: str = "context",
+    softmax_offset: Optional[jnp.ndarray] = None,
+    stripe_size: int | None = None,
+):
+    """
+    Perform cuDNN fused attention.
 
     This function implements the following formula:
         BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
@@ -450,22 +1351,12 @@ def fused_attn_thd(
               query has a different shape (e.g., cross-attention).
             - `(query, key, value)`: For separate query, key, and value tensors.
         bias (Optional[jnp.ndarray]): An optional bias tensor to be added to the attention scores.
-        q_seqlen (jnp.ndarray):
-            Sequence lengths for the query, with shape [batch, max_seqlen]. Unused positions are
-            padded with -1.
-        kv_seqlen (jnp.ndarray):
-            Sequence lengths for the key and value, with shape [batch, max_seqlen]. Unused positions
-            are padded with -1.
-        q_seq_offsets (jnp.ndarray):
-            The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
-            Unused positions are padded with -1.
-        kv_seq_offsets (jnp.ndarray):
-            The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
-            Unused positions are padded with -1.
+        sequence_descriptor (SequenceDescriptor): Descriptor for how to describe the sequence.
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
-        attn_bias_type (NVTE_Bias_Type): Type of attention bias.
-        attn_mask_type (NVTE_Mask_Type): Type of attention mask.
-        qkv_layout (NVTE_QKV_Layout): Layout of the QKV tensors.
+        attn_bias_type (AttnBiasType): Type of attention bias.
+        attn_mask_type (AttnMaskType): Type of attention mask.
+        softmax_type (AttnSoftmaxType): Type of attention softmax.
+        qkv_layout (QKVLayout): Layout of the QKV tensors.
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
@@ -478,214 +1369,92 @@ def fused_attn_thd(
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
+        context_checkpoint_name (str): The name of the context checkpoint for the custom VJP forward pass.
+        softmax_offset (Optional[jnp.ndarray]): An optional learnable softmax offset tensor with shape
+            [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
+            If provided, this parameter will receive gradients during backpropagation.
+        stripe_size (int |  None):
+            Indicates the striping size to be used when using ReorderStrategy.Striped.
+            Currently, a stripe_size > 1 is only supported for CP + THD + Striped + AG, whereas a stripe_size=1
+            is supported for both, CP + THD + Striped + AG and CP + THD + Striped + P2P(Ring)
+            None indicates no striping strategy
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
-    Examples:
+    Examples (non-THD, also known as non-packed):
+        >>> #  q_segment_ids = [[1, 1, 1, 0], [1, 1, 0, 0]], 0 means padded tokens
+        >>> # kv_segment_ids = [[1, 0, 0, 0], [1, 1, 0, 0]], 0 means padded tokens
+        >>> b, s, h, d = 2, 4, 12, 64
+        >>> qkv = jnp.zeros((b, s, 3, h, d), dtype=jnp.bfloat16)
+        >>> q_seq_lens = jnp.asarray([3, 2])
+        >>> kv_seq_lens = jnp.asarray([1, 2])
+        >>> sequence_desc = SequenceDescriptor.from_seqlens(
+                seqlens=(q_seq_lens, kv_seq_lens))
+        >>> out = fused_attn((qkv,), None, sequence_desc, None,
+                             AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
+                             QKVLayout.BS3HD, 0.125, 0, True, 3)
+
+    Examples (THD, also known as packed):
         >>> # segment_ids = [[1, 1, 2, 3], [1, 1, 2, 0]], 0 means padded tokens
+        >>> # segment_pos = [[0, 1, 0, 0], [0, 1, 0, 1]]
         >>> b, s, h, d = 2, 4, 12, 64
         >>> qkv = jnp.zeros((b, s, 3, h, d), dtype=jnp.bfloat16)
         >>> # 3 segments in first seq, 2 segments in second seq
         >>> q_seq_lens = kv_seq_lens = jnp.asarray([[2, 1, 1, -1], [2, 1, -1, -1]])
         >>> # seq_offsets need to include the end offset of the last segments
         >>> q_seq_offsets = kv_seq_offsets = jnp.asarray([[0, 2, 3, 4, -1], [0, 2, 3, -1, -1]])
-        >>> out = fused_attn_thd((qkv,), None, q_seq_lens, kv_seq_lens,
-                                 q_seq_offsets, kv_seq_offsets, None,
-                                 AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
-                                 QKVLayout.T3HD, 0.125, 0, True, 3)
+        >>> sequence_desc = SequenceDescriptor.from_seqlens_and_offsets(
+                seqlens=(q_seq_lens, kv_seq_lens),
+                seq_offsets=(q_seq_offsets, kv_seq_offsets))
+        >>> out = fused_attn((qkv,), None, sequence_desc, None,
+                             AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
+                             QKVLayout.T3HD, 0.125, 0, True, 3)
     """
-    assert (
-        get_qkv_format(qkv_layout) == QKVFormat.THD
-    ), "Please use transformer_engine.jax.attention.fused_attn for non-THD format."
-
-    # Check inputs qkv
-    match qkv_layout:
-        case NVTE_QKV_Layout.NVTE_T3HD:
-            assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
-        case NVTE_QKV_Layout.NVTE_THD_T2HD:
-            assert (
-                len(qkv) == 2
-            ), f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
-        case NVTE_QKV_Layout.NVTE_THD_THD_THD:
-            assert (
-                len(qkv) == 3
-            ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
-
-    batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
-    assert q_seq_lens.shape == (batch, q_max_seqlen)
-    assert kv_seq_lens.shape == (batch, kv_max_seqlen)
-    assert q_seq_offsets.shape == (batch, q_max_seqlen + 1)
-    assert kv_seq_offsets.shape == (batch, kv_max_seqlen + 1)
-
+    if sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray):
+        warnings.warn(
+            "Pass mask to fused_attn is deprecated, please use SequenceDescriptor instead. "
+            + "See help(transformer_engine.jax.attention.SequenceDescriptor) for details.",
+            DeprecationWarning,
+        )
+        if max_segments_per_seq != 1:
+            raise ValueError("Passing mask is only supported for non-THD case.")
+        return _legacy_fused_attn(
+            qkv,
+            bias,
+            sequence_descriptor,
+            seed,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            softmax_type=softmax_type,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            window_size=window_size,
+            context_parallel_strategy=context_parallel_strategy,
+            context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+            context_parallel_axis=context_parallel_axis,
+            softmax_offset=softmax_offset,
+        )
     output = _fused_attn(
         qkv,
         bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
+        softmax_offset,
+        sequence_descriptor,
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
         qkv_layout=qkv_layout,
+        softmax_type=softmax_type,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
-    )
-
-    return output
-
-
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
-def _fused_attn(
-    qkv: Tuple[jnp.ndarray, ...],
-    bias: Optional[jnp.ndarray],
-    q_seq_lens: jnp.ndarray,
-    kv_seq_lens: jnp.ndarray,
-    q_seq_offsets: Optional[jnp.ndarray],
-    kv_seq_offsets: Optional[jnp.ndarray],
-    seed: jnp.ndarray,
-    attn_bias_type: AttnBiasType,
-    attn_mask_type: AttnMaskType,
-    qkv_layout: QKVLayout,
-    scaling_factor: float,
-    dropout_probability: float,
-    is_training: bool,
-    max_segments_per_seq: int,
-    window_size: Optional[Tuple[int, int]],
-    context_parallel_causal_load_balanced: bool,
-    context_parallel_axis: str,
-):
-    output, _ = _fused_attn_fwd_rule(
-        qkv,
-        bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
-        seed,
-        attn_bias_type,
-        attn_mask_type,
-        qkv_layout,
-        scaling_factor,
-        dropout_probability,
-        is_training,
-        max_segments_per_seq,
-        window_size,
-        context_parallel_causal_load_balanced,
-        context_parallel_axis,
+        context_checkpoint_name=context_checkpoint_name,
+        stripe_size=stripe_size,
     )
     return output
-
-
-def _fused_attn_fwd_rule(
-    qkv,
-    bias,
-    q_seq_lens,
-    kv_seq_lens,
-    q_seq_offsets,
-    kv_seq_offsets,
-    seed,
-    attn_bias_type,
-    attn_mask_type,
-    qkv_layout,
-    scaling_factor,
-    dropout_probability,
-    is_training,
-    max_segments_per_seq,
-    window_size,
-    context_parallel_causal_load_balanced,
-    context_parallel_axis,
-):
-    output, softmax_aux, rng_state = tex.fused_attn_fwd(
-        qkv,
-        bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
-        seed,
-        attn_bias_type=attn_bias_type.value,
-        attn_mask_type=attn_mask_type.value,
-        qkv_layout=qkv_layout.value,
-        scaling_factor=scaling_factor,
-        dropout_probability=dropout_probability,
-        is_training=is_training,
-        max_segments_per_seq=max_segments_per_seq,
-        window_size=window_size,
-        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
-        context_parallel_axis=context_parallel_axis,
-    )
-    output = checkpoint_name(output, "context")
-    softmax_aux = checkpoint_name(softmax_aux, "context")
-    rng_state = checkpoint_name(rng_state, "context")
-    return output, (
-        qkv,
-        bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
-        softmax_aux,
-        rng_state,
-        output,
-    )
-
-
-def _fused_attn_bwd_rule(
-    attn_bias_type,
-    attn_mask_type,
-    qkv_layout,
-    scaling_factor,
-    dropout_probability,
-    is_training,
-    max_segments_per_seq,
-    window_size,
-    context_parallel_causal_load_balanced,
-    context_parallel_axis,
-    ctx,
-    dz,
-):
-    (
-        qkv,
-        bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
-        softmax_aux,
-        rng_state,
-        output,
-    ) = ctx
-    grad_qkv, grad_bias = tex.fused_attn_bwd(
-        qkv,
-        bias,
-        softmax_aux,
-        rng_state,
-        output,
-        dz,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
-        attn_bias_type=attn_bias_type.value,
-        attn_mask_type=attn_mask_type.value,
-        qkv_layout=qkv_layout.value,
-        scaling_factor=scaling_factor,
-        dropout_probability=dropout_probability,
-        is_training=is_training,
-        max_segments_per_seq=max_segments_per_seq,
-        window_size=window_size,
-        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
-        context_parallel_axis=context_parallel_axis,
-    )
-    if attn_bias_type == AttnBiasType.NO_BIAS:
-        grad_bias = None
-    return grad_qkv, grad_bias, None, None, None, None, None
-
-
-_fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)

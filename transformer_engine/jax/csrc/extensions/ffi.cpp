@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -7,19 +7,27 @@
 
 #include <iostream>
 
-#include "common/util/logging.h"
-
 namespace transformer_engine {
 namespace jax {
 
 // For XLA_FFI_DataType Enum Reference: https://github.com/openxla/xla/blob/d054e8366c4e8807726961feeb28b1cdba681888/xla/ffi/api/c_api.h#L163-L186
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type) {
   switch (type) {
-    case xla::ffi::DataType::F16:
-      return DType::kFloat16;
+    // Using this for E8M0
+    case xla::ffi::DataType::U8:
+      return DType::kFloat8E8M0;
+      break;
+    case xla::ffi::DataType::S32:
+      return DType::kInt32;
+      break;
+    case xla::ffi::DataType::S64:
+      return DType::kInt64;
       break;
     case xla::ffi::DataType::F32:
       return DType::kFloat32;
+      break;
+    case xla::ffi::DataType::F16:
+      return DType::kFloat16;
       break;
     case xla::ffi::DataType::BF16:
       return DType::kBFloat16;
@@ -29,6 +37,12 @@ DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type) {
       break;
     case xla::ffi::DataType::F8E4M3FN:
       return DType::kFloat8E4M3;
+      break;
+    case xla::ffi::DataType::F8E8M0FNU:
+      return DType::kFloat8E8M0;
+      break;
+    case xla::ffi::DataType::F4E2M1FN:
+      return DType::kFloat4E2M1;
       break;
     default:
       auto type_num = static_cast<XLA_FFI_DataType>(type);

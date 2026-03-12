@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for softmax"""
@@ -9,16 +9,13 @@ import warnings
 
 import jax
 import jax.numpy as jnp
-from jax import core, dtypes
-from jax.interpreters.mlir import ir
+from jax import dtypes, ffi
 from jax.sharding import PartitionSpec, NamedSharding
-
-from transformer_engine import transformer_engine_jax
+from .attention import AttnSoftmaxType
 
 from .base import BasePrimitive, register_primitive
-from .custom_call import custom_caller, CustomCallArgsWrapper
-from .misc import get_padded_spec, check_valid_batch_dims, jax_dtype_to_te_dtype
-from ..softmax import SoftmaxType
+from .misc import get_padded_spec, check_valid_batch_dims
+from ..softmax import SoftmaxFusionType
 
 
 __all__ = [
@@ -29,35 +26,15 @@ __all__ = [
     "scaled_upper_triang_masked_softmax_fwd",
     "scaled_upper_triang_masked_softmax_bwd",
     "is_softmax_kernel_available",
+    "jax_scaled_softmax",
+    "jax_scaled_masked_softmax",
+    "jax_scaled_upper_triang_masked_softmax",
 ]
 
 
-def _jax_scaled_softmax(logits: jnp.ndarray, scale_factor: float):
-    return jax.nn.softmax(scale_factor * logits)
-
-
-def _jax_scaled_masked_softmax(logits: jnp.ndarray, mask: jnp.ndarray, scale_factor: float):
-    if mask is not None:
-        logits += jax.lax.select(
-            mask > 0,
-            jnp.full(mask.shape, -1e10).astype(logits.dtype),
-            jnp.full(mask.shape, 0.0).astype(logits.dtype),
-        )
-    return jax.nn.softmax(logits * scale_factor)
-
-
-def _jax_scaled_upper_triang_masked_softmax(logits: jnp.ndarray, scale_factor: float):
-    mask = 1 - jnp.tril(jnp.ones_like(logits))
-    logits += jax.lax.select(
-        mask > 0,
-        jnp.full(mask.shape, -1e10).astype(logits.dtype),
-        jnp.full(mask.shape, 0.0).astype(logits.dtype),
-    )
-    return jax.nn.softmax(logits * scale_factor)
-
-
 def is_softmax_kernel_available(
-    softmax_type: SoftmaxType,
+    softmax_fusion_type: SoftmaxFusionType,
+    softmax_type: AttnSoftmaxType,
     batch: int,
     heads: int,
     q_seqlen: int,
@@ -65,15 +42,18 @@ def is_softmax_kernel_available(
     dtype: jnp.dtype,
 ):
     """check softmax available"""
-    if softmax_type is SoftmaxType.SCALED:
+    if softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
+        return False
+
+    if softmax_fusion_type is SoftmaxFusionType.SCALED:
         return ScaledSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
-    if softmax_type is SoftmaxType.SCALED_MASKED:
+    if softmax_fusion_type is SoftmaxFusionType.SCALED_MASKED:
         return ScaledMaskedSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
-    if softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
+    if softmax_fusion_type is SoftmaxFusionType.SCALED_UPPER_TRIANG_MASKED:
         return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.is_kernel_available(
             batch, heads, q_seqlen, k_seqlen, dtype
         )
@@ -125,7 +105,7 @@ class SoftmaxPrimitive(BasePrimitive):
         assert k_seqlen <= SoftmaxPrimitive.max_k_seqlen_supported
         assert q_seqlen > 1
 
-        out_aval = core.raise_to_shaped(logits_aval)
+        out_aval = logits_aval
         return out_aval
 
     @staticmethod
@@ -133,34 +113,7 @@ class SoftmaxPrimitive(BasePrimitive):
         """
         softmax_forward lowering rules
         """
-        (i_aval,) = ctx.avals_in
-        i_type = ir.RankedTensorType(logits.type)
-        i_shape = i_type.shape
-        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
-        batch = reduce(operator.mul, i_shape[:-3])
-        pad_batch = batch
-        heads = i_shape[-3]
-        q_seqlen = i_shape[-2]
-        k_seqlen = i_shape[-1]
-
-        out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
-        operands = [logits]
-        operand_shapes = [i_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_softmax_descriptor(
-            batch,
-            pad_batch,
-            heads,
-            q_seqlen,
-            k_seqlen,
-            jax_dtype_to_te_dtype(i_aval.dtype),
-            scale_factor,
-        )
-
-        out = custom_caller(name, args, opaque, False)
-
-        return out
+        return ffi.ffi_lowering(name)(ctx, logits, scale_factor=scale_factor)
 
     @staticmethod
     def forward_impl(primitive, logits, scale_factor):
@@ -232,7 +185,7 @@ class SoftmaxPrimitive(BasePrimitive):
 
         assert dz_aval.shape == softmax_out_aval.shape
 
-        dx_aval = core.raise_to_shaped(dz_aval)
+        dx_aval = dz_aval
         return dx_aval
 
     @staticmethod
@@ -240,39 +193,7 @@ class SoftmaxPrimitive(BasePrimitive):
         """
         softmax_backward lowering rules
         """
-        dz_aval, _ = ctx.avals_in
-
-        dz_type = ir.RankedTensorType(dz.type)
-        dz_shape = dz_type.shape
-
-        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
-        batch = reduce(operator.mul, dz_shape[:-3])
-        pad_batch = batch  # unused
-        heads = dz_shape[-3]
-        q_seqlen = dz_shape[-2]
-        k_seqlen = dz_shape[-1]
-
-        softmax_out_type = ir.RankedTensorType(softmax_out.type)
-        softmax_out_shape = softmax_out_type.shape
-
-        out_types = [ir.RankedTensorType.get(dz_shape, dz_type.element_type)]
-        operands = [dz, softmax_out]
-        operand_shapes = [dz_shape, softmax_out_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_softmax_descriptor(
-            batch,
-            pad_batch,
-            heads,
-            q_seqlen,
-            k_seqlen,
-            jax_dtype_to_te_dtype(dz_aval.dtype),
-            scale_factor,
-        )
-
-        out = custom_caller(name, args, opaque, False)
-
-        return out
+        return ffi.ffi_lowering(name)(ctx, dz, softmax_out, scale_factor=scale_factor)
 
     @staticmethod
     def backward_impl(primitive, dz, softmax_out, scale_factor):
@@ -342,7 +263,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
     Scaled Softmax Fwd Primitive
     """
 
-    name = "te_scaled_softmax_forward"
+    name = "te_scaled_softmax_forward_ffi"
     multiple_results = False
     impl_static_args = (1,)  # scale_factor
     inner_primitive = None
@@ -411,18 +332,13 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
             ScaledSoftmaxFwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return "... -> ..."
+
 
 register_primitive(ScaledSoftmaxFwdPrimitive)
-
-
-def scaled_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
-    """
-    scaled_softmax_forward wrapper
-    Return FP16/BF16 tensor
-    """
-    if not ScaledSoftmaxFwdPrimitive.enabled():
-        return _jax_scaled_softmax(logits, scale_factor)
-    return ScaledSoftmaxFwdPrimitive.outer_primitive.bind(logits, scale_factor=scale_factor)
 
 
 class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
@@ -430,7 +346,7 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
     Scaled Softmax Bwd Primitive
     """
 
-    name = "te_scaled_softmax_backward"
+    name = "te_scaled_softmax_backward_ffi"
     multiple_results = False
     impl_static_args = (2,)  # scale_factor
     inner_primitive = None
@@ -491,6 +407,11 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
             ScaledSoftmaxBwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return "..., ... -> ..."
+
 
 register_primitive(ScaledSoftmaxBwdPrimitive)
 
@@ -503,7 +424,7 @@ def scaled_softmax_bwd(
     Return FP16/BF16 tensor
     """
     if not ScaledSoftmaxBwdPrimitive.enabled():
-        _, vjp_func = jax.vjp(partial(_jax_scaled_softmax, scale_factor=scale_factor), logits)
+        _, vjp_func = jax.vjp(partial(jax_scaled_softmax, scale_factor=scale_factor), logits)
         return vjp_func(dz)[0]
 
     return ScaledSoftmaxBwdPrimitive.outer_primitive.bind(
@@ -516,7 +437,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
     Scaled Masked Softmax Fwd Primitive
     """
 
-    name = "te_scaled_masked_softmax_forward"
+    name = "te_scaled_masked_softmax_forward_ffi"
     multiple_results = False
     impl_static_args = (2,)  # scale_factor
     inner_primitive = None
@@ -569,7 +490,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         assert mask_shape[-2] == q_seqlen
         assert mask_shape[-1] == k_seqlen
 
-        out_aval = core.raise_to_shaped(logits_aval)
+        out_aval = logits_aval
         return out_aval
 
     @staticmethod
@@ -577,38 +498,9 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """
         te_scaled_masked_softmax_forward lowering rules
         """
-
-        logits_aval, _ = ctx.avals_in
-        i_type = ir.RankedTensorType(logits.type)
-        i_shape = i_type.shape
-        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
-        batch = reduce(operator.mul, i_shape[:-3])
-        heads = i_shape[-3]
-        q_seqlen = i_shape[-2]
-        k_seqlen = i_shape[-1]
-
-        mask_type = ir.RankedTensorType(mask.type)
-        mask_shape = mask_type.shape
-        pad_batch = reduce(operator.mul, mask_shape[:-3])
-
-        out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
-        operands = [logits, mask]
-        operand_shapes = [i_shape, mask_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-        opaque = transformer_engine_jax.pack_softmax_descriptor(
-            batch,
-            pad_batch,
-            heads,
-            q_seqlen,
-            k_seqlen,
-            jax_dtype_to_te_dtype(logits_aval.dtype),
-            scale_factor,
+        return ffi.ffi_lowering(ScaledMaskedSoftmaxFwdPrimitive.name)(
+            ctx, logits, mask, scale_factor=scale_factor
         )
-
-        out = custom_caller(ScaledMaskedSoftmaxFwdPrimitive.name, args, opaque, False)
-
-        return out
 
     @staticmethod
     def impl(logits, mask, scale_factor):
@@ -645,22 +537,13 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
             ScaledMaskedSoftmaxFwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return "...1, ...2 -> ...1"
+
 
 register_primitive(ScaledMaskedSoftmaxFwdPrimitive)
-
-
-def scaled_masked_softmax_fwd(
-    logits: jnp.ndarray, mask: jnp.ndarray, scale_factor: float
-) -> jnp.ndarray:
-    """
-    scaled_masked_softmax_forward wrapper
-    Return FP16/BF16 tensor
-    """
-    if not ScaledMaskedSoftmaxFwdPrimitive.enabled():
-        return _jax_scaled_masked_softmax(logits, mask, scale_factor)
-    return ScaledMaskedSoftmaxFwdPrimitive.outer_primitive.bind(
-        logits, mask, scale_factor=scale_factor
-    )
 
 
 class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
@@ -668,7 +551,7 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
     Scaled Masked Softmax Bwd Primitive
     """
 
-    name = "te_scaled_masked_softmax_backward"
+    name = "te_scaled_masked_softmax_backward_ffi"
     multiple_results = False
     impl_static_args = (2,)  # scale_factor
     inner_primitive = None
@@ -695,11 +578,9 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
         """
         te_scaled_upper_triang_masked_backward lowering rules
         """
-        out = SoftmaxPrimitive.backward_lowering(
+        return SoftmaxPrimitive.backward_lowering(
             ScaledMaskedSoftmaxBwdPrimitive.name, ctx, dz, softmax_out, scale_factor=scale_factor
         )
-
-        return out
 
     @staticmethod
     def impl(dz, softmax_out, scale_factor):
@@ -732,29 +613,13 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
             ScaledMaskedSoftmaxBwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return "..., ... -> ..."
+
 
 register_primitive(ScaledMaskedSoftmaxBwdPrimitive)
-
-
-def scaled_masked_softmax_bwd(
-    dz: jnp.ndarray,
-    softmax_out: jnp.ndarray,
-    logits: jnp.ndarray,
-    mask: jnp.ndarray,
-    scale_factor: float,
-) -> jnp.ndarray:
-    """
-    scaled_masked_backward wrapper
-    Return FP16/BF16 tensor
-    """
-    if not ScaledMaskedSoftmaxBwdPrimitive.enabled():
-        _, vjp_func = jax.vjp(
-            partial(_jax_scaled_masked_softmax, scale_factor=scale_factor), logits, mask
-        )
-        return vjp_func(dz)[0]
-    return ScaledMaskedSoftmaxBwdPrimitive.outer_primitive.bind(
-        dz, softmax_out, scale_factor=scale_factor
-    )
 
 
 class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
@@ -762,7 +627,7 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
     Scaled Upper Triang Masked Softmax Fwd Primitive
     """
 
-    name = "te_scaled_upper_triang_masked_softmax_forward"
+    name = "te_scaled_upper_triang_masked_softmax_forward_ffi"
     multiple_results = False
     impl_static_args = (1,)  # scale_factor
     inner_primitive = None
@@ -839,20 +704,13 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
             result_infos,
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return "... -> ..."
+
 
 register_primitive(ScaledUpperTriangMaskedSoftmaxFwdPrimitive)
-
-
-def scaled_upper_triang_masked_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
-    """
-    scaled_upper_triang_masked_softmax_forward wrapper
-    Return FP16/BF16 tensor
-    """
-    if not ScaledUpperTriangMaskedSoftmaxFwdPrimitive.enabled():
-        return _jax_scaled_upper_triang_masked_softmax(logits, scale_factor)
-    return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.outer_primitive.bind(
-        logits, scale_factor=scale_factor
-    )
 
 
 class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
@@ -860,7 +718,7 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
     Scaled Upper Triang Masked Softmax Bwd Primitive
     """
 
-    name = "te_scaled_upper_triang_masked_softmax_backward"
+    name = "te_scaled_upper_triang_masked_softmax_backward_ffi"
     multiple_results = False
     impl_static_args = (2,)  # scale_factor
     inner_primitive = None
@@ -887,15 +745,13 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
         """
         te_scaled_upper_triang_masked_backward lowering rules
         """
-        out = SoftmaxPrimitive.backward_lowering(
+        return SoftmaxPrimitive.backward_lowering(
             ScaledUpperTriangMaskedSoftmaxBwdPrimitive.name,
             ctx,
             dz,
             softmax_out,
             scale_factor=scale_factor,
         )
-
-        return out
 
     @staticmethod
     def impl(dz, softmax_out, scale_factor):
@@ -932,8 +788,143 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
             result_infos,
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return "..., ... -> ..."
+
 
 register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
+
+
+def jax_scaled_softmax(
+    logits: jnp.ndarray, scale_factor: float, softmax_offset: jnp.ndarray | float | None = None
+):
+    """
+    JAX based implementation of scaled softmax
+    """
+    if softmax_offset is not None:
+        return jax_general_softmax(scale_factor * logits, offset=softmax_offset)
+    return jax.nn.softmax(scale_factor * logits)
+
+
+def jax_scaled_masked_softmax(
+    logits: jnp.ndarray,
+    mask: jnp.ndarray,
+    scale_factor: float,
+    softmax_offset: jnp.ndarray | float | None = None,
+):
+    """
+    JAX based implementation of scaled and masked softmax
+    """
+    if softmax_offset is not None:
+        return jax_general_softmax(logits * scale_factor, offset=softmax_offset, where=mask != 1)
+    return jax.nn.softmax(logits * scale_factor, where=mask != 1)
+
+
+def jax_scaled_upper_triang_masked_softmax(
+    logits: jnp.ndarray, scale_factor: float, softmax_offset: jnp.ndarray | float | None = None
+):
+    """
+    JAX based implementation of scaled and upper triangle masked softmax
+    """
+    mask = 1 - jnp.tril(jnp.ones_like(logits))
+    return jax_scaled_masked_softmax(logits, mask, scale_factor, softmax_offset)
+
+
+def jax_general_softmax(
+    x: jnp.ndarray,
+    axis: int = -1,
+    where: jnp.ndarray | None = None,
+    initial: jnp.ndarray = -jnp.inf,
+    offset: jnp.ndarray | float | None = None,
+) -> jnp.ndarray:
+    """
+    JAX based implementation of general softmax with optional masking and offset.
+    """
+    # Compute max of x
+    x_max = jnp.max(x, axis, where=where, initial=initial, keepdims=True)
+
+    if offset is not None:
+        # Cast offset to x.dtype to prevent type promotion
+        if isinstance(offset, (int, float)):
+            offset = jnp.array(offset, dtype=x.dtype)
+        else:
+            offset = offset.astype(x.dtype)
+
+        # Include offset in max: x_max = max(x_max, offset)
+        # This is equivalent to computing max over [x..., offset]
+        x_max = jnp.maximum(x_max, offset)
+
+    x_safe = x if where is None else jnp.where(where, x, initial)
+    unnormalized = jnp.exp(x_safe - x_max)
+    denominator = jnp.sum(unnormalized, axis, where=where, keepdims=True)
+
+    if offset is not None:
+        # Add exp(offset - x_max) to denominator
+        denominator = denominator + jnp.exp(offset - x_max)
+
+    result = unnormalized / denominator
+    if where is not None:
+        result = jnp.where(where, result, 0)
+    return result
+
+
+def scaled_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
+    """
+    scaled_softmax_forward wrapper
+    Return FP16/BF16 tensor
+    """
+    if not ScaledSoftmaxFwdPrimitive.enabled():
+        return jax_scaled_softmax(logits, scale_factor)
+    return ScaledSoftmaxFwdPrimitive.outer_primitive.bind(logits, scale_factor=scale_factor)
+
+
+def scaled_masked_softmax_fwd(
+    logits: jnp.ndarray, mask: jnp.ndarray, scale_factor: float
+) -> jnp.ndarray:
+    """
+    scaled_masked_softmax_forward wrapper
+    Return FP16/BF16 tensor
+    """
+    if not ScaledMaskedSoftmaxFwdPrimitive.enabled():
+        return jax_scaled_masked_softmax(logits, mask, scale_factor)
+    return ScaledMaskedSoftmaxFwdPrimitive.outer_primitive.bind(
+        logits, mask, scale_factor=scale_factor
+    )
+
+
+def scaled_masked_softmax_bwd(
+    dz: jnp.ndarray,
+    softmax_out: jnp.ndarray,
+    logits: jnp.ndarray,
+    mask: jnp.ndarray,
+    scale_factor: float,
+) -> jnp.ndarray:
+    """
+    scaled_masked_backward wrapper
+    Return FP16/BF16 tensor
+    """
+    if not ScaledMaskedSoftmaxBwdPrimitive.enabled():
+        _, vjp_func = jax.vjp(
+            partial(jax_scaled_masked_softmax, scale_factor=scale_factor), logits, mask
+        )
+        return vjp_func(dz)[0]
+    return ScaledMaskedSoftmaxBwdPrimitive.outer_primitive.bind(
+        dz, softmax_out, scale_factor=scale_factor
+    )
+
+
+def scaled_upper_triang_masked_softmax_fwd(logits: jnp.ndarray, scale_factor: float) -> jnp.ndarray:
+    """
+    scaled_upper_triang_masked_softmax_forward wrapper
+    Return FP16/BF16 tensor
+    """
+    if not ScaledUpperTriangMaskedSoftmaxFwdPrimitive.enabled():
+        return jax_scaled_upper_triang_masked_softmax(logits, scale_factor)
+    return ScaledUpperTriangMaskedSoftmaxFwdPrimitive.outer_primitive.bind(
+        logits, scale_factor=scale_factor
+    )
 
 
 def scaled_upper_triang_masked_softmax_bwd(
@@ -945,7 +936,7 @@ def scaled_upper_triang_masked_softmax_bwd(
     """
     if not ScaledUpperTriangMaskedSoftmaxBwdPrimitive.enabled():
         _, vjp_func = jax.vjp(
-            partial(_jax_scaled_upper_triang_masked_softmax, scale_factor=scale_factor), logits
+            partial(jax_scaled_upper_triang_masked_softmax, scale_factor=scale_factor), logits
         )
         return vjp_func(dz)[0]
     return ScaledUpperTriangMaskedSoftmaxBwdPrimitive.outer_primitive.bind(

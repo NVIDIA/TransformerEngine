@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -353,6 +353,7 @@ void call_kernel_scaled_aligned_causal_masked_softmax_forward(
   scaled_aligned_causal_masked_softmax_warp_forward<input_t, output_t, acc_t, log2_elements>
       <<<grid_size, block_size, shmem_size, stream>>>(dst, src, scale, microbatches, query_seq_len,
                                                       key_seq_len);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 template <typename input_t, typename output_t, typename acc_t, int log2_elements>
@@ -363,6 +364,7 @@ void call_kernel_scaled_aligned_causal_masked_softmax_backward(
   scaled_aligned_causal_masked_softmax_warp_backward<input_t, output_t, acc_t, log2_elements>
       <<<grid_size, block_size, 0, stream>>>(gradInput, grad, output, scale, microbatches,
                                              query_seq_len, key_seq_len);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 template <typename input_t, typename output_t, typename acc_t>
@@ -551,8 +553,8 @@ void nvte_scaled_aligned_causal_masked_softmax_forward(const NVTETensor input,
                                                        float scale_factor, cudaStream_t stream) {
   NVTE_API_CALL(nvte_scaled_aligned_causal_masked_softmax_forward);
   using namespace transformer_engine;
-  scaled_aligned_causal_masked_softmax_forward(*reinterpret_cast<const Tensor *>(input),
-                                               reinterpret_cast<Tensor *>(softmax_results),
+  scaled_aligned_causal_masked_softmax_forward(*convertNVTETensorCheck(input),
+                                               convertNVTETensorCheck(softmax_results),
                                                scale_factor, stream);
 }
 
@@ -563,6 +565,6 @@ void nvte_scaled_aligned_causal_masked_softmax_backward(const NVTETensor incomin
   NVTE_API_CALL(nvte_scaled_aligned_causal_masked_softmax_backward);
   using namespace transformer_engine;
   scaled_aligned_causal_masked_softmax_backward(
-      *reinterpret_cast<Tensor *>(output_grads), *reinterpret_cast<const Tensor *>(incoming_grads),
-      *reinterpret_cast<const Tensor *>(softmax_results), scale_factor, stream);
+      *convertNVTETensorCheck(output_grads), *convertNVTETensorCheck(incoming_grads),
+      *convertNVTETensorCheck(softmax_results), scale_factor, stream);
 }

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,11 +8,9 @@ import gc
 from contextlib import contextmanager
 
 import torch
-from torch import nn
 
 import transformer_engine as te
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
-from transformer_engine.pytorch.fp8 import fp8_model_init
 
 import transformers
 from transformers.models.llama.modeling_llama import (
@@ -21,7 +19,7 @@ from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm,
     LlamaConfig,
 )
-from transformers.modeling_utils import _add_variant, load_state_dict, _load_state_dict_into_model
+from transformers.modeling_utils import _add_variant, load_state_dict
 from transformers.utils import WEIGHTS_INDEX_NAME
 from transformers.utils.hub import get_checkpoint_shard_files
 
@@ -74,10 +72,15 @@ class TELlamaDecoderLayer(te.pytorch.TransformerLayer):
         forward pass of the `TransformerLayer`. Also, make sure the output
         format matches the output of the HF's `LlamaDecoderLayer`.
         """
-        return (
-            super().forward(
-                hidden_states, attention_mask=attention_mask, rotary_pos_emb=self.te_rope_emb
-            ),
+        # Handle case where hidden_states might be a tuple (from previous layer output)
+        # This can happen with older versions of HuggingFace transformers
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
+
+        # Return tensor directly for HuggingFace transformers >= 4.57
+        # (older versions wrapped output in tuple and extracted with layer_outputs[0])
+        return super().forward(
+            hidden_states, attention_mask=attention_mask, rotary_pos_emb=self.te_rope_emb
         )
 
 
@@ -150,8 +153,8 @@ class TELlamaForCausalLM:
             state_dict = load_state_dict(shard_file)
             # replace_params copies parameters relevant only to TransformerEngine
             replace_params(state_dict, vanilla_model.state_dict(), config)
-            # _load_state_dict_into_model copies parameters other than those in TransformerEngine
-            _load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
+            # load_state_dict copies parameters other than those in TransformerEngine
+            vanilla_model.load_state_dict(state_dict, strict=False)
 
             # Force mem release. Taken from huggingface code
             del state_dict
@@ -164,7 +167,7 @@ def replace_params(hf_state_dict, te_state_dict, config):
     # collect all layer prefixes to update
     all_layer_prefixes = set()
     for param_key in hf_state_dict.keys():
-        layer_prefix_pat = "model.layers.\d+."
+        layer_prefix_pat = r"model.layers.\d+."
         m = re.match(layer_prefix_pat, param_key)
         if m is not None:
             all_layer_prefixes.add(m.group())

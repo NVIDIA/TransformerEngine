@@ -1,0 +1,59 @@
+stat_collection_test_1:
+  enabled: True
+  layers:
+    layer_numbers: [1, 3]
+  LogTensorStats:
+    enabled: True
+    stats: [mean, std, l1_norm, l2_norm]
+    tensors: [activation]
+    freq: 1
+    start_step: 100
+    end_step: 500
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      stats: [cur_amax, dynamic_range]
+      tensors: [activation]
+      freq: 2
+      start_step: 100
+      end_step: 500
+    LogFp8TensorStats:
+      enabled: True
+      stats: [underflows%]
+      tensors: [gradient]
+      freq: 5
+      start_step: 100
+      end_step: 500
+  
+stat_collection_test_2:
+  enabled: True
+  layers:
+    layer_numbers: [6, 7]
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      tensors_struct:
+        - tensor: activation
+          stats: [cur_amax, dynamic_range, mean, std, l1_norm]
+          freq: 2
+          start_step: 100
+          end_step: 500
+        - tensor: weight
+          stats: [mean, std, l1_norm, min, max]
+          freq: 5
+          start_step: 100
+          end_step: 500
+  
+stat_collection_test_4:
+  enabled: True
+  layers:
+    layer_numbers: [5]
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      tensors: [activation]
+      stats: [cur_amax, dynamic_range, mean, std, l1_norm]
+    LogFp8TensorStats:
+      enabled: True
+      stats: [underflows%]
+      tensors: [activation]

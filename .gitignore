@@ -1,3 +1,4 @@
+.venv
 *.o
 *.swp
 *.ii
@@ -8,7 +9,6 @@
 *.nsys-rep
 *.ncu-rep
 *.sqlite
-*.onnx
 *.eggs
 build/
 *.so
@@ -22,9 +22,7 @@ __pycache__
 .hypothesis
 .devcontainer.json
 tests/cpp/build/
-docs/_build
 .ipynb_checkpoints
-docs/doxygen
 *.log
 CMakeFiles/CMakeSystem.cmake
 sdist/
@@ -40,3 +38,7 @@ dist/
 downloads/
 .pytest_cache/
 compile_commands.json
+.nfs
+tensor_dumps/
+artifacts/
+.DS_Store
