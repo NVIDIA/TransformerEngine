@@ -378,7 +378,8 @@ struct GroupedTensor {
         last_dims(nullptr, std::vector<size_t>{0}, DType::kInt64),
         tensor_offsets(nullptr, std::vector<size_t>{0}, DType::kInt64),
         logical_shape(nvte_make_shape(nullptr, 1)),
-        nvte_tensor(0) {}
+        nvte_tensor(0),
+        with_gemm_swizzled_scales(false) {}
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
 

@@ -44,10 +44,13 @@ struct GroupedMatmulConfig {
   // Number of streaming multiprocessors to use in GEMM kernel
   int sm_count = 0;
 
+  // Split accumulator mode. Only taken into account on Hopper.
+  bool use_split_accumulator = false;
+
   // Note: API transfers the value type, not std::optional
-  static constexpr size_t attr_sizes[] = {sizeof(decltype(avg_m)::value_type),
-                                          sizeof(decltype(avg_n)::value_type),
-                                          sizeof(decltype(avg_k)::value_type), sizeof(sm_count)};
+  static constexpr size_t attr_sizes[] = {
+      sizeof(decltype(avg_m)::value_type), sizeof(decltype(avg_n)::value_type),
+      sizeof(decltype(avg_k)::value_type), sizeof(sm_count), sizeof(uint8_t)};
 };
 
 }  // namespace transformer_engine
