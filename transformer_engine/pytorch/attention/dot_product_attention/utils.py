@@ -694,13 +694,22 @@ def get_attention_backend(
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
-        if device_compute_capability == (12, 0) and cudnn_version < (9, 18, 1):
-            if use_fused_attention:
-                logger.debug(
-                    "Disabling FusedAttention as qkv_format = thd is"
-                    " not supported for compute capability = sm120 and cuDNN version < 9.18.1"
-                )
-            use_fused_attention = False
+        if device_compute_capability == (12, 0):
+            if cudnn_version < (9, 18, 1):
+                if use_fused_attention:
+                    logger.debug(
+                        "Disabling FusedAttention as qkv_format = thd is"
+                        " not supported for compute capability = sm120 and cuDNN version < 9.18.1"
+                    )
+                use_fused_attention = False
+            elif qkv_layout in {"t3hd", "th3d"}:
+                if use_fused_attention:
+                    logger.debug(
+                        "Disabling FusedAttention as qkv_layout = %s is not supported for"
+                        " compute capability = sm120",
+                        qkv_layout,
+                    )
+                use_fused_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention_3:
