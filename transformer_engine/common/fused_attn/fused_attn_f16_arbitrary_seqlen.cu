@@ -55,24 +55,32 @@ namespace py = pybind11;
 
 namespace {
 
-auto make_attention_score_modifier(void *callback)
+auto make_attention_score_modifier(void *callback_ptr)
     -> std::function<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>(
         std::shared_ptr<cudnn_frontend::graph::Graph>,
         std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>)> {
-  if (callback == nullptr) {
+  if (callback_ptr == nullptr) {
     return nullptr;
   }
 
-  auto *py_callback = reinterpret_cast<PyObject *>(callback);
-  return [py_callback](std::shared_ptr<cudnn_frontend::graph::Graph> graph,
-                       std::shared_ptr<cudnn_frontend::graph::Tensor_attributes> score_tensor) {
+  py::object callback;
+  {
     py::gil_scoped_acquire gil;
-    py::module_::import("cudnn");
-    cudnn_frontend::python_bindings::PyGraph py_graph(graph);
-    py::object result = py::reinterpret_borrow<py::object>(py_callback)(
-        py::cast(&py_graph, py::return_value_policy::reference), py::cast(score_tensor));
-    return result.cast<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>>();
-  };
+    callback = py::reinterpret_borrow<py::object>(reinterpret_cast<PyObject *>(callback_ptr));
+  }
+
+  return [callback = std::move(callback)](
+             std::shared_ptr<cudnn_frontend::graph::Graph> graph,
+             std::shared_ptr<cudnn_frontend::graph::Tensor_attributes> score_tensor) {
+           py::gil_scoped_acquire gil;
+           py::module_::import("cudnn");
+
+           auto py_graph =
+               std::make_shared<cudnn_frontend::python_bindings::PyGraph>(std::move(graph));
+
+           py::object result = callback(py::cast(py_graph), py::cast(std::move(score_tensor)));
+           return result.cast<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>>();
+         };
 }
 
 }  // namespace
@@ -168,9 +176,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
+        reinterpret_cast<std::uintptr_t>(score_mod),
+        0,
         return_max_logit,
-        (score_mod != nullptr),
-        false,
     };
 
     namespace fe = cudnn_frontend;
@@ -678,9 +686,9 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
         cudnn_frontend::DataType_t::NOT_SET,
+        reinterpret_cast<std::uintptr_t>(score_mod),
+        reinterpret_cast<std::uintptr_t>(score_mod_bprop),
         false,
-        (score_mod != nullptr),
-        (score_mod_bprop != nullptr),
     };
 
     namespace fe = cudnn_frontend;
