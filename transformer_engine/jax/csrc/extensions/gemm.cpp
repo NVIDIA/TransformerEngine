@@ -627,13 +627,15 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
                                               Buffer_Type const &last_dims,
                                               int64_t *int64_workspace_base,
                                               size_t int64_workspace_capacity, size_t &int64_offset,
-                                              size_t num_gemms, cudaStream_t stream) {
+                                              size_t num_gemms, cudaStream_t stream,
+                                              int64_t axis_boundary = -1) {
   auto dims = data.dimensions();
   NVTE_CHECK(dims.size() >= 2, "grouped GEMM data buffer must be at least 2D.");
-  // Flatten all leading dimensions into the first axis to produce a 2D NVTE shape.
-  // Input buffers (lhs, rhs) are already 2D from the Python side.  Output buffers may be ND
-  // (e.g. [G, K, N] for wgrad), so we collapse dims[0..N-2] → rows and keep dims[N-1] → cols.
-  NVTEShape dataShape{.data = {product(dims, 0, dims.size() - 1), dims[dims.size() - 1]},
+  // Flatten dims at axis_boundary to produce a 2D NVTE shape.
+  // axis_boundary=-1 (default) collapses dims[0..N-2] → rows and keeps dims[N-1] → cols,
+  // preserving the prior behaviour for output buffers (e.g. [G, K, N] for wgrad).
+  size_t ab = (axis_boundary < 0) ? dims.size() - 1 : static_cast<size_t>(axis_boundary);
+  NVTEShape dataShape{.data = {product(dims, 0, ab), product(dims, ab, dims.size())},
                       .ndim = 2};
   JAXX_GroupedTensorWrapper wrapper(JAXX_Scaling_Mode::NO_SCALING, num_gemms, dataShape);
   wrapper.set_rowwise(data, std::nullopt);
@@ -698,7 +700,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             Buffer_Type alpha, Buffer_Type beta, Result_Type output,
                             Result_Type cublas_workspace, Result_Type setup_workspace,
                             Result_Type int64_workspace, GroupedGemmV2Config config) {
-  auto [lhs_is_trans, rhs_is_trans, scaling_mode] = config;
+  auto [lhs_is_trans, rhs_is_trans, scaling_mode, lhs_axis_boundary, rhs_axis_boundary] = config;
 
   NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
              "Only non-quantized grouped GEMM is supported in current implementation.");
@@ -732,9 +734,11 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   size_t int64_capacity = int64_workspace->element_count() / sizeof(int64_t);
   size_t int64_offset = 0;
   auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims, int64_base,
-                                        int64_capacity, int64_offset, num_gemms, stream);
+                                        int64_capacity, int64_offset, num_gemms, stream,
+                                        rhs_axis_boundary);
   auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims, int64_base,
-                                        int64_capacity, int64_offset, num_gemms, stream);
+                                        int64_capacity, int64_offset, num_gemms, stream,
+                                        lhs_axis_boundary);
   auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base,
                                         int64_capacity, int64_offset, num_gemms, stream);
 
@@ -777,7 +781,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                           Buffer_Type out_first_dims, Buffer_Type out_last_dims,
                           Buffer_Type group_offset, Result_Type output, Result_Type workspace,
                           GroupedGemmConfig config) {
-  auto [lhs_is_trans, rhs_is_trans, scaling_mode, has_bias, use_async_d2h_group_sizes] = config;
+  auto [lhs_is_trans, rhs_is_trans, scaling_mode, has_bias, use_async_d2h_group_sizes,
+        lhs_axis_boundary, rhs_axis_boundary] = config;
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -827,20 +832,26 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   else if (is_rhs_last_ragged)
     active_gs_ptr = &rhs_last_dims;
 
-  // lhs_data and rhs_data are 2D; derive m, n, k from buffer dimensions.
-  NVTE_CHECK(lhs_data.dimensions().size() == 2, "lhs_data must be 2D.");
-  NVTE_CHECK(rhs_data.dimensions().size() == 2, "rhs_data must be 2D.");
-  size_t k = lhs_is_trans ? lhs_data.dimensions()[0] : lhs_data.dimensions()[1];
+  // Derive m, n, k from N-D buffer dimensions using axis_boundary.
+  // axis_boundary splits contracting dims from non-contracting dims.
+  auto lhs_dims = lhs_data.dimensions();
+  auto rhs_dims = rhs_data.dimensions();
+  NVTE_CHECK(lhs_dims.size() >= 2, "lhs_data must be at least 2D.");
+  NVTE_CHECK(rhs_dims.size() >= 2, "rhs_data must be at least 2D.");
+  size_t lab = static_cast<size_t>(lhs_axis_boundary);
+  size_t rab = static_cast<size_t>(rhs_axis_boundary);
+  // k = product of contracting dims of lhs
+  size_t k = lhs_is_trans ? product(lhs_dims, 0, lab) : product(lhs_dims, lab, lhs_dims.size());
   size_t m, n;
   if (is_rhs_ragged) {
-    // wgrad: lhs shape [K_lhs, M]: lhs_is_trans=True, contracting is dim[0]=K_lhs, output is dim[1]=M
-    m = lhs_is_trans ? lhs_data.dimensions()[1] : lhs_data.dimensions()[0];
-    // T-layout rhs: (N, K_total) -> n = dim[0]; N-layout rhs: (K_total, N) -> n = dim[1]
-    n = rhs_is_trans ? rhs_data.dimensions()[0] : rhs_data.dimensions()[1];
+    // wgrad: non-contracting lhs dims form M; non-contracting rhs dims form N
+    m = lhs_is_trans ? product(lhs_dims, lab, lhs_dims.size()) : product(lhs_dims, 0, lab);
+    n = rhs_is_trans ? product(rhs_dims, 0, rab) : product(rhs_dims, rab, rhs_dims.size());
   } else {
-    m = lhs_is_trans ? lhs_data.dimensions()[1]
-                     : lhs_data.dimensions()[0];  // total M (sum of group sizes)
-    n = rhs_is_trans ? rhs_data.dimensions()[0] / num_gemms : rhs_data.dimensions()[1];
+    m = lhs_is_trans ? product(lhs_dims, lab, lhs_dims.size())
+                     : product(lhs_dims, 0, lab);  // total M (sum of group sizes)
+    n = rhs_is_trans ? product(rhs_dims, 0, rab) / num_gemms
+                     : product(rhs_dims, rab, rhs_dims.size());
   }
 
   // Inputs

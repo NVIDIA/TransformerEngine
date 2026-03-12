@@ -275,7 +275,16 @@ def _grouped_dequantize(grouped_scaled_tensor):
     """
     data = grouped_scaled_tensor.data
     scale_inv = grouped_scaled_tensor.scale_inv
-    group_sizes = grouped_scaled_tensor.group_sizes
+    group_sizes = (
+        grouped_scaled_tensor.first_dims
+        if grouped_scaled_tensor.first_dims is not None and grouped_scaled_tensor.first_dims.size > 0
+        else grouped_scaled_tensor.last_dims
+    )
+    # For non-ragged groups (kernel case), group_sizes is not stored; derive from original_shape
+    if group_sizes is None:
+        group_sizes = jnp.ones(
+            grouped_scaled_tensor.original_shape[grouped_scaled_tensor.group_axis], dtype=jnp.int32
+        )
     flatten_axis = grouped_scaled_tensor.flatten_axis
     scaling_mode = grouped_scaled_tensor.scaling_mode
     original_shape = grouped_scaled_tensor.original_shape

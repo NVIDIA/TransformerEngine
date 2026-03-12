@@ -37,6 +37,7 @@ from ..quantize import (
     ScaledTensor1x,
     ScaledTensor2x,
     GroupedScaledTensor1x,
+    GroupedNoScaleTensor,
     ScalingMode,
     Quantizer,
     GroupedQuantizer,
@@ -1331,15 +1332,6 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
 register_primitive(GroupedGemmCopySizesPrimitive)
 
 
-def _grouped_gemm_lhs_M(lhs_shape_2d: Tuple[int, int], lhs_is_trans: bool) -> int:
-    """Non-contracting output size M from the 2-D LHS buffer."""
-    return lhs_shape_2d[1] if lhs_is_trans else lhs_shape_2d[0]
-
-
-def _grouped_gemm_rhs_N(rhs_shape_2d: Tuple[int, int], rhs_is_trans: bool, num_groups: int) -> int:
-    """Non-contracting output size N from the 2-D RHS buffer."""
-    return rhs_shape_2d[0] // num_groups if rhs_is_trans else rhs_shape_2d[1]
-
 
 def _assert_grouped_gemm_dims_shapes(
     lhs_first_dims_aval,
@@ -1381,7 +1373,7 @@ class GroupedGemmPrimitive(BasePrimitive):
     #        out_first_dims, out_last_dims, alpha, beta
     name_graph_safe = "te_grouped_gemm_v2_ffi"
     multiple_results = True
-    impl_static_args = (13, 14, 15, 16, 17, 18, 19)
+    impl_static_args = (13, 14, 15, 16, 17, 18, 19, 20, 21, 22)
     inner_primitive = None
     outer_primitive = None
 
@@ -1406,19 +1398,22 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         use_async_d2h_group_sizes,
         use_v2_ffi,
+        lhs_axis_boundary,
+        rhs_axis_boundary,
+        rhs_group_axis,
     ):
         """
         Grouped GEMM operation.
 
         Args:
-            lhs_data: Left-hand side input matrix data, 2D array [rows, cols]
+            lhs_data: Left-hand side input matrix data, N-D array
             lhs_scale_inv: Left-hand side input scale_inv matrix, 1D flattened array
-            rhs_data: Right-hand side input matrix data, 2D array [rows, cols]
+            rhs_data: Right-hand side input matrix data, N-D array
             rhs_scale_inv: Right-hand side input scale_inv matrix, 1D flattened array
             bias: Bias matrix of shape (G, N)
-            lhs_group_sizes: (G,) int32 if lhs first-dim is ragged, else empty (0,) sentinel
-            rhs_group_sizes: (G,) int32 if rhs first-dim is ragged (wgrad), else empty (0,) sentinel
-            out_group_sizes: (G,) int32 if output first-dim is ragged, else empty (0,) sentinel
+            lhs_first_dims: (G,) int32 if lhs first-dim is ragged, else empty (0,) sentinel
+            rhs_first_dims: (G,) int32 if rhs first-dim is ragged (wgrad), else empty (0,) sentinel
+            out_first_dims: (G,) int32 if output first-dim is ragged, else empty (0,) sentinel
             additional_args: Either
                 * group_offsets: 1D array containing offsets for each group (not yet implemented)
                 OR
@@ -1429,6 +1424,9 @@ class GroupedGemmPrimitive(BasePrimitive):
             scaling_mode: Scaling mode for the GEMM operations
             out_dtype: Data type of the output tensors
             has_bias: Boolean indicating if bias tensors are provided
+            lhs_axis_boundary: Axis split point for lhs N-D → 2D flattening
+            rhs_axis_boundary: Axis split point for rhs N-D → 2D flattening
+            rhs_group_axis: Batch-group axis of rhs to exclude from output non-contracting dims
 
         Returns:
             A jnp.ndarray containing the result of the grouped GEMM operation
@@ -1456,21 +1454,33 @@ class GroupedGemmPrimitive(BasePrimitive):
             num_groups,
         )
 
-        # lhs_data_aval and rhs_data_aval are 2D; derive output shape from buffer dims.
-        # lhs shape: [M, K] (lhs_is_trans=False) or [K, M] (lhs_is_trans=True)
-        # rhs shape: [G*K, N] or [K, N] (rhs_is_trans=False) or [G*N, K] (rhs_is_trans=True)
-        M = _grouped_gemm_lhs_M(lhs_data_aval.shape, lhs_is_trans)
+        # Derive output shape from N-D buffer shapes using axis_boundary.
+        lhs_shape = lhs_data_aval.shape
+        rhs_shape = rhs_data_aval.shape
+
+        # Non-contracting dims for lhs
+        if lhs_is_trans:
+            lhs_non_contracting = lhs_shape[lhs_axis_boundary:]
+        else:
+            lhs_non_contracting = lhs_shape[:lhs_axis_boundary]
+
+        # Non-contracting dims for rhs (excluding batch-group axis where applicable)
+        if rhs_is_trans:
+            rhs_non_contracting = tuple(
+                rhs_shape[d]
+                for d in range(rhs_axis_boundary)
+                if rhs_group_axis is None or d != rhs_group_axis
+            )
+        else:
+            rhs_non_contracting = rhs_shape[rhs_axis_boundary:]
+
         # K validation is intentionally skipped: per-group K values may not fill the
         # entire buffer (padding is allowed), so sum(rhs_*_dims) != buffer K is acceptable.
         if rhs_first_dims_aval.size > 0 or rhs_last_dims_aval.size > 0:
-            # Wgrad case: rhs has ragged contracting K dimension with no G-prefix.
-            # T-layout rhs shape is (N, K_total); N-layout rhs shape is (K_total, N).
-            N = rhs_data_aval.shape[0] if rhs_is_trans else rhs_data_aval.shape[1]
-            out_shape = (num_groups, M, N)
+            # Wgrad case: rhs has ragged contracting K dimension → output gets G prefix.
+            out_shape = (num_groups, *lhs_non_contracting, *rhs_non_contracting)
         else:
-            # When rhs has a leading group axis, _grouped_gemm_rhs_N divides by num_groups.
-            N = _grouped_gemm_rhs_N(rhs_data_aval.shape, rhs_is_trans, num_groups)
-            out_shape = (M, N)
+            out_shape = (*lhs_non_contracting, *rhs_non_contracting)
 
         cublas_workspace_aval = jax.core.ShapedArray(
             shape=(
@@ -1577,8 +1587,11 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         use_async_d2h_group_sizes,
         use_v2_ffi,
+        lhs_axis_boundary,
+        rhs_axis_boundary,
+        rhs_group_axis,
     ):
-        del out_dtype
+        del out_dtype, rhs_group_axis  # Python-only; not forwarded to C++
         if use_v2_ffi:
             ffi_name = GroupedGemmPrimitive.name_graph_safe
             return jax.ffi.ffi_lowering(ffi_name)(
@@ -1587,6 +1600,8 @@ class GroupedGemmPrimitive(BasePrimitive):
                 lhs_is_trans=lhs_is_trans,
                 rhs_is_trans=rhs_is_trans,
                 scaling_mode=scaling_mode.value,
+                lhs_axis_boundary=lhs_axis_boundary,
+                rhs_axis_boundary=rhs_axis_boundary,
             )
         ffi_name = GroupedGemmPrimitive.name
         return jax.ffi.ffi_lowering(ffi_name)(
@@ -1597,6 +1612,8 @@ class GroupedGemmPrimitive(BasePrimitive):
             scaling_mode=scaling_mode.value,
             has_bias=has_bias,
             use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+            lhs_axis_boundary=lhs_axis_boundary,
+            rhs_axis_boundary=rhs_axis_boundary,
         )
 
     @staticmethod
@@ -1621,6 +1638,9 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         use_async_d2h_group_sizes,
         use_v2_ffi,
+        lhs_axis_boundary,
+        rhs_axis_boundary,
+        rhs_group_axis,
     ):
         if GroupedGemmPrimitive.inner_primitive is None:
             raise RuntimeError("GroupedGemmPrimitive.inner_primitive has not been registered")
@@ -1648,6 +1668,9 @@ class GroupedGemmPrimitive(BasePrimitive):
             has_bias=has_bias,
             use_async_d2h_group_sizes=use_async_d2h_group_sizes,
             use_v2_ffi=use_v2_ffi,
+            lhs_axis_boundary=lhs_axis_boundary,
+            rhs_axis_boundary=rhs_axis_boundary,
+            rhs_group_axis=rhs_group_axis,
         )
         return (out,)
 
@@ -1959,27 +1982,9 @@ def _can_use_v2_grouped_gemm(
     return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
 
 
-def _flatten_to_2d(data, flatten_axis):
-    """Reshape *data* to 2D by splitting at *flatten_axis*.
-
-    Positive flatten_axis: split before that axis index.
-    Negative flatten_axis: split before (ndim + flatten_axis).
-    """
-    if data.ndim == 2:
-        return data  # Already 2D, no reshape needed
-    fa = flatten_axis if flatten_axis >= 0 else data.ndim + flatten_axis
-    return data.reshape(math.prod(data.shape[:fa]), math.prod(data.shape[fa:]))
-
-
 def grouped_gemm(
-    lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
-    rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
-    lhs_first_dims: jnp.ndarray = None,  # (G,) int32 if LHS squashed first dim varies, else None/(0,)
-    lhs_last_dims: jnp.ndarray = None,  # (G,) int32 if LHS squashed last dim varies, else None/(0,)
-    rhs_first_dims: jnp.ndarray = None,  # (G,) int32 if RHS squashed first dim varies, else None/(0,)
-    rhs_last_dims: jnp.ndarray = None,  # (G,) int32 if RHS squashed last dim varies, else None/(0,)
-    out_first_dims: jnp.ndarray = None,  # (G,) int32 if output first dim varies, else None/(0,)
-    out_last_dims: jnp.ndarray = None,  # (G,) int32 if output last dim varies, else None/(0,)
+    lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+    rhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (2,)),
     bias: jnp.ndarray = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
@@ -1992,14 +1997,8 @@ def grouped_gemm(
     Grouped GEMM operation.
 
     Args:
-        lhs: Left-hand side input matrix, can be a jnp.ndarray or GroupedScaledTensor1x
-        rhs: Right-hand side input matrix, can be a jnp.ndarray or GroupedScaledTensor1x
-        lhs_first_dims: (G,) int32 if LHS squashed first dim varies per group, else None/(0,)
-        lhs_last_dims: (G,) int32 if LHS squashed last dim varies per group, else None/(0,)
-        rhs_first_dims: (G,) int32 if RHS squashed first dim varies per group (wgrad), else None/(0,)
-        rhs_last_dims: (G,) int32 if RHS squashed last dim varies per group, else None/(0,)
-        out_first_dims: (G,) int32 if output first dim varies per group, else None/(0,)
-        out_last_dims: (G,) int32 if output last dim varies per group, else None/(0,)
+        lhs: Left-hand side input matrix, GroupedNoScaleTensor or GroupedScaledTensor1x
+        rhs: Right-hand side input matrix, GroupedNoScaleTensor or GroupedScaledTensor1x
         contracting_dims: Tuple of two sequences representing the contracting dimensions
         bias: Bias tensor of shape (G, N)
         precision: JAX precision for the GEMM operation
@@ -2009,60 +2008,76 @@ def grouped_gemm(
 
     Returns:
         A jnp.ndarray containing the result of the grouped GEMM operation
-
-    Note:
-        Tested shapes:
-        lhs: [M, K] or [K, N]
-        rhs: [G, N, K] or [G, K, N] or [G * K, N] or [N, G * K]
     """
 
     # TODO(Phuong): implement the precision
     del precision
 
-    # Replace None sentinels with empty (0,) int32 arrays.
     empty_gs = jnp.empty((0,), jnp.int32)
-    lhs_first_dims = empty_gs if lhs_first_dims is None else lhs_first_dims
-    lhs_last_dims = empty_gs if lhs_last_dims is None else lhs_last_dims
-    rhs_first_dims = empty_gs if rhs_first_dims is None else rhs_first_dims
-    rhs_last_dims = empty_gs if rhs_last_dims is None else rhs_last_dims
-    out_first_dims = empty_gs if out_first_dims is None else out_first_dims
-    out_last_dims = empty_gs if out_last_dims is None else out_last_dims
 
-    if isinstance(lhs, jnp.ndarray):
-        if not isinstance(rhs, jnp.ndarray):
-            raise TypeError(
-                f"Expected rhs to be jnp.ndarray when lhs is jnp.ndarray, but got type={type(rhs)}"
-            )
-        out_dtype = lhs.dtype
-        lhs_shape = lhs.shape
-        rhs_shape = rhs.shape
-        lhs_data = lhs
-        rhs_data = rhs
-        lhs_scale_inv = rhs_scale_inv = jnp.empty((0,), jnp.float32)
-        scaling_mode = ScalingMode.NO_SCALING
-    elif isinstance(lhs, GroupedScaledTensor1x):
-        if not isinstance(rhs, GroupedScaledTensor1x):
-            raise TypeError(
-                "Expected rhs to be GroupedScaledTensor1x when lhs is GroupedScaledTensor1x, but"
-                f" got type={type(rhs)}"
-            )
-        out_dtype = lhs.dq_dtype
+    # Extract data, dims, and metadata from tensor objects.
+    if isinstance(lhs, GroupedNoScaleTensor):
+        lhs_data = lhs.data
         lhs_shape = lhs.original_shape
-        rhs_shape = rhs.original_shape
-        lhs_fa = lhs.flatten_axis
-        rhs_fa = rhs.flatten_axis
-        lhs_data = lhs.data.reshape(math.prod(lhs_shape[:lhs_fa]), math.prod(lhs_shape[lhs_fa:]))
-        rhs_data = rhs.data.reshape(math.prod(rhs_shape[:rhs_fa]), math.prod(rhs_shape[rhs_fa:]))
+        lhs_scale_inv = jnp.empty((0,), jnp.float32)
+        scaling_mode = ScalingMode.NO_SCALING
+        out_dtype = lhs.data.dtype
+        lhs_first_dims = lhs.first_dims if lhs.first_dims is not None else empty_gs
+        lhs_last_dims = lhs.last_dims if lhs.last_dims is not None else empty_gs
+        rhs_group_axis = getattr(rhs, "group_axis", 0)
+    elif isinstance(lhs, GroupedScaledTensor1x):
+        lhs_shape = lhs.original_shape
+        lhs_data = lhs.data.reshape(lhs_shape)
         lhs_scale_inv = lhs.scale_inv
+        scaling_mode = lhs.scaling_mode
+        out_dtype = lhs.dq_dtype
+        lhs_first_dims = lhs.first_dims if lhs.first_dims is not None else empty_gs
+        lhs_last_dims = lhs.last_dims if lhs.last_dims is not None else empty_gs
+        rhs_group_axis = getattr(rhs, "group_axis", 0)
+    else:
+        raise TypeError(
+            "lhs must be GroupedNoScaleTensor or GroupedScaledTensor1x, "
+            f"got type={type(lhs)}"
+        )
+
+    if isinstance(rhs, GroupedNoScaleTensor):
+        rhs_data = rhs.data
+        rhs_shape = rhs.original_shape
+        rhs_scale_inv = jnp.empty((0,), jnp.float32)
+        rhs_first_dims = rhs.first_dims if rhs.first_dims is not None else empty_gs
+        rhs_last_dims = rhs.last_dims if rhs.last_dims is not None else empty_gs
+    elif isinstance(rhs, GroupedScaledTensor1x):
+        rhs_shape = rhs.original_shape
+        rhs_data = rhs.data.reshape(rhs_shape)
         rhs_scale_inv = rhs.scale_inv
-        if lhs.scaling_mode != rhs.scaling_mode:
+        rhs_first_dims = rhs.first_dims if rhs.first_dims is not None else empty_gs
+        rhs_last_dims = rhs.last_dims if rhs.last_dims is not None else empty_gs
+        if isinstance(lhs, GroupedScaledTensor1x) and lhs.scaling_mode != rhs.scaling_mode:
             raise ValueError(
                 f"Mismatched scaling modes: lhs.scaling_mode={lhs.scaling_mode},"
                 f" rhs.scaling_mode={rhs.scaling_mode}"
             )
-        scaling_mode = lhs.scaling_mode
+        if isinstance(lhs, GroupedScaledTensor1x):
+            scaling_mode = lhs.scaling_mode
     else:
-        raise TypeError("Unsupported lhs type object!")
+        raise TypeError(
+            "rhs must be GroupedNoScaleTensor or GroupedScaledTensor1x, "
+            f"got type={type(rhs)}"
+        )
+
+    # Infer output dims from which operand has the ragged non-contracting dim.
+    if rhs_first_dims.size > 0 or rhs_last_dims.size > 0:
+        # Wgrad: rhs contracting dim is ragged → output is uniform (G prefix from num_groups)
+        out_first_dims = empty_gs
+        out_last_dims = empty_gs
+    elif lhs_first_dims.size > 0:
+        out_first_dims = lhs_first_dims
+        out_last_dims = empty_gs
+    elif lhs_last_dims.size > 0:
+        out_first_dims = empty_gs
+        out_last_dims = lhs_last_dims
+    else:
+        out_first_dims = out_last_dims = empty_gs
 
     out_dtype = preferred_element_type or out_dtype
 
@@ -2072,8 +2087,6 @@ def grouped_gemm(
     lhs_flatten_axis = len(lhs_contract_dim) * (1 if lhs_is_trans else -1)
 
     # rhs_is_trans: K is the last dim of rhs (i.e., rhs is in "T" layout).
-    # This formula handles both standard rhs [G, K, N] (G-prefixed) and wgrad
-    # rhs [K_total, N] (no G prefix) without needing a separate wgrad override.
     rhs_is_trans = rhs_contract_dim[-1] == len(rhs_shape) - 1
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
 
@@ -2115,29 +2128,18 @@ def grouped_gemm(
             ),
             empty_gs,
         )
-        lhs_q = grouped_quantize(lhs, quantizer_set.x, active_group_sizes, lhs_flatten_axis)
+        lhs_input_data = lhs.data if isinstance(lhs, GroupedNoScaleTensor) else lhs_data
+        rhs_input_data = rhs.data if isinstance(rhs, GroupedNoScaleTensor) else rhs_data
+        lhs_q = grouped_quantize(lhs_input_data, quantizer_set.x, active_group_sizes, lhs_flatten_axis)
         rhs_q = grouped_quantize(
-            rhs, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
+            rhs_input_data, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
         )
-        # grouped_quantize returns a 1D flat buffer; reshape to 2D using the
-        # original_shape and flatten_axis stored in each quantized tensor.
-        lhs_fa = lhs_q.flatten_axis  # positive index (adjusted in create_1x)
-        rhs_fa = rhs_q.flatten_axis
-        lhs_data = lhs_q.data.reshape(
-            math.prod(lhs_q.original_shape[:lhs_fa]),
-            math.prod(lhs_q.original_shape[lhs_fa:]),
-        )
-        rhs_data = rhs_q.data.reshape(
-            math.prod(rhs_q.original_shape[:rhs_fa]),
-            math.prod(rhs_q.original_shape[rhs_fa:]),
-        )
+        lhs_data = lhs_q.data.reshape(lhs_q.original_shape)
+        rhs_data = rhs_q.data.reshape(rhs_q.original_shape)
         lhs_scale_inv = lhs_q.scale_inv
         rhs_scale_inv = rhs_q.scale_inv
         lhs_shape = lhs_q.original_shape
         rhs_shape = rhs_q.original_shape
-        # Data is already 2D; reset flatten axes so _flatten_to_2d calls below are no-ops.
-        lhs_flatten_axis = -1
-        rhs_flatten_axis = -1
 
     if lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2:
         raise ValueError("FP8 GEMM does not support E5M2 * E5M2")
@@ -2174,9 +2176,9 @@ def grouped_gemm(
             else:
                 rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
 
-    # Reshape inputs to 2D using the already-computed flatten_axes.
-    lhs_data_2d = _flatten_to_2d(lhs_data, lhs_flatten_axis)
-    rhs_data_2d = _flatten_to_2d(rhs_data, rhs_flatten_axis)
+    # Compute N-D axis boundaries from final (post-adjustment) contracting dims.
+    lhs_axis_boundary = get_lhs_axis_boundary(lhs_contract_dim, lhs_is_trans)
+    rhs_axis_boundary = get_rhs_axis_boundary(rhs_contract_dim, rhs_is_trans)
 
     num_gemms = (
         lhs_first_dims.size
@@ -2188,14 +2190,21 @@ def grouped_gemm(
     )
     if num_gemms == 0:
         raise ValueError(
-            "grouped_gemm requires at least one non-empty dimension array "
-            "(lhs_first_dims, lhs_last_dims, rhs_first_dims, rhs_last_dims, "
-            "out_first_dims, or out_last_dims)."
+            "grouped_gemm requires at least one non-empty dimension array. "
+            "Ensure lhs or rhs tensor objects carry first_dims or last_dims."
         )
 
     has_bias = bias is not None
     if has_bias:
-        N_dim = rhs_data_2d.shape[0] // num_gemms if rhs_is_trans else rhs_data_2d.shape[1]
+        # Compute N from rhs non-contracting dims.
+        if rhs_is_trans:
+            N_dim = math.prod(
+                rhs_data.shape[d]
+                for d in range(rhs_axis_boundary)
+                if rhs_group_axis is None or d != rhs_group_axis
+            )
+        else:
+            N_dim = math.prod(rhs_data.shape[rhs_axis_boundary:])
         assert bias.shape == (
             num_gemms,
             N_dim,
@@ -2218,9 +2227,9 @@ def grouped_gemm(
         additional_arg_1 = jnp.zeros((0,), jnp.int32)  # unused placeholder
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
-        lhs_data_2d,
+        lhs_data,
         lhs_scale_inv,
-        rhs_data_2d,
+        rhs_data,
         rhs_scale_inv,
         bias,
         lhs_first_dims,
@@ -2238,5 +2247,8 @@ def grouped_gemm(
         has_bias=has_bias,
         use_async_d2h_group_sizes=use_async_d2h_group_sizes,
         use_v2_ffi=use_v2_ffi,
+        lhs_axis_boundary=lhs_axis_boundary,
+        rhs_axis_boundary=rhs_axis_boundary,
+        rhs_group_axis=rhs_group_axis,
     )
     return out

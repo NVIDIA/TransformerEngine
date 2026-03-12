@@ -36,6 +36,7 @@ from transformer_engine.jax.quantize import (
     ScaledTensor1x,
     ScaledTensor2x,
     GroupedScaledTensor1x,
+    GroupedNoScaleTensor,
     ScalingMode,
     QuantizerFactory,
     QuantizeLayout,
@@ -1787,18 +1788,17 @@ class TestGroupedDense:
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         # jitting grouped_gemm
-        empty_gs = jnp.empty((0,), jnp.int32)
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, first_dims=group_sizes, last_dims=None, group_axis=0, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, first_dims=None, last_dims=None, group_axis=0, original_shape=rhs.shape
+        )
         prim_out = jax.jit(
             tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
         )(
-            lhs,
-            rhs,
-            lhs_first_dims=group_sizes,
-            lhs_last_dims=empty_gs,
-            rhs_first_dims=empty_gs,
-            rhs_last_dims=empty_gs,
-            out_first_dims=group_sizes,
-            out_last_dims=empty_gs,
+            lhs_tensor,
+            rhs_tensor,
             contracting_dims=contracting_dims,
             use_async_d2h_group_sizes=True,
         )
@@ -1831,16 +1831,15 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        empty_gs = jnp.empty((0,), jnp.int32)
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, first_dims=group_sizes, last_dims=None, group_axis=0, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, first_dims=None, last_dims=None, group_axis=0, original_shape=rhs.shape
+        )
         prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-            lhs,
-            rhs,
-            lhs_first_dims=group_sizes,
-            lhs_last_dims=empty_gs,
-            rhs_first_dims=empty_gs,
-            rhs_last_dims=empty_gs,
-            out_first_dims=group_sizes,
-            out_last_dims=empty_gs,
+            lhs_tensor,
+            rhs_tensor,
             contracting_dims=contracting_dims,
             quantizer_set=quantizer_set,
         )

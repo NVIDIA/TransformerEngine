@@ -27,6 +27,7 @@ from .quantize import (
     is_fp8_gemm_with_all_layouts_supported,
     TensorUsage,
     QuantizeLayout,
+    GroupedNoScaleTensor,
 )
 
 
@@ -490,7 +491,8 @@ def _grouped_dense_fwd_rule(
                 is_colwise=False,
                 data_layout="N",
                 flatten_axis=ctx_kernel.flatten_axis,
-                group_sizes=ctx_kernel.group_sizes,
+                first_dims=ctx_kernel.first_dims,
+                last_dims=ctx_kernel.last_dims,
                 original_shape=kernel_shape,
                 group_axis=ctx_kernel.group_axis,
             )
@@ -507,7 +509,8 @@ def _grouped_dense_fwd_rule(
                     is_colwise=True,
                     data_layout="T",
                     flatten_axis=ctx_kernel.flatten_axis,
-                    group_sizes=ctx_kernel.group_sizes,
+                    first_dims=ctx_kernel.first_dims,
+                    last_dims=ctx_kernel.last_dims,
                     original_shape=kernel_shape,
                     group_axis=ctx_kernel.group_axis,
                 )
@@ -518,16 +521,24 @@ def _grouped_dense_fwd_rule(
         # This is needed especially when kernel_fsdp_enabled == True AND FP8 enabled.
         quantizer_set.kernel.q_layout = original_quantizer_set_kernel_q_layout
 
-    empty_gs = jnp.empty((0,), jnp.int32)
+    if is_noop_quantizer_set:
+        grouped_gemm_x = GroupedNoScaleTensor(
+            data=grouped_gemm_x,
+            first_dims=group_sizes,
+            last_dims=None,
+            group_axis=0,
+            original_shape=grouped_gemm_x.shape,
+        )
+        grouped_gemm_kernel = GroupedNoScaleTensor(
+            data=grouped_gemm_kernel,
+            first_dims=None,
+            last_dims=None,
+            group_axis=0,
+            original_shape=grouped_gemm_kernel.shape,
+        )
     output = tex.grouped_gemm(
         grouped_gemm_x,
         grouped_gemm_kernel,
-        lhs_first_dims=group_sizes,
-        lhs_last_dims=empty_gs,
-        rhs_first_dims=empty_gs,
-        rhs_last_dims=empty_gs,
-        out_first_dims=group_sizes,
-        out_last_dims=empty_gs,
         contracting_dims=contracting_dims,
         bias=bias,
         precision=precision,
@@ -616,16 +627,38 @@ def _grouped_dense_bwd_rule(
         wgrad_x_T = ctx_x
         wgrad_grad = casted_grad.get_tensor(usage=TensorUsage.RHS)
 
-    empty_gs = jnp.empty((0,), jnp.int32)
+    if is_noop_quantizer_set:
+        dgrad_grad = GroupedNoScaleTensor(
+            data=dgrad_grad,
+            first_dims=group_sizes,
+            last_dims=None,
+            group_axis=0,
+            original_shape=dgrad_grad.shape,
+        )
+        dgrad_kernel_T = GroupedNoScaleTensor(
+            data=dgrad_kernel_T,
+            first_dims=None,
+            last_dims=None,
+            group_axis=0,
+            original_shape=dgrad_kernel_T.shape,
+        )
+        wgrad_x_T = GroupedNoScaleTensor(
+            data=wgrad_x_T,
+            first_dims=group_sizes,
+            last_dims=None,
+            group_axis=0,
+            original_shape=wgrad_x_T.shape,
+        )
+        wgrad_grad = GroupedNoScaleTensor(
+            data=wgrad_grad,
+            first_dims=group_sizes,
+            last_dims=None,
+            group_axis=0,
+            original_shape=wgrad_grad.shape,
+        )
     dgrad = tex.grouped_gemm(
         dgrad_grad,
         dgrad_kernel_T,
-        lhs_first_dims=group_sizes,
-        lhs_last_dims=empty_gs,
-        rhs_first_dims=empty_gs,
-        rhs_last_dims=empty_gs,
-        out_first_dims=group_sizes,
-        out_last_dims=empty_gs,
         contracting_dims=dgrad_contracting_dims,
         precision=precision,
         preferred_element_type=preferred_element_type,
@@ -635,12 +668,6 @@ def _grouped_dense_bwd_rule(
     wgrad = tex.grouped_gemm(
         wgrad_x_T,
         wgrad_grad,
-        lhs_first_dims=group_sizes,
-        lhs_last_dims=empty_gs,
-        rhs_first_dims=group_sizes,
-        rhs_last_dims=empty_gs,
-        out_first_dims=empty_gs,
-        out_last_dims=empty_gs,
         contracting_dims=wgrad_contracting_dims,
         precision=precision,
         preferred_element_type=preferred_element_type,
