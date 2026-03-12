@@ -603,9 +603,9 @@ void launch_multi_tensor_swizzle_scaling_factors(MultiSwizzleArgs& kernel_args,
   int n_tiles_in_tb = TB_DIM * vec_load_size;
   int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
   /* Calculate number of CUDA blocks needed for each tensor.
-     * We have to do it here because we have to iterate over all tensors in this batch to
-     * get the minimum vec_load_size.
-     */
+  * We have to do it here because we have to iterate over all tensors in this batch to
+  * get the minimum vec_load_size.
+  */
   for (size_t j = 0; j < kernel_args.num_tensors; j++) {
     const int m = kernel_args.m_list[j];
     const int k = kernel_args.k_list[j];
@@ -853,10 +853,10 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 }  // namespace transformer_engine
 
 /*
-  * WIP (Phuong):
-  *   - Opt for bank conflicts
-  *   - Adding swizzle for 2d-block scaling.
-  */
+* WIP (Phuong):
+*   - Opt for bank conflicts
+*   - Adding swizzle for 2d-block scaling.
+*/
 void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_swizzle_scaling_factors);
   using namespace transformer_engine;
