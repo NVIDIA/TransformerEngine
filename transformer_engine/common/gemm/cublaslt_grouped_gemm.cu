@@ -563,8 +563,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   const DType row_dtype = t->data.dtype;
   const DType col_dtype = t->columnwise_data.dtype;
   GroupedOperandSelection sel{};
-  sel.scaling_mode = sm;
-  sel.with_gemm_swizzled_scales = t->with_gemm_swizzled_scales;
+  GroupedOperandSelection sel{};
   sel.trans = trans;
   sel.scaling_mode = sm;
   sel.with_gemm_swizzled_scales = t->with_gemm_swizzled_scales;
