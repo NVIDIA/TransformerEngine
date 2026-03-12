@@ -4,6 +4,7 @@
 
 """Tests for fused MoE router CUDA kernels (JAX wrappers)."""
 
+import sys
 from functools import partial
 from typing import Optional
 
@@ -13,10 +14,27 @@ import pytest
 
 from utils import pytest_parametrize_wrapper
 
-from transformer_engine.jax.router import (
-    fused_topk_with_score_function,
-    fused_moe_aux_loss,
-)
+
+@pytest.fixture(autouse=True, scope="function")
+def _inject_router(request):
+    """Lazy-load router API only for tests marked 'triton'. Other tests run without importing.
+
+    We inject into sys.modules[__name__] so test code can use fused_topk_with_score_function,
+    fused_moe_aux_loss as module-level names (fixture locals are not visible to tests).
+    """
+    if not request.node.get_closest_marker("triton"):
+        yield
+        return
+    from transformer_engine.jax.router import (
+        fused_topk_with_score_function,
+        fused_moe_aux_loss,
+    )
+
+    mod = sys.modules[__name__]
+    mod.fused_topk_with_score_function = fused_topk_with_score_function
+    mod.fused_moe_aux_loss = fused_moe_aux_loss
+    yield
+
 
 # =============================================================================
 # Test case definitions (L0 = fast smoke, L2 = comprehensive)
@@ -371,6 +389,7 @@ def run_topk_comparison(
 @pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
 @pytest_parametrize_wrapper("scaling_factor", SCALING_FACTOR_OPTIONS)
 @pytest_parametrize_wrapper("enable_bias", ENABLE_BIAS_OPTIONS)
+@pytest.mark.triton
 def test_topk_sigmoid(
     dtype, num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bias
 ):
@@ -397,6 +416,7 @@ def test_topk_sigmoid(
 @pytest_parametrize_wrapper("use_pre_softmax", USE_PRE_SOFTMAX_OPTIONS)
 @pytest_parametrize_wrapper("group_topk", GROUP_TOPK_OPTIONS)
 @pytest_parametrize_wrapper("scaling_factor", SCALING_FACTOR_OPTIONS)
+@pytest.mark.triton
 def test_topk_softmax(
     dtype, num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor
 ):
@@ -426,6 +446,7 @@ def test_topk_softmax(
     SCORE_AUX_LOSS_CASES,
 )
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
+@pytest.mark.triton
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
     logits = make_logits(num_tokens, num_experts, score_function, dtype)
 
@@ -486,6 +507,7 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     "num_tokens,num_experts,topk",
     AUX_LOSS_CASES,
 )
+@pytest.mark.triton
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     key = jax.random.PRNGKey(SEED)
 
