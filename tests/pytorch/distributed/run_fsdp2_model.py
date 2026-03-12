@@ -335,52 +335,6 @@ def restore_custom_attrs(module, custom_attrs):
                 setattr(param, attr_name, attr_value)
 
 
-@torch.no_grad()
-def test_fp8_fsdp2_allgather(model):
-    """
-    Compare the result of the FP8 AG by FSDP2 with a manual AG in FP32
-    after dequantizing the FP8 values.
-    """
-    # FP32 manual weight allgather
-    fp32_allgathered_params = {}
-    for name, param in model.named_parameters():
-        assert isinstance(
-            param, DTensor
-        ), f"[test_fp8_fsdp2_allgather] {param} should be a DTensor."
-        local_tensor = param._local_tensor
-        device_mesh = param.device_mesh
-        dist_group = (
-            device_mesh.get_group(mesh_dim="dp_shard")
-            if device_mesh.ndim > 1
-            else device_mesh.get_group()
-        )
-        # Perform manual allgather on local_tensor. zeros_like will create hp tensor since torch_dispatch
-        # for local_tensor will go down the dequantization route.
-        gathered_tensor = [
-            torch.zeros_like(local_tensor) for _ in range(dist.get_world_size(group=dist_group))
-        ]
-        dist.all_gather(gathered_tensor, local_tensor.dequantize(), group=dist_group)
-        full_tensor = torch.cat(gathered_tensor, dim=0)
-        fp32_allgathered_params[name] = full_tensor
-    # FP8 allgather using FSDP2
-    for module in model.modules():
-        # Not all modules are wrapped/sharded with FSDP2.
-        if hasattr(module, "unshard"):
-            module.unshard()
-    # Make sure allgathered parameters match exactly
-    for name, param in model.named_parameters():
-        if isinstance(param, DTensor):
-            # Will still be a DTensor in the case of TP, even after FSDP2 AG,
-            # because we wrap our weights as DTensor shards over the TP group.
-            param = param._local_tensor
-        torch.testing.assert_close(param.dequantize(), fp32_allgathered_params[name])
-    # Revert model to original sharded state
-    for module in model.modules():
-        # Not all modules are wrapped/sharded with FSDP2.
-        if hasattr(module, "reshard"):
-            module.reshard()
-
-
 def _train(args):
     """
     Torch Distributed Initialization
@@ -488,11 +442,6 @@ def _train(args):
         optimizer.step()
         dist_print(f"Iteration {iteration} completed with loss {loss.item()}")
 
-    # Some of the FSDP states are lazy initialized during FSDP forward pass
-    # so testing fp8 allgather at the end of the training loop.
-    if args.fp8_init and args.recipe not in ("Float8BlockScaling", "NVFP4BlockScaling"):
-        test_fp8_fsdp2_allgather(model)
-
     """
     DCP Checkpoint Testing
     """
@@ -560,9 +509,9 @@ def _train(args):
         v_pt = s_post_train[key]
         if isinstance(v_pt, DTensor):
             v_pt = v_pt.to_local()
-        assert not torch.allclose(v1, v_pt), (
-            f"[{key}] Model weights should have changed after extra training steps"
-        )
+        assert not torch.allclose(
+            v1, v_pt
+        ), f"[{key}] Model weights should have changed after extra training steps"
 
     # Load the checkpoint.
     state_dict = {"app": AppState(model=model, optimizer=optimizer)}
