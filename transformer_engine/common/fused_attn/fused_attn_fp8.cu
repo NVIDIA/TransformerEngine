@@ -2831,8 +2831,8 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   void* devPtrK = input_K->data.dptr;
   void* devPtrV = input_V->data.dptr;
   void* devPtrDescaleQ = input_Q->scale_inv.dptr;
-  void* devPtrDescaleK = input_Q->scale_inv.dptr;
-  void* devPtrDescaleV = input_Q->scale_inv.dptr;
+  void* devPtrDescaleK = input_K->scale_inv.dptr;
+  void* devPtrDescaleV = input_V->scale_inv.dptr;
   void* devPtrQ_t = input_Q->columnwise_data.dptr;
   void* devPtrK_t = input_K->columnwise_data.dptr;
   void* devPtrDescaleQ_t = input_Q->columnwise_scale_inv.dptr;
