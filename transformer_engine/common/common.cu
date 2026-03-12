@@ -87,12 +87,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   reinterpret_cast<TVectorized *>(ptr)[idx] = data.value;
 }
 
-constexpr size_t kScaleCumsumThreads = 256;
-
-__global__ void __launch_bounds__(kScaleCumsumThreads)
+__global__ void __launch_bounds__(kThreadsPerBlock)
     splits_to_offsets_kernel(const int64_t *__restrict__ first_dims, int64_t *__restrict__ output,
                              size_t num_tensors, int64_t logical_last_dim) {
-  __shared__ int64_t block_scan[kScaleCumsumThreads];
+  __shared__ int64_t block_scan[kThreadsPerBlock];
   __shared__ int64_t chunk_prefix;
 
   const size_t tid = threadIdx.x;
@@ -102,7 +100,7 @@ __global__ void __launch_bounds__(kScaleCumsumThreads)
   }
   __syncthreads();
 
-  for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kScaleCumsumThreads) {
+  for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kThreadsPerBlock) {
     const size_t idx = chunk_start + tid;
     int64_t value = 0;
     if (idx < num_tensors) {
@@ -112,7 +110,7 @@ __global__ void __launch_bounds__(kScaleCumsumThreads)
     __syncthreads();
 
     // Inclusive scan in shared memory.
-    for (size_t offset = 1; offset < kScaleCumsumThreads; offset <<= 1) {
+    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
       const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
       __syncthreads();
       block_scan[tid] += addend;
@@ -124,7 +122,7 @@ __global__ void __launch_bounds__(kScaleCumsumThreads)
     }
     __syncthreads();
 
-    if (tid == kScaleCumsumThreads - 1) {
+    if (tid == kThreadsPerBlock - 1) {
       chunk_prefix += block_scan[tid];
     }
     __syncthreads();
@@ -169,8 +167,8 @@ void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t n
   NVTE_CHECK(first_dims != nullptr, "first_dims pointer must be allocated.");
   NVTE_CHECK(logical_last_dim > 0, "logical_last_dim must be greater than 0.");
 
-  splits_to_offsets_kernel<<<1, kScaleCumsumThreads, 0, stream>>>(first_dims, output, num_tensors,
-                                                                  logical_last_dim);
+  splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(first_dims, output, num_tensors,
+                                                               logical_last_dim);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 }  // extern "C"
