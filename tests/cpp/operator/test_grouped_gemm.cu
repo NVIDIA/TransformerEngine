@@ -88,6 +88,7 @@ Tensor make_bf16_operand(const std::string& name, const std::vector<size_t>& sha
   return t;
 }
 
+
 // Creates an MXFP8 operand with the correct data layout for GEMM.
 // MXFP8 GEMM requirements (scales are along K dimension):
 //   A transposed     -> needs rowwise data/scales
