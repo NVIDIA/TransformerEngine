@@ -334,7 +334,7 @@ def general_grouped_gemm_for_grouped_tensor(
     is_discrete_in = isinstance(A, list)
     if is_discrete_in and is_discrete_out:
         raise ValueError("Both A and out are discrete. This is not supported yet.")
-    
+
     if is_discrete_out:
         # wgrad case.
         grouped_gemm_impl = tex.te_general_grouped_gemm_for_discrete_out
