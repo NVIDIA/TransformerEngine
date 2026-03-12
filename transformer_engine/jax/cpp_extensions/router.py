@@ -73,7 +73,9 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         i_shape = logits_aval.shape
         probs_aval = logits_aval.update(shape=i_shape, dtype=i_dtype)
         routing_map_aval = logits_aval.update(shape=i_shape, dtype=jnp.bool_)
-        intermediate_aval = logits_aval.update(shape=i_shape, dtype=i_dtype)
+        # The CUDA kernel always uses float32 (CompType) for intermediate
+        # computations (softmax/sigmoid values saved for backward).
+        intermediate_aval = logits_aval.update(shape=i_shape, dtype=jnp.float32)
         return probs_aval, routing_map_aval, intermediate_aval
 
     @staticmethod

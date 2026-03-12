@@ -3048,7 +3048,9 @@ def _make_grouped_tensor_quantized_mxfp8(
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_grouped_gemm_grouped_tensor_mxfp8(shape, accumulate, layout: str, dtype: torch.dtype) -> None:
+def test_grouped_gemm_grouped_tensor_mxfp8(
+    shape, accumulate, layout: str, dtype: torch.dtype
+) -> None:
     if tex.get_cublasLt_version() < 130200:
         pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
     if torch.cuda.get_device_capability() < (10, 0):

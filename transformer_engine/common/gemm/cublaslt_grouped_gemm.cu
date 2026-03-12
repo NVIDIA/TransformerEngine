@@ -16,8 +16,8 @@
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "../util/handle_manager.h"
-#include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
+#include "../util/vectorized_pointwise.h"
 #include "./config.h"
 
 namespace {
@@ -105,7 +105,6 @@ inline int64_t compute_avg_last_dim(const transformer_engine::GroupedTensor *t) 
   // When varying, logical_shape[1] should be sum of last dims if provided; otherwise fallback to avg via division.
   return static_cast<int64_t>(t->logical_shape.data[1]) / static_cast<int64_t>(t->num_tensors);
 }
-
 
 // Constants for grouped GEMM workspace (declared early for use in helpers)
 static constexpr size_t kGroupedGemmAlignment = 256;
@@ -342,8 +341,7 @@ inline OperandStorageChoice choose_grouped_operand_storage(bool trans, bool is_A
   if (is_mxfp8) {
     if (is_A) {
       if (trans) {
-        NVTE_CHECK(has_row, "Grouped GEMM: MXFP8 transposed ", name,
-                   " is missing row-wise data");
+        NVTE_CHECK(has_row, "Grouped GEMM: MXFP8 transposed ", name, " is missing row-wise data");
         return {true, true, trans};
       }
       NVTE_CHECK(has_col, "Grouped GEMM: MXFP8 non-transposed ", name,
@@ -351,12 +349,10 @@ inline OperandStorageChoice choose_grouped_operand_storage(bool trans, bool is_A
       return {false, false, trans};
     }
     if (trans) {
-      NVTE_CHECK(has_col, "Grouped GEMM: MXFP8 transposed ", name,
-                 " is missing column-wise data");
+      NVTE_CHECK(has_col, "Grouped GEMM: MXFP8 transposed ", name, " is missing column-wise data");
       return {false, false, trans};
     }
-    NVTE_CHECK(has_row, "Grouped GEMM: MXFP8 non-transposed ", name,
-               " is missing row-wise data");
+    NVTE_CHECK(has_row, "Grouped GEMM: MXFP8 non-transposed ", name, " is missing row-wise data");
     return {true, true, trans};
   }
 
@@ -388,80 +384,81 @@ inline OperandStorageChoice choose_grouped_operand_storage(bool trans, bool is_A
 // Build Kernel Arguments detailing out addresses and other metadata for list of C/D tensors
 // passed to the grouped GEMM kernel. Use-case: C/D --> List of wgrads for experts in MOE
 inline MultiTensorGroupGemmOutputArgs build_grouped_gemm_multi_out_args(
-  const NVTETensor *tensor_list, size_t list_size, size_t expected_num_tensors,
-  transformer_engine::DType expected_dtype, const char *name) {
-MultiTensorGroupGemmOutputArgs args{};
-if (list_size == 0) {
-  NVTE_CHECK(tensor_list == nullptr, "Grouped GEMM: ", name, "_list provided with num_", name,
-             "_tensors=0");
-  return args;
-}
-NVTE_CHECK(tensor_list != nullptr, "Grouped GEMM: ", name, "_list is null but num_", name,
-           "_tensors=", list_size);
-NVTE_CHECK(list_size == expected_num_tensors, "Grouped GEMM: ", name,
-           "_list must have num_tensors (", expected_num_tensors, ") entries, got ", list_size);
-NVTE_CHECK(list_size <= static_cast<size_t>(kMaxTensorsPerKernel), "Grouped GEMM: ", name,
-           "_list supports up to ", kMaxTensorsPerKernel, " tensors per kernel, got ", list_size);
+    const NVTETensor *tensor_list, size_t list_size, size_t expected_num_tensors,
+    transformer_engine::DType expected_dtype, const char *name) {
+  MultiTensorGroupGemmOutputArgs args{};
+  if (list_size == 0) {
+    NVTE_CHECK(tensor_list == nullptr, "Grouped GEMM: ", name, "_list provided with num_", name,
+               "_tensors=0");
+    return args;
+  }
+  NVTE_CHECK(tensor_list != nullptr, "Grouped GEMM: ", name, "_list is null but num_", name,
+             "_tensors=", list_size);
+  NVTE_CHECK(list_size == expected_num_tensors, "Grouped GEMM: ", name,
+             "_list must have num_tensors (", expected_num_tensors, ") entries, got ", list_size);
+  NVTE_CHECK(list_size <= static_cast<size_t>(kMaxTensorsPerKernel), "Grouped GEMM: ", name,
+             "_list supports up to ", kMaxTensorsPerKernel, " tensors per kernel, got ", list_size);
 
-for (size_t i = 0; i < list_size; ++i) {
-  const transformer_engine::Tensor *t =
-      transformer_engine::convertNVTETensorCheck(tensor_list[i]);
-  NVTE_CHECK(t->has_data(), "Grouped GEMM: ", name, "_list tensor ", i, " has no data");
-  NVTE_CHECK(t->dtype() == expected_dtype, "Grouped GEMM: ", name, "_list tensor ", i,
-             " dtype mismatch. Expected ", transformer_engine::to_string(expected_dtype), " got ",
-             transformer_engine::to_string(t->dtype()));
-  const auto &shape = t->shape();
-  NVTE_CHECK(shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
-  args.data_ptrs[i] = t->data.dptr;
-  args.rows[i] = static_cast<int>(shape[1]);
-  args.cols[i] = static_cast<int>(shape[0]);
-}
-return args;
+  for (size_t i = 0; i < list_size; ++i) {
+    const transformer_engine::Tensor *t =
+        transformer_engine::convertNVTETensorCheck(tensor_list[i]);
+    NVTE_CHECK(t->has_data(), "Grouped GEMM: ", name, "_list tensor ", i, " has no data");
+    NVTE_CHECK(t->dtype() == expected_dtype, "Grouped GEMM: ", name, "_list tensor ", i,
+               " dtype mismatch. Expected ", transformer_engine::to_string(expected_dtype), " got ",
+               transformer_engine::to_string(t->dtype()));
+    const auto &shape = t->shape();
+    NVTE_CHECK(shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
+    args.data_ptrs[i] = t->data.dptr;
+    args.rows[i] = static_cast<int>(shape[1]);
+    args.cols[i] = static_cast<int>(shape[0]);
+  }
+  return args;
 }
 
 // Build Kernel Arguments detailing out addresses and other metadata for list of A tensors
 // passed to the grouped GEMM kernel. Use-case: A --> List of Expert weights
 inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
-  const NVTETensor *tensor_list, size_t list_size, bool use_rowwise, bool is_fp8,
-  int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name) {
-using namespace transformer_engine;
-MultiTensorGroupGemmInputArgs args{};
-*avg_first_dim = 0;
-*avg_last_dim = 0;
-if (list_size == 0) {
+    const NVTETensor *tensor_list, size_t list_size, bool use_rowwise, bool is_fp8,
+    int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name) {
+  using namespace transformer_engine;
+  MultiTensorGroupGemmInputArgs args{};
+  *avg_first_dim = 0;
+  *avg_last_dim = 0;
+  if (list_size == 0) {
+    return args;
+  }
+  for (size_t i = 0; i < list_size; ++i) {
+    const transformer_engine::Tensor *t =
+        transformer_engine::convertNVTETensorCheck(tensor_list[i]);
+    const transformer_engine::SimpleTensor &data = use_rowwise ? t->data : t->columnwise_data;
+    const transformer_engine::SimpleTensor &scale_inv =
+        use_rowwise ? t->scale_inv : t->columnwise_scale_inv;
+    NVTE_CHECK(data.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
+               " is missing required data.");
+    NVTE_CHECK(data.shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
+    args.data_ptrs[i] = data.dptr;
+    args.rows[i] = static_cast<int>(data.shape[1]);
+    args.cols[i] = static_cast<int>(data.shape[0]);
+    *avg_first_dim += static_cast<int64_t>(data.shape[0]);
+    *avg_last_dim += static_cast<int64_t>(data.shape[1]);
+
+    if (is_fp8) {
+      NVTE_CHECK(scale_inv.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
+                 " requires scale_inv for FP8.");
+      args.scale_inv_ptrs[i] = scale_inv.dptr;
+    } else {
+      args.scale_inv_ptrs[i] = nullptr;
+    }
+  }
+  *avg_first_dim /= static_cast<int64_t>(list_size);
+  *avg_last_dim /= static_cast<int64_t>(list_size);
   return args;
 }
-for (size_t i = 0; i < list_size; ++i) {
-  const transformer_engine::Tensor *t =
-      transformer_engine::convertNVTETensorCheck(tensor_list[i]);
-  const transformer_engine::SimpleTensor &data = use_rowwise ? t->data : t->columnwise_data;
-  const transformer_engine::SimpleTensor &scale_inv =
-      use_rowwise ? t->scale_inv : t->columnwise_scale_inv;
-  NVTE_CHECK(data.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
-             " is missing required data.");
-  NVTE_CHECK(data.shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
-  args.data_ptrs[i] = data.dptr;
-  args.rows[i] = static_cast<int>(data.shape[1]);
-  args.cols[i] = static_cast<int>(data.shape[0]);
-  *avg_first_dim += static_cast<int64_t>(data.shape[0]);
-  *avg_last_dim += static_cast<int64_t>(data.shape[1]);
 
-  if (is_fp8) {
-    NVTE_CHECK(scale_inv.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
-               " requires scale_inv for FP8.");
-    args.scale_inv_ptrs[i] = scale_inv.dptr;
-  } else {
-    args.scale_inv_ptrs[i] = nullptr;
-  }
-}
-*avg_first_dim /= static_cast<int64_t>(list_size);
-*avg_last_dim /= static_cast<int64_t>(list_size);
-return args;
-}
-
-inline MultiTensorListInfo validate_grouped_gemm_multi_inputA_list(
-    const NVTETensor *tensor_list, size_t list_size, size_t expected_num_tensors,
-    const char *name) {
+inline MultiTensorListInfo validate_grouped_gemm_multi_inputA_list(const NVTETensor *tensor_list,
+                                                                   size_t list_size,
+                                                                   size_t expected_num_tensors,
+                                                                   const char *name) {
   using namespace transformer_engine;
   MultiTensorListInfo info{};
   if (list_size == 0) {
@@ -488,9 +485,8 @@ inline MultiTensorListInfo validate_grouped_gemm_multi_inputA_list(
         transformer_engine::convertNVTETensorCheck(tensor_list[i]);
     NVTE_CHECK(t->scaling_mode == info.scaling_mode, "Grouped GEMM: ", name,
                "_list tensors must share the same scaling mode.");
-    NVTE_CHECK(t->with_gemm_swizzled_scales == info.with_gemm_swizzled_scales, "Grouped GEMM: ",
-               name,
-               "_list tensors must share GEMM swizzled scale state.");
+    NVTE_CHECK(t->with_gemm_swizzled_scales == info.with_gemm_swizzled_scales,
+               "Grouped GEMM: ", name, "_list tensors must share GEMM swizzled scale state.");
 
     if (t->has_data()) {
       if (info.row_dtype == DType::kNumTypes) {
@@ -518,7 +514,6 @@ inline MultiTensorListInfo validate_grouped_gemm_multi_inputA_list(
 
   return info;
 }
-
 
 // Helper to create TensorShapeInfo from a GroupedTensor, optionally swapping first/last dims.
 // When swap_dims=true, first_dims and last_dims are swapped to account for columnwise storage.
@@ -655,7 +650,6 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
                                                    &fastAccuMode, sizeof(fastAccuMode)));
 }
-
 
 inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
                                    const GroupedOperandSelection &A_sel,
@@ -885,7 +879,8 @@ __global__ void setup_grouped_gemm_kernel(
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
     float *a_tensor_scale, float *b_tensor_scale, char *a_mxfp8_scale_base,
     char *b_mxfp8_scale_base, size_t num_tensors, MultiTensorGroupGemmInputArgs a_multi_tensor_args,
-    MultiTensorGroupGemmOutputArgs c_multi_tensor_args, MultiTensorGroupGemmOutputArgs d_multi_tensor_args) {
+    MultiTensorGroupGemmOutputArgs c_multi_tensor_args,
+    MultiTensorGroupGemmOutputArgs d_multi_tensor_args) {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_tensors) return;
 
@@ -920,8 +915,7 @@ __global__ void setup_grouped_gemm_kernel(
   C_ptrs[idx] =
       has_c_multi_tensor ? c_multi_tensor_args.data_ptrs[idx] : (c_base + c_offset * c_elem_size);
   D_ptrs[idx] =
-      has_d_multi_tensor ? d_multi_tensor_args.data_ptrs[idx]
-                         : (d_base + d_offset * d_elem_size);
+      has_d_multi_tensor ? d_multi_tensor_args.data_ptrs[idx] : (d_base + d_offset * d_elem_size);
 
   // Compute storage dimensions for cuBLAS matrix layouts.
   // For INPUTS (A, B): Row-wise storage is seen as transposed column-major by cuBLAS,
@@ -970,8 +964,8 @@ inline void launch_grouped_gemm_setup(
     const transformer_engine::GroupedTensor *D, const transformer_engine::Tensor *alpha_tensor,
     const transformer_engine::Tensor *beta_tensor, size_t num_tensors, cudaStream_t stream,
     const MultiTensorGroupGemmInputArgs &a_multi_tensor_args, const NVTETensor *C_list,
-    const NVTETensor *D_list, char *a_base,
-    transformer_engine::DType c_dtype, transformer_engine::DType d_dtype) {
+    const NVTETensor *D_list, char *a_base, transformer_engine::DType c_dtype,
+    transformer_engine::DType d_dtype) {
   // Use shape info from selection (already accounts for columnwise dimension swap)
   TensorShapeInfo A_meta = A_sel.shape;
   TensorShapeInfo B_meta = B_sel.shape;
@@ -1041,8 +1035,8 @@ inline void launch_grouped_gemm_setup(
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
       ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
-      a_base, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size,
-      b_elem_size, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
+      a_base, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size, b_elem_size,
+      c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
       static_cast<float *>(beta_tensor->data.dptr), a_tensor_scale, b_tensor_scale,
       a_mxfp8_scale_base, b_mxfp8_scale_base, num_tensors, a_multi_tensor_args, c_multi_tensor_args,
       d_multi_tensor_args);
@@ -1102,9 +1096,9 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
 
   MultiTensorGroupGemmInputArgs a_multi_tensor_args{};
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, inputC, outputD, alpha_tensor,
-                            beta_tensor, num_tensors, stream, a_multi_tensor_args, /*C_list=*/nullptr,
-                            /*D_list=*/nullptr, A_sel.dptr,
-                            inputC->dtype(), outputD->dtype());
+                            beta_tensor, num_tensors, stream, a_multi_tensor_args,
+                            /*C_list=*/nullptr,
+                            /*D_list=*/nullptr, A_sel.dptr, inputC->dtype(), outputD->dtype());
 
   // Compute average dimensions for heuristics
   // K dimension: if transa, K is A's first dim; if not, K is A's last dim
@@ -1119,11 +1113,12 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                        workspace.cublas_workspace_ptr, stream);
 }
 
-void nvte_grouped_gemm_with_discrete_inputA(
-    const NVTETensor *A_list, size_t num_a_tensors, int transa, const NVTEGroupedTensor B,
-    int transb, const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
-    const NVTETensor beta, NVTETensor workspace_setup, NVTETensor workspace_cublas,
-    NVTEGroupedMatmulConfig config, cudaStream_t stream) {
+void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
+                                            int transa, const NVTEGroupedTensor B, int transb,
+                                            const NVTEGroupedTensor C, NVTEGroupedTensor D,
+                                            const NVTETensor alpha, const NVTETensor beta,
+                                            NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                            NVTEGroupedMatmulConfig config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_grouped_gemm_with_discrete_inputA);
   using namespace transformer_engine;
 
@@ -1167,7 +1162,8 @@ void nvte_grouped_gemm_with_discrete_inputA(
   const GroupedTensor *inputC = (inputC_raw != nullptr) ? inputC_raw : outputD;
 
   // Validate A list and selection
-  auto A_list_info = validate_grouped_gemm_multi_inputA_list(A_list, num_a_tensors, num_tensors, "A");
+  auto A_list_info =
+      validate_grouped_gemm_multi_inputA_list(A_list, num_a_tensors, num_tensors, "A");
   const transformer_engine::Tensor *t0 = transformer_engine::convertNVTETensorCheck(A_list[0]);
 
   auto is_fp8_or_16bit = [](transformer_engine::DType dtype) {
@@ -1235,8 +1231,8 @@ void nvte_grouped_gemm_with_discrete_inputA(
   int64_t avg_k_val =
       config_.avg_k.value_or(static_cast<bool>(transa) ? avg_first_dim : avg_last_dim);
   const bool use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
-  execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(),
-                       num_tensors, config_.use_split_accumulator, use_fp8, avg_m_val, avg_n_val, avg_k_val,
+  execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
+                       config_.use_split_accumulator, use_fp8, avg_m_val, avg_n_val, avg_k_val,
                        workspace.cublas_workspace_ptr, stream);
 }
 
@@ -1374,14 +1370,16 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
              CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
 }
 
-void nvte_grouped_gemm_with_discrete_inputA(
-    const NVTETensor *A_list, size_t num_a_tensors, int transa, const NVTEGroupedTensor B,
-    int transb, const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
-    const NVTETensor beta, NVTETensor workspace_setup, NVTETensor workspace_cublas,
-    NVTEGroupedMatmulConfig config, cudaStream_t stream) {
-  NVTE_ERROR("nvte_grouped_gemm_with_discrete_inputA requires cuBLAS 13.2+, but compile-time "
-             "cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
+                                            int transa, const NVTEGroupedTensor B, int transb,
+                                            const NVTEGroupedTensor C, NVTEGroupedTensor D,
+                                            const NVTETensor alpha, const NVTETensor beta,
+                                            NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                            NVTEGroupedMatmulConfig config, cudaStream_t stream) {
+  NVTE_ERROR(
+      "nvte_grouped_gemm_with_discrete_inputA requires cuBLAS 13.2+, but compile-time "
+      "cuBLAS version is ",
+      CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
 }
 
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
@@ -1391,9 +1389,10 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
                                          const NVTETensor alpha, const NVTETensor beta,
                                          NVTETensor workspace_setup, NVTETensor workspace_cublas,
                                          NVTEGroupedMatmulConfig config, cudaStream_t stream) {
-  NVTE_ERROR("nvte_grouped_gemm_with_discrete_out requires cuBLAS 13.2+, but compile-time "
-             "cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+  NVTE_ERROR(
+      "nvte_grouped_gemm_with_discrete_out requires cuBLAS 13.2+, but compile-time "
+      "cuBLAS version is ",
+      CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
 }
 
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,

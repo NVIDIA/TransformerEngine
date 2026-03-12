@@ -287,6 +287,7 @@ def general_grouped_gemm(
 
     return out, bias, gelu_input
 
+
 @functools.lru_cache(maxsize=None)
 def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
     """Return workspace size for grouped GEMM pointer setup.
