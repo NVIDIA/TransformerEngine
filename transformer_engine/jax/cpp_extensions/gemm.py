@@ -5,9 +5,10 @@
 
 import math
 import operator
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from functools import partial, reduce
+from functools import partial, reduce, cache
 from typing import Tuple, Sequence, Union
 from enum import Enum
 import warnings
@@ -24,6 +25,7 @@ from transformer_engine_jax import (
     get_device_compute_capability,
     initialize_cgemm_communicator,
     get_cgemm_num_max_streams,
+    get_grouped_gemm_setup_workspace_size,
 )
 
 from .base import BasePrimitive, register_primitive
@@ -42,8 +44,6 @@ from ..quantize import (
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
-    get_quantize_config_with_recipe,
-    get_global_quantize_recipe,
     QuantizeLayout,
 )
 from .misc import get_padded_spec, is_all_reduce_in_float32
@@ -62,7 +62,6 @@ __all__ = [
     "gemm",
     "grouped_gemm_copy_group_sizes",
     "grouped_gemm",
-    "gemm_uses_jax_dot",
     "sanitize_dims",
     "get_non_contracting_dims",
     "transpose_dims",
@@ -70,6 +69,18 @@ __all__ = [
 
 
 num_cublas_streams = get_num_compute_streams()
+
+# Cache whether the CUDA-graphable grouped GEMM implementation is available at import time.
+# Calling get_grouped_gemm_setup_workspace_size raises a RuntimeError mentioning "cublas" when
+# compiled against cuBLAS < 13.2, in which case the cuda-graphable path is unavailable.
+try:
+    get_grouped_gemm_setup_workspace_size(1)
+    _v2_grouped_gemm_available = True
+except RuntimeError as e:
+    if "cublas" in str(e).lower():
+        _v2_grouped_gemm_available = False
+    else:
+        raise
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -166,17 +177,26 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
             flatten_axis=flatten_axis,
         )
 
-    assert not isinstance(lhs_q, ScaledTensor2x)
-    assert not isinstance(rhs_q, ScaledTensor2x)
+    if isinstance(lhs_q, ScaledTensor2x):
+        raise TypeError(
+            "Expected lhs_q to not be ScaledTensor2x after quantization, but got"
+            f" type={type(lhs_q)}"
+        )
+    if isinstance(rhs_q, ScaledTensor2x):
+        raise TypeError(
+            "Expected rhs_q to not be ScaledTensor2x after quantization, but got"
+            f" type={type(rhs_q)}"
+        )
 
     def has_rht_applied(q: AbstractBaseTensor) -> bool:
         return isinstance(q, ScaledTensor1x) and q.has_rht_applied
 
-    assert has_rht_applied(lhs_q) == has_rht_applied(rhs_q), (
-        "With NVFP4_1D_SCALING, if one operand is quantized with RHT, the other must be quantized"
-        " with RHT as well. This is to ensure the RHT is applied to both and will cancel out in the"
-        " GEMM."
-    )
+    if has_rht_applied(lhs_q) != has_rht_applied(rhs_q):
+        raise ValueError(
+            "With NVFP4_1D_SCALING, if one operand is quantized with RHT, the other must be"
+            " quantized with RHT as well. This is to ensure the RHT is applied to both and will"
+            " cancel out in the GEMM."
+        )
 
     return lhs_q, rhs_q
 
@@ -273,14 +293,15 @@ def collective_gemm_bootstrap(
         this function with its own unique process_id.
     """
 
-    assert (
-        num_devices_per_process == 1 and jax.local_device_count() == 1
-    ), "Only single device per process is supported at the moment!"
-    assert num_total_devices % num_devices_per_process == 0, (
-        f"Invalid num_total_devices={num_total_devices},"
-        f" num_devices_per_process={num_devices_per_process}"
-    )
-    assert 0 <= process_id < num_total_devices, f"Invalid process_id={process_id}"
+    if not (num_devices_per_process == 1 and jax.local_device_count() == 1):
+        raise RuntimeError("Only single device per process is supported at the moment!")
+    if num_total_devices % num_devices_per_process != 0:
+        raise ValueError(
+            f"Invalid num_total_devices={num_total_devices},"
+            f" num_devices_per_process={num_devices_per_process}"
+        )
+    if not 0 <= process_id < num_total_devices:
+        raise ValueError(f"Invalid process_id={process_id}")
     initialize_cgemm_communicator(
         num_total_devices,
         num_devices_per_process,
@@ -367,16 +388,23 @@ def get_rhs_axis_boundary(rhs_cdims, is_transposed):
     return min(rhs_cdims) if is_transposed else max(rhs_cdims) + 1
 
 
+@cache
+def _get_high_precision_accumulation_from_env() -> bool:
+    """Read NVTE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION once per process (cached)."""
+    return os.getenv("NVTE_FP8_GEMM_HIGH_PRECISION_ACCUMULATION", "0") == "1"
+
+
 def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
     """Assert that the given tensor shape and layout meet the requirements for cuBLAS GEMM."""
     if scaling_mode != ScalingMode.NO_SCALING:
         # Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
         alignment = 32 if scaling_mode.is_nvfp4_scaling else 16
 
-        assert contracting_size % alignment == 0, (
-            f"cuBLAS GEMM {tensor_name} tensor's contracting dimension must be a multiple of"
-            f" {alignment} when using quantized inputs. Got contracting_size={contracting_size}"
-        )
+        if contracting_size % alignment != 0:
+            raise ValueError(
+                f"cuBLAS GEMM {tensor_name} tensor's contracting dimension must be a multiple of"
+                f" {alignment} when using quantized inputs. Got contracting_size={contracting_size}"
+            )
 
 
 class GemmPrimitive(BasePrimitive):
@@ -384,9 +412,9 @@ class GemmPrimitive(BasePrimitive):
     Primitive for cuBLAS GEMM
     """
 
-    name = "te_gemm_ffi"
+    name = "te_gemm_v2_ffi"
     multiple_results = True
-    impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
+    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14)
     inner_primitive = None
     outer_primitive = None
 
@@ -397,15 +425,11 @@ class GemmPrimitive(BasePrimitive):
         rhs,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -426,55 +450,63 @@ class GemmPrimitive(BasePrimitive):
             lhs_contracting_dims,
             rhs_contracting_dims,
         ) = map(sanitize_dims, operand_ndims, contracting_dims)
-        assert _dims_are_consecutive(lhs_contracting_dims), (
-            "cuBLAS GEMM expected consecutive contracting dimensions for LHS operand, but got "
-            f"{lhs_contracting_dims}."
-        )
-        assert _dims_are_consecutive(rhs_contracting_dims), (
-            "cuBLAS GEMM expected consecutive contracting dimensions for RHS operand, but got "
-            f"{rhs_contracting_dims}."
-        )
+        if not _dims_are_consecutive(lhs_contracting_dims):
+            raise ValueError(
+                "cuBLAS GEMM expected consecutive contracting dimensions for LHS operand, but got "
+                f"{lhs_contracting_dims}."
+            )
+        if not _dims_are_consecutive(rhs_contracting_dims):
+            raise ValueError(
+                "cuBLAS GEMM expected consecutive contracting dimensions for RHS operand, but got "
+                f"{rhs_contracting_dims}."
+            )
 
         lhs_contracting_size, rhs_contracting_size = map(
             lambda shape, dims: reduce(operator.mul, [shape[dim] for dim in dims]),
             (lhs.shape, rhs.shape),
             (lhs_contracting_dims, rhs_contracting_dims),
         )
-        assert lhs_contracting_size == rhs_contracting_size, (
-            "cuBLAS GEMM operands have incompatible contracting dimensions: "
-            f"{lhs.shape} @ idx {lhs_contracting_dims} X {rhs.shape} @ idx {rhs_contracting_dims}."
-        )
+        if lhs_contracting_size != rhs_contracting_size:
+            raise ValueError(
+                f"cuBLAS GEMM operands have incompatible contracting dimensions: {lhs.shape} @ idx"
+                f" {lhs_contracting_dims} X {rhs.shape} @ idx {rhs_contracting_dims}."
+            )
+        assert_cublas_requirements(scaling_mode, lhs_contracting_size, "LHS")
+        assert_cublas_requirements(scaling_mode, rhs_contracting_size, "RHS")
 
         lhs_is_transposed, rhs_is_transposed = _get_gemm_layout(operand_ndims, contracting_dims)
         if scaling_mode != ScalingMode.NO_SCALING:
-            assert scaling_mode.is_nvfp4_scaling or _compatible_fp8_gemm_dtypes(
-                lhs.dtype, rhs.dtype
-            ), (
-                "cuBLAS GEMM quantized operands have incompatible data types: "
-                f"{lhs.dtype} x {rhs.dtype}."
-            )
-            assert (
-                lhs_scale_inv.size > 0 and rhs_scale_inv.size > 0
-            ), "Quantized cuBLAS GEMM requires inverse scaling factors for both operands."
+            if not (
+                scaling_mode.is_nvfp4_scaling or _compatible_fp8_gemm_dtypes(lhs.dtype, rhs.dtype)
+            ):
+                raise ValueError(
+                    "cuBLAS GEMM quantized operands have incompatible data types: "
+                    f"{lhs.dtype} x {rhs.dtype}."
+                )
+            if not (lhs_scale_inv.size > 0 and rhs_scale_inv.size > 0):
+                raise ValueError(
+                    "Quantized cuBLAS GEMM requires inverse scaling factors for both operands."
+                )
             if (
                 scaling_mode != ScalingMode.MXFP8_1D_SCALING
                 and not is_fp8_gemm_with_all_layouts_supported()
             ):
-                assert not lhs_is_transposed and rhs_is_transposed, (
-                    "cuBLAS FP8 GEMM on devices with compute capability < 10.0 (Hopper) "
-                    "require non-transposed LHS and transposed RHS operands "
-                    "(`contracting_dims=((-1, ), (-1, ))`)."
-                )
+                if lhs_is_transposed or not rhs_is_transposed:
+                    raise ValueError(
+                        "cuBLAS FP8 GEMM on devices with compute capability < 10.0 (Hopper) "
+                        "require non-transposed LHS and transposed RHS operands "
+                        "(`contracting_dims=((-1, ), (-1, ))`)."
+                    )
         else:
-            assert lhs.dtype == rhs.dtype, (
-                "For TE cuBLAS GEMM for non-quantized inputs, the operand dtypes must be equal."
-                f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
-            )
+            if lhs.dtype != rhs.dtype:
+                raise ValueError(
+                    "For TE cuBLAS GEMM for non-quantized inputs, the operand dtypes must be equal."
+                    f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
+                )
 
         # Determine output shape and dtype
-        assert (
-            dtypes.canonicalize_dtype(out_dtype).itemsize > 1
-        ), "cuBLAS GEMM custom op does not support 8-bit quantized output types."
+        if not dtypes.canonicalize_dtype(out_dtype).itemsize > 1:
+            raise ValueError("cuBLAS GEMM custom op does not support 8-bit quantized output types.")
         lhs_non_contracting_shape, rhs_non_contracting_shape = map(
             lambda shape, dims: [shape[dim] for dim in range(len(shape)) if dim not in dims],
             (lhs.shape, rhs.shape),
@@ -485,7 +517,8 @@ class GemmPrimitive(BasePrimitive):
 
         # Adjust output shape for comm+GEMM overlap
         if not collective_op.is_none and not is_outer:  # Inner abstract
-            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            if sequence_dim != 1:
+                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
             overlap_out_shape = list(out_shape).copy()
             if collective_op.is_all_gather:
                 overlap_out_shape[1] *= tpsp_axis_size()
@@ -493,44 +526,33 @@ class GemmPrimitive(BasePrimitive):
                 overlap_out_shape[sequence_dim] = (
                     overlap_out_shape[sequence_dim] // tpsp_axis_size()
                 )
-            assert out_dtype == jnp.bfloat16, f"Unsupported out_dtype={out_dtype}"
+            if out_dtype != jnp.bfloat16:
+                raise ValueError(f"Unsupported out_dtype={out_dtype}")
             output = jax.core.ShapedArray(shape=overlap_out_shape, dtype=out_dtype)
 
-        # Validate bias
-        if fuse_bias:
-            assert bias.shape == tuple(rhs_non_contracting_shape), (
-                "cuBLAS GEMM bias tensor has incorrect shape, "
-                f"expected ({tuple(rhs_non_contracting_shape)}, ) but found {bias.shape}."
-            )
-            assert bias.dtype == out_dtype, (
-                "cuBLAS GEMM bias tensor has incorrect data type, "
-                f"expected {out_dtype} but found {bias.dtype}."
-            )
-        # WAR: allocate dbias regardless of fuse_bias so that the sharding propagation works as we
-        # change the fuse_bias value in the sharded_impl
-        dbias_shape = bias.shape if grad else (0,)
-        bias_grad = jax.core.ShapedArray(shape=dbias_shape, dtype=bias.dtype)
+        # Validate bias when present (bias.size > 0 means fuse bias)
+        if bias.size > 0:
+            if bias.shape != tuple(rhs_non_contracting_shape):
+                raise ValueError(
+                    "cuBLAS GEMM bias tensor has incorrect shape, "
+                    f"expected ({tuple(rhs_non_contracting_shape)}, ) but found {bias.shape}."
+                )
+            if bias.dtype != out_dtype:
+                raise ValueError(
+                    "cuBLAS GEMM bias tensor has incorrect data type, "
+                    f"expected {out_dtype} but found {bias.dtype}."
+                )
 
-        # Validate pre-GeLU
-        pre_gelu_shape = (0,)
-        pre_gelu_dtype = out_dtype
-        if fuse_gelu:
-            pre_gelu_shape = out_shape
-            if grad:
-                pre_gelu_ndim = len(pre_gelu_shape)
-                assert gelu_input.ndim == pre_gelu_shape and all(
-                    gelu_input.shape[i] == pre_gelu_shape[i] for i in range(pre_gelu_ndim)
-                ), (
-                    "cuBLAS GEMM pre-GeLU tensor has incorrect shape, "
-                    f"expected {pre_gelu_shape} but found {gelu_input.shape}."
-                )
-                assert gelu_input.dtype == out_dtype, (
-                    "cuBLAS GEMM pre-GeLU tensor has incorrect data type, "
-                    f"expected {pre_gelu_dtype} but found {gelu_input.dtype}."
-                )
-        pre_gelu_out = jax.core.ShapedArray(shape=pre_gelu_shape, dtype=pre_gelu_dtype)
-        assert alpha.size == 1 and alpha.dtype == jnp.float32
-        assert beta.size == 1 and beta.dtype == jnp.float32
+        if alpha.size != 1 or alpha.dtype != jnp.float32:
+            raise ValueError(
+                f"Expected alpha to be a single float32 scalar, but got alpha.size={alpha.size},"
+                f" alpha.dtype={alpha.dtype}"
+            )
+        if beta.size != 1 or beta.dtype != jnp.float32:
+            raise ValueError(
+                f"Expected beta to be a single float32 scalar, but got beta.size={beta.size},"
+                f" beta.dtype={beta.dtype}"
+            )
 
         # Declare cuBLAS workspace
         workspace_size = get_cublas_workspace_size_bytes()
@@ -544,12 +566,12 @@ class GemmPrimitive(BasePrimitive):
         workspace_size += 256
         workspace = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
-        return output, bias_grad, pre_gelu_out, workspace
+        return output, workspace
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        outputs = GemmPrimitive.abstract(*args, **kwargs)
-        return outputs[:-1]  # discard workspace array
+        output, _ = GemmPrimitive.abstract(*args, **kwargs)
+        return (output,)
 
     @staticmethod
     def lowering(
@@ -559,15 +581,11 @@ class GemmPrimitive(BasePrimitive):
         rhs,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -582,53 +600,18 @@ class GemmPrimitive(BasePrimitive):
             (lhs_aval.ndim, rhs_aval.ndim), (lhs_cdims, rhs_cdims)
         )
 
-        lhs_axis_boundary = get_lhs_axis_boundary(lhs_cdims, lhs_transposed)
-        lhs_contracting_size = (
-            reduce(operator.mul, lhs_aval.shape[lhs_axis_boundary:])
-            if lhs_transposed
-            else reduce(operator.mul, lhs_aval.shape[:lhs_axis_boundary])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            lhs_contracting_size,
-            "LHS",
-        )
-        rhs_axis_boundary = get_rhs_axis_boundary(rhs_cdims, rhs_transposed)
-        rhs_contracting_size = (
-            reduce(operator.mul, rhs_aval.shape[:rhs_axis_boundary])
-            if rhs_transposed
-            else reduce(operator.mul, rhs_aval.shape[rhs_axis_boundary:])
-        )
-        assert_cublas_requirements(
-            scaling_mode,
-            rhs_contracting_size,
-            "RHS",
-        )
-
-        args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta)
+        args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta)
         kwargs = {
             "scaling_mode": int(scaling_mode.value),
+            "collective_op": int(collective_op.value),
             "lhs_axis_boundary": get_lhs_axis_boundary(lhs_cdims, lhs_transposed),
             "rhs_axis_boundary": get_rhs_axis_boundary(rhs_cdims, rhs_transposed),
             "lhs_transposed": lhs_transposed,
             "rhs_transposed": rhs_transposed,
-            "fuse_bias": fuse_bias,
-            "fuse_gelu": fuse_gelu,
-            "grad": grad,
             "use_split_accumulator": use_split_accumulator,
-            "collective_op": int(collective_op.value),
         }
 
-        operand_output_aliases = {}
-        if grad:
-            operand_output_aliases.update({4: 1})  # bias <-> bias_grad
-        if fuse_gelu and grad:
-            operand_output_aliases.update({5: 2})  # gelu_input <-> pre_gelu_out
-
-        return jax.ffi.ffi_lowering(
-            GemmPrimitive.name,
-            operand_output_aliases=operand_output_aliases,
-        )(ctx, *args, **kwargs)
+        return jax.ffi.ffi_lowering(GemmPrimitive.name)(ctx, *args, config=kwargs)
 
     @staticmethod
     def impl(
@@ -637,15 +620,11 @@ class GemmPrimitive(BasePrimitive):
         rhs,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -666,6 +645,7 @@ class GemmPrimitive(BasePrimitive):
             rhs_scale_inv = apply_padding_to_scale_inv(
                 rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
             )
+
         # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
         if scaling_mode.is_mxfp8_scaling:
             lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
@@ -678,16 +658,19 @@ class GemmPrimitive(BasePrimitive):
             and not is_outer
             and not lhs.shape[0] == 1
         ):
-            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            if sequence_dim != 1:
+                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
             original_shape = lhs.shape
-            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
-                f"Original_shape[0]={original_shape[0]} is not divisible by"
-                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-            )
-            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
-                f"Original_shape[1]={original_shape[1]} is not divisible by"
-                f" tpsp_axis_size()={tpsp_axis_size()}"
-            )
+            if original_shape[0] % dp_or_fsdp_axis_size() != 0 and original_shape[0] != 1:
+                raise ValueError(
+                    f"Original_shape[0]={original_shape[0]} is not divisible by"
+                    f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+                )
+            if original_shape[1] % tpsp_axis_size() != 0 and original_shape[1] != 1:
+                raise ValueError(
+                    f"Original_shape[1]={original_shape[1]} is not divisible by"
+                    f" tpsp_axis_size()={tpsp_axis_size()}"
+                )
             reshaped = lhs.reshape(
                 dp_or_fsdp_axis_size(),
                 int(original_shape[0] / dp_or_fsdp_axis_size()),
@@ -698,26 +681,22 @@ class GemmPrimitive(BasePrimitive):
             reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
             lhs = reordered.reshape(original_shape)
 
-        (output, bias_grad, pre_gelu_out, _) = GemmPrimitive.inner_primitive.bind(
+        (output, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
             lhs_scale_inv,
             rhs,
             rhs_scale_inv,
             bias,
-            gelu_input,
             alpha,
             beta,
             out_dtype=out_dtype,
             contracting_dims=contracting_dims,
             scaling_mode=scaling_mode,
-            fuse_bias=fuse_bias,
-            fuse_gelu=fuse_gelu,
-            grad=grad,
             use_split_accumulator=use_split_accumulator,
-            collective_op=collective_op,
             transpose_batch_sequence=transpose_batch_sequence,
             sequence_dim=sequence_dim,
             is_outer=is_outer,
+            collective_op=collective_op,
         )
         # Alter output blocks for CGEMM AG
         if (
@@ -726,16 +705,19 @@ class GemmPrimitive(BasePrimitive):
             and not is_outer
             and not output.shape[0] == 1
         ):
-            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            if sequence_dim != 1:
+                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
             original_shape = output.shape
-            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
-                f"Original_shape[0]={original_shape[0]} is not divisible by"
-                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-            )
-            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
-                f"Original_shape[1]={original_shape[1]} is not divisible by"
-                f" tpsp_axis_size()={tpsp_axis_size()}"
-            )
+            if original_shape[0] % dp_or_fsdp_axis_size() != 0 and original_shape[0] != 1:
+                raise ValueError(
+                    f"Original_shape[0]={original_shape[0]} is not divisible by"
+                    f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+                )
+            if original_shape[1] % tpsp_axis_size() != 0 and original_shape[1] != 1:
+                raise ValueError(
+                    f"Original_shape[1]={original_shape[1]} is not divisible by"
+                    f" tpsp_axis_size()={tpsp_axis_size()}"
+                )
             reshaped = output.reshape(
                 tpsp_axis_size(),
                 dp_or_fsdp_axis_size(),
@@ -746,7 +728,7 @@ class GemmPrimitive(BasePrimitive):
             reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
             output = reordered.reshape(original_shape)
 
-        return [output, bias_grad, pre_gelu_out]
+        return (output,)
 
     @staticmethod
     def outer_impl(
@@ -755,15 +737,11 @@ class GemmPrimitive(BasePrimitive):
         rhs,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -776,15 +754,11 @@ class GemmPrimitive(BasePrimitive):
             rhs,
             rhs_scale_inv,
             bias,
-            gelu_input,
             alpha,
             beta,
             out_dtype,
             contracting_dims,
             scaling_mode,
-            fuse_bias,
-            fuse_gelu,
-            grad,
             use_split_accumulator,
             transpose_batch_sequence,
             sequence_dim,
@@ -799,9 +773,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         collective_op,
         transpose_batch_sequence,
@@ -809,22 +780,16 @@ class GemmPrimitive(BasePrimitive):
         is_outer,
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
-        assert GemmPrimitive.outer_primitive is not None
+        if GemmPrimitive.outer_primitive is None:
+            raise RuntimeError("GemmPrimitive.outer_primitive has not been registered")
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
         # Batched GEMM is not supported
-        assert (
-            lhs_bdims is None and rhs_bdims is None
-        ), f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
+        if not (lhs_bdims is None and rhs_bdims is None):
+            raise RuntimeError(
+                f"Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
+            )
         out_bdims = (None,)
-
-        # Bias gradient is never batched
-        bias_bdims = (None,)
-
-        # Pre-GeLU output, if exists, is batched like GEMM output
-        pre_gelu_bdims = (None,)
-        if fuse_gelu and not grad:
-            pre_gelu_bdims = out_bdims
 
         return (
             GemmPrimitive.outer_primitive.bind(
@@ -832,16 +797,13 @@ class GemmPrimitive(BasePrimitive):
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
                 scaling_mode=scaling_mode,
-                fuse_bias=fuse_bias,
-                fuse_gelu=fuse_gelu,
-                grad=grad,
                 use_split_accumulator=use_split_accumulator,
                 collective_op=collective_op,
                 transpose_batch_sequence=transpose_batch_sequence,
                 sequence_dim=sequence_dim,
                 is_outer=is_outer,
             ),
-            (out_bdims, bias_bdims, pre_gelu_bdims),
+            (out_bdims,),
         )
 
     @staticmethod
@@ -881,7 +843,8 @@ class GemmPrimitive(BasePrimitive):
         for l in lhs_cspecs:
             for r in rhs_cspecs:
                 if l is not None and l == r:
-                    assert reduce_spec is None, "Multiple reduce dimension is detected!"
+                    if reduce_spec is not None:
+                        raise RuntimeError("Multiple reduce dimension is detected!")
                     reduce_spec = l
 
         sequence_dim = None
@@ -897,18 +860,20 @@ class GemmPrimitive(BasePrimitive):
                     " Please check your sharding configuration."
                 ) from exc
             sequence_dim = tpsp_idx
-            assert (sequence_dim == 1) ^ transpose_batch_sequence, (
-                "CollectiveGEMM supports only (sequence_dim=1 and transpose_batch_sequence=False)"
-                " or (sequence_dim=0 and transpose_batch_sequence=True). Received:"
-                f" sequence_dim={sequence_dim},"
-                f" transpose_batch_sequence={transpose_batch_sequence}."
-            )
+            if not (sequence_dim == 1) ^ transpose_batch_sequence:
+                raise ValueError(
+                    "CollectiveGEMM supports only (sequence_dim=1 and"
+                    " transpose_batch_sequence=False) or (sequence_dim=0 and"
+                    f" transpose_batch_sequence=True). Received: sequence_dim={sequence_dim},"
+                    f" transpose_batch_sequence={transpose_batch_sequence}."
+                )
 
         elif collective_op.is_reduce_scatter:
-            assert reduce_spec == gsr.tpsp_resource, (
-                "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
-                f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
-            )
+            if reduce_spec != gsr.tpsp_resource:
+                raise ValueError(
+                    "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
+                    f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
+                )
             sequence_dim = int(not transpose_batch_sequence)
 
         if reduce_spec is not None:
@@ -961,14 +926,18 @@ class GemmPrimitive(BasePrimitive):
 
         # Only do AG Sequence dim if not Overlap RS
         if collective_op.is_all_gather:
-            assert sequence_dim <= len(
-                lhs_non_cspecs
-            ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
+            if sequence_dim > len(lhs_non_cspecs):
+                raise ValueError(
+                    f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs:"
+                    f" {lhs_non_cspecs}"
+                )
             out_specs = out_specs[:sequence_dim] + (None,) + out_specs[sequence_dim + 1 :]
         elif collective_op.is_reduce_scatter:
-            assert sequence_dim <= len(
-                lhs_non_cspecs
-            ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
+            if sequence_dim > len(lhs_non_cspecs):
+                raise ValueError(
+                    f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs:"
+                    f" {lhs_non_cspecs}"
+                )
             out_specs = (
                 out_specs[:sequence_dim] + (gsr.tpsp_resource,) + out_specs[sequence_dim + 1 :]
             )
@@ -983,16 +952,16 @@ class GemmPrimitive(BasePrimitive):
             (lhs_non_cspecs, rhs_non_cspecs),
         )
 
-        # Bias and Pre-GeLU sharding is based on GEMM output before any scatter
-        bias_specs = tuple(list(rhs_non_cspecs).copy())
-        gelu_specs = tuple(list(out_specs).copy())
+        # Bias sharding is based on GEMM output before any scatter
+        bias_specs = rhs_non_cspecs if arg_infos[4].size > 0 else (None,)  # bias is operand index 4
 
         if not collective_op.is_none:
-            assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            if sequence_dim < 0:
+                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
 
         return (
-            (lhs_specs, rhs_specs, bias_specs, gelu_specs),
-            (out_specs, bias_specs, gelu_specs),
+            (lhs_specs, rhs_specs, bias_specs),
+            out_specs,
             reduce_spec,
             sequence_dim,
         )
@@ -1002,9 +971,6 @@ class GemmPrimitive(BasePrimitive):
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -1023,33 +989,18 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim,
         )
 
-        (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
-            GemmPrimitive._parse_operand_output_specs(
-                arg_infos, contracting_dims, transpose_batch_sequence, collective_op
-            )
+        (_, out_specs, *_) = GemmPrimitive._parse_operand_output_specs(
+            arg_infos, contracting_dims, transpose_batch_sequence, collective_op
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
-        # Discard dbias gradient spec if there is no bias and grad fusion
-        if not (fuse_bias and grad):
-            dbias_specs = (None,)
-        dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_specs))
-
-        # Discard pre-GeLU output spec if there is no GeLU fusion
-        if not fuse_gelu:
-            pre_gelu_specs = (None,)
-        pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_specs))
-
-        return [out_sharding, dbias_sharding, pre_gelu_sharding]
+        return (out_sharding,)
 
     @staticmethod
     def partition(
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -1062,8 +1013,8 @@ class GemmPrimitive(BasePrimitive):
         del result_infos, is_outer, sequence_dim
 
         (
-            (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
-            (out_specs, dbias_specs, pre_gelu_specs),
+            (lhs_specs, rhs_specs, bias_input_specs),
+            out_specs,
             reduce_spec,
             inferred_sequence_dim,
         ) = GemmPrimitive._parse_operand_output_specs(
@@ -1084,50 +1035,31 @@ class GemmPrimitive(BasePrimitive):
             rhs_sharding if scaling_mode.is_1d_block_scaling() else none_sharding,
         )
 
-        # Discard bias input spec if there is no bias fusion
-        if not fuse_bias:
-            bias_input_specs = (None,)
+        # Bias
         arg_shardings += (NamedSharding(mesh, PartitionSpec(*bias_input_specs)),)
-
-        # Discard pre-GeLU input spec if there is no GeLU fusion
-        if not fuse_gelu:
-            gelu_input_specs = (None,)
-        arg_shardings += (NamedSharding(mesh, PartitionSpec(*gelu_input_specs)),)
 
         # Alpha, beta
         arg_shardings += (none_sharding, none_sharding)
 
         # Assemble output shardings
-        out_shardings = [NamedSharding(mesh, PartitionSpec(*out_specs))]
+        out_sharding = (NamedSharding(mesh, PartitionSpec(*out_specs)),)
 
-        # Discard bias gradient spec if there is no bias and grad fusion
-        if not (fuse_bias and grad):
-            dbias_specs = (None,)
-        out_shardings.append(NamedSharding(mesh, PartitionSpec(*dbias_specs)))
-
-        # Discard pre-GeLU output spec if there is no GeLU fusion
-        if not fuse_gelu:
-            pre_gelu_specs = (None,)
-        out_shardings.append(NamedSharding(mesh, PartitionSpec(*pre_gelu_specs)))
-
-        def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, alpha, beta):
+        def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, alpha, beta):
             # We should not fuse bias in the output reduction case
-            sharded_fuse_bias = fuse_bias and reduce_spec is None
-            outputs = GemmPrimitive.impl(
+            has_bias = bias.size > 0
+            fuse_bias = has_bias and reduce_spec is None
+            bias_for_impl = bias if fuse_bias else jnp.empty(0, dtype=bias.dtype)
+            (output,) = GemmPrimitive.impl(
                 lhs,
                 lhs_scale_inv,
                 rhs,
                 rhs_scale_inv,
-                bias,
-                gelu_input,
+                bias_for_impl,
                 alpha,
                 beta,
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
                 scaling_mode=scaling_mode,
-                fuse_bias=sharded_fuse_bias,
-                fuse_gelu=fuse_gelu,
-                grad=grad,
                 use_split_accumulator=use_split_accumulator,
                 transpose_batch_sequence=transpose_batch_sequence,
                 sequence_dim=inferred_sequence_dim,
@@ -1138,27 +1070,24 @@ class GemmPrimitive(BasePrimitive):
             if reduce_spec is not None:
                 if not collective_op.is_reduce_scatter:
                     if is_all_reduce_in_float32():  # For unittest only
-                        outputs[0] = jax.lax.psum(
-                            outputs[0].astype(jnp.float32), reduce_spec
-                        ).astype(out_dtype)
+                        output = jax.lax.psum(output.astype(jnp.float32), reduce_spec).astype(
+                            out_dtype
+                        )
                     else:
-                        outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
+                        output = jax.lax.psum(output, reduce_spec)
 
-                if fuse_bias:  # TODO(Phuong): rename fuse_bias to has_bias
-                    outputs[0] += bias
+                if has_bias:
+                    output += bias
 
-            return outputs
+            return (output,)
 
-        return mesh, _sharded_impl, out_shardings, arg_shardings
+        return mesh, _sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(
         out_dtype,
         contracting_dims,
         scaling_mode,
-        fuse_bias,
-        fuse_gelu,
-        grad,
         use_split_accumulator,
         transpose_batch_sequence,
         sequence_dim,
@@ -1218,11 +1147,10 @@ class GemmPrimitive(BasePrimitive):
         lhs_non_cspec = tuple(lhs_specs[i] for i in range(operand_ndims[0]) if i not in lhs_cdims)
         rhs_non_cspec = tuple(rhs_specs[i] for i in range(operand_ndims[1]) if i not in rhs_cdims)
         out_spec = (*lhs_non_cspec, *rhs_non_cspec)
-        bias_spec = rhs_non_cspec if fuse_bias else ("…4",)
-        gelu_spec = out_spec if fuse_gelu else ("…5",)
-        alpha_spec = ("_6",)
-        beta_spec = ("_7",)
-        dbias_spec = bias_spec if grad else ("…8")
+        bias_aval = operand_types[4]
+        bias_spec = rhs_non_cspec if math.prod(bias_aval.shape) > 0 else ("…4",)
+        alpha_spec = ("_5",)
+        beta_spec = ("_6",)
 
         return SdyShardingRule(
             operand_mappings=(
@@ -1231,55 +1159,29 @@ class GemmPrimitive(BasePrimitive):
                 rhs_specs,
                 rhs_scale_specs,
                 bias_spec,
-                gelu_spec,
                 alpha_spec,
                 beta_spec,
             ),
-            result_mappings=(
-                out_spec,
-                dbias_spec,
-                gelu_spec,
-            ),
+            result_mappings=(out_spec,),
         )
 
 
 register_primitive(GemmPrimitive)
 
 
-def gemm_uses_jax_dot() -> bool:
-    """Check if the GEMM call directs to the TE custom cuBLAS call or native JAX dot."""
-    return not GemmPrimitive.enabled()
-
-
+# TODO(Phuong): move this function down after GroupedGemmPrimitive after initial review. Keep it
+# here for now to minimize line changes.
 def _te_gemm(
     lhs: Union[jax.Array, ScaledTensor],
     rhs: Union[jax.Array, ScaledTensor],
     bias: jax.Array = None,
-    gelu_input: jax.Array = None,
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
-    fuse_bias: bool = False,
-    fuse_gelu: bool = False,
-    grad: bool = False,
-    use_split_accumulator: bool = None,
+    use_split_accumulator: bool = False,
     transpose_batch_sequence: bool = False,
     collective_op: CollectiveOp = CollectiveOp.NONE,
 ) -> Tuple[jax.Array, ...]:
-
-    if grad or fuse_gelu:
-        warnings.warn(
-            "GEMM + fused grad or fused gelu is not well tested and will be deprecated in the"
-            " future",
-            DeprecationWarning,
-        )
-
-    if use_split_accumulator is None:
-        # TODO(jberchtold): Rework GEMM API to provide the context here instead of relying on global state and also
-        # use context of the GEMM type so we can decide between fprop, dgrad, and wgrad
-        use_split_accumulator = get_quantize_config_with_recipe(
-            get_global_quantize_recipe()
-        ).FP8_2X_ACC_FPROP
 
     # Prepare non-quantized GEMM operands
     lhs_data = lhs
@@ -1297,10 +1199,11 @@ def _te_gemm(
     lhs_amax = rhs_amax = None
     # Extract GEMM custom op inputs from quantized operands
     if isinstance(lhs_q, ScaledTensor):
-        assert isinstance(rhs_q, ScaledTensor) or rhs_quantizer is not None, (
-            "cuBLAS GEMM with quantized LHS and non-quantized RHS operands requires a valid "
-            "`Quantizer` object to quantize the RHS operand."
-        )
+        if not isinstance(rhs_q, ScaledTensor) and rhs_quantizer is None:
+            raise ValueError(
+                "cuBLAS GEMM with quantized LHS and non-quantized RHS operands requires a valid "
+                "`Quantizer` object to quantize the RHS operand."
+            )
         if isinstance(lhs_q, ScaledTensor2x):
             # Choose the quantization of the contracting dimension(s)
             lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
@@ -1312,21 +1215,23 @@ def _te_gemm(
         lhs_amax = lhs_q.amax
 
     if isinstance(rhs_q, ScaledTensor):
-        assert isinstance(lhs_q, ScaledTensor) or lhs_quantizer is not None, (
-            "cuBLAS GEMM with non-quantized LHS and quantized RHS operands requires a valid "
-            "`Quantizer` object to quantize the LHS operand."
-        )
+        if not isinstance(lhs_q, ScaledTensor) and lhs_quantizer is None:
+            raise ValueError(
+                "cuBLAS GEMM with non-quantized LHS and quantized RHS operands requires a valid "
+                "`Quantizer` object to quantize the LHS operand."
+            )
         if isinstance(rhs_q, ScaledTensor2x):
             # Choose the quantization of the contracting dimension(s)
             rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_transposed else rhs_q.get_colwise_tensor()
-        assert (
+        if not (
             rhs_q.scaling_mode == lhs_q.scaling_mode
             or rhs_q.scaling_mode.is_nvfp4_scaling
             and lhs_q.scaling_mode.is_nvfp4_scaling
-        ), (
-            "cuBLAS GEMM quantized operands have mismatched scaling types, "
-            f"LHS:{lhs_q.scaling_mode} x RHS:{rhs_q.scaling_mode}."
-        )
+        ):
+            raise ValueError(
+                "cuBLAS GEMM quantized operands have mismatched scaling types, "
+                f"LHS:{lhs_q.scaling_mode} x RHS:{rhs_q.scaling_mode}."
+            )
         rhs_data = rhs_q.data
         rhs_scale_inv = rhs_q.scale_inv
         if rhs_q.data_layout == "T":
@@ -1336,39 +1241,34 @@ def _te_gemm(
     alpha = jnp.ones((1,), jnp.float32)
     beta = jnp.zeros((1,), jnp.float32)
     if scaling_mode.is_nvfp4_scaling:
-        assert lhs_amax is not None and rhs_amax is not None
+        if lhs_amax is None or rhs_amax is None:
+            raise ValueError("NVFP4 scaling requires non-None amax for both LHS and RHS operands")
         lhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(lhs_amax)
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs_amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
 
-    # Dummy empties for bias and gelu
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
-    if bias is None or not (fuse_bias and not grad):
+    if bias is None:
         bias = jnp.empty(0, dtype=out_dtype)
-    if gelu_input is None or not (fuse_gelu and grad):
-        gelu_input = jnp.empty(0, dtype=out_dtype)
 
-    return GemmPrimitive.outer_primitive.bind(
+    (output,) = GemmPrimitive.outer_primitive.bind(
         lhs_data,
         lhs_scale_inv,
         rhs_data,
         rhs_scale_inv,
         bias,
-        gelu_input,
         alpha,
         beta,
         out_dtype=out_dtype,
         contracting_dims=(lhs_cdims, rhs_cdims),
         scaling_mode=scaling_mode,
-        fuse_bias=fuse_bias,
-        fuse_gelu=fuse_gelu,
-        grad=grad,
         use_split_accumulator=use_split_accumulator,
         transpose_batch_sequence=transpose_batch_sequence,
         sequence_dim=-1,  #  Dummy value and will be set in the primitive
         is_outer=True,
         collective_op=collective_op,
     )
+    return output
 
 
 class GroupedGemmCopySizesPrimitive(BasePrimitive):
@@ -1417,7 +1317,10 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
         group_sizes,
         num_gemms,
     ):
-        assert GroupedGemmCopySizesPrimitive.inner_primitive is not None
+        if GroupedGemmCopySizesPrimitive.inner_primitive is None:
+            raise RuntimeError(
+                "GroupedGemmCopySizesPrimitive.inner_primitive has not been registered"
+            )
         out = GroupedGemmCopySizesPrimitive.inner_primitive.bind(
             group_sizes,
             num_gemms=num_gemms,
@@ -1430,12 +1333,15 @@ register_primitive(GroupedGemmCopySizesPrimitive)
 
 class GroupedGemmPrimitive(BasePrimitive):
     """
-    Primitive for grouped GEMM
+    Primitive for grouped GEMM using nvte_multi_tensor_gemm (supports all scaling modes) or nvte_grouped_gemm (supporting BF16).
     """
 
+    # args = lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, group_offset, unused_placeholder
     name = "te_grouped_gemm_ffi"
+    # args = lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, alpha, beta
+    name_graph_safe = "te_grouped_gemm_v2_ffi"
     multiple_results = True
-    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)
     inner_primitive = None
     outer_primitive = None
 
@@ -1447,8 +1353,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv_aval,
         bias_aval,
         group_sizes_aval,
-        group_offset_aval,
-        *,
+        *additional_args,  # group_offset_aval, unused_placeholder OR alpha_aval, beta_aval
         M,
         N,
         K,
@@ -1459,6 +1364,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
+        use_v2_ffi,
     ):
         """
         Grouped GEMM operation.
@@ -1470,7 +1376,11 @@ class GroupedGemmPrimitive(BasePrimitive):
             rhs_scale_inv: Right-hand side input scale_inv matrix, 1D flattened array
             bias: Bias matrix of shape (G, N)
             group_sizes: 1D array containing the sizes of each group
-            group_offset: 1D array containing offsets for each group (not yet implemented)
+            additional_args: Either
+                * group_offsets: 1D array containing offsets for each group (not yet implemented)
+                OR
+                * alpha: 1D array of shape (G,) containing alpha values for each group
+                * beta: 1D array of shape (G,) containing beta values for each group
             M: Number of rows in the output matrix
             N: Number of columns in the output matrix
             K: Number of columns in the left-hand side matrix
@@ -1485,10 +1395,66 @@ class GroupedGemmPrimitive(BasePrimitive):
         Returns:
             A jnp.ndarray containing the result of the grouped GEMM operation
         """
-        del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
+        del lhs_data_aval, rhs_data_aval, bias_aval
         del K, lhs_is_trans, rhs_is_trans, has_bias, use_async_d2h_group_sizes
+
+        num_groups = group_sizes_aval.size
+
+        cublas_workspace_aval = jax.core.ShapedArray(
+            shape=(
+                GroupedGemmPrimitive._compute_cublas_workspace_size(
+                    scaling_mode, lhs_scale_inv_aval, rhs_scale_inv_aval, use_v2_ffi
+                ),
+            ),
+            dtype=jnp.uint8,
+        )
+
+        out_shape = (M, N)
+        if is_grouped_dense_wgrad:
+            out_shape = (num_groups, M, N)
+        out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
+
+        if use_v2_ffi:
+            setup_workspace_aval = jax.core.ShapedArray(
+                shape=(get_grouped_gemm_setup_workspace_size(num_groups),), dtype=jnp.uint8
+            )
+            # Temporary buffer for int32 -> int64 conversion of group_sizes on device.
+            int64_workspace_size = num_groups * jnp.dtype(jnp.int64).itemsize
+            int64_workspace_aval = jax.core.ShapedArray(
+                shape=(int64_workspace_size,), dtype=jnp.uint8
+            )
+
+            if len(additional_args) != 2:
+                raise ValueError(
+                    "Expected additional_args to contain alpha, beta for the graph-safe grouped"
+                    f" GEMM primitive, but got {len(additional_args)} arguments."
+                )
+            alpha_aval, beta_aval = additional_args
+            if alpha_aval.shape != (num_groups,):
+                raise ValueError(f"Expected alpha shape {(num_groups,)}, got {alpha_aval.shape}")
+            if alpha_aval.dtype != jnp.float32:
+                raise ValueError(f"Expected alpha dtype float32, got {alpha_aval.dtype}")
+            if beta_aval.shape != (num_groups,):
+                raise ValueError(f"Expected beta shape {(num_groups,)}, got {beta_aval.shape}")
+            if beta_aval.dtype != jnp.float32:
+                raise ValueError(f"Expected beta dtype float32, got {beta_aval.dtype}")
+
+            return (out_aval, cublas_workspace_aval, setup_workspace_aval, int64_workspace_aval)
+
+        return (out_aval, cublas_workspace_aval)
+
+    @staticmethod
+    def _compute_cublas_workspace_size(
+        scaling_mode: ScalingMode,
+        lhs_scale_inv_aval,
+        rhs_scale_inv_aval,
+        use_v2_ffi: bool,
+    ):
+        """Compute the required cuBLAS workspace size based on the scaling mode and alignment requirements."""
+        stream_count = 1 if use_v2_ffi else num_cublas_streams
+
         # TODO(Phuong): move some shape checks from Cpp to here
-        workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
+        workspace_size = get_cublas_workspace_size_bytes() * stream_count
         workspace_alignment_padding = 256
         tensor_scaling_sinv_aligment = 16
         mxfp8_scaling_sinv_alignment_padding = 256
@@ -1507,18 +1473,12 @@ class GroupedGemmPrimitive(BasePrimitive):
             # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
             workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
             workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
-        workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
-
-        out_shape = (M, N)
-        if is_grouped_dense_wgrad:
-            out_shape = (group_sizes_aval.size, M, N)
-        out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
-        return (out_aval, workspace_aval)
+        return workspace_size
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        (out_aval, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
-        return (out_aval,)
+        (out, *_) = GroupedGemmPrimitive.abstract(*args, **kwargs)
+        return (out,)
 
     @staticmethod
     def lowering(
@@ -1534,9 +1494,24 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
+        use_v2_ffi,
     ):
         del out_dtype
-        return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
+        if use_v2_ffi:
+            ffi_name = GroupedGemmPrimitive.name_graph_safe
+            return jax.ffi.ffi_lowering(ffi_name)(
+                ctx,
+                *args,
+                M=M,
+                N=N,
+                K=K,
+                lhs_is_trans=lhs_is_trans,
+                rhs_is_trans=rhs_is_trans,
+                scaling_mode=scaling_mode.value,
+                is_grouped_dense_wgrad=is_grouped_dense_wgrad,
+            )
+        ffi_name = GroupedGemmPrimitive.name
+        return jax.ffi.ffi_lowering(ffi_name)(
             ctx,
             *args,
             M=M,
@@ -1558,7 +1533,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset,
+        additional_arg_0,  # group_offset (non-graph-safe) OR alpha (graph-safe)
+        additional_arg_1,  # unused placeholder (non-graph-safe) OR beta (graph-safe)
         M,
         N,
         K,
@@ -1569,16 +1545,22 @@ class GroupedGemmPrimitive(BasePrimitive):
         has_bias,
         is_grouped_dense_wgrad,
         use_async_d2h_group_sizes,
+        use_v2_ffi,
     ):
-        assert GroupedGemmPrimitive.inner_primitive is not None
-        (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
+        if GroupedGemmPrimitive.inner_primitive is None:
+            raise RuntimeError("GroupedGemmPrimitive.inner_primitive has not been registered")
+        if use_v2_ffi:
+            additional_args = (additional_arg_0, additional_arg_1)
+        else:
+            additional_args = (additional_arg_0,)
+        (out, *_) = GroupedGemmPrimitive.inner_primitive.bind(
             lhs_data,
             lhs_scale_inv,
             rhs_data,
             rhs_scale_inv,
             bias,
             group_sizes,
-            group_offset,
+            *additional_args,
             M=M,
             N=N,
             K=K,
@@ -1589,6 +1571,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             has_bias=has_bias,
             is_grouped_dense_wgrad=is_grouped_dense_wgrad,
             use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+            use_v2_ffi=use_v2_ffi,
         )
         return (out,)
 
@@ -1653,30 +1636,37 @@ def _jax_scaled_matmul(
     """
     JAX GEMM for MXFP8 via scaled_matmul
     """
-    assert rhs.scaling_mode in (
+    if rhs.scaling_mode not in (
         ScalingMode.MXFP8_1D_SCALING,
         ScalingMode.NVFP4_1D_SCALING,
         ScalingMode.NVFP4_2D_SCALING,
-    ), f"rhs does not have MXFP8 or NVFP4 scaling mode, got rhs.scaling_mode={rhs.scaling_mode}"
+    ):
+        raise ValueError(
+            "rhs does not have MXFP8 or NVFP4 scaling mode, got"
+            f" rhs.scaling_mode={rhs.scaling_mode}"
+        )
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
 
     expected_lhs_is_colwise = lhs_contract[-1] != lhs.data.ndim - 1
     expected_rhs_is_colwise = rhs_contract[-1] != rhs.data.ndim - 1
-    assert lhs.is_colwise is expected_lhs_is_colwise, (
-        f"LHS with unexpected quantize dimension.\nExpect is_colwise={expected_lhs_is_colwise}, got"
-        f" {lhs.is_colwise}"
-    )
-    assert rhs.is_colwise is expected_rhs_is_colwise, (
-        f"RHS with unexpected quantize dimension.\nExpect is_colwise={expected_rhs_is_colwise}, got"
-        f" {rhs.is_colwise}"
-    )
+    if lhs.is_colwise is not expected_lhs_is_colwise:
+        raise ValueError(
+            f"LHS with unexpected quantize dimension.\nExpect is_colwise={expected_lhs_is_colwise},"
+            f" got {lhs.is_colwise}"
+        )
+    if rhs.is_colwise is not expected_rhs_is_colwise:
+        raise ValueError(
+            f"RHS with unexpected quantize dimension.\nExpect is_colwise={expected_rhs_is_colwise},"
+            f" got {rhs.is_colwise}"
+        )
 
     if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         out_dtype = lhs.dq_dtype
-        assert (
-            lhs.data_layout == "N" and rhs.data_layout == "N"
-        ), f"Got lhs.data_layout={lhs.data_layout}, rhs.data_layout={rhs.data_layout}"
+        if not (lhs.data_layout == "N" and rhs.data_layout == "N"):
+            raise ValueError(
+                f"Got lhs.data_layout={lhs.data_layout}, rhs.data_layout={rhs.data_layout}"
+            )
     else:
         if lhs.data_layout == "T":
             lhs_contract = transpose_dims(
@@ -1708,7 +1698,8 @@ def _jax_scaled_matmul(
         lhs_3d, rhs_3d, lhs_scale_3d, rhs_scale_3d, preferred_element_type=out_dtype
     )
     if lhs.scaling_mode.is_nvfp4_scaling:
-        assert lhs.amax is not None and rhs.amax is not None
+        if lhs.amax is None or rhs.amax is None:
+            raise ValueError("NVFP4 scaling requires non-None amax for both LHS and RHS operands")
         lhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(lhs.amax)
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs.amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
@@ -1732,6 +1723,7 @@ def _jax_gemm(
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
+    use_split_accumulator: bool = False,
 ) -> jnp.ndarray:
     """
     FP8 GEMM via JAX
@@ -1740,15 +1732,10 @@ def _jax_gemm(
 
     def _jax_gemm_impl(lhs, rhs):
         if lhs.scaling_mode.is_tensor_scaling():
-            assert (
-                rhs.scaling_mode == lhs.scaling_mode
-            ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
-
-            # TODO(jberchtold): Rework GEMM API to provide the context here instead of relying on global state and also
-            # use context of the GEMM type so we can decide between fprop, dgrad, and wgrad
-            use_split_accumulator = get_quantize_config_with_recipe(
-                get_global_quantize_recipe()
-            ).FP8_2X_ACC_FPROP
+            if rhs.scaling_mode != lhs.scaling_mode:
+                raise ValueError(
+                    f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
+                )
 
             precision = (
                 jax.lax.Precision.HIGHEST if use_split_accumulator else jax.lax.Precision.DEFAULT
@@ -1779,6 +1766,7 @@ def _jax_gemm(
 def gemm(
     lhs: Union[jnp.ndarray, AbstractBaseTensor],
     rhs: Union[jnp.ndarray, AbstractBaseTensor],
+    bias: jnp.ndarray = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
@@ -1794,30 +1782,15 @@ def gemm(
         Left-hand side operand in the matrix multiplication.
     rhs: Union[jax.Array, ScaledTensor]
         Right-hand side operand in the matrix multiplication.
+    bias: jax.Array, default = None
+        Optional additive bias term. When provided (non-empty), bias is added to the result of the Matrix Multiplication operation.
+        This bias addition is fused when using the TE's custom call to cuBLAS GEMM.
+    contracting_dims: Tuple[Sequence[int], Sequence[int]], default = ((-1, ), (0, ))
+        Tuple of sequences representing the contracting dimensions of the operands.
     lhs_quantizer: Quantizer, default = None
         Object for down-casting the LHS operand for quantized GEMM.
     rhs_quantizer: Quantizer, default = None
         Object for down-casting the RHS operand for quantized GEMM.
-    contracting_dims: Tuple[Sequence[int], Sequence[int]], default = ((-1, ), (0, ))
-        Tuple of sequences representing the contracting dimensions of the operands.
-    bias: jax.Array, default = None
-        Optional additive bias term, required for forward GEMM with bias fusion. Only supported
-        with TE's custom call to cuBLAS GEMM.
-    gelu_input: jax.Array, default = None
-        Pre-GeLU output from forward GEMM, required for backward/grad GEMM with dGeLU fusion. Only
-        supported with TE's custom call to cuBLAS GEMM.
-    fuse_bias: bool, default = False
-        Enable bias addition in forward GEMM or bias gradient in backward GEMM. Only supported with
-        TE's custom call to cuBLAS GEMM.
-    fuse_gelu: bool, default = False
-        Enable GeLU activation in forward GEMM or GeLU gradient in backward GEMM. Only supported
-        with TE's custom call to cuBLAS GEMM.
-    grad: bool, default = False
-        Flag for switching bias and GeLU fusions from forward to backward mode. Only supported with
-        TE's custom call to cuBLAS GEMM.
-    use_split_accumulator: bool, default = True
-        Enable promoting some intermediate sums to higher precision when accumulating the result in
-        the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
     transpose_batch_sequence: bool, default = False
         Transpose the batch and sequence dimensions of the input tensor.
     collective_op: CollectiveOp, default = CollectiveOp.NONE
@@ -1826,18 +1799,7 @@ def gemm(
     Returns
     -------
     jax.Array:
-        Result of the operation. For TE's custom call to cuBLAS GEMM, this result can include the
-        GeLU application when `fuse_gelu=True` and `grad=False`, the GeLU gradient contribution
-        when `fuse_gelu=True` and `grad=True`, and the additive bias when `fuse_bias=True` and
-        `grad=False`.
-    Optional[jax.Array]:
-        Bias gradient when `fuse_bias=True` and `grad=True`. Only supported with TE's custom call
-        to cuBLAS GEMM.
-    Optional[jax.Array]:
-        Pre-GeLU GEMM output when `fuse_gelu=True` and `grad=False`. This is required as an input
-        to `_te_gemm()` with `fuse_gelu=True` and `grad=True` in the backward pass in order to
-        compute the GeLU contribution to the gradient. Only supported with TE's custom call to
-        cuBLAS GEMM.
+        Result of the operation lhs * rhs + bias.
     """
     if isinstance(lhs, NoScaleTensor):
         lhs = lhs.data
@@ -1851,45 +1813,34 @@ def gemm(
             lhs_quantizer = quantizer_set.x
             rhs_quantizer = quantizer_set.kernel
 
-    # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
-    # TODO(Phuong): fuse_bias -> has_bias and has_bias = bias is not None
-    fuse_bias = kwargs.get("fuse_bias", False)
-    fuse_gelu = kwargs.get("fuse_gelu", False)
-    if not GemmPrimitive.enabled():
-        assert kwargs.get("bias", None) is None and not fuse_gelu, (
-            "TE GEMM was invoked with bias fusion options that are not supported by the "
-            "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backends used when the custom cuBLAS "
-            "GEMM primitive is disabled."
-        )
-        assert kwargs.get("gelu_input", None) is None and not fuse_bias, (
-            "TE GEMM was invoked with GeLU fusion options that are not supported by the "
-            "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backends used when the custom cuBLAS "
-            "GEMM primitive is disabled."
-        )
-        assert collective_op.is_none, "JAX GEMM does not support collective GEMM"
-        return _jax_gemm(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer)
+    # This option enable promoting some intermediate sums to higher precision when accumulating the result in
+    # the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
+    use_split_accumulator = _get_high_precision_accumulation_from_env()
 
-    outputs = _te_gemm(
+    # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
+    if not GemmPrimitive.enabled():
+        if not collective_op.is_none:
+            raise RuntimeError("JAX GEMM does not support collective GEMM")
+        output = _jax_gemm(
+            lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer, use_split_accumulator
+        )
+        if bias is not None:
+            output += bias  # Unfused
+        return output
+
+    output = _te_gemm(
         lhs,
         rhs,
+        bias,
         lhs_quantizer=lhs_quantizer,
         rhs_quantizer=rhs_quantizer,
         contracting_dims=contracting_dims,
+        use_split_accumulator=use_split_accumulator,
         transpose_batch_sequence=transpose_batch_sequence,
         collective_op=collective_op,
-        **kwargs,
     )
 
-    # Discard empty outputs
-    grad = kwargs.get("grad", False)
-    clean_outputs = outputs[0]  # first output is the final result and is never empty
-    if (fuse_bias and grad) or (fuse_gelu and not grad):
-        clean_outputs = (outputs[0],)
-        if fuse_bias and grad:  # only return bias gradient if it exists
-            clean_outputs += (outputs[1],)
-        if fuse_gelu and not grad:  # only return pre-GeLU output if it exists
-            clean_outputs += (outputs[2],)
-    return clean_outputs
+    return output
 
 
 def grouped_gemm_copy_group_sizes(
@@ -1908,6 +1859,23 @@ def grouped_gemm_copy_group_sizes(
         num_gemms=num_gemms,
     )
     return out
+
+
+def _can_use_v2_grouped_gemm(
+    scaling_mode: ScalingMode,
+    dtype: jnp.dtype,
+    has_bias: bool,
+) -> bool:
+    """Determine whether the cuda-graphable grouped GEMM implementation can be used based on the input parameters."""
+    # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
+    # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
+    # feature-compatible with the main branch.
+    # Bias can be supported in a kernel or in pure-JAX in the future.
+
+    if not _v2_grouped_gemm_available:
+        return False
+
+    return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
 
 
 def grouped_gemm(
@@ -1944,14 +1912,15 @@ def grouped_gemm(
         lhs: [M, K] or [K, N]
         rhs: [G, N, K] or [G, K, N] or [G * K, N] or [N, G * K]
     """
-    # TODO(Phuong): implement the group_offset
-    group_offset = group_offset or jnp.zeros((1,), jnp.int32)
 
     # TODO(Phuong): implement the precision
     del precision
 
     if isinstance(lhs, jnp.ndarray):
-        assert isinstance(rhs, jnp.ndarray)
+        if not isinstance(rhs, jnp.ndarray):
+            raise TypeError(
+                f"Expected rhs to be jnp.ndarray when lhs is jnp.ndarray, but got type={type(rhs)}"
+            )
         out_dtype = lhs.dtype
         lhs_shape = lhs.shape
         rhs_shape = rhs.shape
@@ -1960,7 +1929,11 @@ def grouped_gemm(
         lhs_scale_inv = rhs_scale_inv = jnp.empty((0,), jnp.float32)
         scaling_mode = ScalingMode.NO_SCALING
     elif isinstance(lhs, GroupedScaledTensor1x):
-        assert isinstance(rhs, GroupedScaledTensor1x)
+        if not isinstance(rhs, GroupedScaledTensor1x):
+            raise TypeError(
+                "Expected rhs to be GroupedScaledTensor1x when lhs is GroupedScaledTensor1x, but"
+                f" got type={type(rhs)}"
+            )
         out_dtype = lhs.dq_dtype
         lhs_shape = lhs.original_shape
         rhs_shape = rhs.original_shape
@@ -1968,7 +1941,11 @@ def grouped_gemm(
         rhs_data = rhs.data
         lhs_scale_inv = lhs.scale_inv
         rhs_scale_inv = rhs.scale_inv
-        assert lhs.scaling_mode == rhs.scaling_mode
+        if lhs.scaling_mode != rhs.scaling_mode:
+            raise ValueError(
+                f"Mismatched scaling modes: lhs.scaling_mode={lhs.scaling_mode},"
+                f" rhs.scaling_mode={rhs.scaling_mode}"
+            )
         scaling_mode = lhs.scaling_mode
     else:
         raise TypeError("Unsupported lhs type object!")
@@ -2005,8 +1982,16 @@ def grouped_gemm(
         and not isinstance(rhs, ScaledTensor)
         and quantizer_set != noop_quantizer_set
     ):
-        assert isinstance(quantizer_set.x, GroupedQuantizer)
-        assert type(quantizer_set.x) is type(quantizer_set.kernel)
+        if not isinstance(quantizer_set.x, GroupedQuantizer):
+            raise TypeError(
+                "Expected quantizer_set.x to be GroupedQuantizer, but got"
+                f" type={type(quantizer_set.x)}"
+            )
+        if type(quantizer_set.x) is not type(quantizer_set.kernel):
+            raise TypeError(
+                "Expected quantizer_set.x and quantizer_set.kernel to have the same type, but got"
+                f" {type(quantizer_set.x)} and {type(quantizer_set.kernel)}"
+            )
         scaling_mode = quantizer_set.x.scaling_mode
         if (
             quantizer_set.x.scaling_mode.is_tensor_scaling()
@@ -2033,9 +2018,8 @@ def grouped_gemm(
         lhs_shape = lhs_q.original_shape
         rhs_shape = rhs_q.original_shape
 
-    assert not (
-        lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2
-    ), "FP8 GEMM does not support E5M2 * E5M2"
+    if lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2:
+        raise ValueError("FP8 GEMM does not support E5M2 * E5M2")
 
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
@@ -2048,12 +2032,10 @@ def grouped_gemm(
             rhs_layout_is_T = rhs_q.data_layout == "T"
         # we can't apply _shape_normalization on the grouped input
         # thus we need to ensure that lhs is in N and rhs is in T
-        assert (
-            lhs_is_trans == lhs_layout_is_T
-        ), "lhs input must be transposed before calling grouped_gemm"
-        assert (
-            not rhs_is_trans == rhs_layout_is_T
-        ), "rhs input must be transposed before calling grouped_gemm"
+        if lhs_is_trans != lhs_layout_is_T:
+            raise RuntimeError("lhs input must be transposed before calling grouped_gemm")
+        if (not rhs_is_trans) != rhs_layout_is_T:
+            raise RuntimeError("rhs input must be transposed before calling grouped_gemm")
         lhs_is_trans = False
         rhs_is_trans = True
         lhs_ndim = len(lhs_shape)
@@ -2072,20 +2054,45 @@ def grouped_gemm(
     # Calling GroupedGEMM Custom Call
     K_lhs = math.prod(lhs_shape[i] for i in lhs_contract_dim)
     K_rhs = math.prod(rhs_shape[i] for i in rhs_contract_dim)
-    assert K_lhs == K_rhs
+    if K_lhs != K_rhs:
+        raise ValueError(
+            f"Mismatched contracting dimensions: K_lhs={K_lhs}, K_rhs={K_rhs} (from"
+            f" lhs_shape={lhs_shape}, rhs_shape={rhs_shape})"
+        )
     M = math.prod(_calculate_remaining_shape(lhs_shape, lhs_contract_dim))
     N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim)[1:])  # Exclude G
 
     if is_grouped_dense_wgrad:
         N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim))
     else:
-        assert group_sizes.size == rhs_shape[0]
-
-    assert group_offset.size == 1
+        if group_sizes.size != rhs_shape[0]:
+            raise ValueError(
+                "Expected group_sizes.size == rhs_shape[0], but got"
+                f" group_sizes.size={group_sizes.size}, rhs_shape[0]={rhs_shape[0]}"
+            )
 
     has_bias = bias is not None
-    assert not has_bias or bias.shape == (group_sizes.size, N)
+    if has_bias and bias.shape != (group_sizes.size, N):
+        raise ValueError(
+            f"Expected bias.shape=({group_sizes.size}, {N}), but got bias.shape={bias.shape}"
+        )
     bias = jnp.empty((), jnp.float32) if bias is None else bias
+
+    if group_offset is not None:
+        raise RuntimeError(
+            "group_offset is not supported yet and is instead computed"
+            " internally assuming contiguous grouping. Any padding is included in the group_sizes"
+            " and padded with zeros to not affect the result of the MoE block."
+        )
+
+    use_v2_ffi = _can_use_v2_grouped_gemm(scaling_mode, lhs_data.dtype, has_bias)
+    if use_v2_ffi:
+        num_gemms = group_sizes.shape[0]
+        additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
+        additional_arg_1 = jnp.zeros((num_gemms,), jnp.float32)  # beta
+    else:
+        additional_arg_0 = jnp.zeros((1,), jnp.int32)  # group_offset
+        additional_arg_1 = jnp.zeros((0,), jnp.int32)  # unused placeholder
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
@@ -2094,7 +2101,8 @@ def grouped_gemm(
         rhs_scale_inv,
         bias,
         group_sizes,
-        group_offset,
+        additional_arg_0,
+        additional_arg_1,
         M=M,
         N=N,
         K=K_lhs,
@@ -2105,5 +2113,6 @@ def grouped_gemm(
         has_bias=has_bias,
         is_grouped_dense_wgrad=is_grouped_dense_wgrad,
         use_async_d2h_group_sizes=use_async_d2h_group_sizes,
+        use_v2_ffi=use_v2_ffi,
     )
     return out
