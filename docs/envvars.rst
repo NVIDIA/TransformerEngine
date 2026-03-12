@@ -72,6 +72,12 @@ Build Configuration
    :Default: Not set
    :Description: Internal flag set to ``1`` during the build process to indicate that the project is being built. Not intended for external use.
 
+.. envvar:: NVTE_BUILD_NUM_PHILOX_ROUNDS
+
+   :Type: ``int`` (positive integer)
+   :Default: ``10``
+   :Description: Number of Philox4x32 rounds used by stochastic rounding kernels. Must be a positive integer.
+
 Optional Dependencies
 ^^^^^^^^^^^^^^^^^^^^^
 
