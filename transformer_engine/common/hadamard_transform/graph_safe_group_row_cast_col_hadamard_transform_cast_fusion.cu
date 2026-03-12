@@ -903,7 +903,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
 
             // Prepare stochastic rounding random state if enabled
             uint4 random_uint4 = uint4{0, 0, 0, 0};
-            transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+            transformer_engine::curanddx::detail::philox4x32_native_state<
+                NVTE_BUILD_NUM_PHILOX_ROUNDS>
+                rng;
             // "Prefetch" a stochastic rounding state for the first tile
             if constexpr (kEnableStochasticRounding) {
               const size_t rng_sequence = global_thread_idx + k_tile * 512 +
@@ -1059,7 +1061,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
             Tensor amax =
                 make_tensor<ElementAccumulator>(prepend(take<1, rank(tQArA)>(tQArA.shape()), _1{}));
             Tensor pvscales = make_tensor_like<ElementAccumulator>(amax);
-            transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+            transformer_engine::curanddx::detail::philox4x32_native_state<
+                NVTE_BUILD_NUM_PHILOX_ROUNDS>
+                rng;
             if constexpr (kEnableStochasticRounding) {
               const size_t rng_sequence = global_thread_idx + k_tile * 512 +
                                           scheduler.get_linear_tile_idx() * K_TILE_MAX * 512 +

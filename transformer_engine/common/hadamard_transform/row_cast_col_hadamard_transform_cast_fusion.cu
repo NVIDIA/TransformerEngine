@@ -813,7 +813,7 @@ __global__ static void row_col_rht_gemm_device(
           }
 
           uint4 random_uint4 = uint4{0, 0, 0, 0};
-          transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+          transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
           // "Prefetch" a stochastic rounding state for the first tile
           if constexpr (kEnableStochasticRounding) {
             const size_t rng_sequence = global_thread_idx + k_tile * 512 + scheduler.get_linear_tile_idx() * K_TILE_MAX * 512;
@@ -943,7 +943,7 @@ __global__ static void row_col_rht_gemm_device(
           cutlass::maximum_absolute_value_reduction<cutlass::Array<ElementAccumulator, VectorSize>, true> amax_reduction;
           auto compute_frgs = reinterpret_cast<cutlass::Array<TA, VectorSize> *>(tQArA.data());
           auto output_frgs = reinterpret_cast<cutlass::Array<TQA, VectorSize> *>(raw_pointer_cast(tQArQA.data()));
-          transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+          transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
           if constexpr (kEnableStochasticRounding) {
             const size_t rng_sequence = global_thread_idx + k_tile * 512 + scheduler.get_linear_tile_idx() * K_TILE_MAX * 512;
             rng.init(rng_seed, rng_sequence, rng_offset);
