@@ -403,7 +403,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         data = self._rowwise_data if self._rowwise_data is not None else self._columnwise_data
         if data is not None:
             return data.untyped_storage()
-        return torch.UntypedStorage(0, device=self.device)
+        return self._default_storage
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

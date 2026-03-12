@@ -98,9 +98,6 @@ def test_distributed(fp8_init, sharding_dims, fp_recipe, layer_type):
             f"Insufficient devices ({NUM_PROCS}) to test sharding configuration: {sharding_dims}"
         )
 
-    if fp_recipe in ("Float8BlockScaling", "NVFP4BlockScaling") and fp8_init:
-        pytest.xfail(f"{fp_recipe} + fp8_init: test_fp8_fsdp2_allgather is currently failing.")
-
     _run_test(fp8_init, sharding_dims, fp_recipe, layer_type)
 
 
