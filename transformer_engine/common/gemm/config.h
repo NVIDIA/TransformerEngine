@@ -44,7 +44,7 @@ struct GroupedMatmulConfig {
   // Number of streaming multiprocessors to use in GEMM kernel
   int sm_count = 0;
 
-  // Whether to use split accumulator for FP8 GEMM
+  // Split accumulator mode. Only taken into account on Hopper.
   bool use_split_accumulator = false;
 
   // Note: API transfers the value type, not std::optional

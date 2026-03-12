@@ -2868,8 +2868,6 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
-    if case == "discrete_in" and not accumulate:
-        pytest.xfail("discrete_in accumulate=False not supported yet.")
     torch.manual_seed(0)
 
     dtype = torch.bfloat16
@@ -3047,9 +3045,10 @@ def _make_grouped_tensor_quantized_mxfp8(
 )
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("case", ["no_discrete", "discrete_in", "discrete_out"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_grouped_gemm_grouped_tensor_mxfp8(
-    shape, accumulate, layout: str, dtype: torch.dtype
+    shape, accumulate, layout: str, case: str, dtype: torch.dtype
 ) -> None:
     if tex.get_cublasLt_version() < 130200:
         pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
@@ -3057,6 +3056,7 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if dtype == torch.bfloat16 and not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
+
 
     torch.manual_seed(0)
     z, m, k, n = shape
@@ -3104,23 +3104,27 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
 
     device = A[0].device
 
-    if layout == "TN":
-        grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
-    elif layout == "NN":
-        grouped_out = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
-    else:  # layout == "NT"
-        grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+    grouped_out = None
+    if case != "discrete_out":
+        if layout == "TN":
+            grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
+        elif layout == "NN":
+            grouped_out = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+        else:  # layout == "NT"
+            grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+        _pack_grouped_tensor(grouped_out, out)
 
-    _pack_grouped_tensor(grouped_out, out)
+    grouped_out_input = out if case == "discrete_out" else grouped_out
+    grouped_A_input = A_fp8 if case == "discrete_in" else grouped_A
     general_grouped_gemm_for_grouped_tensor(
-        grouped_A,
+        grouped_A_input,
         grouped_B,
-        grouped_out,
+        grouped_out_input,
         layout=layout,
         accumulate=accumulate,
     )
 
-    out_grouped = grouped_out.split_into_quantized_tensors()
+    out_grouped = out if case == "discrete_out" else grouped_out.split_into_quantized_tensors()
     tols = dict(rtol=0.125, atol=0.0675)  # mxfp8 tolerance
 
     for o, o_ref in zip(out_grouped, out_ref):

@@ -1296,7 +1296,9 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     }
 
     // Mark as having swizzled scales (required for GEMM)
-    nvte_set_grouped_tensor_swizzled_scales(h, 1);
+    const uint8_t swizzled = 1;
+    nvte_set_grouped_tensor_param(h, kNVTEGroupedWithGEMMSwizzledScales, &swizzled,
+                                  sizeof(swizzled));
   }
 
   return grouped;

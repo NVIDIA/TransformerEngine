@@ -222,15 +222,14 @@ inline size_t validate_grouped_gemm_input_list(
   NVTE_CHECK(beta_numel == num_tensors, "Grouped GEMM: beta must have num_tensors (", num_tensors,
              ") elements, got ", beta_numel);
 
-  auto is_fp8_or_16bit = [](transformer_engine::DType dtype) {
+  auto is_supported_input_dtype = [](transformer_engine::DType dtype) {
     return dtype == transformer_engine::DType::kFloat8E4M3 ||
            dtype == transformer_engine::DType::kFloat8E5M2 ||
-           dtype == transformer_engine::DType::kBFloat16 ||
-           dtype == transformer_engine::DType::kFloat16;
+           dtype == transformer_engine::DType::kBFloat16;
   };
   bool dtype_ok = true;
   for (const auto *tensor : inputs) {
-    dtype_ok = dtype_ok && is_fp8_or_16bit(tensor->dtype());
+    dtype_ok = dtype_ok && is_supported_input_dtype(tensor->dtype());
   }
   NVTE_CHECK(dtype_ok, dtype_error);
   for (const auto *tensor : inputs) {
@@ -294,8 +293,7 @@ inline transformer_engine::GroupedMatmulConfig parse_grouped_gemm_config(
 struct GroupedOperandSelection {
   TensorShapeInfo shape;  // Shape info with dims already swapped for columnwise if needed
   char *dptr = nullptr;
-  void *scale_inv = nullptr;        // Contiguous array of scales (input)
-  void **scale_inv_ptrs = nullptr;  // Array of pointers to scales (output, for cuBLAS)
+  void *scale_inv = nullptr;  // Contiguous array of scales (input)
   transformer_engine::DType dtype = transformer_engine::DType::kNumTypes;
   NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   bool with_gemm_swizzled_scales = false;
@@ -555,7 +553,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
 
   // Validate scaling mode
   NVTE_CHECK(sm == NVTE_DELAYED_TENSOR_SCALING || mxfp8,
-             "Grouped GEMM is only supported with tensor scaling and MXFP8");
+             "Grouped GEMM is only supported with bf16, fp8 tensor scaling and MXFP8");
 
   const DType row_dtype = t->data.dtype;
   const DType col_dtype = t->columnwise_data.dtype;
@@ -568,12 +566,15 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   const bool is_fp8 = is_fp8_dtype(rep_dtype);
   const bool non_tn_fp8_ok = nvte_is_non_tn_fp8_gemm_supported();
 
-  // Helper to select columnwise storage (optionally swap dims)
-  auto use_columnwise = [&](bool swap_dims) {
+  // Helper to select columnwise storage.
+  // swap_dims=true (default): swap first/last dims in shape info (used when columnwise == transposed).
+  // swap_dims=false: keep original dims (MXFP8: columnwise data has different scale direction,
+  //                  but the logical matrix shape and transpose flag remain unchanged).
+  auto use_columnwise = [&](bool swap_dims = true) {
     sel.dptr = static_cast<char *>(t->columnwise_data.dptr);
     sel.scale_inv = t->columnwise_scale_inv.dptr;
     sel.dtype = col_dtype;
-    sel.shape = create_shape_info(t, /*swap_dims=*/swap_dims);
+    sel.shape = create_shape_info(t, swap_dims);
   };
 
   // Helper to select row-wise storage
@@ -625,7 +626,7 @@ inline void init_matrix_layouts(
 }
 
 inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOperation_t op_A,
-                             cublasOperation_t op_B, bool use_split_accumulator, bool use_fp8) {
+                             cublasOperation_t op_B, bool use_fp8, bool use_split_accumulator) {
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescInit(&matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &op_A,
@@ -645,76 +646,52 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
                                                    CUBLASLT_MATMUL_DESC_BETA_BATCH_STRIDE,
                                                    &alphabeta_batch_stride, sizeof(int64_t)));
 
-  // Fast accumulation mode: 0 = split accumulator (more accurate), 1 = fast accumulator
-  int8_t fastAccuMode = use_split_accumulator ? 0 : use_fp8;
+  // Fast accumulation is only supported for FP8 (mirrors non-grouped GEMM logic).
+  int8_t fastAccuMode = use_split_accumulator ? 0 : static_cast<int8_t>(use_fp8);
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
                                                    &fastAccuMode, sizeof(fastAccuMode)));
 }
 
-inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
-                                   const GroupedOperandSelection &A_sel,
-                                   const GroupedOperandSelection &B_sel) {
-  const bool is_fp8_a = is_fp8_dtype(A_sel.dtype);
-  const bool is_fp8_b = is_fp8_dtype(B_sel.dtype);
-  if (!is_fp8_a && !is_fp8_b) return;
-
-  const bool mxfp8_a = transformer_engine::is_mxfp_scaling(A_sel.scaling_mode);
-  const bool mxfp8_b = transformer_engine::is_mxfp_scaling(B_sel.scaling_mode);
-
+// Configures cuBLAS for MXFP8 grouped GEMM: sets VEC32_UE8M0 scale mode and scale pointers
+// for both A and B.
+inline void set_mxfp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
+                                     void **a_scale_inv_ptrs, void **b_scale_inv_ptrs) {
 #if CUBLAS_VERSION >= CUBLAS_MXFP8_GROUPED_GEMM_VERSION
-  // For MXFP8, verify scales are swizzled and set scale mode
-  if (mxfp8_a || mxfp8_b) {
-    NVTE_CHECK(transformer_engine::cuda::cublas_version() >= CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
-               "MXFP8 grouped GEMM requires cuBLAS ", CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
-               "+, but run-time cuBLAS version is ", transformer_engine::cuda::cublas_version());
-  }
-
-  if (mxfp8_a) {
-    NVTE_CHECK(A_sel.with_gemm_swizzled_scales,
-               "MXFP8 grouped GEMM: A scales must be swizzled for GEMM");
-    cublasLtMatmulMatrixScale_t scale_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
-                                                     &scale_mode_a, sizeof(scale_mode_a)));
-  }
-  if (mxfp8_b) {
-    NVTE_CHECK(B_sel.with_gemm_swizzled_scales,
-               "MXFP8 grouped GEMM: B scales must be swizzled for GEMM");
-    cublasLtMatmulMatrixScale_t scale_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
-                                                     &scale_mode_b, sizeof(scale_mode_b)));
-  }
+  NVTE_CHECK(transformer_engine::cuda::cublas_version() >= CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
+             "MXFP8 grouped GEMM requires cuBLAS ", CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
+             "+, but run-time cuBLAS version is ", transformer_engine::cuda::cublas_version());
+  const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
+                                                   &scale_mode, sizeof(scale_mode)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
+                                                   &scale_mode, sizeof(scale_mode)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                   &a_scale_inv_ptrs, sizeof(a_scale_inv_ptrs)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                   &b_scale_inv_ptrs, sizeof(b_scale_inv_ptrs)));
 #else
-  NVTE_CHECK(!mxfp8_a && !mxfp8_b, "MXFP8 grouped GEMM requires cuBLAS ",
-             CUBLAS_MXFP8_GROUPED_GEMM_VERSION, "+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION);
+  NVTE_CHECK(false, "MXFP8 grouped GEMM requires cuBLAS ", CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
+             "+, but compile-time cuBLAS version is ", CUBLAS_VERSION);
 #endif  // CUBLAS_VERSION >= CUBLAS_MXFP8_GROUPED_GEMM_VERSION
+}
 
-  if (is_fp8_a) {
-    NVTE_CHECK(A_sel.scale_inv != nullptr, "FP8 grouped GEMM: A scale_inv is required");
-    NVTE_CHECK(A_sel.scale_inv_ptrs != nullptr, "FP8 grouped GEMM: A scale_inv_ptrs is required");
-    if (!mxfp8_a) {
-      // Tensor scaling: PER_BATCH_SCALAR_32F for grouped GEMM with float** pointer array
-      cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_PER_BATCH_SCALAR_32F;
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-          &matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode, sizeof(scale_mode)));
-    }
-    void *a_scale_ptrs = A_sel.scale_inv_ptrs;
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        &matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale_ptrs, sizeof(a_scale_ptrs)));
-  }
-  if (is_fp8_b) {
-    NVTE_CHECK(B_sel.scale_inv != nullptr, "FP8 grouped GEMM: B scale_inv is required");
-    NVTE_CHECK(B_sel.scale_inv_ptrs != nullptr, "FP8 grouped GEMM: B scale_inv_ptrs is required");
-    if (!mxfp8_b) {
-      // Tensor scaling: PER_BATCH_SCALAR_32F for grouped GEMM with float** pointer array
-      cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_PER_BATCH_SCALAR_32F;
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-          &matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode, sizeof(scale_mode)));
-    }
-    void *b_scale_ptrs = B_sel.scale_inv_ptrs;
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        &matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale_ptrs, sizeof(b_scale_ptrs)));
-  }
+// Configures cuBLAS for tensor-scaling FP8 grouped GEMM: sets PER_BATCH_SCALAR_32F scale mode
+// and scale pointers for A and B. Both operands are guaranteed FP8 by the caller.
+inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc, void **a_scale_inv_ptrs,
+                                   void **b_scale_inv_ptrs) {
+  const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_PER_BATCH_SCALAR_32F;
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
+                                                   &scale_mode, sizeof(scale_mode)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                   &a_scale_inv_ptrs, sizeof(a_scale_inv_ptrs)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
+                                                   &scale_mode, sizeof(scale_mode)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                   &b_scale_inv_ptrs, sizeof(b_scale_inv_ptrs)));
 }
 
 inline cublasLtMatmulAlgo_t select_grouped_gemm_algo(cublasLtHandle_t handle,
@@ -786,8 +763,14 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                       num_tensors);
 
   cublasLtMatmulDescOpaque_t matmulDesc;
-  init_matmul_desc(matmulDesc, op_A, op_B, use_split_accumulator, use_fp8);
-  set_fp8_scale_pointers(matmulDesc, A_sel, B_sel);
+  init_matmul_desc(matmulDesc, op_A, op_B, use_fp8, use_split_accumulator);
+  if (transformer_engine::is_mxfp_scaling(A_sel.scaling_mode)) {
+    set_mxfp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
+                             setup_workspace.b_scale_inv_ptrs);
+  } else if (use_fp8) {
+    set_fp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
+                           setup_workspace.b_scale_inv_ptrs);
+  }
 
   cublasLtMatmulAlgo_t algo = select_grouped_gemm_algo(handle, matmulDesc, descA, descB, descC,
                                                        descD, avg_m_val, avg_n_val, avg_k_val);
@@ -877,8 +860,8 @@ __global__ void setup_grouped_gemm_kernel(
     size_t b_elem_size, size_t c_elem_size, size_t d_elem_size, float *alpha_ptr, float *beta_ptr,
     // Scale inputs: for tensor scaling, pass float* and set mxfp8_base to nullptr
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
-    float *a_tensor_scale, float *b_tensor_scale, char *a_mxfp8_scale_base,
-    char *b_mxfp8_scale_base, size_t num_tensors, MultiTensorGroupGemmInputArgs a_multi_tensor_args,
+    float *a_scale_base, float *b_scale_base, NVTEScalingMode scaling_mode,
+    size_t num_tensors, MultiTensorGroupGemmInputArgs a_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs c_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs d_multi_tensor_args) {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -936,24 +919,33 @@ __global__ void setup_grouped_gemm_kernel(
   alpha_ptrs[idx] = alpha_ptr + idx;
   beta_ptrs[idx] = beta_ptr + idx;
 
-  // Fill FP8 scale pointers (per-matrix)
-  // For tensor scaling: one float per tensor, indexed by tensor index
-  // For MXFP8: E8M0 blocks, offset computed from data offset (1 scale byte per 32 elements)
-  a_scale_inv_ptrs[idx] = nullptr;
-  b_scale_inv_ptrs[idx] = nullptr;
-  if (a_tensor_scale) {
-    a_scale_inv_ptrs[idx] = a_tensor_scale + idx;
-  } else if (a_mxfp8_scale_base) {
-    int64_t a_scale_offset = a_offset / 32;
-    a_scale_inv_ptrs[idx] = a_mxfp8_scale_base + a_scale_offset;
-  } else if (has_a_multi_tensor && a_multi_tensor_args.scale_inv_ptrs[idx] != nullptr) {
+  // Fill scale pointers (per-matrix).
+  // The interpretation of the scale buffers depends on the shared scaling recipe:
+  //   NVTE_MXFP8_1D_SCALING : E8M0 byte stream; offset = data_offset / 32 elements
+  //   otherwise             : one float per tensor, indexed by tensor index
+  if (a_scale_base) {
+    if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      a_scale_inv_ptrs[idx] =
+          reinterpret_cast<void *>(static_cast<char *>(static_cast<void *>(a_scale_base)) +
+                                   a_offset / 32);
+    } else {
+      a_scale_inv_ptrs[idx] = static_cast<float *>(a_scale_base) + idx;
+    }
+  }
+  else {
     a_scale_inv_ptrs[idx] = a_multi_tensor_args.scale_inv_ptrs[idx];
   }
-  if (b_tensor_scale) {
-    b_scale_inv_ptrs[idx] = b_tensor_scale + idx;
-  } else if (b_mxfp8_scale_base) {
-    int64_t b_scale_offset = b_offset / 32;
-    b_scale_inv_ptrs[idx] = b_mxfp8_scale_base + b_scale_offset;
+  if (b_scale_base) {
+    if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      b_scale_inv_ptrs[idx] =
+          reinterpret_cast<void *>(static_cast<char *>(static_cast<void *>(b_scale_base)) +
+                                   b_offset / 32);
+    } else {
+      b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + idx;
+    }
+  }
+  else {
+    b_scale_inv_ptrs[idx] = a_multi_tensor_args.scale_inv_ptrs[idx];
   }
 }
 
@@ -1011,35 +1003,16 @@ inline void launch_grouped_gemm_setup(
   const int threads_per_block = 256;
   const int num_blocks = (num_tensors + threads_per_block - 1) / threads_per_block;
 
-  // Get scale pointers for FP8
-  // For tensor scaling: float* array indexed by tensor
-  // For MXFP8: char* base, kernel computes offsets from data offsets
-  float *a_tensor_scale = nullptr;
-  float *b_tensor_scale = nullptr;
-  char *a_mxfp8_scale_base = nullptr;
-  char *b_mxfp8_scale_base = nullptr;
-
-  if (a_base != nullptr) {
-    if (transformer_engine::is_mxfp_scaling(A_sel.scaling_mode)) {
-      a_mxfp8_scale_base = static_cast<char *>(A_sel.scale_inv);
-    } else if (A_sel.scale_inv) {
-      a_tensor_scale = static_cast<float *>(A_sel.scale_inv);
-    }
-  }
-  if (transformer_engine::is_mxfp_scaling(B_sel.scaling_mode)) {
-    b_mxfp8_scale_base = static_cast<char *>(B_sel.scale_inv);
-  } else if (B_sel.scale_inv) {
-    b_tensor_scale = static_cast<float *>(B_sel.scale_inv);
-  }
-
+  // A and B share the same scaling recipe (validated in validate_grouped_gemm_inputs).
+  // Pass scale buffers as void* and let the kernel interpret them via scaling_mode.
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
       ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
-      a_base, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size, b_elem_size,
-      c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
-      static_cast<float *>(beta_tensor->data.dptr), a_tensor_scale, b_tensor_scale,
-      a_mxfp8_scale_base, b_mxfp8_scale_base, num_tensors, a_multi_tensor_args, c_multi_tensor_args,
-      d_multi_tensor_args);
+      A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size,
+      b_elem_size, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
+      static_cast<float *>(beta_tensor->data.dptr),
+      reinterpret_cast<float *>(A_sel.scale_inv), reinterpret_cast<float *>(B_sel.scale_inv),
+      A_sel.scaling_mode, num_tensors, a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -1075,7 +1048,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   // Parse config (if provided)
   GroupedMatmulConfig config_ = parse_grouped_gemm_config(config);
 
-  // Validate inputs and num_tensors
+  // Validate inputs and num_tensors; returns dtype properties shared by A and B.
   validate_grouped_gemm_inputs(inputA, inputB, inputC_raw, outputD, alpha_tensor, beta_tensor);
 
   // If C is NULL, use D as C (valid when beta=0, cuBLAS won't read C data)
@@ -1089,16 +1062,11 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);
 
-  // Set scale_inv_ptrs from workspace (kernel will fill these arrays)
-  // Set scale_inv_ptrs from workspace (kernel will fill these arrays for both tensor scaling and MXFP8)
-  A_sel.scale_inv_ptrs = workspace.setup_workspace.a_scale_inv_ptrs;
-  B_sel.scale_inv_ptrs = workspace.setup_workspace.b_scale_inv_ptrs;
-
   MultiTensorGroupGemmInputArgs a_multi_tensor_args{};
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, inputC, outputD, alpha_tensor,
                             beta_tensor, num_tensors, stream, a_multi_tensor_args,
-                            /*C_list=*/nullptr,
-                            /*D_list=*/nullptr, A_sel.dptr, inputC->dtype(), outputD->dtype());
+                            /*C_list=*/nullptr, /*D_list=*/nullptr, A_sel.dptr, inputC->dtype(),
+                            outputD->dtype());
 
   // Compute average dimensions for heuristics
   // K dimension: if transa, K is A's first dim; if not, K is A's last dim
@@ -1199,25 +1167,22 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   if (choice.use_rowwise) {
     NVTE_CHECK(A_list_info.all_row, "Grouped GEMM: A_list is missing row-wise data");
     A_sel.dtype = A_list_info.row_dtype;
-    A_sel.scale_inv = t0->scale_inv.dptr;
-    A_sel.dptr = static_cast<char *>(t0->data.dptr);
     a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
         A_list, num_a_tensors, /*use_rowwise=*/true, is_fp8, &avg_first_dim, &avg_last_dim, "A");
   } else {
     NVTE_CHECK(A_list_info.all_col, "Grouped GEMM: A_list is missing column-wise data");
     A_sel.dtype = A_list_info.col_dtype;
-    A_sel.scale_inv = t0->columnwise_scale_inv.dptr;
-    A_sel.dptr = static_cast<char *>(t0->columnwise_data.dptr);
     a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
         A_list, num_a_tensors, /*use_rowwise=*/false, is_fp8, &avg_first_dim, &avg_last_dim, "A");
   }
 
+  // For discrete A_list, scale pointers are per-tensor; use multi-tensor args.
+  // Base pointer is unused when providing per-tensor pointers.
+  A_sel.scale_inv = nullptr;
+  A_sel.dptr = nullptr;
+
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);
-
-  // Set scale_inv_ptrs from workspace (kernel will fill these arrays for both tensor scaling and MXFP8)
-  A_sel.scale_inv_ptrs = workspace.setup_workspace.a_scale_inv_ptrs;
-  B_sel.scale_inv_ptrs = workspace.setup_workspace.b_scale_inv_ptrs;
 
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, inputC, outputD, alpha_tensor,
                             beta_tensor, num_tensors, stream, a_multi_tensor_args,
@@ -1290,10 +1255,6 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);
-
-  // Set scale_inv_ptrs from workspace (kernel will fill these arrays for both tensor scaling and MXFP8)
-  A_sel.scale_inv_ptrs = workspace.setup_workspace.a_scale_inv_ptrs;
-  B_sel.scale_inv_ptrs = workspace.setup_workspace.b_scale_inv_ptrs;
 
   MultiTensorGroupGemmInputArgs a_multi_tensor_args{};
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, /*C=*/nullptr, /*D=*/nullptr,

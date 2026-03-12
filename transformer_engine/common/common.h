@@ -342,6 +342,7 @@ struct GroupedTensor {
   NVTEShape logical_shape;
 
   NVTEGroupedTensor nvte_tensor;
+
   /*! \brief Whether scaling factors are in format expected by GEMM
    *
    *  Only meaningful for MXFP8 and NVFP4.
