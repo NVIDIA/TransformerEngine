@@ -3057,7 +3057,6 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
     if dtype == torch.bfloat16 and not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
-
     torch.manual_seed(0)
     z, m, k, n = shape
     m_sizes = [m // z] * z
