@@ -225,7 +225,8 @@ inline size_t validate_grouped_gemm_input_list(
   auto is_supported_input_dtype = [](transformer_engine::DType dtype) {
     return dtype == transformer_engine::DType::kFloat8E4M3 ||
            dtype == transformer_engine::DType::kFloat8E5M2 ||
-           dtype == transformer_engine::DType::kBFloat16;
+           dtype == transformer_engine::DType::kBFloat16 ||
+           dtype == transformer_engine::DType::kFloat16;
   };
   bool dtype_ok = true;
   for (const auto *tensor : inputs) {
