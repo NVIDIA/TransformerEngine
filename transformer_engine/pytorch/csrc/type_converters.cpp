@@ -283,7 +283,7 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   }
 
   bool with_gemm_swizzled = false;
-  if (!tensor.attr("_with_gemm_swizzled_scales").is_none()) {
+  if (py::hasattr(tensor, "_with_gemm_swizzled_scales")) {
     with_gemm_swizzled = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
   }
   ret.set_with_gemm_swizzled_scales(with_gemm_swizzled);
