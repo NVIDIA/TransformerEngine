@@ -1845,8 +1845,6 @@ class FusedAttention(torch.nn.Module):
                 fused_attention_backend
                 == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
             ), "score_mod and score_mod_bprop require the F16_arbitrary_seqlen fused backend."
-        if self.training and score_mod is not None:
-            assert score_mod_bprop is not None, "score_mod_bprop is required when training with score_mod."
 
         cp_size = 1
         if isinstance(cp_group, dist_group_type):

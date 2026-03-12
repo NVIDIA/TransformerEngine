@@ -1745,7 +1745,6 @@ def test_dpa_score_mod_causal(dtype, model_configs, model):
         max_seqlen_kv=sq,
         attn_mask_type="no_mask",
         score_mod=_causal_score_mod,
-        score_mod_bprop=_causal_score_mod,
     )
     out_sm.backward(out_grad)
     dq_sm = q.grad.clone()
