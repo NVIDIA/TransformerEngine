@@ -254,6 +254,18 @@ inline void validate_grouped_gemm_inputs(const transformer_engine::GroupedTensor
            dtype == transformer_engine::DType::kFloat16 ||
            dtype == transformer_engine::DType::kFloat32;
   };
+  NVTE_CHECK(is_fp8_dtype(inputA->dtype()) == is_fp8_dtype(inputB->dtype()),
+             "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
+  NVTE_CHECK(transformer_engine::is_mxfp_scaling(inputA->scaling_mode) ==
+                 transformer_engine::is_mxfp_scaling(inputB->scaling_mode),
+             "Grouped GEMM: A and B must both use MXFP8 scaling or both use tensor scaling, "
+             "mixed configurations are not supported.");
+  if (transformer_engine::is_mxfp_scaling(inputA->scaling_mode)) {
+    NVTE_CHECK(inputA->with_gemm_swizzled_scales,
+               "MXFP8 grouped GEMM: A scales must be swizzled for GEMM");
+    NVTE_CHECK(inputB->with_gemm_swizzled_scales,
+               "MXFP8 grouped GEMM: B scales must be swizzled for GEMM");
+  }
   // C can be NULL (will use D as C when beta=0)
   if (inputC != nullptr) {
     NVTE_CHECK(inputC->num_tensors == num_tensors,
@@ -678,6 +690,23 @@ inline void set_mxfp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
   NVTE_CHECK(false, "MXFP8 grouped GEMM requires cuBLAS ", CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
              "+, but compile-time cuBLAS version is ", CUBLAS_VERSION);
 #endif  // CUBLAS_VERSION >= CUBLAS_MXFP8_GROUPED_GEMM_VERSION
+}
+
+// Configures cuBLAS for tensor-scaling FP8 grouped GEMM: sets PER_BATCH_SCALAR_32F scale mode
+// and scale pointers for A and B. Both operands are guaranteed FP8 by the caller.
+inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc, void **a_scale_inv_ptrs,
+                                   void **b_scale_inv_ptrs) {
+  const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_PER_BATCH_SCALAR_32F;
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
+                                                   &scale_mode, sizeof(scale_mode)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                   &a_scale_inv_ptrs, sizeof(a_scale_inv_ptrs)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
+                                                   &scale_mode, sizeof(scale_mode)));
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                   &b_scale_inv_ptrs, sizeof(b_scale_inv_ptrs)));
 }
 inline cublasLtMatmulAlgo_t select_grouped_gemm_algo(cublasLtHandle_t handle,
                                                      cublasLtMatmulDescOpaque_t &matmulDesc,
@@ -1274,10 +1303,13 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
              "Grouped bias add: bias must have uniform first dim (expected 1)");
   NVTE_CHECK(bias_tensor->get_common_first_dim() == 1,
              "Grouped bias add: bias first dim must be 1");
-  if (outputD->all_same_last_dim() && bias_tensor->all_same_last_dim()) {
-    NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(),
-               "Grouped bias add: output and bias last dims must match");
-  }
+  NVTE_CHECK(outputD->all_same_last_dim() && bias_tensor->all_same_last_dim(),
+             "Grouped bias add requires uniform last dim for output and bias");
+  NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(),
+             "Grouped bias add: output and bias last dims must match");
+  constexpr int kVec = 4;
+  NVTE_CHECK(outputD->get_common_last_dim() % kVec == 0,
+             "Grouped bias add requires last dim divisible by ", kVec);
 
   const TensorShapeInfo d_meta = TensorShapeInfo::from_tensor(outputD);
   const TensorShapeInfo bias_meta = TensorShapeInfo::from_tensor(bias_tensor);
@@ -1291,7 +1323,6 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
   const dim3 grid(outputD->num_tensors, blocks_per_tensor);
   const dim3 block(kThreads);
 
-  constexpr int kVec = 4;
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
     grouped_bias_add_kernel<T, kVec><<<grid, block, 0, stream>>>(
         static_cast<char *>(outputD->data.dptr), static_cast<const char *>(bias_tensor->data.dptr),
