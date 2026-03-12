@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from typing import Optional, Tuple, Dict, Any, List
 from packaging.version import Version as PkgVersion
 
+import pytest
 import torch
 
 import transformer_engine
@@ -147,6 +148,28 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
             **recipe_kwargs,
         )
     raise ValueError(f"Unsupported quantization scheme ({name})")
+
+
+def skip_unsupported_backward_mode(
+    layer_type: str,
+    quant_recipe: Recipe,
+    backward_mode: str,
+) -> None:
+    """Skip known unsupported layer/recipe/backward-mode combinations used in tests."""
+    if backward_mode is None or backward_mode == "default":
+        return
+    if quant_recipe is None and backward_mode in ("unquant", "dequant"):
+        pytest.skip(f"Not a quantized recipe, cannot use backward mode {backward_mode}.")
+    if quant_recipe.delayed() and backward_mode in ("unquant", "dequant"):
+        pytest.skip(f"Delayed scaling does not support backward mode {backward_mode}.")
+    if layer_type in (
+        "layernorm_mlp",
+        "layernorm_mlp_nocheckpoint",
+        "layernorm_mlp_checkpoint",
+        "transformer",
+        "transformer_layer",
+    ):
+        pytest.skip(f"{layer_type} does not support NVTE_BACKWARD_MODE={backward_mode}.")
 
 
 # Cached RNG state

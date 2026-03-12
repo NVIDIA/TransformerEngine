@@ -443,7 +443,14 @@ class _GroupedLinear(torch.autograd.Function):
                         for weight in weights
                     ]
                 elif ctx.backward_mode == "unquant":
-                    weights_for_dgrad = origin_weights
+                    weights_for_dgrad = [
+                        (
+                            weight.dequantize(dtype=ctx.activation_dtype)
+                            if isinstance(weight, QuantizedTensorStorage)
+                            else cast_if_needed(weight, ctx.activation_dtype)
+                        )
+                        for weight in origin_weights
+                    ]
                 # Make sure weights are available in column-wise format
                 # for dgrad computation.
                 for weight in weights_for_dgrad:

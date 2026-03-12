@@ -360,7 +360,9 @@ class BasicLinear(BasicOperation):
                 grad_output_quantizer.optimize_for_gemm = True
         if FP8GlobalStateManager.is_fp8_enabled():
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if fp8_recipe.backward_mode == "dequant" and (fp8_recipe.mxfp8() or fp8_recipe.nvfp4()):
+            if fp8_recipe.backward_mode in ("unquant", "dequant") and (
+                fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
+            ):
                 if input_quantizer is not None:
                     input_quantizer.optimize_for_gemm = False
                 if grad_output_quantizer is not None:

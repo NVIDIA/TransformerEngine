@@ -213,6 +213,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         """Dequantize to a higher precision."""
         if dtype is None:
             dtype = self._dtype
+        if self._rowwise_data is not None and 0 in self._rowwise_data.size():
+            return torch.empty(self.size(), dtype=dtype, device=self.device)
         return _FromNVFP4Func.forward(None, self, dtype)
 
     def size(self, dim: Optional[int] = None) -> Union[torch.Size, int]:

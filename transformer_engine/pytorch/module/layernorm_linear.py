@@ -774,6 +774,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     weight_for_dgrad = cast_if_needed(weight_for_dgrad, ctx.activation_dtype)
             elif ctx.backward_mode == "unquant":
                 weight_for_dgrad = origin_weight
+                if isinstance(weight_for_dgrad, QuantizedTensorStorage):
+                    weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
             gemm_out, *_, reduce_scatter_out = general_gemm(
                 weight_for_dgrad,
                 grad_output,

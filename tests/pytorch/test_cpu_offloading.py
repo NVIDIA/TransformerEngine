@@ -6,6 +6,7 @@ import random
 import contextlib
 import pytest
 import os
+import copy
 import torch
 from typing import Optional, List
 from transformer_engine.pytorch.cpu_offload import (
@@ -18,7 +19,7 @@ from transformer_engine.pytorch.cpu_offload import (
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from utils import ModelConfig
+from utils import ModelConfig, skip_unsupported_backward_mode
 import transformer_engine_torch as tex
 
 # Check supported quantization schemes
@@ -416,9 +417,14 @@ class TestsDefaultOffloadSynchronizer:
 class TestTELayers:
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    def test_sanity(self, layer_type, recipe):
+    @pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
+    def test_sanity(self, layer_type, recipe, backward_mode):
         Utils.memory_leak_check()
 
+        skip_unsupported_backward_mode(layer_type, recipe, backward_mode)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_mode = backward_mode
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
             layer_type in ["linear_op", "layernorm_mlp_ops"]
@@ -458,8 +464,14 @@ class TestTELayers:
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    def test_memory(self, layer_type, recipe):
+    @pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
+    def test_memory(self, layer_type, recipe, backward_mode):
         Utils.memory_leak_check()
+
+        skip_unsupported_backward_mode(layer_type, recipe, backward_mode)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_mode = backward_mode
 
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
@@ -537,8 +549,14 @@ class TestTELayers:
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    def test_manual_synchronization(self, recipe, layer_type):
+    @pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
+    def test_manual_synchronization(self, recipe, layer_type, backward_mode):
         Utils.memory_leak_check()
+
+        skip_unsupported_backward_mode(layer_type, recipe, backward_mode)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_mode = backward_mode
 
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
@@ -600,6 +618,7 @@ class TestTELayers:
         out_2.sum().backward()
 
     @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("use_cuda_graphs", [True, False])
     @pytest.mark.parametrize("retain_pinned_cpu_buffers", [True, False])
@@ -607,11 +626,17 @@ class TestTELayers:
     def test_numerics(
         self,
         recipe,
+        backward_mode,
         layer_type,
         use_cuda_graphs,
         backend,
         retain_pinned_cpu_buffers,
     ):
+        skip_unsupported_backward_mode(layer_type, recipe, backward_mode)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_mode = backward_mode
+
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
             layer_type in ["linear_op", "layernorm_mlp_ops"]

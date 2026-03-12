@@ -7,6 +7,7 @@ from typing import Optional, List
 import torch
 import pytest
 import os
+import copy
 
 import transformer_engine
 import transformer_engine.pytorch as te
@@ -37,7 +38,7 @@ from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from utils import ModelConfig
+from utils import ModelConfig, skip_unsupported_backward_mode
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -383,6 +384,7 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
@@ -392,6 +394,7 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 def test_sanity_layernorm_linear(
     dtype,
     fp8_recipe,
+    backward_mode,
     model,
     skip_wgrad,
     zero_centered_gamma,
@@ -400,6 +403,11 @@ def test_sanity_layernorm_linear(
     microbatching,
 ):
     config = model_configs[model]
+
+    skip_unsupported_backward_mode("layernorm_linear", fp8_recipe, backward_mode)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_mode = backward_mode
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -424,12 +432,20 @@ def test_sanity_layernorm_linear(
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
 @pytest.mark.parametrize("microbatching", all_boolean)
-def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microbatching):
+def test_sanity_linear(
+    dtype, fp8_recipe, backward_mode, model, skip_wgrad, skip_dgrad, microbatching
+):
     config = model_configs[model]
+
+    skip_unsupported_backward_mode("linear", fp8_recipe, backward_mode)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_mode = backward_mode
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -454,12 +470,20 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
-def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias):
+def test_sanity_linear_with_zero_tokens(
+    dtype, bs, model, fp8_recipe, backward_mode, fp8_model_params, use_bias
+):
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.max_seqlen_q
+
+    skip_unsupported_backward_mode("linear", fp8_recipe, backward_mode)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_mode = backward_mode
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -487,6 +511,7 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
 @pytest.mark.parametrize("single_param", all_boolean)
@@ -497,6 +522,7 @@ def test_sanity_grouped_linear(
     bs,
     model,
     fp8_recipe,
+    backward_mode,
     fp8_model_params,
     use_bias,
     single_param,
@@ -508,6 +534,11 @@ def test_sanity_grouped_linear(
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
+
+    skip_unsupported_backward_mode("grouped_linear", fp8_recipe, backward_mode)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_mode = backward_mode
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):

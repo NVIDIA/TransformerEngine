@@ -25,7 +25,12 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch.quantized_tensor import restore_from_saved
 
-from utils import assert_close, make_recipe, reset_rng_states
+from utils import (
+    assert_close,
+    make_recipe,
+    reset_rng_states,
+    skip_unsupported_backward_mode,
+)
 
 
 # --------------------------
@@ -803,6 +808,7 @@ def test_linear_like_backward_mode_matches_reference(
     in_features = input_shape[-1]
     quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
     mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+    skip_unsupported_backward_mode(module_type, mode_recipe, backward_mode)
 
     module_quantized_ref = _make_linear_like_module(
         module_type,
@@ -1154,6 +1160,7 @@ def test_linear_like_runtime_backward_mode_switch_updates_ctx(
 
     default_recipe = make_recipe(recipe_name, backward_mode="default")
     mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+    skip_unsupported_backward_mode(module_type, mode_recipe, backward_mode)
 
     *_, default_ctx = _run_single_step_with_ctx_state(module, x, dy, default_recipe)
     (
@@ -1291,6 +1298,7 @@ def test_fused_linear_paths_match_backward_mode_reference(
 
     quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
     mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+    skip_unsupported_backward_mode("ops_linear", mode_recipe, backward_mode)
 
     model_quantized_ref = _make_fused_model(fused_pattern, in_features, out_features, dtype)
     model_bwd_mode = _make_fused_model(fused_pattern, in_features, out_features, dtype)
@@ -1432,6 +1440,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
 
     quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
     mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+    skip_unsupported_backward_mode("ops_linear", mode_recipe, backward_mode)
 
     model_quantized_ref = _make_fused_model("bias_activation", in_features, out_features, dtype)
     model_bwd_mode = _make_fused_model("bias_activation", in_features, out_features, dtype)
@@ -1593,6 +1602,7 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
     extra_inputs = [() for _ in range(fuser._num_basic_ops)]
 
     quant_recipe = make_recipe(recipe_name, backward_mode="default")
+    skip_unsupported_backward_mode("ops_linear", quant_recipe, backward_mode)
     fuser.maybe_fuse_ops(
         is_grad_enabled=True,
         recipe=quant_recipe,
@@ -1602,6 +1612,7 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
     assert any(isinstance(op, UserbuffersForwardLinear) for op, _ in fuser._forward_ops)
 
     non_quant_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+    skip_unsupported_backward_mode("ops_linear", non_quant_recipe, backward_mode)
     current_recipe["value"] = non_quant_recipe
     fuser.maybe_fuse_ops(
         is_grad_enabled=True,
@@ -1630,6 +1641,7 @@ def test_quantize_op_respects_backward_mode(
     model_ref = te_ops.Sequential(te_ops.Quantize(forward=True, backward=False))
 
     mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+    skip_unsupported_backward_mode("ops_linear", mode_recipe, backward_mode)
 
     y_override, dx_override = _run_quantize_op_single_step(model_override, x, dy, mode_recipe)
     y_ref, dx_ref = _run_quantize_op_single_step(model_ref, x, dy, mode_recipe)
