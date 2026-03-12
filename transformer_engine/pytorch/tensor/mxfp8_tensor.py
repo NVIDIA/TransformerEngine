@@ -384,6 +384,18 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             return self
         raise ValueError("MXFP8Tensor does not support different memory formats!")
 
+    def untyped_storage(self) -> torch.UntypedStorage:
+        """Return the underlying UntypedStorage of the FP8 data.
+
+        MXFP8Tensor may have multiple buffers (row-wise data/scales,
+        column-wise data/scales). Returns the UntypedStorage of the
+        row-wise FP8 data if it exists, otherwise the column-wise data.
+        """
+        data = self._rowwise_data if self._rowwise_data is not None else self._columnwise_data
+        if data is not None:
+            return data.untyped_storage()
+        return self._default_storage    # Unique 1-byte storage.
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
         if func == aten.view.default:
