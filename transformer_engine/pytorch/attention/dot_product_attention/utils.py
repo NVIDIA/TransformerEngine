@@ -2164,7 +2164,7 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
         return [None] * 6
 
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-    QKV_quantizer.internal = False
+    QKV_quantizer.internal = True
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
 
     S_quantizer = quantizers["scaling_fwd"][META_S]
@@ -2176,7 +2176,7 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
     O_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dO_quantizer = quantizers["scaling_bwd"][META_DO]
-    dO_quantizer.internal = False
+    dO_quantizer.internal = True
     dO_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
@@ -2184,7 +2184,7 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
     dP_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
-    dQKV_quantizer.interal = False
+    dQKV_quantizer.interal = True
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
 
     if fp8_recipe.mxfp8():
@@ -2262,62 +2262,60 @@ def print_quantizers(
 
 
 def permute_to_grouped_tensor(src_format, tensor):
-    """Permute tensor to bhsd or htd format for grouped quantization in MXFP8BlockScaling. src_format ={bshd, sbhd, thd}"""
+    """Permute tensor from src_format = {bshd, sbhd, thd} to des_format = {bhsd, htd} for MXFP8 quantization."""
     if src_format in ["bhsd", "htd"]:
         return tensor, src_format
+    des_format = "bhsd" if src_format != "thd" else "htd"
+    # make tensor contiguous bshd/sbhd/thd
     tensor = tensor.contiguous() if not tensor.is_contiguous() else tensor
+    # permute bshd/sbhd to bhsd, and thd to htd
     dim_s_or_t = src_format.find("s") if "s" in src_format else src_format.find("t")
     dim_others = [i for i in range(len(tensor.shape)) if i != dim_s_or_t]
-    perm = [*dim_others[:-1], dim_s_or_t, dim_others[-1]]
-    tensor = tensor.permute(*perm).contiguous()
-    return tensor, "bhsd" if src_format != "thd" else "htd"
+    new_dims = [*dim_others[:-1], dim_s_or_t, dim_others[-1]]
+    tensor = tensor.permute(*new_dims).contiguous()
+    return tensor, des_format
 
 
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
     """Combine q,k,v based on qkv_layout and quantize them together"""
-    # 1: qkv packed, 2: kv packed, 3: qkv separate
-    qkv_layout = qkv_layout.replace("paged_kv_", "")
-    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
-    qkv_group = len(qkv_layout.split("_"))
-    src_nominal_dtype = q.dtype
     if isinstance(qkv_quantizer, MXFP8Quantizer):
-        # bs3hd, sb3hd, etc -> bshd_bshd_bhsd -> bhsd_bhsd_bhsd
-        # t3hd, etc -> thd_thd_thd -> htd_htd_htd
+        qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
+        # permute q, k, v to bhsd/htd format
         if q_format not in ["bhsd", "htd"]:
             q, _ = permute_to_grouped_tensor(q_format, q)
         if kv_format not in ["bhsd", "htd"]:
             k, _ = permute_to_grouped_tensor(kv_format, k)
             v, _ = permute_to_grouped_tensor(kv_format, v)
         qkv_layout = "bhsd_bhsd_bhsd" if qkv_format != "thd" else "htd_htd_htd"
-
+        # check shapes
         original_shapes = [x.shape for x in [q, k, v]]
         s_q, d_qk = q.shape[-2:]
         s_kv, d_v = v.shape[-2:]
-        assert s_q % 128 == 0
-        assert s_kv % 128 == 0
-        assert d_qk % 32 == 0
-        assert d_v % 32 == 0
-        # need to check seqlens in THD % 128 == 0
+        assert (
+            s_q % 128 == 0 and s_kv % 128 == 0 and d_qk % 32 == 0 and d_v % 32 == 0
+        ), f"MXFP8 quantization requires s_q % 128 == 0, s_kv % 128 == 0, d_qk % 32 == 0, d_v % 32 == 0. Found {s_q=}, {s_kv=}, {d_qk=}, {d_v=}."
         q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
-
-        # consider bhsd for now
+        # quantize q, k, v
         if d_qk == d_v:
             grouped_tensor = GroupedTensor.create_and_quantize(
                 tensors=[q, k, v], quantizer=qkv_quantizer
             )
             q_fp8, k_fp8, v_fp8 = grouped_tensor.quantized_tensors
         else:
-            # grouped_tensor = GroupedTensor.create_and_quantize(
-            #     tensors=[q, k], quantizer=qkv_quantizer
-            # )
-            # q_fp8, k_fp8 = grouped_tensor.quantized_tensors
-            q_fp8 = qkv_quantizer(q)
-            k_fp8 = qkv_quantizer(k)
+            grouped_tensor = GroupedTensor.create_and_quantize(
+                tensors=[q, k], quantizer=qkv_quantizer
+            )
+            q_fp8, k_fp8 = grouped_tensor.quantized_tensors
             v_fp8 = qkv_quantizer(v)
+        # view rowwise/columnwise data back to original shapes, not rowwise_scale_inv/columnwise_scale_inv
         q_fp8, k_fp8, v_fp8 = [x.view(s) for x, s in zip([q_fp8, k_fp8, v_fp8], original_shapes)]
 
         return q_fp8, k_fp8, v_fp8, qkv_layout
 
+    qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_group = len(qkv_layout.split("_"))
+    src_nominal_dtype = q.dtype
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
@@ -2364,10 +2362,6 @@ def combine_and_dequantize(
     qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
 ):
     """Combine q,k,v based on qkv_layout and dequantize them together"""
-    # 1: qkv packed, 2: kv packed, 3: qkv separate
-    qkv_layout = qkv_layout.replace("paged_kv_", "")
-    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
-    qkv_group = len(qkv_layout.split("_"))
     if all(isinstance(x, QuantizedTensorStorage) for x in [q_fp8, k_fp8, v_fp8]):
         src_nominal_dtype = q_fp8.dtype
     else:
@@ -2379,7 +2373,11 @@ def combine_and_dequantize(
         q, k, v = [x.dequantize(dtype=des_nominal_dtype) for x in [q_fp8, k_fp8, v_fp8]]
         return q, k, v
 
+    qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
+    qkv_group = len(qkv_layout.split("_"))
     q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
