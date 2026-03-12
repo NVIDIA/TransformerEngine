@@ -1,4 +1,4 @@
-/*************************************************************************
+//*************************************************************************
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -954,8 +954,6 @@ __global__ void setup_grouped_gemm_kernel(
     } else {
       b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + idx;
     }
-  } else {
-    b_scale_inv_ptrs[idx] = a_multi_tensor_args.scale_inv_ptrs[idx];
   }
 }
 
