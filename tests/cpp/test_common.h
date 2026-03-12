@@ -535,7 +535,6 @@ struct GroupedBuffers {
   GroupedTensorHandle handle;
   CudaPtr<> data;
   CudaPtr<> scale_inv;
-  CudaPtr<> columnwise_scale_inv;
   CudaPtr<int64_t> first_dims_dev;
   CudaPtr<int64_t> last_dims_dev;
   CudaPtr<int64_t> offsets_dev;

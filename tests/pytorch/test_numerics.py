@@ -4,7 +4,6 @@
 
 import math
 import os
-from torch._tensor import Tensor
 from typing import Dict, List, Tuple, Optional
 import pytest
 import random
@@ -3005,6 +3004,7 @@ def _make_grouped_tensor_quantized_mxfp8(
     is_a: bool,
     transposed: bool,
     device: torch.device,
+    optimize_for_gemm: bool = True,
 ) -> GroupedTensor:
     if not tensors:
         raise ValueError("Expected non-empty tensor list for grouped quantization.")
@@ -3019,7 +3019,7 @@ def _make_grouped_tensor_quantized_mxfp8(
         rowwise=rowwise,
         columnwise=columnwise,
     )
-    quantizer.optimize_for_gemm = True
+    quantizer.optimize_for_gemm = optimize_for_gemm
     grouped_input = torch.cat(tensors, dim=0)
     first_dims = torch.tensor([t.shape[0] for t in tensors], dtype=torch.int64, device=device)
     return tex.group_quantize(grouped_input, quantizer, len(tensors), first_dims)
@@ -3035,11 +3035,18 @@ def _make_grouped_tensor_quantized_mxfp8(
 )
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
-def test_grouped_gemm_grouped_tensor_mxfp8(shape, accumulate, layout: str) -> None:
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_grouped_gemm_grouped_tensor_mxfp8(shape, accumulate, layout: str, dtype: torch.dtype) -> None:
+    if tex.get_cublasLt_version() < 130200:
+        pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if dtype == torch.bfloat16 and not is_bf16_available():
+        pytest.skip("bfloat16 is required for grouped GEMM test.")
+
     torch.manual_seed(0)
     z, m, k, n = shape
     m_sizes = [m // z] * z
-    dtype = torch.float16
 
     if layout == "TN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight

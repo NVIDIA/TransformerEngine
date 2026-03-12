@@ -82,7 +82,7 @@ def general_gemm(
     layout: str = "TN",
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    use_split_accumulator: bool = True,
+    use_split_accumulator: bool = False,
     grad: bool = False,
     ub: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
     ub_type: tex.CommOverlapType = None,
@@ -287,7 +287,7 @@ def general_grouped_gemm(
 
     return out, bias, gelu_input
 
-
+@functools.lru_cache(maxsize=None)
 def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
     """Return workspace size for grouped GEMM pointer setup.
     Must match GroupedGemmSetupWorkspace::required_setup_size in cublaslt_grouped_gemm.cu.

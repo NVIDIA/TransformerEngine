@@ -82,10 +82,10 @@ enum NVTEGroupedMatmulConfigAttribute {
    * computed automatically from A's logical shape.
    */
   kNVTEGroupedMatmulConfigAvgK = 2,
-  /*! Whether to use split accumulator for FP8 GEMM. */
-  kNVTEGroupedMatmulConfigUseSplitAccumulator = 3,
   /*! Number of streaming multiprocessors to use in GEMM kernel. */
-  kNVTEGroupedMatmulConfigSMCount = 4,
+  kNVTEGroupedMatmulConfigSMCount = 3,
+  /*! Whether to use split accumulator for FP8 GEMM. */
+  kNVTEGroupedMatmulConfigUseSplitAccumulator = 4,
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
@@ -366,17 +366,19 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
 /*! \brief Grouped matrix multiplication with discrete A input tensors.
  *
  * Identical to nvte_grouped_gemm, but A is provided as a list of tensors
- * instead of NVTEGroupedTensor. This enables non-contiguous per-expert inputs.
+ * instead of NVTEGroupedTensor. This enables discrete per-expert weights as inputA
+ * for Grouped GEMM.
  *
  *  \param[in]  A_list           List of A tensors (length = num_tensors).
  *  \param[in]  num_a_tensors    Number of tensors in A_list.
  */
- void nvte_grouped_gemm_with_discrete_in(const NVTETensor *A_list, size_t num_a_tensors, int transa,
-  const NVTEGroupedTensor B, int transb,
-  const NVTEGroupedTensor C, NVTEGroupedTensor D,
-  const NVTETensor alpha, const NVTETensor beta,
-  NVTETensor workspace_setup, NVTETensor workspace_cublas,
-  NVTEGroupedMatmulConfig config, cudaStream_t stream);
+void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
+                                            int transa, const NVTEGroupedTensor B, int transb,
+                                            const NVTEGroupedTensor C, NVTEGroupedTensor D,
+                                            const NVTETensor alpha, const NVTETensor beta,
+                                            NVTETensor workspace_setup,
+                                            NVTETensor workspace_cublas,
+                                            NVTEGroupedMatmulConfig config, cudaStream_t stream);
 
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Grouped matrix multiplication with discrete output tensors.

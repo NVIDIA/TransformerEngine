@@ -120,63 +120,6 @@ GroupedGemmConfig prepare_grouped_gemm_config(at::Tensor alpha, at::Tensor beta,
 
 }  // namespace detail
 
-namespace {
-
-  bool is_empty_grouped_tensor_param(const NVTEBasicTensor &t) {
-    return t.shape.ndim == 1 && t.shape.data[0] == 0;
-  }
-  
-  using SwizzledGroupedScales =
-      std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>;
-
-  std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
-      GroupedTensorWrapper &input) {
-    if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
-      return std::nullopt;
-    }
-    if (input.get_with_gemm_swizzled_scales()) {
-      return std::nullopt;
-    }
-  
-    const auto row_scales = input.get_rowwise_scale_inv();
-    const auto col_scales = input.get_columnwise_scale_inv();
-    const bool has_rowwise_scales = !is_empty_grouped_tensor_param(row_scales);
-    const bool has_columnwise_scales = !is_empty_grouped_tensor_param(col_scales);
-    if (!has_rowwise_scales && !has_columnwise_scales) {
-      return std::nullopt;
-    }
-    if (!is_empty_grouped_tensor_param(input.get_first_dims()) ||
-        !is_empty_grouped_tensor_param(input.get_last_dims())) {
-      // Swizzling is only supported for uniform shapes.
-      return std::nullopt;
-    }
-  
-    input.set_with_gemm_swizzled_scales(true);
-    std::optional<at::Tensor> rowwise_scales_pyt;
-    std::optional<at::Tensor> columnwise_scales_pyt;
-    if (has_rowwise_scales) {
-      const auto scales_dtype = static_cast<DType>(row_scales.dtype);
-      rowwise_scales_pyt = allocateSpace(row_scales.shape, scales_dtype, false);
-      void *output_scales_dptr = getDataPtr(*rowwise_scales_pyt);
-      input.set_rowwise_scale_inv(output_scales_dptr, scales_dtype, row_scales.shape);
-    }
-    if (has_columnwise_scales) {
-      const auto scales_dtype = static_cast<DType>(col_scales.dtype);
-      columnwise_scales_pyt = allocateSpace(col_scales.shape, scales_dtype, false);
-      void *output_scales_dptr = getDataPtr(*columnwise_scales_pyt);
-      input.set_columnwise_scale_inv(output_scales_dptr, scales_dtype, col_scales.shape);
-    }
-  
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_swizzle_grouped_scaling_factors(input.data(), input.data(),
-                                           at::cuda::getCurrentCUDAStream());
-    });
-  
-    return SwizzledGroupedScales{std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};
-  }
-  
-  }  // namespace
-
 std::pair<TensorWrapper, py::object> createOutputTensor(const std::vector<size_t>& shape,
                                                         DType dtype, py::handle quantizer) {
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
@@ -763,7 +706,7 @@ py::object te_general_grouped_gemm_for_discrete_in(
   [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
 
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_grouped_gemm_with_discrete_in(
+    nvte_grouped_gemm_with_discrete_inputA(
         te_A_vector.data(), num_tensors, transa, grouped_B.data(), transb,
         grouped_D.data(), grouped_D.data(), gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
         gemm_config.te_workspace_setup.data(), gemm_config.te_workspace_cublas.data(),

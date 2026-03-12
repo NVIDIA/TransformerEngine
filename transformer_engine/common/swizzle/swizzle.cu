@@ -274,7 +274,7 @@
  
  template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
  __global__ void __launch_bounds__(TB_DIM * TB_DIM)
-     grouped_swizzle_row_scaling_kernel(const void* input, void* output, const int M, const int K,
+     grouped_swizzle_row_scaling_uniform_shape_kernel(const void* input, void* output, const int M, const int K,
                                         const int original_M, const int original_K,
                                         const size_t scale_stride_bytes) {
    const int tensor_id = blockIdx.z;
@@ -289,7 +289,7 @@
  
  template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
  __global__ void __launch_bounds__(TB_DIM * TB_DIM)
-     grouped_swizzle_col_scaling_kernel(const void* input, void* output, const int M, const int K,
+     grouped_swizzle_col_scaling_uniform_shape_kernel(const void* input, void* output, const int M, const int K,
                                         const int original_M, const int original_K,
                                         const size_t scale_stride_bytes) {
    const int tensor_id = blockIdx.z;
@@ -877,9 +877,6 @@
  }
  
  namespace transformer_engine {
- namespace {
- 
- }  // namespace
  
  void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* output,
                                       cudaStream_t stream) {
@@ -969,27 +966,27 @@
        switch (vec_load_size) {
          case 4:
            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-               grouped_swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+               grouped_swizzle_row_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-           grouped_swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
+           grouped_swizzle_row_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
                <<<num_blocks, block_size, slm_size, stream>>>(
                    input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
                    scale_stride_bytes);
            break;
          case 2:
            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-               grouped_swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+               grouped_swizzle_row_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-           grouped_swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
+           grouped_swizzle_row_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
                <<<num_blocks, block_size, slm_size, stream>>>(
                    input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
                    scale_stride_bytes);
            break;
          case 1:
            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-               grouped_swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+               grouped_swizzle_row_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-           grouped_swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
+           grouped_swizzle_row_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
                <<<num_blocks, block_size, slm_size, stream>>>(
                    input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
                    scale_stride_bytes);
@@ -1001,27 +998,27 @@
        switch (vec_load_size) {
          case 4:
            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-               grouped_swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+               grouped_swizzle_col_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-           grouped_swizzle_col_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
+           grouped_swizzle_col_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
                <<<num_blocks, block_size, slm_size, stream>>>(
                    input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
                    scale_stride_bytes);
            break;
          case 2:
            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-               grouped_swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+               grouped_swizzle_col_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-           grouped_swizzle_col_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
+           grouped_swizzle_col_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
                <<<num_blocks, block_size, slm_size, stream>>>(
                    input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
                    scale_stride_bytes);
            break;
          case 1:
            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-               grouped_swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+               grouped_swizzle_col_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-           grouped_swizzle_col_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
+           grouped_swizzle_col_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
                <<<num_blocks, block_size, slm_size, stream>>>(
                    input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
                    scale_stride_bytes);

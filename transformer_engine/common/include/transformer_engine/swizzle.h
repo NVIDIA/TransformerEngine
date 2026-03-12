@@ -74,6 +74,7 @@ void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input,
  *  - scale_inv is stored in row-major per group.
  *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
  *  - data is quantitized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
+ *  - all tensors in the grouped tensor must have the same shape.
  */
  void nvte_swizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGroupedTensor output,
     cudaStream_t stream);
