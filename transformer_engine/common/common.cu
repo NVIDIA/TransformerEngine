@@ -93,14 +93,15 @@ __global__ void __launch_bounds__(kScaleCumsumThreads)
     splits_to_offsets_kernel(const int64_t *__restrict__ first_dims, int64_t *__restrict__ output,
                              size_t num_tensors, int64_t logical_last_dim) {
   __shared__ int64_t block_scan[kScaleCumsumThreads];
+  __shared__ int64_t chunk_prefix;
 
   const size_t tid = threadIdx.x;
   if (tid == 0) {
     output[0] = 0;
+    chunk_prefix = 0;
   }
   __syncthreads();
 
-  int64_t running_total = 0;
   for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kScaleCumsumThreads) {
     const size_t idx = chunk_start + tid;
     int64_t value = 0;
@@ -119,11 +120,11 @@ __global__ void __launch_bounds__(kScaleCumsumThreads)
     }
 
     if (idx < num_tensors) {
-      output[idx + 1] = running_total + block_scan[tid];
+      output[idx + 1] = chunk_prefix + block_scan[tid];
     }
 
     if (tid == kScaleCumsumThreads - 1) {
-      running_total += block_scan[tid];
+      chunk_prefix += block_scan[tid];
     }
     __syncthreads();
   }
