@@ -167,6 +167,7 @@ void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t n
   NVTE_CHECK(output != nullptr, "Output pointer must be allocated.");
   NVTE_CHECK(num_tensors > 0, "num_tensors must be greater than 0.");
   NVTE_CHECK(first_dims != nullptr, "first_dims pointer must be allocated.");
+  NVTE_CHECK(logical_last_dim > 0, "logical_last_dim must be greater than 0.");
 
   splits_to_offsets_kernel<<<1, kScaleCumsumThreads, 0, stream>>>(first_dims, output, num_tensors,
                                                                   logical_last_dim);
