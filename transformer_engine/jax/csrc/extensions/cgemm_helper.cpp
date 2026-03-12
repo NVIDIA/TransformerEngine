@@ -138,8 +138,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
-  auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32,
-                                                                  JAXX_Collective_Op::ALL_GATHER);
+  [[maybe_unused]] auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(
+      buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
