@@ -193,10 +193,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
   // Abort immediately if compilation is not supported
   constexpr bool is_blackwell_arch = ARCH_BLACKWELL_FAMILY;
   if constexpr (!is_blackwell_arch) {
-    NVTE_DEVICE_ERROR(
-        "group_row_col_rht_gemm_device_graph_safe is only supported on Blackwell "
-        "with architecture-specific compilation. "
-        "Try recompiling with sm_100a or similar.");
+    NVTE_DEVICE_ERROR("RHT fusion is only supported on Blackwell.");
     return;
   } else {
     static_assert(kEnableRHTColQuant_ || kEnableRowQuant_,

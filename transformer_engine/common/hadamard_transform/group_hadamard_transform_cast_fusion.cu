@@ -173,10 +173,7 @@ __global__ static void group_rht_gemm_device(
   using namespace cute;
   constexpr bool is_blackwell_arch = ARCH_BLACKWELL_FAMILY;
   if constexpr (!is_blackwell_arch) {
-    NVTE_DEVICE_ERROR(
-        "group_rht_gemm_device is only supported on Blackwell "
-        "with architecture-specific compilation. "
-        "Try recompiling with sm_100a or similar.");
+    NVTE_DEVICE_ERROR("RHT fusion is only supported on Blackwell.");
     return;
   } else {
     using X = Underscore;
