@@ -210,8 +210,7 @@ inline GroupedGemmInputProperties validate_grouped_gemm_inputs(
     const transformer_engine::GroupedTensor *inputB,
     const transformer_engine::GroupedTensor *inputC,
     const transformer_engine::GroupedTensor *outputD,
-    const transformer_engine::Tensor *alpha_tensor,
-    const transformer_engine::Tensor *beta_tensor) {
+    const transformer_engine::Tensor *alpha_tensor, const transformer_engine::Tensor *beta_tensor) {
   const size_t num_tensors = inputA->num_tensors;
   NVTE_CHECK(num_tensors >= 1, "Grouped GEMM: number of tensors must be at least 1");
   NVTE_CHECK(inputB->num_tensors == num_tensors,
@@ -484,9 +483,11 @@ inline void set_mxfp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
                                                    &scale_mode, sizeof(scale_mode)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
                                                    &scale_mode, sizeof(scale_mode)));
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
                                                    &a_scale_inv_ptrs, sizeof(a_scale_inv_ptrs)));
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                    &b_scale_inv_ptrs, sizeof(b_scale_inv_ptrs)));
 #else
   NVTE_CHECK(false, "MXFP8 grouped GEMM requires cuBLAS ", CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
@@ -496,16 +497,18 @@ inline void set_mxfp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
 
 // Configures cuBLAS for tensor-scaling FP8 grouped GEMM: sets PER_BATCH_SCALAR_32F scale mode
 // and scale pointers for A and B. Both operands are guaranteed FP8 by the caller.
-inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
-                                   void **a_scale_inv_ptrs, void **b_scale_inv_ptrs) {
+inline void set_fp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc, void **a_scale_inv_ptrs,
+                                   void **b_scale_inv_ptrs) {
   const cublasLtMatmulMatrixScale_t scale_mode = CUBLASLT_MATMUL_MATRIX_SCALE_PER_BATCH_SCALAR_32F;
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
                                                    &scale_mode, sizeof(scale_mode)));
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
                                                    &a_scale_inv_ptrs, sizeof(a_scale_inv_ptrs)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
                                                    &scale_mode, sizeof(scale_mode)));
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                   CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                    &b_scale_inv_ptrs, sizeof(b_scale_inv_ptrs)));
 }
 
