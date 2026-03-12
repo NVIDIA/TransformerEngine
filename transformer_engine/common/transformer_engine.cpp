@@ -33,7 +33,6 @@ size_t typeToSize(const DType type) {
   return typeToNumBits(type) / 8;
 }
 
-
 std::string to_string(const NVTEScalingMode &mode) {
   switch (mode) {
     case NVTE_DELAYED_TENSOR_SCALING:
