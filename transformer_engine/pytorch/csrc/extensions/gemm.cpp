@@ -707,15 +707,9 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
 
   NVTE_SCOPED_GIL_RELEASE({
-<<<<<<< HEAD
     nvte_grouped_gemm_with_discrete_inputA(
         te_A_vector.data(), num_tensors, transa, grouped_B.data(), transb,
         grouped_D.data(), grouped_D.data(), gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
-=======
-    nvte_grouped_gemm_with_discrete_in(
-        te_A_vector.data(), num_tensors, transa, grouped_B.data(), transb, grouped_D.data(),
-        grouped_D.data(), gemm_config.te_alpha.data(), gemm_config.te_beta.data(),
->>>>>>> f1e0a3e080e14a27d52890d43aaa55d4ff10aac3
         gemm_config.te_workspace_setup.data(), gemm_config.te_workspace_cublas.data(),
         gemm_config.matmul_config.has_value()
             ? static_cast<NVTEGroupedMatmulConfig>(*gemm_config.matmul_config)
