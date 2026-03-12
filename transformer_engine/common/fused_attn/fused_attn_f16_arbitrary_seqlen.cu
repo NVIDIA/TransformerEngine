@@ -63,10 +63,10 @@ auto make_attention_score_modifier(void *callback_ptr)
     return nullptr;
   }
 
-  py::object callback;
+  py::function callback;
   {
     py::gil_scoped_acquire gil;
-    callback = py::reinterpret_borrow<py::object>(reinterpret_cast<PyObject *>(callback_ptr));
+    callback = py::reinterpret_borrow<py::function>(reinterpret_cast<PyObject *>(callback_ptr));
   }
 
   return [callback = std::move(callback)](
@@ -76,9 +76,9 @@ auto make_attention_score_modifier(void *callback_ptr)
            py::module_::import("cudnn");
 
            auto py_graph =
-               std::make_shared<cudnn_frontend::python_bindings::PyGraph>(std::move(graph));
+               std::make_shared<cudnn_frontend::python_bindings::PyGraph>(graph);
 
-           py::object result = callback(py::cast(py_graph), py::cast(std::move(score_tensor)));
+           py::object result = callback(*py_graph, score_tensor);
            return result.cast<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>>();
          };
 }
