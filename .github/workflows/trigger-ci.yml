@@ -58,7 +58,6 @@ jobs:
            || github.actor == 'vthumbe1503'
            || github.actor == 'shengfangd'
            || github.actor == 'kainzhong'
-           || github.actor == 'pstjohn'
            || github.actor == 'cspades'
            || github.actor == 'jomitchellnv'
          )
