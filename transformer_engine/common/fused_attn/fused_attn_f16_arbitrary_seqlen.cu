@@ -79,6 +79,9 @@ auto make_attention_score_modifier(void *callback_ptr)
                std::make_shared<cudnn_frontend::python_bindings::PyGraph>(graph);
 
            py::object result = callback(*py_graph, score_tensor);
+           if (result.is_none()) {
+             return score_tensor;
+           }
            return result.cast<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>>();
          };
 }
