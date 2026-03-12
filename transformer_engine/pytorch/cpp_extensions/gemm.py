@@ -346,7 +346,8 @@ def general_grouped_gemm_for_grouped_tensor(
         grouped_gemm_impl = tex.te_general_grouped_gemm_for_grouped_tensor
 
     num_tensors = B.num_tensors
-    device = B.rowwise_data.device if B.has_data() else B.columnwise_data.device
+    rowwise = B.rowwise_data
+    device = rowwise.device if rowwise is not None else B.columnwise_data.device
 
     if alpha is None:
         alpha = torch.ones(num_tensors, dtype=torch.float32, device=device)

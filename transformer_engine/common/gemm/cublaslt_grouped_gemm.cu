@@ -1121,8 +1121,6 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
  // Validate A list and selection
  auto A_list_info =
      validate_grouped_gemm_multi_inputA_list(A_list, num_a_tensors, num_tensors, "A");
- const transformer_engine::Tensor *t0 = transformer_engine::convertNVTETensorCheck(A_list[0]);
-
  auto is_fp8_or_16bit = [](transformer_engine::DType dtype) {
    return dtype == transformer_engine::DType::kFloat8E4M3 ||
           dtype == transformer_engine::DType::kFloat8E5M2 ||
