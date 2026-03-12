@@ -122,6 +122,7 @@ __global__ void __launch_bounds__(kScaleCumsumThreads)
     if (idx < num_tensors) {
       output[idx + 1] = chunk_prefix + block_scan[tid];
     }
+    __syncthreads();
 
     if (tid == kScaleCumsumThreads - 1) {
       chunk_prefix += block_scan[tid];
