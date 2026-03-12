@@ -2035,6 +2035,11 @@ class _ToLocalIdentity(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, dtensor_param: DTensor) -> torch.Tensor:
+        """
+        Forward implementation for DTensor.to_local().
+        For quantized parameters, does not shallow copy
+        the local Tensor.
+        """
         ctx.device_mesh = dtensor_param.device_mesh
         ctx.placements = dtensor_param.placements
         ctx.set_materialize_grads(False)
@@ -2042,6 +2047,10 @@ class _ToLocalIdentity(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_local):
+        """
+        Backward implementation for DTensor.to_local().
+        Converts Tensor gradients to DTensor.
+        """
         if grad_local is None:
             return None
         return DTensor.from_local(
