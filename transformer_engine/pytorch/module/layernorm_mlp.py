@@ -2371,6 +2371,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     label,
                     None if label in ("dgrad", "wgrad") else base_quantizers[i + offset],
                     self.tp_group,
+                    self.tp_size,
                 )
                 for i, label in enumerate(labels)
             ]
