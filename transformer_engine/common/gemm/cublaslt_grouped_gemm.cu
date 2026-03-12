@@ -783,7 +783,7 @@ inline void set_mxfp8_scale_pointers(cublasLtMatmulDescOpaque_t &matmulDesc,
   NVTE_CHECK(false, "MXFP8 grouped GEMM requires cuBLAS ", CUBLAS_MXFP8_GROUPED_GEMM_VERSION,
              "+, but compile-time cuBLAS version is ", CUBLAS_VERSION);
 #endif  // CUBLAS_VERSION >= CUBLAS_MXFP8_GROUPED_GEMM_VERSION
-<<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
+  <<<<<<< users/vthumbe/pytorch_binding_for_cublas_gemm
 =======
 }
 
@@ -1351,16 +1351,16 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
                             /*C_list=*/nullptr, /*D_list=*/nullptr, nullptr, inputC->dtype(),
                             outputD->dtype());
 =======
-  // Create matmul descriptor
-  cublasLtMatmulDescOpaque_t matmulDesc;
-  init_matmul_desc(matmulDesc, op_A, op_B, is_fp8, config_.use_split_accumulator);
-  if (is_mxfp8) {
-    set_mxfp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
+    // Create matmul descriptor
+    cublasLtMatmulDescOpaque_t matmulDesc;
+    init_matmul_desc(matmulDesc, op_A, op_B, is_fp8, config_.use_split_accumulator);
+    if (is_mxfp8) {
+      set_mxfp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
+                               setup_workspace.b_scale_inv_ptrs);
+    } else if (is_fp8) {
+      set_fp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
                              setup_workspace.b_scale_inv_ptrs);
-  } else if (is_fp8) {
-    set_fp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
-                           setup_workspace.b_scale_inv_ptrs);
-  }
+    }
 >>>>>>> main
 
   // Compute average dimensions for heuristics
