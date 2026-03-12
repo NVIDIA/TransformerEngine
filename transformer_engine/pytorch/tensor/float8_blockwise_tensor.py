@@ -695,9 +695,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         fp8_dtype, is_2D_scaled, rowwise_usage, columnwise_usage = metadata
 
         # Extract rowwise tensors from all-gather outputs
-        rowwise_data, rowwise_scale_inv = (
-            all_gather_outputs[:2] if rowwise_usage else (None, None)
-        )
+        rowwise_data, rowwise_scale_inv = all_gather_outputs[:2] if rowwise_usage else (None, None)
 
         # Extract columnwise tensors — they were transposed in pre_all_gather,
         # so we need to transpose them back.

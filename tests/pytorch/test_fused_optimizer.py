@@ -552,9 +552,9 @@ class TestFusedAdamMXFP8(TestFusedOptimizer):
         # Verify weight params are QuantizedTensors (bias stays bf16)
         for name, p in model.named_parameters():
             if "bias" not in name:
-                assert isinstance(p, QuantizedTensor), (
-                    f"Expected QuantizedTensor for {name}, got {type(p).__name__}"
-                )
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"Expected QuantizedTensor for {name}, got {type(p).__name__}"
 
         # Build reference: clone dequantized weights for a plain Adam
         ref_params = [p.detach().clone().float() for p in model.parameters()]
@@ -578,17 +578,16 @@ class TestFusedAdamMXFP8(TestFusedOptimizer):
 
             # FP32 master weights should match reference Adam exactly
             master_params = [
-                tst_optim.get_unscaled_state(p, "master_param")
-                for p in model.parameters()
+                tst_optim.get_unscaled_state(p, "master_param") for p in model.parameters()
             ]
             torch.testing.assert_close(ref_params, master_params)
 
         # Weight params should still be QuantizedTensors after training
         for name, p in model.named_parameters():
             if "bias" not in name:
-                assert isinstance(p, QuantizedTensor), (
-                    f"{name} lost QuantizedTensor type after training: {type(p).__name__}"
-                )
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type after training: {type(p).__name__}"
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_mxfp8_linear_forward_backward_step(self):
@@ -624,18 +623,12 @@ class TestFusedAdamMXFP8(TestFusedOptimizer):
 
             # Verify all params have non-None gradients after backward
             for name, p in model.named_parameters():
-                assert p.grad is not None, (
-                    f"Step {i}: {name} has no gradient after backward"
-                )
-                assert p.grad.shape == p.shape, (
-                    f"Step {i}: {name} grad shape {p.grad.shape} != param shape {p.shape}"
-                )
-                assert torch.isfinite(p.grad).all(), (
-                    f"Step {i}: {name} has non-finite gradients"
-                )
-                assert p.grad.any(), (
-                    f"Step {i}: {name} gradient is all zeros"
-                )
+                assert p.grad is not None, f"Step {i}: {name} has no gradient after backward"
+                assert (
+                    p.grad.shape == p.shape
+                ), f"Step {i}: {name} grad shape {p.grad.shape} != param shape {p.shape}"
+                assert torch.isfinite(p.grad).all(), f"Step {i}: {name} has non-finite gradients"
+                assert p.grad.any(), f"Step {i}: {name} gradient is all zeros"
 
             optimizer.step()
 
@@ -645,9 +638,9 @@ class TestFusedAdamMXFP8(TestFusedOptimizer):
         # Verify weight params remain QuantizedTensors
         for name, p in model.named_parameters():
             if "bias" not in name:
-                assert isinstance(p, QuantizedTensor), (
-                    f"{name} lost QuantizedTensor type: {type(p).__name__}"
-                )
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type: {type(p).__name__}"
 
         # Verify optimizer states are float32
         for name, p in model.named_parameters():
@@ -691,9 +684,9 @@ class TestFusedAdamFloat8Block(TestFusedOptimizer):
         # Verify weight params are QuantizedTensors (bias stays bf16)
         for name, p in model.named_parameters():
             if "bias" not in name:
-                assert isinstance(p, QuantizedTensor), (
-                    f"Expected QuantizedTensor for {name}, got {type(p).__name__}"
-                )
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"Expected QuantizedTensor for {name}, got {type(p).__name__}"
 
         # Build reference: clone dequantized weights for a plain Adam
         ref_params = [p.detach().clone().float() for p in model.parameters()]
@@ -717,17 +710,16 @@ class TestFusedAdamFloat8Block(TestFusedOptimizer):
 
             # FP32 master weights should match reference Adam exactly
             master_params = [
-                tst_optim.get_unscaled_state(p, "master_param")
-                for p in model.parameters()
+                tst_optim.get_unscaled_state(p, "master_param") for p in model.parameters()
             ]
             torch.testing.assert_close(ref_params, master_params)
 
         # Weight params should still be QuantizedTensors after training
         for name, p in model.named_parameters():
             if "bias" not in name:
-                assert isinstance(p, QuantizedTensor), (
-                    f"{name} lost QuantizedTensor type after training: {type(p).__name__}"
-                )
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type after training: {type(p).__name__}"
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_float8block_linear_forward_backward_step(self):
@@ -763,18 +755,12 @@ class TestFusedAdamFloat8Block(TestFusedOptimizer):
 
             # Verify all params have non-None gradients after backward
             for name, p in model.named_parameters():
-                assert p.grad is not None, (
-                    f"Step {i}: {name} has no gradient after backward"
-                )
-                assert p.grad.shape == p.shape, (
-                    f"Step {i}: {name} grad shape {p.grad.shape} != param shape {p.shape}"
-                )
-                assert torch.isfinite(p.grad).all(), (
-                    f"Step {i}: {name} has non-finite gradients"
-                )
-                assert p.grad.any(), (
-                    f"Step {i}: {name} gradient is all zeros"
-                )
+                assert p.grad is not None, f"Step {i}: {name} has no gradient after backward"
+                assert (
+                    p.grad.shape == p.shape
+                ), f"Step {i}: {name} grad shape {p.grad.shape} != param shape {p.shape}"
+                assert torch.isfinite(p.grad).all(), f"Step {i}: {name} has non-finite gradients"
+                assert p.grad.any(), f"Step {i}: {name} gradient is all zeros"
 
             optimizer.step()
 
@@ -784,9 +770,9 @@ class TestFusedAdamFloat8Block(TestFusedOptimizer):
         # Verify weight params remain QuantizedTensors
         for name, p in model.named_parameters():
             if "bias" not in name:
-                assert isinstance(p, QuantizedTensor), (
-                    f"{name} lost QuantizedTensor type: {type(p).__name__}"
-                )
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type: {type(p).__name__}"
 
         # Verify optimizer states are float32
         for name, p in model.named_parameters():

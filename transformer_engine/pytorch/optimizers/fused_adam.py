@@ -635,7 +635,7 @@ class FusedAdam(torch.optim.Optimizer):
                     if not self.master_weights:
                         local_p = p._local_tensor if isinstance(p, DTensor) else p
                         raise RuntimeError(
-                            f"FusedAdam without master_weights does not support "
+                            "FusedAdam without master_weights does not support "
                             f"{type(local_p).__name__} parameters. Use master_weights=True."
                         )
                     # Route to the FP32 master-weight path: Adam updates the FP32 master,
