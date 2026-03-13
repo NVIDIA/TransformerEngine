@@ -68,15 +68,15 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
   const int warp_id = threadIdx.x / kThreadsPerWarp;
   const int lane_id = threadIdx.x % kThreadsPerWarp;
   if (warp_id == 0) {
+<<<<<<< HEAD
     CompType block_sum = warp_reduce_on_shmem(shmem_block,
                                               static_cast<int>(blockDim.x),
                                               ReduceFuncType::SUM,
                                               lane_id);
-    __syncwarp();
+    CompType block_sum =
+        warp_reduce_on_shmem(shmem_block, blockDim.x, ReduceFuncType::SUM, lane_id);
 
-    // -----------------------------------------------------------------------
-    // 4) One atomic add per CTA to the float accumulator.
-    //    The multiplication by C_coeff is folded into the atomic.
+    __syncwarp();
     // -----------------------------------------------------------------------
     if (lane_id == 0) {
       atomicAdd(&accum_buf[1], block_sum * C_coeff);
@@ -98,9 +98,8 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
                                                    const IndexType* tokens_per_expert,
                                                    int total_num_tokens, int num_experts,
                                                    int num_rows, int num_cols, int topk,
-                                                   float coeff,
-                                                   DataType* aux_loss, float* Const_buf,
-                                                   cudaStream_t stream) {
+                                                   float coeff, DataType* aux_loss,
+                                                   float* Const_buf, cudaStream_t stream) {
   // Round up to a multiple of warp size for correct warp shuffles.
   const int block_size =
       ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1)
@@ -131,9 +130,9 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
 }
 
 void fused_moe_aux_loss_forward_v2(const Tensor& probs, const Tensor& tokens_per_expert,
-                                   int total_num_tokens, int num_experts, int num_rows, int num_cols,
-                                   int topk, float coeff, Tensor& aux_loss, Tensor& Const_buf,
-                                   cudaStream_t stream) {
+                                   int total_num_tokens, int num_experts, int num_rows,
+                                   int num_cols, int topk, float coeff, Tensor& aux_loss,
+                                   Tensor& Const_buf, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       probs.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
