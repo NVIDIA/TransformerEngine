@@ -184,10 +184,10 @@ Error_Type FusedMoEAuxLossForwardFFI(cudaStream_t stream,
   auto aux_loss_tensor = TensorWrapper(aux_loss_buf->untyped_data(), scalar_shape, dtype);
   auto const_buf_tensor = TensorWrapper(const_buf->untyped_data(), scalar_shape, DType::kFloat32);
 
-  nvte_fused_moe_aux_loss_forward(probs_tensor.data(), tpe_tensor.data(), num_tokens, num_experts,
-                                  num_tokens, num_experts, static_cast<int>(topk),
-                                  static_cast<float>(coeff), aux_loss_tensor.data(),
-                                  const_buf_tensor.data(), stream);
+  nvte_fused_moe_aux_loss_forward_v2(probs_tensor.data(), tpe_tensor.data(), num_tokens,
+                                     num_experts, num_tokens, num_experts, static_cast<int>(topk),
+                                     static_cast<float>(coeff), aux_loss_tensor.data(),
+                                     const_buf_tensor.data(), stream);
 
   return ffi_with_cuda_error_check();
 }
