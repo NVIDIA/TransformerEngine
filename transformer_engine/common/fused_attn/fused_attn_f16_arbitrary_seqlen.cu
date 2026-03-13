@@ -115,7 +115,8 @@ std::vector<std::string> get_sorted_extra_tensor_names(const py::dict &extra_ten
   return names;
 }
 
-DLManagedTensor *get_dlpack_tensor(py::handle tensor_obj) {
+template <typename Fn>
+decltype(auto) with_dlpack_tensor(py::handle tensor_obj, Fn &&fn) {
   NVTE_CHECK(py::hasattr(tensor_obj, "__dlpack__"),
              "score_mod_tensors entries must support __dlpack__().");
   py::capsule capsule = tensor_obj.attr("__dlpack__")();
@@ -123,44 +124,48 @@ DLManagedTensor *get_dlpack_tensor(py::handle tensor_obj) {
   auto *managed =
       static_cast<DLManagedTensor *>(PyCapsule_GetPointer(capsule.ptr(), kDlpackCapsuleName));
   NVTE_CHECK(managed != nullptr, "Invalid DLPack capsule in score_mod_tensors entry.");
-  return managed;
+  return std::forward<Fn>(fn)(*managed);
 }
 
 void *get_dlpack_data_pointer(py::handle tensor_obj) {
-  auto *managed = get_dlpack_tensor(tensor_obj);
-  return static_cast<char *>(managed->dl_tensor.data) + managed->dl_tensor.byte_offset;
+  return with_dlpack_tensor(tensor_obj, [](const DLManagedTensor &managed) -> void * {
+    return static_cast<char *>(managed.dl_tensor.data) + managed.dl_tensor.byte_offset;
+  });
 }
 
 TensorAttr create_tensor_attr_from_dlpack(const std::shared_ptr<cudnn_frontend::graph::Graph> &graph,
                                           py::handle tensor_obj, const std::string &name) {
-  auto *managed = get_dlpack_tensor(tensor_obj);
-  const auto device_type = managed->dl_tensor.device.device_type;
-  NVTE_CHECK(device_type == kDLCPU || device_type == kDLCUDAHost || device_type == kDLCUDA ||
-                 device_type == kDLCUDAManaged,
-             "Invalid device type in score_mod_tensors entry.");
+  return with_dlpack_tensor(
+      tensor_obj, [&](const DLManagedTensor &managed) -> TensorAttr {
+        const auto device_type = managed.dl_tensor.device.device_type;
+        NVTE_CHECK(device_type == kDLCPU || device_type == kDLCUDAHost || device_type == kDLCUDA ||
+                       device_type == kDLCUDAManaged,
+                   "Invalid device type in score_mod_tensors entry.");
 
-  const auto ndim = managed->dl_tensor.ndim;
-  std::vector<int64_t> dims(managed->dl_tensor.shape, managed->dl_tensor.shape + ndim);
-  const auto tensor_dtype = convert_dlpack_dtype(managed->dl_tensor.dtype);
-  NVTE_CHECK(tensor_dtype != cudnn_frontend::DataType_t::NOT_SET,
-             "Unsupported DLPack dtype in score_mod_tensors entry.");
+        const auto ndim = managed.dl_tensor.ndim;
+        std::vector<int64_t> dims(managed.dl_tensor.shape, managed.dl_tensor.shape + ndim);
+        const auto tensor_dtype = convert_dlpack_dtype(managed.dl_tensor.dtype);
+        NVTE_CHECK(tensor_dtype != cudnn_frontend::DataType_t::NOT_SET,
+                   "Unsupported DLPack dtype in score_mod_tensors entry.");
 
-  auto props = cudnn_frontend::graph::Tensor_attributes()
-                   .set_name(name)
-                   .set_data_type(tensor_dtype)
-                   .set_is_virtual(false)
-                   .set_is_pass_by_value(device_type == kDLCPU)
-                   .set_dim(dims);
+        auto props = cudnn_frontend::graph::Tensor_attributes()
+                         .set_name(name)
+                         .set_data_type(tensor_dtype)
+                         .set_is_virtual(false)
+                         .set_is_pass_by_value(device_type == kDLCPU)
+                         .set_dim(dims);
 
-  if (managed->dl_tensor.strides == nullptr) {
-    auto stride_order = cudnn_frontend::detail::generate_row_major_stride_order(ndim);
-    props.set_stride(cudnn_frontend::detail::generate_stride(dims, stride_order));
-  } else {
-    std::vector<int64_t> strides(managed->dl_tensor.strides, managed->dl_tensor.strides + ndim);
-    props.set_stride(strides);
-  }
+        if (managed.dl_tensor.strides == nullptr) {
+          auto stride_order = cudnn_frontend::detail::generate_row_major_stride_order(ndim);
+          props.set_stride(cudnn_frontend::detail::generate_stride(dims, stride_order));
+        } else {
+          std::vector<int64_t> strides(managed.dl_tensor.strides,
+                                       managed.dl_tensor.strides + ndim);
+          props.set_stride(strides);
+        }
 
-  return graph->tensor(props);
+        return graph->tensor(props);
+      });
 }
 
 template <typename T>
@@ -179,19 +184,19 @@ std::uint64_t get_extra_tensor_signature(void *extra_tensors_ptr) {
 
   for (const auto &name : get_sorted_extra_tensor_names(extra_tensors)) {
     py::handle tensor_obj = extra_tensors[py::str(name)];
-    auto *managed = get_dlpack_tensor(tensor_obj);
-
     hash_combine(signature, name);
-    hash_combine(signature, managed->dl_tensor.device.device_type);
-    hash_combine(signature, managed->dl_tensor.device.device_id);
-    hash_combine(signature, managed->dl_tensor.dtype.code);
-    hash_combine(signature, managed->dl_tensor.dtype.bits);
-    hash_combine(signature, managed->dl_tensor.dtype.lanes);
-    hash_combine(signature, managed->dl_tensor.ndim);
-    for (int i = 0; i < managed->dl_tensor.ndim; ++i) {
-      hash_combine(signature, managed->dl_tensor.shape[i]);
-      hash_combine(signature, managed->dl_tensor.strides ? managed->dl_tensor.strides[i] : -1);
-    }
+    with_dlpack_tensor(tensor_obj, [&](const DLManagedTensor &managed) {
+      hash_combine(signature, managed.dl_tensor.device.device_type);
+      hash_combine(signature, managed.dl_tensor.device.device_id);
+      hash_combine(signature, managed.dl_tensor.dtype.code);
+      hash_combine(signature, managed.dl_tensor.dtype.bits);
+      hash_combine(signature, managed.dl_tensor.dtype.lanes);
+      hash_combine(signature, managed.dl_tensor.ndim);
+      for (int i = 0; i < managed.dl_tensor.ndim; ++i) {
+        hash_combine(signature, managed.dl_tensor.shape[i]);
+        hash_combine(signature, managed.dl_tensor.strides ? managed.dl_tensor.strides[i] : -1);
+      }
+    });
   }
 
   return signature;

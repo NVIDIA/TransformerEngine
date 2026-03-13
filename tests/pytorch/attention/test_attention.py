@@ -1748,7 +1748,7 @@ def test_dpa_score_mod_causal_external_neg_inf(dtype, model_configs, model):
     v = (torch.randn(b, sq, h, d, dtype=dtype, device="cuda") * 0.1).detach().requires_grad_(True)
     cu_seqlens = torch.arange(0, (b + 1) * sq, sq, dtype=torch.int32, device="cuda")
     out_grad = (torch.randn(b, sq, h * d, dtype=dtype, device="cuda") * 0.01).detach()
-    neg_inf = torch.full((1, 1, 1, 1), float("-inf"), dtype=torch.float32)
+    neg_inf = torch.full((1, 1, 1, 1), float("-inf"), dtype=torch.float32, device="cuda")
 
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
