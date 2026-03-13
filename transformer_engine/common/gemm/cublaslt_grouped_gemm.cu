@@ -1304,12 +1304,11 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
   const DType dtype = outputD->dtype();
   constexpr int kThreads = 256;
   const size_t total_elements = static_cast<size_t>(outputD->logical_shape.data[0]) *
-  static_cast<size_t>(outputD->logical_shape.data[1]);
+                                static_cast<size_t>(outputD->logical_shape.data[1]);
   const size_t avg_elements = total_elements / outputD->num_tensors;
   int blocks_per_tensor = static_cast<int>((avg_elements + kThreads - 1) / kThreads);
   const dim3 grid(outputD->num_tensors, blocks_per_tensor);
   const dim3 block(kThreads);
-
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
     grouped_bias_add_kernel<T, kVec><<<grid, block, 0, stream>>>(
