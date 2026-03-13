@@ -301,7 +301,8 @@ std::vector<py::object> fused_attn_fwd(
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
         return_max_logit, cuda_graph, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type,
         softmax_type, window_size[0], window_size[1], bottom_right_diagonal,
-        score_mod.is_none() ? nullptr : score_mod.ptr(), workspace.data(),
+        score_mod.is_none() ? nullptr : score_mod.ptr(),
+        score_mod_tensors.is_none() ? nullptr : score_mod_tensors.ptr(), workspace.data(),
         at::cuda::getCurrentCUDAStream());
   });
 
