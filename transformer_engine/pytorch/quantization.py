@@ -89,6 +89,7 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     )
 
 
+@torch.compiler.assume_constant_result
 def check_fp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available."""
     global _FP8_SUPPORT
@@ -97,6 +98,7 @@ def check_fp8_support() -> Tuple[bool, str]:
     return _FP8_SUPPORT
 
 
+@torch.compiler.assume_constant_result
 def check_mxfp8_support() -> Tuple[bool, str]:
     """Return if MXFP8 support is available."""
     global _MXFP8_SUPPORT
@@ -105,6 +107,7 @@ def check_mxfp8_support() -> Tuple[bool, str]:
     return _MXFP8_SUPPORT
 
 
+@torch.compiler.assume_constant_result
 def check_nvfp4_support() -> Tuple[bool, str]:
     """Return if NVFP4 support is available."""
     global _NVFP4_SUPPORT
@@ -113,6 +116,7 @@ def check_nvfp4_support() -> Tuple[bool, str]:
     return _NVFP4_SUPPORT
 
 
+@torch.compiler.assume_constant_result
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available."""
     global _FP8_BLOCK_SCALING_SUPPORT
@@ -309,7 +313,7 @@ class FP8GlobalState:
     reason_for_no_nvfp4: str = ""
 
 
-_fp8_state = FP8GlobalState()
+_FP8_GLOBAL_STATE = FP8GlobalState()
 
 
 class FP8GlobalStateManager:
@@ -320,22 +324,22 @@ class FP8GlobalStateManager:
     @classmethod
     def reset(cls) -> None:
         """Reset the global state"""
-        global _fp8_state
-        _fp8_state = FP8GlobalState()
+        global _FP8_GLOBAL_STATE
+        _FP8_GLOBAL_STATE = FP8GlobalState()
 
     @classmethod
     def set_skip_fp8_weight_update_tensor(cls, skip: bool) -> None:
         """`skip_fp8_weight_update_tensor` inplace setter."""
-        if _fp8_state.skip_fp8_weight_update_tensor is None:
-            _fp8_state.skip_fp8_weight_update_tensor = torch.empty(
+        if _FP8_GLOBAL_STATE.skip_fp8_weight_update_tensor is None:
+            _FP8_GLOBAL_STATE.skip_fp8_weight_update_tensor = torch.empty(
                 1, dtype=torch.float32, device="cuda"
             )
-        _fp8_state.skip_fp8_weight_update_tensor.fill_(skip)
+        _FP8_GLOBAL_STATE.skip_fp8_weight_update_tensor.fill_(skip)
 
     @classmethod
     def get_skip_fp8_weight_update_tensor(cls) -> None:
         """`skip_fp8_weight_update_tensor` getter."""
-        return _fp8_state.skip_fp8_weight_update_tensor
+        return _FP8_GLOBAL_STATE.skip_fp8_weight_update_tensor
 
     @classmethod
     def is_fp8_available(cls) -> Tuple[bool, str]:
@@ -437,92 +441,96 @@ class FP8GlobalStateManager:
 
             key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
-            if key not in _fp8_state.global_amax_buffer:
-                _fp8_state.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
-                _fp8_state.global_amax_history_buffer[key] = [
+            if key not in _FP8_GLOBAL_STATE.global_amax_buffer:
+                _FP8_GLOBAL_STATE.global_amax_buffer[key] = [
+                    fp8_meta[fp8_meta_tensor_key].amax_history[0]
+                ]
+                _FP8_GLOBAL_STATE.global_amax_history_buffer[key] = [
                     fp8_meta[fp8_meta_tensor_key].amax_history
                 ]
-                _fp8_state.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
+                _FP8_GLOBAL_STATE.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
             else:
-                _fp8_state.global_amax_buffer[key].append(
+                _FP8_GLOBAL_STATE.global_amax_buffer[key].append(
                     fp8_meta[fp8_meta_tensor_key].amax_history[0]
                 )
-                _fp8_state.global_amax_history_buffer[key].append(
+                _FP8_GLOBAL_STATE.global_amax_history_buffer[key].append(
                     fp8_meta[fp8_meta_tensor_key].amax_history
                 )
-                _fp8_state.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
-            fp8_meta[index_in_buffer].append(len(_fp8_state.global_amax_buffer[key]) - 1)
+                _FP8_GLOBAL_STATE.global_scale_buffer[key].append(
+                    fp8_meta[fp8_meta_tensor_key].scale
+                )
+            fp8_meta[index_in_buffer].append(len(_FP8_GLOBAL_STATE.global_amax_buffer[key]) - 1)
             fp8_meta[index_in_buffer].append(key)
 
     @classmethod
     def is_fp8_enabled(cls) -> bool:
         """Is FP8 enabled"""
-        return _fp8_state.fp8_enabled
+        return _FP8_GLOBAL_STATE.fp8_enabled
 
     @classmethod
     def is_fp8_calibration(cls) -> bool:
         """Is FP8 calibration"""
-        return _fp8_state.fp8_calibration
+        return _FP8_GLOBAL_STATE.fp8_calibration
 
     @classmethod
     def with_fp8_parameters(cls) -> bool:
         """Should the parameters be stored as FP8"""
-        return _fp8_state.fp8_parameters
+        return _FP8_GLOBAL_STATE.fp8_parameters
 
     @classmethod
     def with_high_precision_init_val(cls) -> bool:
         """Should the high precision initial values be stored with FP8 parameters"""
-        return _fp8_state.high_precision_init_val
+        return _FP8_GLOBAL_STATE.high_precision_init_val
 
     @classmethod
     def fp8_graph_capturing(cls) -> bool:
         """Is CUDA graph capture under way?"""
         if torch.compiler.is_compiling():
-            assert not _fp8_state.fp8_graph_capturing
+            assert not _FP8_GLOBAL_STATE.fp8_graph_capturing
             return False
-        return _fp8_state.fp8_graph_capturing or torch.cuda.is_current_stream_capturing()
+        return _FP8_GLOBAL_STATE.fp8_graph_capturing or torch.cuda.is_current_stream_capturing()
 
     @classmethod
     def is_first_fp8_module(cls):
         """Returns `True` only the first time when called multiple
         times from within the same `autocast` context.
         """
-        tmp = _fp8_state.is_first_fp8_module
-        _fp8_state.is_first_fp8_module = False
+        tmp = _FP8_GLOBAL_STATE.is_first_fp8_module
+        _FP8_GLOBAL_STATE.is_first_fp8_module = False
         return tmp
 
     @classmethod
     def peek_is_first_fp8_module(cls) -> bool:
         """Return the current first-module flag without consuming it."""
-        return _fp8_state.is_first_fp8_module
+        return _FP8_GLOBAL_STATE.is_first_fp8_module
 
     @classmethod
     def set_is_first_fp8_module(cls, value: bool) -> None:
         """Set the first-module flag."""
-        _fp8_state.is_first_fp8_module = value
+        _FP8_GLOBAL_STATE.is_first_fp8_module = value
 
     @classmethod
     def get_fp8_recipe(cls) -> Recipe:
         """Return the fp8 recipe"""
-        if _fp8_state.fp8_recipe is not None:
-            return _fp8_state.fp8_recipe
+        if _FP8_GLOBAL_STATE.fp8_recipe is not None:
+            return _FP8_GLOBAL_STATE.fp8_recipe
         return get_default_fp8_recipe()
 
     @classmethod
     def get_fp8_group(cls) -> Union[dist_group_type, None]:
         """Return the fp8 group for scale/amax comm"""
-        return _fp8_state.fp8_distributed_group
+        return _FP8_GLOBAL_STATE.fp8_distributed_group
 
     @classmethod
     def get_autocast_state(cls) -> Tuple[bool, bool, Recipe, dist_group_type, bool]:
         """FP8 autocast state getter"""
         return (
-            _fp8_state.fp8_enabled,
-            _fp8_state.fp8_calibration,
-            _fp8_state.fp8_recipe,
-            _fp8_state.fp8_distributed_group,
-            _fp8_state.is_first_fp8_module,
-            _fp8_state.fp8_graph_capturing,
+            _FP8_GLOBAL_STATE.fp8_enabled,
+            _FP8_GLOBAL_STATE.fp8_calibration,
+            _FP8_GLOBAL_STATE.fp8_recipe,
+            _FP8_GLOBAL_STATE.fp8_distributed_group,
+            _FP8_GLOBAL_STATE.is_first_fp8_module,
+            _FP8_GLOBAL_STATE.fp8_graph_capturing,
         )
 
     @classmethod
@@ -531,28 +539,28 @@ class FP8GlobalStateManager:
     ) -> None:
         """FP8 autocast state setter"""
         (
-            _fp8_state.fp8_enabled,
-            _fp8_state.fp8_calibration,
-            _fp8_state.fp8_recipe,
-            _fp8_state.fp8_distributed_group,
-            _fp8_state.is_first_fp8_module,
-            _fp8_state.fp8_graph_capturing,
+            _FP8_GLOBAL_STATE.fp8_enabled,
+            _FP8_GLOBAL_STATE.fp8_calibration,
+            _FP8_GLOBAL_STATE.fp8_recipe,
+            _FP8_GLOBAL_STATE.fp8_distributed_group,
+            _FP8_GLOBAL_STATE.is_first_fp8_module,
+            _FP8_GLOBAL_STATE.fp8_graph_capturing,
         ) = fp8_state
 
     @classmethod
     def get_global_amax_buffer(cls) -> Dict[str, list]:
         """Return the global amax buffer."""
-        return _fp8_state.global_amax_buffer
+        return _FP8_GLOBAL_STATE.global_amax_buffer
 
     @classmethod
     def get_global_amax_history_buffer(cls) -> Dict[str, list]:
         """Return the global amax history buffer."""
-        return _fp8_state.global_amax_history_buffer
+        return _FP8_GLOBAL_STATE.global_amax_history_buffer
 
     @classmethod
     def get_autocast_arguments(cls) -> Dict[Any, Tuple[Recipe, Optional[dist_group_type]]]:
         """Return autocast arguments keyed by autocast identity."""
-        return _fp8_state.autocast_arguments
+        return _FP8_GLOBAL_STATE.autocast_arguments
 
     @staticmethod
     def reduce_tensor_across_group_op_max(tensor: torch.Tensor, group: dist_group_type) -> None:
@@ -572,7 +580,7 @@ class FP8GlobalStateManager:
     ) -> None:
         """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
         # global_amax_buffer should only be non-empty for fp8 delayed scaling
-        for buffer_key, amax_buffer in _fp8_state.global_amax_buffer.items():
+        for buffer_key, amax_buffer in _FP8_GLOBAL_STATE.global_amax_buffer.items():
             # Check for forward or backward reduction.
             fwd_update, autocast_key = cls.split_key_in_buffer(buffer_key)
             if fwd_update != forward:
@@ -581,7 +589,7 @@ class FP8GlobalStateManager:
                 continue
 
             # Retrieve autocast specific args and concat amaxes.
-            recipe, group = _fp8_state.autocast_arguments[autocast_key]
+            recipe, group = _FP8_GLOBAL_STATE.autocast_arguments[autocast_key]
             contiguous_amax = torch.cat(amax_buffer)
 
             # Reduction.
@@ -602,8 +610,8 @@ class FP8GlobalStateManager:
             if not unfused_update:
                 tex.fused_amax_and_scale_update_after_reduction(
                     contiguous_amax,
-                    _fp8_state.global_amax_history_buffer[buffer_key],
-                    _fp8_state.global_scale_buffer[buffer_key],
+                    _FP8_GLOBAL_STATE.global_amax_history_buffer[buffer_key],
+                    _FP8_GLOBAL_STATE.global_scale_buffer[buffer_key],
                     recipe.amax_compute_algo,
                     get_fp8_te_dtype(recipe, forward),
                     recipe.margin,
@@ -612,8 +620,8 @@ class FP8GlobalStateManager:
                 split_and_copy(contiguous_amax, amax_buffer, [x.numel() for x in amax_buffer])
 
                 for amax_history, scale in zip(
-                    _fp8_state.global_amax_history_buffer[buffer_key],
-                    _fp8_state.global_scale_buffer[buffer_key],
+                    _FP8_GLOBAL_STATE.global_amax_history_buffer[buffer_key],
+                    _FP8_GLOBAL_STATE.global_scale_buffer[buffer_key],
                 ):
                     _amax_and_scale_update(
                         amax_history, scale, get_fp8_max(recipe, forward), recipe
@@ -646,17 +654,17 @@ class FP8GlobalStateManager:
 
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
-        _fp8_state.autocast_arguments[autocast_key] = (fp8_recipe, fp8_group)
+        _FP8_GLOBAL_STATE.autocast_arguments[autocast_key] = (fp8_recipe, fp8_group)
 
-        _fp8_state.fp8_enabled = enabled
-        _fp8_state.fp8_calibration = calibrating
-        _fp8_state.fp8_recipe = fp8_recipe
-        _fp8_state.fp8_distributed_group = fp8_group
-        _fp8_state.fp8_graph_capturing = _graph
+        _FP8_GLOBAL_STATE.fp8_enabled = enabled
+        _FP8_GLOBAL_STATE.fp8_calibration = calibrating
+        _FP8_GLOBAL_STATE.fp8_recipe = fp8_recipe
+        _FP8_GLOBAL_STATE.fp8_distributed_group = fp8_group
+        _FP8_GLOBAL_STATE.fp8_graph_capturing = _graph
 
-        if _fp8_state.autocast_depth == 0:
-            _fp8_state.is_first_fp8_module = True
-        _fp8_state.autocast_depth += 1
+        if _FP8_GLOBAL_STATE.autocast_depth == 0:
+            _FP8_GLOBAL_STATE.is_first_fp8_module = True
+        _FP8_GLOBAL_STATE.autocast_depth += 1
 
         if enabled:
             fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
@@ -674,11 +682,16 @@ class FP8GlobalStateManager:
     @classmethod
     def autocast_exit(cls, enabled: bool, _graph: bool) -> None:
         """Set state and tracking variables for exit from FP8 region."""
-        _fp8_state.autocast_depth -= 1
+        _FP8_GLOBAL_STATE.autocast_depth -= 1
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if enabled and _fp8_state.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
+        if (
+            enabled
+            and _FP8_GLOBAL_STATE.autocast_depth == 0
+            and not _graph
+            and torch.is_grad_enabled()
+        ):
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)
@@ -701,14 +714,16 @@ class FP8GlobalStateManager:
         ]
 
         if buffer_position_key in fp8_meta:
-            _fp8_state.fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].append(to_copy)
+            _FP8_GLOBAL_STATE.fp8_tensors_recompute_buffer[
+                fp8_meta[buffer_position_key]
+            ].append(to_copy)
         else:
-            if len(_fp8_state.fp8_tensors_recompute_buffer) == 0:
-                _fp8_state.fp8_tensors_recompute_buffer = [deque()]
+            if len(_FP8_GLOBAL_STATE.fp8_tensors_recompute_buffer) == 0:
+                _FP8_GLOBAL_STATE.fp8_tensors_recompute_buffer = [deque()]
             else:
-                _fp8_state.fp8_tensors_recompute_buffer.append(deque())
-            _fp8_state.fp8_tensors_recompute_buffer[-1].append(to_copy)
-            fp8_meta[buffer_position_key] = len(_fp8_state.fp8_tensors_recompute_buffer) - 1
+                _FP8_GLOBAL_STATE.fp8_tensors_recompute_buffer.append(deque())
+            _FP8_GLOBAL_STATE.fp8_tensors_recompute_buffer[-1].append(to_copy)
+            fp8_meta[buffer_position_key] = len(_FP8_GLOBAL_STATE.fp8_tensors_recompute_buffer) - 1
 
     @classmethod
     def get_old_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
@@ -725,7 +740,7 @@ class FP8GlobalStateManager:
 
         # Retrieve stashed amaxes and scales from phase 1 pre forward.
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
-        stashed_fp8_meta = _fp8_state.fp8_tensors_recompute_buffer[
+        stashed_fp8_meta = _FP8_GLOBAL_STATE.fp8_tensors_recompute_buffer[
             fp8_meta[buffer_position_key]
         ].popleft()
 
@@ -824,18 +839,18 @@ def quantized_model_init(
              This functionality is *EXPERIMENTAL*.
     """
 
-    _fp8_parameters = _fp8_state.fp8_parameters
-    _fp8_recipe = _fp8_state.fp8_recipe
-    _high_precision_init_val = _fp8_state.high_precision_init_val
-    _fp8_state.fp8_parameters = enabled
-    _fp8_state.fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
-    _fp8_state.high_precision_init_val = preserve_high_precision_init_val
+    _fp8_parameters = _FP8_GLOBAL_STATE.fp8_parameters
+    _fp8_recipe = _FP8_GLOBAL_STATE.fp8_recipe
+    _high_precision_init_val = _FP8_GLOBAL_STATE.high_precision_init_val
+    _FP8_GLOBAL_STATE.fp8_parameters = enabled
+    _FP8_GLOBAL_STATE.fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
+    _FP8_GLOBAL_STATE.high_precision_init_val = preserve_high_precision_init_val
     try:
         yield
     finally:
-        _fp8_state.fp8_parameters = _fp8_parameters
-        _fp8_state.fp8_recipe = _fp8_recipe
-        _fp8_state.high_precision_init_val = _high_precision_init_val
+        _FP8_GLOBAL_STATE.fp8_parameters = _fp8_parameters
+        _FP8_GLOBAL_STATE.fp8_recipe = _fp8_recipe
+        _FP8_GLOBAL_STATE.high_precision_init_val = _high_precision_init_val
 
 
 @contextmanager
