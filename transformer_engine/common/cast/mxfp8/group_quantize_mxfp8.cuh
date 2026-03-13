@@ -744,47 +744,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     static_next_block_id = launch_block_id + static_block_stride;
   }
   bool job_finished = false;
-  int buff_in = 0;
-  bool has_prefetched_current_job = true;
 
-  // Prime the pipeline with stage-0 of the first job assigned to this CTA.
-  {
-    const JobDescriptor first_job =
-        decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
-                   work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
-    if (!is_job_valid(first_job, shape_rep, total_work_blocks, offsets_ptr)) {
-      return;
-    }
-    const BlockDescriptor first_block = decode_block(first_job, is_single_tensor, offsets_ptr);
-
-    const CUtensorMap &tensor_map_input =
-        is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[first_job.tensor_id];
-    const CUtensorMap &tensor_map_act_input = is_single_tensor
-                                                  ? tensor_map_act_input_static
-                                                  : g_tensor_maps_act_input[first_job.tensor_id];
-
-    if (leading_thread && (!is_single_tensor)) {
-      fence_acquire_tensormap(&tensor_map_input);
-      if constexpr (COMPUTE_ACTIVATIONS) {
-        fence_acquire_tensormap(&tensor_map_act_input);
-      }
-    }
-
-#pragma unroll
-    for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
-      const size_t buff = stage;
-      const size_t stage_offset_Y = stage * BUFF_DIM_Y;
-      const size_t global_offset_Y = first_block.block_offset_Y + stage_offset_Y;
-      const size_t global_offset_X = first_block.block_offset_X;
-      const size_t buff_offset = buff * BUFF_DIM;
-      uint64_t *barrier = &IN_buff_readable_mbar[buff];
-      prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, tensor_map_input, tensor_map_act_input,
-                                           global_offset_X, global_offset_Y, buff_offset,
-                                           shmem_buff_size, barrier, leading_thread);
-    }
-  }
-
-  // Main work loop: decode current job, run all 32-row stages, schedule/prefetch next job.
+  // Main work loop: decode current job, prime its pipeline, then process all 32-row stages.
   while (!job_finished) {
     // Decode CTA assignment into logical tensor coordinates and validate bounds.
     const JobDescriptor current_job =
@@ -793,13 +754,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const bool current_job_is_valid =
         is_job_valid(current_job, shape_rep, total_work_blocks, offsets_ptr);
     if (!current_job_is_valid) {
-      if (has_prefetched_current_job) {
-        // A stage-0 prefetch may already be in flight for this CTA. Drain it before exiting.
-        ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
-                                                         IN_buff_readable_parity[buff_in]);
-        IN_buff_readable_parity[buff_in] ^= 1;
-        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
-      }
       break;
     }
 
@@ -864,6 +818,22 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
     }
 
+    int buff_in = 0;
+
+    // Prime the pipeline with the first PREFETCH_STAGES slices of the current block.
+#pragma unroll
+    for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
+      const size_t buff = stage;
+      const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+      const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
+      const size_t global_offset_X = block_offset_X;
+      const size_t buff_offset = buff * BUFF_DIM;
+      uint64_t *barrier = &IN_buff_readable_mbar[buff];
+      prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, tensor_map_input, tensor_map_act_input,
+                                           global_offset_X, global_offset_Y, buff_offset,
+                                           shmem_buff_size, barrier, leading_thread);
+    }
+
     float partial_dbias_colwise = 0.0f;
     float thread_dbias_rowwise[SCALE_DIM_X];
     if constexpr (IS_DBIAS) {
@@ -873,83 +843,24 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
     }
 
-    bool prefetched_next_job = false;
     // Process one [CHUNK_DIM_Y x CHUNK_DIM_X] block in STAGES slices (32 rows each).
 #pragma unroll
     for (int stage = 0; stage < STAGES; ++stage) {
       const size_t stage_offset_Y = stage * BUFF_DIM_Y;
-      bool allow_next_job_prefetch = true;
-      JobDescriptor prefetch_job = current_job;
-      BlockDescriptor prefetch_block = current_block;
-
-      if (stage == STAGES - PREFETCH_STAGES) {
-        if constexpr (PERSISTENT) {
-          if (static_next_block_id < total_work_blocks) {
-            ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
-            ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
-            static_next_block_id += static_block_stride;
-          } else {
-            // Next loop iteration exits via current_job_is_valid check.
-            ctaid_X = 0;
-            ctaid_Y = static_cast<int32_t>(work_blocks_Y);
-            allow_next_job_prefetch = false;
-          }
-        } else {
-          ctaid_X = -1;
-          ctaid_Y = -1;
-        }
-        if constexpr (!PERSISTENT) {
-          if (ctaid_X == -1 && ctaid_Y == -1) {
-            job_finished = true;
-          }
-        }
-      }
-
-      // Stage-(STAGES - PREFETCH_STAGES) prefetches stage-0 of the next job.
-      // Validate that job before issuing TMA reads to avoid OOB accesses on graph-safe tails.
-      if ((stage >= STAGES - PREFETCH_STAGES) && allow_next_job_prefetch && !job_finished) {
-        prefetch_job = decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim,
-                                  last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr,
-                                  first_dims_ptr, last_dims_ptr);
-        allow_next_job_prefetch =
-            is_job_valid(prefetch_job, shape_rep, total_work_blocks, offsets_ptr);
-        if (allow_next_job_prefetch) {
-          prefetch_block = decode_block(prefetch_job, is_single_tensor, offsets_ptr);
-        }
-      }
-
-      if ((stage < STAGES - PREFETCH_STAGES) || (allow_next_job_prefetch && !job_finished)) {
+      if (stage < STAGES - PREFETCH_STAGES) {
         const size_t next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
-        const size_t next_prefetch_stage = (stage + PREFETCH_STAGES) % STAGES;
+        const size_t next_prefetch_stage = stage + PREFETCH_STAGES;
         const size_t next_prefetch_stage_offset_Y = next_prefetch_stage * BUFF_DIM_Y;
-        if (stage >= STAGES - PREFETCH_STAGES) {
-          prefetched_next_job = true;
-        }
 
-        const size_t global_offset_Y = prefetch_block.block_offset_Y + next_prefetch_stage_offset_Y;
-        const size_t global_offset_X = prefetch_block.block_offset_X;
+        const size_t global_offset_Y = block_offset_Y + next_prefetch_stage_offset_Y;
+        const size_t global_offset_X = block_offset_X;
         const size_t next_prefetch_buff_offset = next_prefetch_buff * BUFF_DIM;
 
-        const CUtensorMap &prefetch_tensor_map_input =
-            is_single_tensor ? tensor_map_input_static
-                             : g_tensor_maps_input[prefetch_job.tensor_id];
-        const CUtensorMap &prefetch_tensor_map_act_input =
-            is_single_tensor ? tensor_map_act_input_static
-                             : g_tensor_maps_act_input[prefetch_job.tensor_id];
-
         uint64_t *barrier = &IN_buff_readable_mbar[next_prefetch_buff];
-        if (leading_thread) {
-          if ((!is_single_tensor) && (stage == STAGES - PREFETCH_STAGES)) {
-            fence_acquire_tensormap(&prefetch_tensor_map_input);
-            if constexpr (COMPUTE_ACTIVATIONS) {
-              fence_acquire_tensormap(&prefetch_tensor_map_act_input);
-            }
-          }
-        }
-        prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, prefetch_tensor_map_input,
-                                             prefetch_tensor_map_act_input, global_offset_X,
-                                             global_offset_Y, next_prefetch_buff_offset,
-                                             shmem_buff_size, barrier, leading_thread);
+        prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, tensor_map_input, tensor_map_act_input,
+                                             global_offset_X, global_offset_Y,
+                                             next_prefetch_buff_offset, shmem_buff_size, barrier,
+                                             leading_thread);
         ptx::fence_proxy_async_shared_cta();
       }
 
@@ -994,7 +905,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
       buff_in = (buff_in + 1) % BUFFS_NUM;
     }
-    has_prefetched_current_job = prefetched_next_job;
 
     if constexpr (IS_DBIAS) {
       if (is_single_tensor) {
@@ -1034,6 +944,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
           dbias_workspace[dbias_idx] = thread_partial_dbias;
         }
       }
+    }
+
+    if constexpr (PERSISTENT) {
+      if (static_next_block_id < total_work_blocks) {
+        ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
+        ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
+        static_next_block_id += static_block_stride;
+      } else {
+        job_finished = true;
+      }
+    } else {
+      job_finished = true;
     }
   }
 
