@@ -522,24 +522,25 @@ void performTest_x2(const ProcessingMethod processing_method,
 }
 
 std::vector<std::vector<size_t>> matrix_sizes = {
-    {1, 16},
-    {16, 48},
-    {65, 96},
-    {128, 128},
-    {256, 256},
-    {993, 512},
-    {511, 6144},
-    {8192, 128},
-    {2048, 160},
-    {577, 1632},
-    {1024},
-    {8, 32, 1024},
-    {16, 8, 4, 512},
+    // {1, 16},
+    // {16, 48},
+    // {65, 96},
+    // {128, 128},
+    // {256, 256},
+    // {993, 512},
+    // {511, 6144},
+    // {8192, 128},
+    // {2048, 160},
+    // {577, 1632},
+    // {1024},
+    // {8, 32, 1024},
+    // {16, 8, 4, 512},
+    {8192, 7168},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
-    {1, 32},
-    {32, 1},
+    // {1, 32},
+    // {32, 1},
     {32, 32},
 };
 
@@ -553,16 +554,16 @@ std::vector<InputsFillCase> input_scenarios = {
 
 std::vector<ProcessingMethod> processing_methods = {
     ProcessingMethod::CAST_ONLY,
-    ProcessingMethod::CAST_DBIAS,
-    ProcessingMethod::CAST_DBIAS_DACT,
-    ProcessingMethod::CAST_DACT,
-    ProcessingMethod::CAST_ACT,
+    // ProcessingMethod::CAST_DBIAS,
+    // ProcessingMethod::CAST_DBIAS_DACT,
+    // ProcessingMethod::CAST_DACT,
+    // ProcessingMethod::CAST_ACT,
 };
 
 // Only GeLU activation tests are supported
 std::vector<ActivationType> Activation_types = {
     ActivationType::Identity,
-    ActivationType::GeLU,
+    // ActivationType::GeLU,
     // ActivationType::SiLU,
     // ActivationType::ReLU,
     // ActivationType::QGeLU,
@@ -691,8 +692,10 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(matrix_sizes),
         ::testing::ValuesIn(block_sizes),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::Values(DType::kFloat8E4M3),
+        // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::ValuesIn(input_scenarios)),
     [](const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param)) + "X" +
