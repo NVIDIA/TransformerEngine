@@ -692,8 +692,10 @@ class ScaledTensorFactory:
 
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
 
-        if first_dims is not None or last_dims is not None or (
-            original_shape is not None and group_axis is not None
+        if (
+            first_dims is not None
+            or last_dims is not None
+            or (original_shape is not None and group_axis is not None)
         ):
             assert (
                 original_shape is not None
@@ -701,7 +703,9 @@ class ScaledTensorFactory:
             flatten_axis = (len(original_shape) + flatten_axis) % len(original_shape)
 
             # Determine num_groups from whichever dims array is provided, or from original_shape
-            active_dims = first_dims if first_dims is not None and first_dims.size > 0 else last_dims
+            active_dims = (
+                first_dims if first_dims is not None and first_dims.size > 0 else last_dims
+            )
             if active_dims is not None:
                 num_groups = active_dims.size
             else:

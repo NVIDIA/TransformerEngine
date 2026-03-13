@@ -277,7 +277,8 @@ def _grouped_dequantize(grouped_scaled_tensor):
     scale_inv = grouped_scaled_tensor.scale_inv
     group_sizes = (
         grouped_scaled_tensor.first_dims
-        if grouped_scaled_tensor.first_dims is not None and grouped_scaled_tensor.first_dims.size > 0
+        if grouped_scaled_tensor.first_dims is not None
+        and grouped_scaled_tensor.first_dims.size > 0
         else grouped_scaled_tensor.last_dims
     )
     # For non-ragged groups (kernel case), group_sizes is not stored; derive from original_shape

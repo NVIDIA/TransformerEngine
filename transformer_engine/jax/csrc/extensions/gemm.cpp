@@ -622,21 +622,17 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
 // int64_offset (in int64 elements) is updated on return to the next available slot so callers can
 // thread it through successive make_grouped_tensor calls without aliasing.  Bounds are checked
 // before each slot is used.  Only NO_SCALING is supported.
-JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
-                                              Buffer_Type const &first_dims,
-                                              Buffer_Type const &last_dims,
-                                              int64_t *int64_workspace_base,
-                                              size_t int64_workspace_capacity, size_t &int64_offset,
-                                              size_t num_gemms, cudaStream_t stream,
-                                              int64_t axis_boundary = -1) {
+JAXX_GroupedTensorWrapper make_grouped_tensor(
+    Buffer_Type const &data, Buffer_Type const &first_dims, Buffer_Type const &last_dims,
+    int64_t *int64_workspace_base, size_t int64_workspace_capacity, size_t &int64_offset,
+    size_t num_gemms, cudaStream_t stream, int64_t axis_boundary = -1) {
   auto dims = data.dimensions();
   NVTE_CHECK(dims.size() >= 2, "grouped GEMM data buffer must be at least 2D.");
   // Flatten dims at axis_boundary to produce a 2D NVTE shape.
   // axis_boundary=-1 (default) collapses dims[0..N-2] → rows and keeps dims[N-1] → cols,
   // preserving the prior behaviour for output buffers (e.g. [G, K, N] for wgrad).
   size_t ab = (axis_boundary < 0) ? dims.size() - 1 : static_cast<size_t>(axis_boundary);
-  NVTEShape dataShape{.data = {product(dims, 0, ab), product(dims, ab, dims.size())},
-                      .ndim = 2};
+  NVTEShape dataShape{.data = {product(dims, 0, ab), product(dims, ab, dims.size())}, .ndim = 2};
   JAXX_GroupedTensorWrapper wrapper(JAXX_Scaling_Mode::NO_SCALING, num_gemms, dataShape);
   wrapper.set_rowwise(data, std::nullopt);
   if (first_dims.element_count() > 0) {
@@ -733,12 +729,12 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   auto *int64_base = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
   size_t int64_capacity = int64_workspace->element_count() / sizeof(int64_t);
   size_t int64_offset = 0;
-  auto rhs_tensor = make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims, int64_base,
-                                        int64_capacity, int64_offset, num_gemms, stream,
-                                        rhs_axis_boundary);
-  auto lhs_tensor = make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims, int64_base,
-                                        int64_capacity, int64_offset, num_gemms, stream,
-                                        lhs_axis_boundary);
+  auto rhs_tensor =
+      make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims, int64_base, int64_capacity,
+                          int64_offset, num_gemms, stream, rhs_axis_boundary);
+  auto lhs_tensor =
+      make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims, int64_base, int64_capacity,
+                          int64_offset, num_gemms, stream, lhs_axis_boundary);
   auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base,
                                         int64_capacity, int64_offset, num_gemms, stream);
 
