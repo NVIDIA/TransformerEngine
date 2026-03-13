@@ -466,7 +466,7 @@ class TestGroupedTensor:
         assert grouped_tensor.logical_shape == (0, 0)
 
     def test_grouped_linear_load_state_dict_multi_to_single_param(self, tmp_path) -> None:
-        """Load legacy per-GEMM checkpoint from disk into single grouped parameter format."""
+        """Load per-GEMM checkpoint from disk into single grouped parameter format."""
         num_gemms = 3
         in_features = 64
         out_features = 32
@@ -489,7 +489,7 @@ class TestGroupedTensor:
                         torch.randn(out_features, device="cuda", dtype=dtype)
                     )
         expected_weights = [getattr(src, f"weight{i}").detach().clone() for i in range(num_gemms)]
-        ckpt_path = tmp_path / "grouped_linear_legacy.pt"
+        ckpt_path = tmp_path / "grouped_linear_per_gemm.pt"
         torch.save(src.state_dict(), ckpt_path)
         del src
 
