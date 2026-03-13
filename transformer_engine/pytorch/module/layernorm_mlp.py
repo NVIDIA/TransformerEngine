@@ -832,10 +832,10 @@ class _LayerNormMLP(torch.autograd.Function):
             if ctx.fp8 and requires_grad(
                 inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
             ):
-                _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+                _first_fp8_module = FP8GlobalStateManager.peek_is_first_fp8_module()
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase() or is_recomputation:
-                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+                    FP8GlobalStateManager.set_is_first_fp8_module(_first_fp8_module)
 
             ctx.wgrad_store = wgrad_store
             if is_recomputation:  # return the recomputed tensors

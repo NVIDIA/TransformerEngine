@@ -693,14 +693,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.get_buffer_info()
                 ]
                 for pos, buffer_key in zip((fwd_pos, bwd_pos), (fwd_key, bwd_key)):
-                    if buffer_key in FP8GlobalStateManager.global_amax_buffer:
+                    if buffer_key in FP8GlobalStateManager.get_global_amax_buffer():
                         assert (
-                            buffer_key in FP8GlobalStateManager.global_amax_history_buffer
+                            buffer_key in FP8GlobalStateManager.get_global_amax_history_buffer()
                         ), "TE internal error during amax history change."
-                        FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = self.fp8_meta[
-                            meta_key
-                        ].amax_history[0]
-                        FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = (
+                        FP8GlobalStateManager.get_global_amax_buffer()[buffer_key][pos] = (
+                            self.fp8_meta[meta_key].amax_history[0]
+                        )
+                        FP8GlobalStateManager.get_global_amax_history_buffer()[buffer_key][pos] = (
                             self.fp8_meta[meta_key].amax_history
                         )
 
