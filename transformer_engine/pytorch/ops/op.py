@@ -330,11 +330,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                                 buffer_key
                                 in FP8GlobalStateManager.quantization_state.global_amax_history_buffer
                             ), "TE internal error during amax history change."
-                            FP8GlobalStateManager.quantization_state.global_amax_buffer[
-                                buffer_key
-                            ][pos] = (
-                                recipe_state.amax_history[0]
-                            )
+                            FP8GlobalStateManager.quantization_state.global_amax_buffer[buffer_key][
+                                pos
+                            ] = recipe_state.amax_history[0]
                             FP8GlobalStateManager.quantization_state.global_amax_history_buffer[
                                 buffer_key
                             ][pos] = recipe_state.amax_history

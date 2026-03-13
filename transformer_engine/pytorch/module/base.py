@@ -739,9 +739,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         FP8GlobalStateManager.quantization_state.global_amax_history_buffer[
                             buffer_key
                         ][pos] = self.fp8_meta[meta_key].amax_history
-                        FP8GlobalStateManager.quantization_state.global_amax_buffer[
-                            buffer_key
-                        ][pos] = self.fp8_meta[meta_key].amax_history[0]
+                        FP8GlobalStateManager.quantization_state.global_amax_buffer[buffer_key][
+                            pos
+                        ] = self.fp8_meta[meta_key].amax_history[0]
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""

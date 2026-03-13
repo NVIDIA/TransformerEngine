@@ -98,10 +98,9 @@ class ToyLinear(TransformerEngineBaseModule):
 # Opaque custom op  (torch.library)
 # ---------------------------------------------------------------------------
 
+
 @torch.library.custom_op("test_te::toy_linear", mutates_args=[])
-def _toy_linear_fwd_op(
-    inp: torch.Tensor, weight: torch.Tensor, module_idx: int
-) -> torch.Tensor:
+def _toy_linear_fwd_op(inp: torch.Tensor, weight: torch.Tensor, module_idx: int) -> torch.Tensor:
     """Forward GEMM wrapped as an opaque custom op."""
     module = _toy_modules[module_idx]
     input_q, weight_q = module.get_forward_quantizers()
@@ -288,12 +287,12 @@ def test_autocast_nested():
     inp = torch.randn(8, 32, dtype=dtype, device=device, requires_grad=True)
 
     def fn(inp):
-        with te.autocast(recipe=recipe_current0):          # outer
+        with te.autocast(recipe=recipe_current0):  # outer
             out = m0(inp)
-            with te.autocast(recipe=recipe_current1):      # nested inside outer
+            with te.autocast(recipe=recipe_current1):  # nested inside outer
                 out = m1(out)
 
-        with te.autocast(recipe=recipe_current2):          # separate, after nested pair
+        with te.autocast(recipe=recipe_current2):  # separate, after nested pair
             out = m2(out)
         return out
 

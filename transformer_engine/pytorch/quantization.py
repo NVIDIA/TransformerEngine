@@ -305,6 +305,7 @@ class FP8GlobalState:
     )
     skip_fp8_weight_update_tensor: Optional[torch.Tensor] = None
 
+
 class FP8GlobalStateManager:
     """Class to keep track of and manipulate the global
     FP8 state at different stages of execution.
@@ -468,7 +469,9 @@ class FP8GlobalStateManager:
         if torch.compiler.is_compiling():
             assert not cls.quantization_state.fp8_graph_capturing
             return False
-        return cls.quantization_state.fp8_graph_capturing or torch.cuda.is_current_stream_capturing()
+        return (
+            cls.quantization_state.fp8_graph_capturing or torch.cuda.is_current_stream_capturing()
+        )
 
     @classmethod
     def is_first_fp8_module(cls):
@@ -509,7 +512,10 @@ class FP8GlobalStateManager:
     ) -> None:
         """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
         # global_amax_buffer should only be non-empty for fp8 delayed scaling
-        for buffer_key, amax_buffer in FP8GlobalStateManager.quantization_state.global_amax_buffer.items():
+        for (
+            buffer_key,
+            amax_buffer,
+        ) in FP8GlobalStateManager.quantization_state.global_amax_buffer.items():
             # Check for forward or backward reduction.
             fwd_update, autocast_key = cls.split_key_in_buffer(buffer_key)
             if fwd_update != forward:
@@ -518,7 +524,9 @@ class FP8GlobalStateManager:
                 continue
 
             # Retrieve autocast specific args and concat amaxes.
-            recipe, group = FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key]
+            recipe, group = FP8GlobalStateManager.quantization_state.autocast_arguments[
+                autocast_key
+            ]
             contiguous_amax = torch.cat(amax_buffer)
 
             # Reduction.
@@ -567,8 +575,9 @@ class FP8GlobalStateManager:
         Object identity is sufficient since autocast contexts never outlive a single
         training session.
         """
-        return str((id(recipe) if recipe is not None else None,
-                id(group) if group is not None else None))
+        return str(
+            (id(recipe) if recipe is not None else None, id(group) if group is not None else None)
+        )
 
     @classmethod
     def autocast_enter(
@@ -583,7 +592,10 @@ class FP8GlobalStateManager:
 
         fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
-        FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key] = (fp8_recipe, fp8_group)
+        FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key] = (
+            fp8_recipe,
+            fp8_group,
+        )
 
         FP8GlobalStateManager.quantization_state.fp8_enabled = enabled
         FP8GlobalStateManager.quantization_state.fp8_calibration = calibrating
@@ -650,8 +662,12 @@ class FP8GlobalStateManager:
             if len(FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer) == 0:
                 FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer = [deque()]
             else:
-                FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer.append(deque())
-            FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer[-1].append(to_copy)
+                FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer.append(
+                    deque()
+                )
+            FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer[-1].append(
+                to_copy
+            )
             fp8_meta[buffer_position_key] = (
                 len(FP8GlobalStateManager.quantization_state.fp8_tensors_recompute_buffer) - 1
             )
@@ -688,6 +704,7 @@ class FP8GlobalStateManager:
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
         fp8_meta["scaling_fwd"].scale.copy_(fp8_meta["updated_scale_fwd"])
+
 
 @contextmanager
 def fp8_model_init(
@@ -773,8 +790,12 @@ def quantized_model_init(
     _fp8_recipe = FP8GlobalStateManager.quantization_state.fp8_recipe
     _high_precision_init_val = FP8GlobalStateManager.quantization_state.high_precision_init_val
     FP8GlobalStateManager.quantization_state.fp8_parameters = enabled
-    FP8GlobalStateManager.quantization_state.fp8_recipe = get_default_fp8_recipe() if recipe is None else recipe
-    FP8GlobalStateManager.quantization_state.high_precision_init_val = preserve_high_precision_init_val
+    FP8GlobalStateManager.quantization_state.fp8_recipe = (
+        get_default_fp8_recipe() if recipe is None else recipe
+    )
+    FP8GlobalStateManager.quantization_state.high_precision_init_val = (
+        preserve_high_precision_init_val
+    )
     try:
         yield
     finally:
