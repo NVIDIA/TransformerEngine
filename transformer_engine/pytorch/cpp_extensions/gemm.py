@@ -306,18 +306,6 @@ def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
     return ((size + alignment - 1) // alignment) * alignment
 
 
-@functools.lru_cache(maxsize=None)
-def _get_grouped_gemm_workspaces(device: int, num_tensors: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    setup_size = get_grouped_gemm_setup_workspace_size(num_tensors)
-    workspace_setup = torch.empty(setup_size, dtype=torch.uint8, device=device)
-    workspace_cublas = torch.empty(
-        get_cublas_workspace_size_bytes(),
-        dtype=torch.uint8,
-        device=device,
-    )
-    return workspace_setup, workspace_cublas
-
-
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -374,7 +362,16 @@ def general_grouped_gemm_for_grouped_tensor(
     if not alpha.is_cuda or not beta.is_cuda:
         raise ValueError("alpha and beta must be CUDA tensors.")
 
-    workspace_setup, workspace_cublas = _get_grouped_gemm_workspaces(device.index, num_tensors)
+    workspace_setup = torch.empty(
+        get_grouped_gemm_setup_workspace_size(num_tensors),
+        dtype=torch.uint8,
+        device=device,
+    )
+    workspace_cublas = torch.empty(
+        get_cublas_workspace_size_bytes(),
+        dtype=torch.uint8,
+        device=device,
+    )
 
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
