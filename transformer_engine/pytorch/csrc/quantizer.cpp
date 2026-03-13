@@ -202,6 +202,7 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -412,6 +413,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -734,6 +736,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -1096,6 +1099,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -1516,6 +1520,7 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -1948,6 +1953,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
