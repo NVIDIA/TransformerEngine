@@ -744,6 +744,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     static_next_block_id = launch_block_id + static_block_stride;
   }
   bool job_finished = false;
+  size_t last_acquired_tensor_id = num_tensors;
 
   // Main work loop: decode current job, prime its pipeline, then process all 32-row stages.
   while (!job_finished) {
@@ -805,7 +806,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
                                                        ? tensor_map_output_colwise_static
                                                        : g_tensor_maps_output_colwise[tensor_id];
 
-    if (leading_thread && (!is_single_tensor)) {
+    if (leading_thread && (!is_single_tensor) && (last_acquired_tensor_id != tensor_id)) {
       fence_acquire_tensormap(&tensor_map_input);
       if constexpr (COMPUTE_ACTIVATIONS) {
         fence_acquire_tensormap(&tensor_map_act_input);
@@ -816,6 +817,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       if constexpr (COLWISE_SCALING) {
         fence_acquire_tensormap(&tensor_map_output_colwise);
       }
+      last_acquired_tensor_id = tensor_id;
     }
 
     int buff_in = 0;
