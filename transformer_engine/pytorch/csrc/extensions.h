@@ -435,6 +435,8 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
+at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
+
 /***************************************************************************************************
  * Support THD format for Context Parallel
  **************************************************************************************************/
@@ -465,6 +467,10 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 
 void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
                              std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
+
+void multi_tensor_scale_tensor_cuda(int chunk_size, at::Tensor is_infinite,
+                                    std::vector<std::vector<at::Tensor>> tensor_lists,
+                                    at::Tensor scale);
 
 std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,

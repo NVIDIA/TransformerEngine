@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 """Collective Dense Gradient test on multi-GPU with tensor parallelism"""
-import argparse
 import unittest
 import os
 
@@ -13,18 +12,24 @@ import flax
 
 from common import (
     assert_allclose,
+    get_tolerance_dtype,
     _initialize_distributed,
     _get_dp_and_tp_sizes,
     _create_mesh,
     DP_AXIS,
     TPSP_AXIS,
-    PARAMS_KEY,
     cgemm_parser,
 )
 
 from transformer_engine.jax.dense import dense
 
-from transformer_engine.jax.quantize import autocast
+from transformer_engine.jax.quantize import (
+    autocast,
+    is_quantize_recipe_supported,
+    get_quantization_recipe,
+    QuantizerFactory,
+    noop_quantizer_set,
+)
 from transformer_engine.jax.cpp_extensions.gemm import (
     CollectiveOp,
     CollectiveOpSet,
@@ -56,7 +61,9 @@ def _get_operand_sharding(mesh, collective_op):
     return x_sharding, weight_sharding, bias_sharding
 
 
-def _mean_dense(x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set):
+def _mean_dense(
+    x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set, quantizer_set
+):
     output = dense(
         x,
         weight,
@@ -66,13 +73,16 @@ def _mean_dense(x, weight, bias, input_axes, weight_axes, output_axes, collectiv
         kernel_axes=weight_axes,
         output_axes=output_axes,
         collective_op_set=collective_op_set,
+        quantizer_set=quantizer_set,
     )
     return jnp.mean(output.astype(jnp.float32))
 
 
-def _value_and_grad_dense(x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set):
+def _value_and_grad_dense(
+    x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set, quantizer_set
+):
     return jax.jit(jax.value_and_grad(_mean_dense, (0, 1, 2)), static_argnums=(3, 4, 5, 6))(
-        x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set
+        x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set, quantizer_set
     )
 
 
@@ -98,11 +108,16 @@ def run_dense_grad_tests(args, mesh=None):
     )
     collective_op_set = CollectiveOpSet.create(forward_collective_op=collective_op)
 
+    use_quantization = args.quantize_recipe is not None
+    recipe = get_quantization_recipe(args.quantize_recipe) if use_quantization else None
     with mesh, autocast(
-        enabled=False,
-        recipe=None,
+        enabled=use_quantization,
+        recipe=recipe,
         mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
+        # Build quantizer_set inside autocast so create_set() reads the global recipe
+        # for correct fwd/bwd dtypes.
+        quantizer_set = QuantizerFactory.create_set() if use_quantization else noop_quantizer_set
         # Get the base axis rules and extend them with TE's rules. This must be done inside autocast
         axis_rules = flax.linen.get_logical_axis_rules()
         axis_rules += ((TPSP_AXIS, TPSP_AXIS), (DP_AXIS, DP_AXIS))
@@ -123,6 +138,7 @@ def run_dense_grad_tests(args, mesh=None):
                 weight_axes,
                 output_axes,
                 noop_collective_op_set,
+                quantizer_set,
             )
             output, sharded_grads = _value_and_grad_dense(
                 x_sharded,
@@ -132,6 +148,7 @@ def run_dense_grad_tests(args, mesh=None):
                 weight_axes,
                 output_axes,
                 collective_op_set,
+                quantizer_set,
             )
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)
@@ -148,9 +165,10 @@ def run_dense_grad_tests(args, mesh=None):
         jax.block_until_ready(gathered_ref_grads)
 
     if args.enable_result_check and args.process_id == 0:
-        assert_allclose(ref_output, output, dtype=jnp.bfloat16)
+        tol_dtype = get_tolerance_dtype(quantizer_set)
+        assert_allclose(ref_output, output, dtype=tol_dtype)
         for ref_grad, gathered_grad in zip(gathered_ref_grads, gathered_grads):
-            assert_allclose(ref_grad, gathered_grad, dtype=jnp.bfloat16)
+            assert_allclose(ref_grad, gathered_grad, dtype=tol_dtype)
 
 
 class TestCollectiveDenseGradient(unittest.TestCase):
@@ -187,6 +205,82 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         self.args.collective_type = "reduce_scatter"
         run_dense_grad_tests(self.args, self.mesh)
 
+    def test_te_delayed_scaling_fp8_all_gather(self):
+        """Test Collective Dense Gradient with FP8 DelayedScaling + AllGather"""
+        self.args.quantize_recipe = "DelayedScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "all_gather"
+        run_dense_grad_tests(self.args, self.mesh)
+
+    def test_te_delayed_scaling_fp8_reduce_scatter(self):
+        """Test Collective Dense Gradient with FP8 DelayedScaling + ReduceScatter"""
+        self.args.quantize_recipe = "DelayedScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "reduce_scatter"
+        run_dense_grad_tests(self.args, self.mesh)
+
+    def test_te_current_scaling_fp8_all_gather(self):
+        """Test Collective Dense Gradient with FP8 Float8CurrentScaling + AllGather"""
+        self.args.quantize_recipe = "Float8CurrentScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "all_gather"
+        run_dense_grad_tests(self.args, self.mesh)
+
+    def test_te_current_scaling_fp8_reduce_scatter(self):
+        """Test Collective Dense Gradient with FP8 Float8CurrentScaling + ReduceScatter"""
+        self.args.quantize_recipe = "Float8CurrentScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "reduce_scatter"
+        run_dense_grad_tests(self.args, self.mesh)
+
+    def test_te_mxfp8_all_gather(self):
+        """Test Collective Dense Gradient with MXFP8BlockScaling + AllGather"""
+        self.args.quantize_recipe = "MXFP8BlockScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+        self.args.collective_type = "all_gather"
+        run_dense_grad_tests(self.args, self.mesh)
+
+    def test_te_mxfp8_reduce_scatter(self):
+        """Test Collective Dense Gradient with MXFP8BlockScaling + ReduceScatter"""
+        self.args.quantize_recipe = "MXFP8BlockScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+        self.args.collective_type = "reduce_scatter"
+        run_dense_grad_tests(self.args, self.mesh)
+
+    # def test_te_nvfp4_all_gather(self):
+    #     """Test Collective Dense Gradient with NVFP4BlockScaling + AllGather"""
+    #     self.args.quantize_recipe = "NVFP4BlockScaling"
+    #     is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+    #     if not is_supported:
+    #         self.skipTest(reason)
+    #     self.args.collective_type = "all_gather"
+    #     run_dense_grad_tests(self.args, self.mesh)
+
+    # def test_te_nvfp4_reduce_scatter(self):
+    #     """Test Collective Dense Gradient with NVFP4BlockScaling + ReduceScatter"""
+    #     self.args.quantize_recipe = "NVFP4BlockScaling"
+    #     is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+    #     if not is_supported:
+    #         self.skipTest(reason)
+    #     self.args.collective_type = "reduce_scatter"
+    #     run_dense_grad_tests(self.args, self.mesh)
+
 
 if __name__ == "__main__":
     import sys
@@ -209,6 +303,6 @@ if __name__ == "__main__":
 
     args = cgemm_parser(
         "Collective Dense Gradient test on multi-GPU with tensor parallelism"
-    ).parse_args([])
+    ).parse_args()
     _initialize_distributed(args)
     run_dense_grad_tests(args, mesh=None)

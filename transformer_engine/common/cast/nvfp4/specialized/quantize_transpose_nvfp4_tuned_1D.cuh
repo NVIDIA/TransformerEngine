@@ -142,7 +142,8 @@ using OType2x3D = fp4e2m1x2[BUFFS_NUM_OUT][BUFF_OUT_DIM_Y][BUFF_OUT_DIM_X];
 using OType2xt3D = fp4e2m1x2[BUFFS_NUM_OUT_TR][BUFF_OUT_TR_DIM_Y][BUFF_OUT_TR_DIM_X];
 using ScalesType2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
 using ScalesTypeTr2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
-using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<10>;
+using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<
+    NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
 template <bool USE_FAST_MATH>
 struct SCALING_COEFFICIENT_TYPE {};

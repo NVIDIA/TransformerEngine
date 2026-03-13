@@ -20,6 +20,7 @@
 #include <transformer_engine/cast.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/recipe.h>
+#include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include "../test_common.h"
@@ -32,6 +33,7 @@ namespace {
 enum class InputCase {
   kFP8Current,
   kBF16,
+  kMXFP8,
 };
 
 enum class ShapeCase {
@@ -44,8 +46,8 @@ enum class ShapeCase {
 size_t grouped_setup_workspace_size(const size_t num_tensors) {
   const size_t ptr_bytes = num_tensors * sizeof(void*);
   const size_t int_bytes = num_tensors * sizeof(int);
-  // Layout: 6 pointer arrays (A, B, C, D, alpha, beta) + 6 int arrays (a_rows, a_cols, b_rows, b_cols, d_rows, d_cols)
-  size_t size = 6 * ptr_bytes + 6 * int_bytes;
+  // Layout: 8 pointer arrays (A, B, C, D, alpha, beta, a_scale, b_scale) + 6 int arrays
+  size_t size = 8 * ptr_bytes + 6 * int_bytes;
   const size_t alignment = 256;
   size = ((size + alignment - 1) / alignment) * alignment;
   return size;
@@ -53,7 +55,20 @@ size_t grouped_setup_workspace_size(const size_t num_tensors) {
 
 Tensor make_fp8_operand(const std::string& name, const std::vector<size_t>& shape) {
   Tensor input_fp32(name + "_fp32", shape, DType::kFloat32);
-  fillUniform(&input_fp32);
+
+  const size_t numel = shape[0] * shape[1];
+  std::vector<float> data(numel);
+  std::mt19937 gen(std::hash<std::string>{}(name));
+  // Random mean and stddev -> different amax per tensor -> different scales
+  std::uniform_real_distribution<float> param_dis(0.1f, 10.0f);
+  float mean = param_dis(gen);
+  float stddev = param_dis(gen);
+  std::normal_distribution<float> dis(mean, stddev);
+  for (size_t i = 0; i < numel; ++i) {
+    data[i] = dis(gen);
+  }
+  NVTE_CHECK_CUDA(cudaMemcpy(input_fp32.rowwise_dptr(), data.data(),
+                             numel * sizeof(float), cudaMemcpyHostToDevice));
 
   Tensor fp8(name, shape, TypeInfo<fp8e4m3>::dtype, true, true, NVTE_DELAYED_TENSOR_SCALING);
 
@@ -73,6 +88,64 @@ Tensor make_bf16_operand(const std::string& name, const std::vector<size_t>& sha
   return t;
 }
 
+
+// Creates an MXFP8 operand with the correct data layout for GEMM.
+// MXFP8 GEMM requirements (scales are along K dimension):
+//   A transposed     -> needs rowwise data/scales
+//   A non-transposed -> needs columnwise data/scales
+//   B transposed     -> needs columnwise data/scales
+//   B non-transposed -> needs rowwise data/scales
+Tensor make_mxfp8_operand(const std::string& name, const std::vector<size_t>& shape,
+                          bool is_A, bool transposed) {
+  // Determine which data layout we need
+  bool use_rowwise, use_colwise;
+  if (is_A) {
+    // A: transposed -> rowwise, non-transposed -> columnwise
+    use_rowwise = transposed;
+    use_colwise = !transposed;
+  } else {
+    // B: transposed -> columnwise, non-transposed -> rowwise (opposite of A!)
+    use_rowwise = !transposed;
+    use_colwise = transposed;
+  }
+
+  // Create BF16 input with random data
+  Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
+  fillUniform(&input_bf16);
+
+  // Create MXFP8 tensor with only the required data layout
+  Tensor mxfp8(name, shape, TypeInfo<fp8e4m3>::dtype, use_rowwise, use_colwise,
+               NVTE_MXFP8_1D_SCALING);
+
+  // Quantize BF16 -> MXFP8
+  nvte_quantize(input_bf16.data(), mxfp8.data(), 0);
+
+  // Create output tensor for swizzled scales (same data shape, same layout)
+  Tensor mxfp8_swizzled(name + "_swizzled", shape, TypeInfo<fp8e4m3>::dtype,
+                        use_rowwise, use_colwise, NVTE_MXFP8_1D_SCALING);
+  mxfp8_swizzled.set_with_gemm_swizzled_scales(true);  // Must be set BEFORE swizzle call
+
+  // Copy quantized data from mxfp8 to mxfp8_swizzled
+  if (use_rowwise) {
+    size_t data_bytes = test::bytes(mxfp8.rowwise_shape(), mxfp8.dtype());
+    NVTE_CHECK_CUDA(cudaMemcpy(mxfp8_swizzled.rowwise_dptr(), mxfp8.rowwise_dptr(),
+                               data_bytes, cudaMemcpyDeviceToDevice));
+  }
+  if (use_colwise) {
+    size_t data_bytes = test::bytes(mxfp8.columnwise_shape(), mxfp8.dtype());
+    NVTE_CHECK_CUDA(cudaMemcpy(mxfp8_swizzled.columnwise_dptr(), mxfp8.columnwise_dptr(),
+                               data_bytes, cudaMemcpyDeviceToDevice));
+  }
+
+  // Swizzle scales for GEMM
+  nvte_swizzle_scaling_factors(mxfp8.data(), mxfp8_swizzled.data(), 0);
+
+  // Sync to ensure operations are complete
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+
+  return mxfp8_swizzled;
+}
+
 struct TestParams {
   InputCase input_case;
   bool transa;
@@ -88,16 +161,16 @@ struct TestParams {
 std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
   switch (scase) {
     case ShapeCase::kAllSame:
-      return {{64, 64, 32}, {64, 64, 32}, {64, 64, 32}};
+      return {{128, 256, 384}, {128, 256, 384}, {128, 256, 384}};
     case ShapeCase::kSameFirst:
       // Same M (first dim), varying N and K
-      return {{64, 80, 32}, {64, 96, 48}, {64, 112, 64}};
+      return {{128, 256, 384}, {128, 384, 512}, {128, 512, 640}};
     case ShapeCase::kSameLast:
       // Same N (last dim), varying M and K
-      return {{64, 80, 32}, {80, 80, 48}, {96, 80, 64}};
+      return {{128, 256, 384}, {256, 256, 512}, {384, 256, 640}};
     case ShapeCase::kAllDifferent:
     default:
-      return {{64, 96, 32}, {80, 112, 48}, {96, 128, 64}};
+      return {{128, 256, 384}, {256, 384, 512}, {384, 512, 640}};
   }
 }
 
@@ -136,6 +209,13 @@ void run_grouped_gemm_case(const TestParams& params) {
       case InputCase::kBF16: {
         A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape));
         B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape));
+        break;
+      }
+      case InputCase::kMXFP8: {
+        A_tensors.emplace_back(make_mxfp8_operand("A" + std::to_string(i), a_shape,
+                                                  /*is_A=*/true, params.transa));
+        B_tensors.emplace_back(make_mxfp8_operand("B" + std::to_string(i), b_shape,
+                                                  /*is_A=*/false, params.transb));
         break;
       }
     }
@@ -246,7 +326,9 @@ void run_grouped_gemm_case(const TestParams& params) {
                     cublas_ws.data(),
                     nullptr,  // config (use defaults)
                     0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
+  // Compare results
   for (size_t i = 0; i < num_gemms; ++i) {
     Tensor grouped_split("grouped_D" + std::to_string(i),
                          std::vector<size_t>{static_cast<size_t>(std::get<0>(shapes[i])),
@@ -277,7 +359,7 @@ TEST_P(GroupedGemmTest, CompareWithMultiTensorGemm) {
 }
 
 std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest::ParamType>& info) {
-  constexpr const char* kInputNames[] = {"FP8Current", "BF16"};
+  constexpr const char* kInputNames[] = {"FP8Current", "BF16", "MXFP8"};
   constexpr const char* kShapeNames[] = {"AllSame", "SameM", "SameN", "AllDiff"};
   const std::string layout = std::string("ta") + (info.param.transa ? "T" : "N") +
                              "tb" + (info.param.transb ? "T" : "N");
@@ -288,16 +370,27 @@ std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest
 
 // TestParams: {input_case, transa, transb, shape_case, use_null_c}
 const std::vector<TestParams> kTestParams = {
-    // Basic tests
+    // FP8 tests (each tensor has random mean/stddev -> different scales)
     {InputCase::kFP8Current, true, false, ShapeCase::kAllDifferent, false},
     {InputCase::kFP8Current, false, true, ShapeCase::kAllDifferent, false},
     {InputCase::kFP8Current, false, false, ShapeCase::kAllSame, false},
+    // BF16 tests
     {InputCase::kBF16, true, false, ShapeCase::kSameFirst, false},
     {InputCase::kBF16, false, true, ShapeCase::kSameLast, false},
     {InputCase::kBF16, false, false, ShapeCase::kAllSame, false},
     {InputCase::kBF16, true, true, ShapeCase::kAllDifferent, false},
     // Test NULL C (valid when beta=0)
     {InputCase::kBF16, false, false, ShapeCase::kAllSame, true},
+    // MXFP8 tests
+    {InputCase::kMXFP8, true, false, ShapeCase::kAllSame, false},
+    {InputCase::kMXFP8, true, false, ShapeCase::kAllDifferent, false},
+    {InputCase::kMXFP8, false, true, ShapeCase::kAllSame, false},
+    {InputCase::kMXFP8, false, true, ShapeCase::kAllDifferent, false},
+    {InputCase::kMXFP8, false, false, ShapeCase::kAllSame, false},
+    {InputCase::kMXFP8, false, false, ShapeCase::kAllDifferent, false},
+    {InputCase::kMXFP8, false, false, ShapeCase::kSameFirst, false},
+    // MXFP8 with NULL C
+    {InputCase::kMXFP8, true, false, ShapeCase::kAllSame, true},
 };
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest,

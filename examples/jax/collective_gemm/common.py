@@ -1,47 +1,52 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Shared functions for the comm_overlap tests"""
+"""Shared functions for the collective GEMM tests"""
 
+import argparse
+
+import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.experimental import mesh_utils
+
+from transformer_engine.jax.cpp_extensions.gemm import collective_gemm_bootstrap
 
 
-# Add this after your existing imports
 def dtype_tols(dtype, rtol=None, atol=None):
     """Expected numerical tolerance for a data type."""
-    # Return immediately if tolerances are fully specified
     if rtol is not None and atol is not None:
         return {"rtol": rtol, "atol": atol}
 
-    # Default tolerances for common dtypes
     if dtype in [jnp.float32, "float32"]:
         return {"rtol": 1e-5, "atol": 1e-8}
     elif dtype in [jnp.float16, "float16"]:
         return {"rtol": 1e-3, "atol": 1e-6}
     elif dtype in [jnp.bfloat16, "bfloat16"]:
         return {"rtol": 1e-2, "atol": 1e-5}
+    elif dtype in [jnp.float8_e4m3fn, "float8_e4m3fn", jnp.float8_e5m2, "float8_e5m2"]:
+        # FP8 quantization introduces ~1% error; match C++ getTolerances for fp8 types
+        return {"rtol": 1e-2, "atol": 1e-2}
     else:
         return {"rtol": 1e-5, "atol": 1e-8}
 
 
-def assert_allclose(
-    actual,
-    desired,
-    rtol=None,
-    atol=None,
-    dtype=None,
-    **kwargs,
-):
-    """Check if two tensors are close."""
-    # Infer data type if needed
-    if dtype is None:
-        if isinstance(actual, float):
-            dtype = "float32"
-        else:
-            dtype = actual.dtype
+def get_tolerance_dtype(quantizer_set):
+    """Return the dtype used to select numerical tolerances based on the active quantizer.
 
-    # Determine tolerances
+    Reads q_dtype from quantizer_set.x; falls back to bfloat16 when no quantizer is
+    active (NO_SCALING / noop path, where quantizer_set.x is None).
+    """
+    if quantizer_set.x is not None:
+        return quantizer_set.x.q_dtype
+    return jnp.bfloat16
+
+
+def assert_allclose(actual, desired, rtol=None, atol=None, dtype=None, **kwargs):
+    """Check if two tensors are close."""
+    if dtype is None:
+        dtype = "float32" if isinstance(actual, float) else actual.dtype
+
     tols = {}
     if rtol is None or atol is None:
         tols = dtype_tols(dtype)
@@ -50,49 +55,26 @@ def assert_allclose(
     if atol is not None:
         tols["atol"] = atol
 
-    # Cast tensors to fp32
     if not isinstance(actual, float):
         actual = actual.astype(jnp.float32)
     if not isinstance(desired, float):
         desired = desired.astype(jnp.float32)
 
-    # Check if tensors are close
     np.testing.assert_allclose(actual, desired, **tols, **kwargs)
 
 
-def assert_allclose_print_index(ref_output, gathered_output, rtol=1e-5, atol=1e-8):
-    if not jnp.allclose(ref_output, gathered_output, rtol=rtol, atol=atol):
-        diff = jnp.abs(ref_output - gathered_output)
-        mask = diff > (atol + rtol * jnp.abs(gathered_output))
-        print(mask.astype(int))
-        print(jnp.where(mask, diff, 0))
-
-
-# Shared constants for all tests
+# Shared constants
 DP_AXIS = "data"
 TPSP_AXIS = "tensor_sequence"
-PARAMS_KEY = "params"
-
-# Shared functions for distributed testing
-import argparse
-import jax
-from jax.experimental import mesh_utils
-from transformer_engine.jax.cpp_extensions.gemm import collective_gemm_bootstrap
 
 # Global flag to track if distributed has been initialized
 _distributed_initialized = False
-
-
-def _is_distributed_initialized():
-    """Check if JAX distributed has been initialized."""
-    return _distributed_initialized
 
 
 def _initialize_distributed(args):
     """Initialize JAX distributed with custom arguments."""
     global _distributed_initialized
 
-    # Check if already initialized
     if _distributed_initialized:
         return
 
@@ -105,14 +87,10 @@ def _initialize_distributed(args):
         assert (
             args.num_devices_per_process is not None
         ), "Either local_device_ids or num_devices_per_process must be provided"
-        # Calculate device range for this process
-        # Single process single device: each process gets one unique device
-        # Single process multiple devices: each process gets a unique range of devices
         start_device = args.process_id * args.num_devices_per_process
         device_range = range(start_device, start_device + args.num_devices_per_process)
         global_device_ids_for_this_process = ",".join(map(str, device_range))
     else:
-        # Use explicitly provided global device IDs
         global_device_ids_for_this_process = args.local_device_ids
         args.num_devices_per_process = len(args.local_device_ids.split(","))
 
@@ -229,7 +207,16 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
         help="Type of collective operation",
     )
     parser.add_argument(
-        "--fp8-recipe", type=str, default="DelayedScaling", help="FP8 recipe to use"
+        "--quantize-recipe",
+        type=str,
+        default=None,
+        choices=[
+            "DelayedScaling",
+            "Float8CurrentScaling",
+            "MXFP8BlockScaling",
+            "NVFP4BlockScaling",
+        ],
+        help="Quantization recipe to use. Omit for BF16 (no quantization).",
     )
     parser.add_argument(
         "--enable-data-parallel", action="store_true", help="Enable data parallelism"

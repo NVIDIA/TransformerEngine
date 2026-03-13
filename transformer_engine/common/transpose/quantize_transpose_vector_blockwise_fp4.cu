@@ -201,10 +201,10 @@ __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t
-get_rbits(transformer_engine::curanddx::detail::philox4x32_native_state<10>&
-              rng,  // philox4x32_native_state<10>: 10 rounds of philox4_32
-          uint4& random_uint4, int& rnd_idx) {
+__device__ __forceinline__ uint32_t get_rbits(
+    transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>&
+        rng,  // NVTE_BUILD_NUM_PHILOX_ROUNDS rounds of philox4x32
+    uint4& random_uint4, int& rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
     random_uint4 = rng.generate4();
@@ -344,7 +344,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
 
-  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
   rng.init(rng_seed, rng_sequence, rng_offset);
   uint4 random_uint4 = kApplyStochasticRounding ? rng.generate4() : uint4{0, 0, 0, 0};
 

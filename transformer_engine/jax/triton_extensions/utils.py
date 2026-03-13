@@ -42,6 +42,11 @@ from jax import core
 import jax
 import jax.numpy as jnp
 
+from ..version_utils import (
+    TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_extension_supported,
+)
+
 
 # Placeholder package version on PyPI that should never be used
 _PYTORCH_TRITON_PLACEHOLDER_VERSION = "0.0.1"
@@ -149,6 +154,21 @@ def _check_triton_compatibility():
 
 # Perform compatibility check and get triton info
 _TRITON_VERSION, _IS_PYTORCH_TRITON = _check_triton_compatibility()
+
+# Enforce minimum JAX version before importing gpu_triton.  The segfault on old
+# jaxlib occurs at Triton kernel dispatch time, not at import time, so gpu_triton
+# itself is safe to import on older jaxlib.  The guard is placed here (before the
+# import) as a belt-and-suspenders measure so that if the import behaviour ever
+# changes, we still fail fast with a clear error rather than a cryptic crash.
+if not is_triton_extension_supported():
+    raise RuntimeError(
+        f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for "
+        "transformer_engine.jax.triton_extensions. "
+        "Triton kernel dispatch segfaults with older jaxlib. "
+        f"Current jax version: {jax.__version__}. "
+        "Please upgrade: pip install --upgrade jax jaxlib. "
+        "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
+    )
 
 try:
     from jax._src.lib import gpu_triton

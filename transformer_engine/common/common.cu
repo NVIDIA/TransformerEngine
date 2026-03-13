@@ -87,6 +87,48 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   reinterpret_cast<TVectorized *>(ptr)[idx] = data.value;
 }
 
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    splits_to_offsets_kernel(const int64_t *__restrict__ first_dims, int64_t *__restrict__ output,
+                             size_t num_tensors, int64_t logical_last_dim) {
+  __shared__ int64_t block_scan[kThreadsPerBlock];
+  __shared__ int64_t chunk_prefix;
+
+  const size_t tid = threadIdx.x;
+  if (tid == 0) {
+    output[0] = 0;
+    chunk_prefix = 0;
+  }
+  __syncthreads();
+
+  for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kThreadsPerBlock) {
+    const size_t idx = chunk_start + tid;
+    int64_t value = 0;
+    if (idx < num_tensors) {
+      value = first_dims[idx] * logical_last_dim;
+    }
+    block_scan[tid] = value;
+    __syncthreads();
+
+    // Inclusive scan in shared memory.
+    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
+      const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
+      __syncthreads();
+      block_scan[tid] += addend;
+      __syncthreads();
+    }
+
+    if (idx < num_tensors) {
+      output[idx + 1] = chunk_prefix + block_scan[tid];
+    }
+    __syncthreads();
+
+    if (tid == kThreadsPerBlock - 1) {
+      chunk_prefix += block_scan[tid];
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
 
 #define MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, vectorizedType, stream) \
@@ -115,6 +157,19 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float2, stream);
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float, stream);
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, uint8_t, stream);
+}
+
+void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
+                            int64_t logical_last_dim, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_splits_to_offsets);
+  NVTE_CHECK(output != nullptr, "Output pointer must be allocated.");
+  NVTE_CHECK(num_tensors > 0, "num_tensors must be greater than 0.");
+  NVTE_CHECK(first_dims != nullptr, "first_dims pointer must be allocated.");
+  NVTE_CHECK(logical_last_dim > 0, "logical_last_dim must be greater than 0.");
+
+  splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(first_dims, output, num_tensors,
+                                                               logical_last_dim);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 }  // extern "C"
 

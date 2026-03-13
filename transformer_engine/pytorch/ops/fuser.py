@@ -213,6 +213,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         # Restore saved tensors
         saved_tensors = restore_from_saved(func_ctx.tensor_objects, func_ctx.saved_tensors)
+        func_ctx.tensor_objects = None
 
         # Unflatten list of saved tensors
         for ctx in basic_op_ctxs:

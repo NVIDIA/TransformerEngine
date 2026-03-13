@@ -34,10 +34,28 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from distributed_test_base import generate_configs
 from utils import assert_allclose, pytest_parametrize_wrapper
 
-from transformer_engine.jax.router import (
-    fused_topk_with_score_function,
-    fused_moe_aux_loss,
-)
+
+@pytest.fixture(autouse=True, scope="function")
+def _inject_router(request):
+    """Lazy-load router API only for tests marked 'triton'. Other tests run without importing.
+
+    We inject into sys.modules[__name__] so test code can use fused_topk_with_score_function,
+    fused_moe_aux_loss as module-level names (fixture locals are not visible to tests).
+    """
+    if not request.node.get_closest_marker("triton"):
+        yield
+        return
+    import sys
+    from transformer_engine.jax.router import (
+        fused_topk_with_score_function,
+        fused_moe_aux_loss,
+    )
+
+    mod = sys.modules[__name__]
+    mod.fused_topk_with_score_function = fused_topk_with_score_function
+    mod.fused_moe_aux_loss = fused_moe_aux_loss
+    yield
+
 
 jax.config.update("jax_use_shardy_partitioner", True)
 
@@ -68,6 +86,7 @@ AUX_LOSS_CASES = {
 }
 
 
+@pytest.mark.triton
 class TestDistributedFusedTopk:
     """Test distributed execution of fused_topk_with_score_function.
 
@@ -200,6 +219,7 @@ class TestDistributedFusedTopk:
         )
 
 
+@pytest.mark.triton
 class TestDistributedScoreForAuxLoss:
     """Test distributed execution of fused_topk_with_score_function with compute_aux_scores=True.
 
@@ -333,6 +353,7 @@ class TestDistributedScoreForAuxLoss:
         )
 
 
+@pytest.mark.triton
 class TestDistributedMoEAuxLoss:
     """Test distributed execution of fused_moe_aux_loss.
 

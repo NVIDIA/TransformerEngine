@@ -130,6 +130,8 @@ def check_group_quantization_nvfp4_versus_reference(
     [
         # edge case, zero tokens for all
         (0, 512),
+        # edge case, not 128 multiple hidden dimension
+        (1024, 320),
         # full tile cases
         (256, 1024),
         (1024, 256),

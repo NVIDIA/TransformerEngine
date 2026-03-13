@@ -32,7 +32,8 @@ def custom_gemm(
     grad: bool = False,
 ) -> Iterable[Optional[torch.Tensor]]:
     """Dispatch GEMM to quantizer's qgemm method."""
-    assert is_custom(A) and is_custom(B), "A and B must be custom tensors"
+    if not (is_custom(A) and is_custom(B)):
+        raise TypeError("A and B must be custom tensors")
 
     A, B = B, A
 
@@ -68,11 +69,16 @@ def custom_gemm(
     if gemm_type == GEMMType.FPROP:
         qx, sx = A.data, A.scale
         qw, sw = B.data, B.scale
-        assert qx is not None
-        assert sx is not None
-        assert qw is not None
-        assert sw is not None
-        assert A.original_shape is not None
+        if qx is None:
+            raise ValueError("FPROP GEMM: quantized activation data (A.data) is None")
+        if sx is None:
+            raise ValueError("FPROP GEMM: activation scale (A.scale) is None")
+        if qw is None:
+            raise ValueError("FPROP GEMM: quantized weight data (B.data) is None")
+        if sw is None:
+            raise ValueError("FPROP GEMM: weight scale (B.scale) is None")
+        if A.original_shape is None:
+            raise ValueError("FPROP GEMM: A.original_shape is None, cannot determine output shape")
 
         # Call quantizer's qgemm method
         result = quantizer.qgemm(
@@ -95,10 +101,14 @@ def custom_gemm(
     elif gemm_type == GEMMType.DGRAD:
         qdy, sdy = A.data, A.scale
         qw_t, sw_t = B.data_t, B.scale_t
-        assert qdy is not None
-        assert sdy is not None
-        assert qw_t is not None
-        assert sw_t is not None
+        if qdy is None:
+            raise ValueError("DGRAD GEMM: quantized gradient data (A.data) is None")
+        if sdy is None:
+            raise ValueError("DGRAD GEMM: gradient scale (A.scale) is None")
+        if qw_t is None:
+            raise ValueError("DGRAD GEMM: transposed quantized weight data (B.data_t) is None")
+        if sw_t is None:
+            raise ValueError("DGRAD GEMM: transposed weight scale (B.scale_t) is None")
 
         result = quantizer.qgemm(
             qdy,
@@ -115,10 +125,14 @@ def custom_gemm(
     elif gemm_type == GEMMType.WGRAD:
         qdy_t, sdy_t = A.data_t, A.scale_t
         qx_t, sx_t = B.data_t, B.scale_t
-        assert qdy_t is not None
-        assert sdy_t is not None
-        assert qx_t is not None
-        assert sx_t is not None
+        if qdy_t is None:
+            raise ValueError("WGRAD GEMM: transposed quantized gradient data (A.data_t) is None")
+        if sdy_t is None:
+            raise ValueError("WGRAD GEMM: transposed gradient scale (A.scale_t) is None")
+        if qx_t is None:
+            raise ValueError("WGRAD GEMM: transposed quantized activation data (B.data_t) is None")
+        if sx_t is None:
+            raise ValueError("WGRAD GEMM: transposed activation scale (B.scale_t) is None")
 
         result = quantizer.qgemm(
             qdy_t,

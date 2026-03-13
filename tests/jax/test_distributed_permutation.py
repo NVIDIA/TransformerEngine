@@ -34,11 +34,28 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from distributed_test_base import generate_configs
 from utils import assert_allclose, pytest_parametrize_wrapper
 
-# High-level API with VJP support
-from transformer_engine.jax.permutation import (
-    token_dispatch,
-    token_combine,
-)
+
+@pytest.fixture(autouse=True, scope="function")
+def _inject_permutation(request):
+    """Lazy-load permutation API only for tests marked 'triton'. Other tests run without importing.
+
+    We inject into sys.modules[__name__] so test code in this module can use
+    token_dispatch, token_combine as module-level names (fixture locals are not
+    visible to test methods).
+    """
+    if not request.node.get_closest_marker("triton"):
+        yield
+        return
+    import sys
+    from transformer_engine.jax.permutation import token_dispatch, token_combine
+
+    mod = sys.modules[__name__]
+    mod.token_dispatch = token_dispatch
+    mod.token_combine = token_combine
+    yield
+
+
+# High-level API with VJP support (injected by _inject_permutation)
 
 # Reference implementations from test_permutation.py
 from test_permutation import (
@@ -80,6 +97,7 @@ DTYPES = {
 }
 
 
+@pytest.mark.triton
 class TestDistributedPermutation:
     """Test distributed/sharded execution of MoE permutation primitives.
 

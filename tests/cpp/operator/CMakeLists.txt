@@ -25,6 +25,7 @@ add_executable(test_operator
                test_normalization.cu
                test_normalization_mxfp8.cu
                test_memset.cu
+               test_splits_to_offsets.cu
                test_multi_cast_transpose.cu
                test_multi_padding.cu
                test_multi_unpadding.cu

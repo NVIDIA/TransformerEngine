@@ -49,6 +49,10 @@ PyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context
 
+.. autoapifunction:: transformer_engine.pytorch.mark_not_offload
+
+.. autoapiclass:: transformer_engine.pytorch.ManualOffloadSynchronizer
+
 .. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
 
 Recipe availability
