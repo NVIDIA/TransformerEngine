@@ -804,7 +804,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       if (use_ragged_stats) {
         sdpa_backward_options.set_max_total_seq_len_q(s_q);
       }
-      if (is_ragged_kv && cudnn_runtime_version >= 90600) {
+      if (is_ragged_kv && cudnn_runtime_version >= 90600 && sm_arch_ < 120) {
         sdpa_backward_options.set_max_total_seq_len_kv(s_kv);
       }
 
