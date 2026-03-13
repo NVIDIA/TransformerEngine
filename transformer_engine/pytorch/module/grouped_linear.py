@@ -846,18 +846,16 @@ class GroupedLinear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, f"bias{i}"), True, 0, 1)
 
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-    ):
-        """Load state, including compatibility with legacy grouped-weight checkpoints."""
-        if self.single_grouped_parameter:
-            grouped_weight_key = f"{prefix}weight"
-            legacy_weight_keys = [f"{prefix}weight{i}" for i in range(self.num_gemms)]
-            has_grouped_weight = grouped_weight_key in state_dict
-            has_legacy_weights = all(key in state_dict for key in legacy_weight_keys)
+    def _remap_grouped_weight_state_dict_keys(self, state_dict, prefix: str) -> None:
+        """Remap weight keys between single and per-GEMM checkpoint formats."""
+        grouped_weight_key = f"{prefix}weight"
+        legacy_weight_keys = [f"{prefix}weight{i}" for i in range(self.num_gemms)]
+        has_grouped_weight = grouped_weight_key in state_dict
+        has_legacy_weights = all(key in state_dict for key in legacy_weight_keys)
 
+        if self.single_grouped_parameter:
             # Backward compatibility: checkpoints saved without single_grouped_parameter
-            # store one weight tensor per expert (weight0..weightN). Convert them into a
+            # store one weight tensor per GEMM (weight0..weightN). Convert them into a
             # single stacked grouped weight expected by this module configuration.
             if not has_grouped_weight and has_legacy_weights:
                 legacy_weights = [state_dict.pop(key) for key in legacy_weight_keys]
@@ -870,6 +868,50 @@ class GroupedLinear(TransformerEngineBaseModule):
                 # Drop any redundant legacy keys to avoid strict-load unexpected-key errors.
                 for key in legacy_weight_keys:
                     state_dict.pop(key, None)
+        else:
+            # Forward compatibility: checkpoints saved with single_grouped_parameter
+            # store one grouped `weight`. Convert it back to weight0..weightN.
+            if not has_legacy_weights and has_grouped_weight:
+                grouped_weight = state_dict.pop(grouped_weight_key)
+                if hasattr(grouped_weight, "split_into_quantized_tensors"):
+                    grouped_members = grouped_weight.quantized_tensors
+                    if grouped_members is None:
+                        grouped_members = grouped_weight.split_into_quantized_tensors()
+                    legacy_weights = [
+                        (
+                            weight.dequantize()
+                            if isinstance(weight, QuantizedTensorStorage)
+                            else weight
+                        )
+                        for weight in grouped_members
+                    ]
+                else:
+                    grouped_weight = (
+                        grouped_weight.dequantize()
+                        if isinstance(grouped_weight, QuantizedTensorStorage)
+                        else grouped_weight
+                    )
+                    legacy_weights = list(grouped_weight.unbind(dim=0))
+                for i, weight in enumerate(legacy_weights):
+                    state_dict[f"{prefix}weight{i}"] = weight
+            elif has_legacy_weights:
+                # Drop any redundant grouped key to avoid strict-load unexpected-key errors.
+                state_dict.pop(grouped_weight_key, None)
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        """Load state dict with grouped-weight format compatibility."""
+        state_dict_copy = state_dict.copy()
+        metadata = getattr(state_dict, "_metadata", None)
+        if metadata is not None:
+            state_dict_copy._metadata = metadata
+        self._remap_grouped_weight_state_dict_keys(state_dict_copy, prefix="")
+        return super().load_state_dict(state_dict_copy, strict=strict, assign=assign)
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        """Load state, including compatibility with legacy grouped-weight checkpoints."""
+        self._remap_grouped_weight_state_dict_keys(state_dict, prefix)
 
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
