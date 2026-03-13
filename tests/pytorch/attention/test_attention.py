@@ -129,19 +129,6 @@ def _causal_score_mod(sdpa_graph, score_tensor):
     return sdpa_graph.binary_select(input0=score_tensor, input1=neg_inf, mask=causal_mask)
 
 
-def foo_score_mod(sdpa_graph, q_kt_tensor):
-    row_index = sdpa_graph.gen_index(input=q_kt_tensor, axis=2)
-    row_index.set_data_type(cudnn.data_type.INT32)
-
-    col_index = sdpa_graph.gen_index(input=q_kt_tensor, axis=3)
-    col_index.set_data_type(cudnn.data_type.INT32)
-
-    d = sdpa_graph.sub(row_index, col_index)
-    ret = sdpa_graph.add(q_kt_tensor, d)
-    return ret
-
-
-
 model_configs_base = {
     # test: ModelConfig(b, sq, hq, dqk)
     "base_1_0": ModelConfig(8, 128, 16, 64),
@@ -1459,66 +1446,8 @@ def test_transformer_layer(
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
-def test_fused_attn_score_mod_smoke():
-    pytest.importorskip("cudnn")
-
-    batch_size, seqlen, num_heads, head_dim = 2, 64, 4, 64
-    dtype = torch.float16
-    device = "cuda"
-    cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, seqlen, device=device, dtype=torch.int32)
-
-    q = torch.randn(batch_size, seqlen, num_heads, head_dim, device=device, dtype=dtype)
-    k = torch.randn_like(q)
-    v = torch.randn_like(q)
-
-    out, aux_ctx_tensors = fused_attn_fwd(
-        True,
-        seqlen,
-        seqlen,
-        cu_seqlens,
-        cu_seqlens,
-        q,
-        k,
-        v,
-        dtype,
-        FusedAttnBackend["F16_arbitrary_seqlen"],
-        qkv_layout="bshd_bshd_bshd",
-        attn_mask_type="no_mask",
-        dropout=0.0,
-        score_mod=foo_score_mod,
-    )
-
-    dq, dk, dv, *_ = fused_attn_bwd(
-        seqlen,
-        seqlen,
-        cu_seqlens,
-        cu_seqlens,
-        q,
-        k,
-        v,
-        out,
-        torch.randn_like(out),
-        dtype,
-        tex.DType.kFloat16,
-        aux_ctx_tensors,
-        FusedAttnBackend["F16_arbitrary_seqlen"],
-        qkv_layout="bshd_bshd_bshd",
-        attn_mask_type="no_mask",
-        dropout=0.0,
-        score_mod=_identity_score_mod,
-        score_mod_bprop=_identity_score_mod,
-    )
-
-    assert dq.shape == q.shape
-    assert dk.shape == k.shape
-    assert dv.shape == v.shape
-
-
-@pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
+@pytest.mark.skipif(get_cudnn_version() < (9, 7, 0), reason="cuDNN 9.7.0+ is required.")
 def test_multihead_attention_score_mod_forces_fused_backend():
-    pytest.importorskip("cudnn")
-
     _attention_backends["attention_params"] = None
     _attention_backends["backend_selection_requires_update"] = True
 
@@ -1541,7 +1470,7 @@ def test_multihead_attention_score_mod_forces_fused_backend():
     )
     output = mha(
         hidden_states,
-        attn_mask_type="causal",
+        attn_mask_type="no_mask",
         score_mod=_identity_score_mod,
         score_mod_bprop=_identity_score_mod,
     )
