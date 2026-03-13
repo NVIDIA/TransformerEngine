@@ -298,10 +298,24 @@ def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
     ptr_size = num_tensors * ptr_bytes
     int_size = num_tensors * int_bytes
     k_ptr_alignment = 16
+    # Each pointer array is placed at a 16-byte-aligned offset (matching kPtrAlignment in C++).
+    # aligned_ptr_size = round_up(num_tensors * ptr_bytes, 16)
     aligned_ptr_size = ((ptr_size + k_ptr_alignment - 1) // k_ptr_alignment) * k_ptr_alignment
     size = 8 * aligned_ptr_size + 6 * int_size
     alignment = 256
     return ((size + alignment - 1) // alignment) * alignment
+
+
+@functools.lru_cache(maxsize=None)
+def _get_grouped_gemm_workspaces(device: int, num_tensors: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    setup_size = get_grouped_gemm_setup_workspace_size(num_tensors)
+    workspace_setup = torch.empty(setup_size, dtype=torch.uint8, device=device)
+    workspace_cublas = torch.empty(
+        get_cublas_workspace_size_bytes(),
+        dtype=torch.uint8,
+        device=device,
+    )
+    return workspace_setup, workspace_cublas
 
 
 def general_grouped_gemm_for_grouped_tensor(
@@ -360,16 +374,8 @@ def general_grouped_gemm_for_grouped_tensor(
     if not alpha.is_cuda or not beta.is_cuda:
         raise ValueError("alpha and beta must be CUDA tensors.")
 
-    workspace_setup = torch.empty(
-        get_grouped_gemm_setup_workspace_size(num_tensors),
-        dtype=torch.uint8,
-        device=device,
-    )
-    workspace_cublas = torch.empty(
-        get_cublas_workspace_size_bytes(),
-        dtype=torch.uint8,
-        device=device,
-    )
+    device_index = device.index if isinstance(device, torch.device) else device
+    workspace_setup, workspace_cublas = _get_grouped_gemm_workspaces(device_index, num_tensors)
 
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
