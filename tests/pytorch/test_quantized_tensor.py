@@ -173,7 +173,7 @@ def make_reference_and_test_tensors(
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
 
     # Make sure reference and test tensors match each other
-    ref.copy_(test)
+    ref.copy_(test.to(dtype=ref.dtype))
 
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)

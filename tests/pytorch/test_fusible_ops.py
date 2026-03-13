@@ -178,7 +178,7 @@ def make_reference_and_test_tensors(
         test = test.dequantize()
 
     # Make sure reference and test tensors match each other
-    ref.copy_(test)
+    ref.copy_(test.to(dtype=ref.dtype))
 
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
@@ -1956,7 +1956,7 @@ class TestBasicOps:
         )
         with torch.no_grad():
             x_test += 1
-            x_ref.copy_(x_test)
+            x_ref.copy_(x_test.to(dtype=x_ref.dtype))
         dy_ref, dy_test = make_reference_and_test_tensors(
             shape,
             test_dtype=dtype,
