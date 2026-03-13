@@ -407,6 +407,48 @@ def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
             )
 
 
+def _reorder_tpsp_leading(tensor, original_shape):
+    """Reorder tensor so the tpsp axis is leading: reshape (dp, n, tpsp, m, ...), transpose (2, 0, 1, 3, ...)."""
+    assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+        f"Original_shape[0]={original_shape[0]} is not divisible by"
+        f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+    )
+    assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+        f"Original_shape[1]={original_shape[1]} is not divisible by"
+        f" tpsp_axis_size()={tpsp_axis_size()}"
+    )
+    reshaped = tensor.reshape(
+        dp_or_fsdp_axis_size(),
+        int(original_shape[0] / dp_or_fsdp_axis_size()),
+        tpsp_axis_size(),
+        int(original_shape[1] / tpsp_axis_size()),
+        *original_shape[2:],
+    )
+    reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
+    return reordered.reshape(original_shape)
+
+
+def _reorder_dp_leading(tensor, original_shape):
+    """Reorder tensor so the dp axis is leading: reshape (tpsp, dp, n, m, ...), transpose (1, 2, 0, 3, ...)."""
+    assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+        f"Original_shape[0]={original_shape[0]} is not divisible by"
+        f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+    )
+    assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+        f"Original_shape[1]={original_shape[1]} is not divisible by"
+        f" tpsp_axis_size()={tpsp_axis_size()}"
+    )
+    reshaped = tensor.reshape(
+        tpsp_axis_size(),
+        dp_or_fsdp_axis_size(),
+        int(original_shape[0] / dp_or_fsdp_axis_size()),
+        int(original_shape[1] / tpsp_axis_size()),
+        *original_shape[2:],
+    )
+    reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
+    return reordered.reshape(original_shape)
+
+
 class GemmPrimitive(BasePrimitive):
     """
     Primitive for cuBLAS GEMM
@@ -639,47 +681,64 @@ class GemmPrimitive(BasePrimitive):
             lhs_flatten_axis = max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims)
             rhs_flatten_axis = min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1
 
-            lhs_scale_inv = apply_padding_to_scale_inv(
-                lhs_scale_inv, scaling_mode, lhs.shape, lhs_transposed, lhs_flatten_axis
-            )
-            rhs_scale_inv = apply_padding_to_scale_inv(
-                rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
-            )
+            if not collective_op.is_none and not is_outer:
+                # MXFP8 + Collective AG/RS: both sides of flatten_axis must be multiples of 128.
+                # No padding is needed in this case
+                lhs_first, lhs_last = math.prod(lhs.shape[:lhs_flatten_axis]), math.prod(
+                    lhs.shape[lhs_flatten_axis:]
+                )
+                assert lhs_first % 128 == 0 and lhs_last % 128 == 0, (
+                    "MXFP8 + Collective AG/RS requires LHS dimensions before and after the flatten"
+                    f" axis to be multiples of 128. Got lhs.shape={lhs.shape},"
+                    f" lhs_flatten_axis={lhs_flatten_axis}"
+                )
+                rhs_first, rhs_last = math.prod(rhs.shape[:rhs_flatten_axis]), math.prod(
+                    rhs.shape[rhs_flatten_axis:]
+                )
+                assert rhs_first % 128 == 0 and rhs_last % 128 == 0, (
+                    "MXFP8 + Collective AG/RS requires LHS dimensions before and after the flatten"
+                    f" axis to be multiples of 128. Got rhs.shape={rhs.shape},"
+                    f" rhs_flatten_axis={rhs_flatten_axis}"
+                )
+                # The scale needs to be in good shape for reordering
+                assert lhs_scale_inv.shape[sequence_dim] % tpsp_axis_size() == 0, (
+                    "MXFP8 + Collective AG/RS requires RHS scale inv sequence dimension to be"
+                    f" multiples of tpsp_axis_size. Got lhs_scale_inv.shape={lhs_scale_inv.shape},"
+                    f" tpsp_axis_size={tpsp_axis_size()}, sequence_dim={sequence_dim}"
+                )
+            else:
+                lhs_scale_inv = apply_padding_to_scale_inv(
+                    lhs_scale_inv,
+                    scaling_mode,
+                    lhs.shape,
+                    lhs_transposed,
+                    lhs_flatten_axis,
+                )
+                rhs_scale_inv = apply_padding_to_scale_inv(
+                    rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
+                )
 
         # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
         if scaling_mode.is_mxfp8_scaling:
             lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
             rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
+        # Determine if we need to reorder the tensor so that the input/output are in the correct layout for the collective operation
+        need_reorder = not transpose_batch_sequence and not is_outer and not collective_op.is_none
+
         # Alter lhs blocks so that CGEMM RS outputs correctly
+        if need_reorder and collective_op.is_reduce_scatter and lhs.shape[0] != 1:
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            lhs = _reorder_tpsp_leading(lhs, lhs.shape)
+
         if (
-            collective_op.is_reduce_scatter
-            and not transpose_batch_sequence
-            and not is_outer
-            and not lhs.shape[0] == 1
+            need_reorder
+            and (collective_op.is_reduce_scatter or collective_op.is_all_gather)
+            and lhs_scale_inv.shape[0] != 1
+            and scaling_mode.is_1d_block_scaling()
         ):
-            if sequence_dim != 1:
-                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
-            original_shape = lhs.shape
-            if original_shape[0] % dp_or_fsdp_axis_size() != 0 and original_shape[0] != 1:
-                raise ValueError(
-                    f"Original_shape[0]={original_shape[0]} is not divisible by"
-                    f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-                )
-            if original_shape[1] % tpsp_axis_size() != 0 and original_shape[1] != 1:
-                raise ValueError(
-                    f"Original_shape[1]={original_shape[1]} is not divisible by"
-                    f" tpsp_axis_size()={tpsp_axis_size()}"
-                )
-            reshaped = lhs.reshape(
-                dp_or_fsdp_axis_size(),
-                int(original_shape[0] / dp_or_fsdp_axis_size()),
-                tpsp_axis_size(),
-                int(original_shape[1] / tpsp_axis_size()),
-                *original_shape[2:],
-            )
-            reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
-            lhs = reordered.reshape(original_shape)
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            lhs_scale_inv = _reorder_tpsp_leading(lhs_scale_inv, lhs_scale_inv.shape)
 
         (output, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
@@ -699,34 +758,9 @@ class GemmPrimitive(BasePrimitive):
             collective_op=collective_op,
         )
         # Alter output blocks for CGEMM AG
-        if (
-            collective_op.is_all_gather
-            and not transpose_batch_sequence
-            and not is_outer
-            and not output.shape[0] == 1
-        ):
-            if sequence_dim != 1:
-                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
-            original_shape = output.shape
-            if original_shape[0] % dp_or_fsdp_axis_size() != 0 and original_shape[0] != 1:
-                raise ValueError(
-                    f"Original_shape[0]={original_shape[0]} is not divisible by"
-                    f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-                )
-            if original_shape[1] % tpsp_axis_size() != 0 and original_shape[1] != 1:
-                raise ValueError(
-                    f"Original_shape[1]={original_shape[1]} is not divisible by"
-                    f" tpsp_axis_size()={tpsp_axis_size()}"
-                )
-            reshaped = output.reshape(
-                tpsp_axis_size(),
-                dp_or_fsdp_axis_size(),
-                int(original_shape[0] / dp_or_fsdp_axis_size()),
-                int(original_shape[1] / tpsp_axis_size()),
-                *original_shape[2:],
-            )
-            reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
-            output = reordered.reshape(original_shape)
+        if need_reorder and collective_op.is_all_gather and output.shape[0] != 1:
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            output = _reorder_dp_leading(output, output.shape)
 
         return (output,)
 
@@ -812,6 +846,7 @@ class GemmPrimitive(BasePrimitive):
         contracting_dims,
         transpose_batch_sequence,
         collective_op,
+        scaling_mode,
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
@@ -955,12 +990,25 @@ class GemmPrimitive(BasePrimitive):
         # Bias sharding is based on GEMM output before any scatter
         bias_specs = rhs_non_cspecs if arg_infos[4].size > 0 else (None,)  # bias is operand index 4
 
+        # Scale shardings are based on the scaling_mode and collective_op
+        lhs_scale_specs = rhs_scale_specs = (None,)
+        if scaling_mode.is_1d_block_scaling():
+            rhs_scale_specs = rhs_specs
+            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM does not handle
+            # scale collecting yet
+            if collective_op.is_all_gather:
+                lhs_scale_specs = tuple(
+                    None if i == sequence_dim else s for i, s in enumerate(lhs_specs)
+                )
+            else:
+                lhs_scale_specs = lhs_specs
+
         if not collective_op.is_none:
             if sequence_dim < 0:
                 raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
 
         return (
-            (lhs_specs, rhs_specs, bias_specs),
+            (lhs_specs, lhs_scale_specs, rhs_specs, rhs_scale_specs, bias_specs),
             out_specs,
             reduce_spec,
             sequence_dim,
@@ -982,7 +1030,6 @@ class GemmPrimitive(BasePrimitive):
     ):
         del (
             out_dtype,
-            scaling_mode,
             use_split_accumulator,
             result_infos,
             is_outer,
@@ -990,7 +1037,11 @@ class GemmPrimitive(BasePrimitive):
         )
 
         (_, out_specs, *_) = GemmPrimitive._parse_operand_output_specs(
-            arg_infos, contracting_dims, transpose_batch_sequence, collective_op
+            arg_infos,
+            contracting_dims,
+            transpose_batch_sequence,
+            collective_op,
+            scaling_mode,
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -1013,7 +1064,7 @@ class GemmPrimitive(BasePrimitive):
         del result_infos, is_outer, sequence_dim
 
         (
-            (lhs_specs, rhs_specs, bias_input_specs),
+            (lhs_specs, lhs_scale_specs, rhs_specs, rhs_scale_specs, bias_input_specs),
             out_specs,
             reduce_spec,
             inferred_sequence_dim,
@@ -1022,17 +1073,21 @@ class GemmPrimitive(BasePrimitive):
             contracting_dims,
             transpose_batch_sequence,
             collective_op,
+            scaling_mode,
         )
 
         # Block scale inverses match their operands, but tensor scale inverses are unsharded.
         none_sharding = NamedSharding(mesh, PartitionSpec(None))
         lhs_sharding = NamedSharding(mesh, PartitionSpec(*lhs_specs))
+        lhs_scale_sharding = NamedSharding(mesh, PartitionSpec(*lhs_scale_specs))
         rhs_sharding = NamedSharding(mesh, PartitionSpec(*rhs_specs))
+        rhs_scale_sharding = NamedSharding(mesh, PartitionSpec(*rhs_scale_specs))
+
         arg_shardings = (
             lhs_sharding,
-            lhs_sharding if scaling_mode.is_1d_block_scaling() else none_sharding,
+            lhs_scale_sharding,
             rhs_sharding,
-            rhs_sharding if scaling_mode.is_1d_block_scaling() else none_sharding,
+            rhs_scale_sharding,
         )
 
         # Bias
@@ -1246,6 +1301,12 @@ def _te_gemm(
         lhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(lhs_amax)
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs_amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
+
+    if not collective_op.is_none:
+        assert not scaling_mode.is_nvfp4_scaling, (
+            f"Collective GEMM is not yet supported with {scaling_mode} quantization. Only"
+            " DELAYED_TENSOR_SCALING, CURRENT_TENSOR_SCALING, and MXFP8_1D_SCALING are supported."
+        )
 
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
     if bias is None:
