@@ -84,11 +84,12 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
+template <ShapeRepresentation SHAPE_REP>
 __device__ __forceinline__ size_t get_current_tensor_id(
-    const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t current_offset,
-    const size_t block_Y, const size_t first_logical_dim, const size_t last_logical_dim,
+    const size_t num_tensors, const size_t current_offset, const size_t block_Y,
+    const size_t first_logical_dim, const size_t last_logical_dim,
     const int64_t *const __restrict__ offsets_ptr) {
-  if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
+  if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
     const size_t current_row = block_Y * CHUNK_DIM_Y;
     const size_t rows_per_tensor = first_logical_dim / num_tensors;
     return current_row / rows_per_tensor;
@@ -110,19 +111,16 @@ __device__ __forceinline__ size_t get_current_tensor_id(
   }
 }
 
+template <ShapeRepresentation SHAPE_REP>
 __device__ __forceinline__ size_t get_tensor_rows_num(
-    const size_t tensor_id, const ShapeRepresentation shape_rep, const size_t first_logical_dim,
+    const size_t tensor_id, const size_t first_logical_dim,
     const int64_t *const __restrict__ first_dims_ptr, const size_t num_tensors) {
   size_t rows_num = 0;
-  switch (shape_rep) {
-    case ShapeRepresentation::SAME_BOTH_DIMS:
-    case ShapeRepresentation::VARYING_LAST_DIM:
-      rows_num = first_logical_dim;
-      break;
-    case ShapeRepresentation::VARYING_FIRST_DIM:
-    case ShapeRepresentation::VARYING_BOTH_DIMS:
-      rows_num = static_cast<size_t>(first_dims_ptr[tensor_id]);
-      break;
+  if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
+                SHAPE_REP == ShapeRepresentation::VARYING_LAST_DIM) {
+    rows_num = first_logical_dim;
+  } else {
+    rows_num = static_cast<size_t>(first_dims_ptr[tensor_id]);
   }
   if (rows_num % 128 != 0) {
     NVTE_DEVICE_ERROR("First dimension of each tensor in a group must be divisible by 128.");
@@ -130,26 +128,63 @@ __device__ __forceinline__ size_t get_tensor_rows_num(
   return rows_num;
 }
 
+__device__ __forceinline__ size_t get_tensor_rows_num(
+    const size_t tensor_id, const ShapeRepresentation shape_rep, const size_t first_logical_dim,
+    const int64_t *const __restrict__ first_dims_ptr, const size_t num_tensors) {
+  switch (shape_rep) {
+    case ShapeRepresentation::SAME_BOTH_DIMS:
+      return get_tensor_rows_num<ShapeRepresentation::SAME_BOTH_DIMS>(
+          tensor_id, first_logical_dim, first_dims_ptr, num_tensors);
+    case ShapeRepresentation::VARYING_FIRST_DIM:
+      return get_tensor_rows_num<ShapeRepresentation::VARYING_FIRST_DIM>(
+          tensor_id, first_logical_dim, first_dims_ptr, num_tensors);
+    case ShapeRepresentation::VARYING_LAST_DIM:
+      return get_tensor_rows_num<ShapeRepresentation::VARYING_LAST_DIM>(
+          tensor_id, first_logical_dim, first_dims_ptr, num_tensors);
+    case ShapeRepresentation::VARYING_BOTH_DIMS:
+      return get_tensor_rows_num<ShapeRepresentation::VARYING_BOTH_DIMS>(
+          tensor_id, first_logical_dim, first_dims_ptr, num_tensors);
+  }
+  return 0;
+}
+
+template <ShapeRepresentation SHAPE_REP>
+__device__ __forceinline__ size_t get_tensor_cols_num(
+    const size_t tensor_id, const size_t last_logical_dim,
+    const int64_t *const __restrict__ last_dims_ptr) {
+  size_t cols_num = 0;
+  if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
+                SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
+    cols_num = last_logical_dim;
+  } else {
+    cols_num = static_cast<size_t>(last_dims_ptr[tensor_id]);
+    if (cols_num % 128 != 0) {
+      NVTE_DEVICE_ERROR(
+          "For non-single tensors, the last dimension of each tensor in a group "
+          "must be divisible by 128.");
+    }
+  }
+  return cols_num;
+}
+
 __device__ __forceinline__ size_t get_tensor_cols_num(
     const size_t tensor_id, const ShapeRepresentation shape_rep, const size_t last_logical_dim,
     const int64_t *const __restrict__ last_dims_ptr) {
-  size_t cols_num = 0;
   switch (shape_rep) {
     case ShapeRepresentation::SAME_BOTH_DIMS:
+      return get_tensor_cols_num<ShapeRepresentation::SAME_BOTH_DIMS>(
+          tensor_id, last_logical_dim, last_dims_ptr);
     case ShapeRepresentation::VARYING_FIRST_DIM:
-      cols_num = last_logical_dim;
-      break;
+      return get_tensor_cols_num<ShapeRepresentation::VARYING_FIRST_DIM>(
+          tensor_id, last_logical_dim, last_dims_ptr);
     case ShapeRepresentation::VARYING_LAST_DIM:
+      return get_tensor_cols_num<ShapeRepresentation::VARYING_LAST_DIM>(
+          tensor_id, last_logical_dim, last_dims_ptr);
     case ShapeRepresentation::VARYING_BOTH_DIMS:
-      cols_num = static_cast<size_t>(last_dims_ptr[tensor_id]);
-      if (cols_num % 128 != 0) {
-        NVTE_DEVICE_ERROR(
-            "For non-single tensors, the last dimension of each tensor in a group "
-            "must be divisible by 128.");
-      }
-      break;
+      return get_tensor_cols_num<ShapeRepresentation::VARYING_BOTH_DIMS>(
+          tensor_id, last_logical_dim, last_dims_ptr);
   }
-  return cols_num;
+  return 0;
 }
 
 // Logical work-item decoded from CTA coordinates.
@@ -195,32 +230,37 @@ struct BlockDescriptor {
         block_offset_X(block_offset_X_) {}
 };
 
+template <ShapeRepresentation SHAPE_REP>
 __device__ __forceinline__ JobDescriptor decode_job(
-    const ShapeRepresentation shape_rep, const bool is_single_tensor, const size_t num_tensors,
-    const size_t first_logical_dim, const size_t last_logical_dim, const size_t work_blocks_X,
-    const int32_t ctaid_X, const int32_t ctaid_Y, const int64_t *const __restrict__ offsets_ptr,
+    const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
+    const size_t work_blocks_X, const int32_t ctaid_X, const int32_t ctaid_Y,
+    const int64_t *const __restrict__ offsets_ptr,
     const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr) {
+  constexpr bool is_single_tensor =
+      (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
+       SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM);
   const size_t block_id = ctaid_Y * work_blocks_X + ctaid_X;
   const size_t block_global_offset =
       is_single_tensor ? (ctaid_Y * CHUNK_DIM_Y * last_logical_dim + ctaid_X * CHUNK_DIM_X)
                        : (block_id * ELTS_PER_CHUNK);
-  const size_t tensor_id =
-      get_current_tensor_id(shape_rep, num_tensors, block_global_offset, ctaid_Y,
-                            first_logical_dim, last_logical_dim, offsets_ptr);
+  const size_t tensor_id = get_current_tensor_id<SHAPE_REP>(
+      num_tensors, block_global_offset, ctaid_Y, first_logical_dim, last_logical_dim, offsets_ptr);
   const size_t rows =
-      get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
-  const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
+      get_tensor_rows_num<SHAPE_REP>(tensor_id, first_logical_dim, first_dims_ptr, num_tensors);
+  const size_t cols = get_tensor_cols_num<SHAPE_REP>(tensor_id, last_logical_dim, last_dims_ptr);
   return JobDescriptor(block_id, block_global_offset, tensor_id, rows, cols);
 }
 
-__device__ __forceinline__ bool is_job_valid(const JobDescriptor &job,
-                                             const ShapeRepresentation shape_rep,
-                                             const size_t total_work_blocks,
+template <ShapeRepresentation SHAPE_REP>
+__device__ __forceinline__ bool is_job_valid(const JobDescriptor &job, const size_t total_work_blocks,
                                              const int64_t *const __restrict__ offsets_ptr) {
   bool is_valid = (job.block_id < total_work_blocks) && (job.rows != 0) && (job.cols != 0);
-  if (!is_valid || shape_rep == SAME_BOTH_DIMS) {
+  if (!is_valid) {
     return is_valid;
+  }
+  if constexpr (SHAPE_REP == SAME_BOTH_DIMS) {
+    return true;
   }
 
   const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[job.tensor_id]);
@@ -239,9 +279,12 @@ __device__ __forceinline__ bool is_job_valid(const JobDescriptor &job,
   return true;
 }
 
-__device__ __forceinline__ BlockDescriptor
-decode_block(const JobDescriptor &job, const bool is_single_tensor,
-             const int64_t *const __restrict__ offsets_ptr) {
+template <ShapeRepresentation SHAPE_REP>
+__device__ __forceinline__ BlockDescriptor decode_block(
+    const JobDescriptor &job, const int64_t *const __restrict__ offsets_ptr) {
+  constexpr bool is_single_tensor =
+      (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
+       SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM);
   const size_t CHUNK_DIM_X_ = CHUNK_DIM_X;
   const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, CHUNK_DIM_X_);
   const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[job.tensor_id]);
@@ -644,14 +687,15 @@ __device__ __forceinline__ float process_rowwise_stage(
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
-          bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES>
+          bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES,
+          ShapeRepresentation SHAPE_REP>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input_static,
     const __grid_constant__ CUtensorMap tensor_map_act_input_static,
     const __grid_constant__ CUtensorMap tensor_map_output_rowwise_static,
     const __grid_constant__ CUtensorMap tensor_map_output_colwise_static,
-    const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t first_logical_dim,
-    const size_t last_logical_dim, const int64_t *const __restrict__ offsets_ptr,
+    const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
+    const int64_t *const __restrict__ offsets_ptr,
     const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, e8m0_t *const __restrict__ scales_rowwise_ptr,
     e8m0_t *const __restrict__ scales_colwise_ptr, const float *__restrict__ noop,
@@ -667,7 +711,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
   }
 
-  const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
+  constexpr ShapeRepresentation shape_rep = SHAPE_REP;
+  constexpr bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
   const bool leading_thread = (threadIdx.x == 0);
 
@@ -749,11 +794,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   // Main work loop: decode current job, prime its pipeline, then process all 32-row stages.
   while (!job_finished) {
     // Decode CTA assignment into logical tensor coordinates and validate bounds.
-    const JobDescriptor current_job =
-        decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
-                   work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
+    const JobDescriptor current_job = decode_job<SHAPE_REP>(
+        num_tensors, first_logical_dim, last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y,
+        offsets_ptr, first_dims_ptr, last_dims_ptr);
     const bool current_job_is_valid =
-        is_job_valid(current_job, shape_rep, total_work_blocks, offsets_ptr);
+        is_job_valid<SHAPE_REP>(current_job, total_work_blocks, offsets_ptr);
     if (!current_job_is_valid) {
       break;
     }
@@ -761,7 +806,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const size_t tensor_id = current_job.tensor_id;
     const size_t rows = current_job.rows;
     const size_t cols = current_job.cols;
-    const BlockDescriptor current_block = decode_block(current_job, is_single_tensor, offsets_ptr);
+    const BlockDescriptor current_block = decode_block<SHAPE_REP>(current_job, offsets_ptr);
 
     const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
     const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
@@ -1165,24 +1210,53 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
               auto kernel =
                   group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                              true, true, WITH_GEMM_SWIZZLED_SCALES>;
+                                              true, true, WITH_GEMM_SWIZZLED_SCALES,
+                                              ShapeRepresentation::SAME_BOTH_DIMS>;
+              auto assign_kernel_for_shape = [&](auto rowwise_scaling, auto colwise_scaling) {
+                constexpr bool ROWWISE_SCALING_VALUE = decltype(rowwise_scaling)::value;
+                constexpr bool COLWISE_SCALING_VALUE = decltype(colwise_scaling)::value;
+                switch (shape_rep) {
+                  case ShapeRepresentation::SAME_BOTH_DIMS: {
+                    kernel = group_quantize_mxfp8_kernel<
+                        IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                        ROWWISE_SCALING_VALUE, COLWISE_SCALING_VALUE, WITH_GEMM_SWIZZLED_SCALES,
+                        ShapeRepresentation::SAME_BOTH_DIMS>;
+                    break;
+                  }
+                  case ShapeRepresentation::VARYING_FIRST_DIM: {
+                    kernel = group_quantize_mxfp8_kernel<
+                        IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                        ROWWISE_SCALING_VALUE, COLWISE_SCALING_VALUE, WITH_GEMM_SWIZZLED_SCALES,
+                        ShapeRepresentation::VARYING_FIRST_DIM>;
+                    break;
+                  }
+                  case ShapeRepresentation::VARYING_LAST_DIM: {
+                    kernel = group_quantize_mxfp8_kernel<
+                        IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                        ROWWISE_SCALING_VALUE, COLWISE_SCALING_VALUE, WITH_GEMM_SWIZZLED_SCALES,
+                        ShapeRepresentation::VARYING_LAST_DIM>;
+                    break;
+                  }
+                  case ShapeRepresentation::VARYING_BOTH_DIMS: {
+                    kernel = group_quantize_mxfp8_kernel<
+                        IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                        ROWWISE_SCALING_VALUE, COLWISE_SCALING_VALUE, WITH_GEMM_SWIZZLED_SCALES,
+                        ShapeRepresentation::VARYING_BOTH_DIMS>;
+                    break;
+                  }
+                }
+              };
               switch (scaling_type) {
                 case ScalingType::ROWWISE: {
-                  kernel =
-                      group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                  OType, true, false, WITH_GEMM_SWIZZLED_SCALES>;
+                  assign_kernel_for_shape(std::true_type{}, std::false_type{});
                   break;
                 }
                 case ScalingType::COLWISE: {
-                  kernel =
-                      group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                  OType, false, true, WITH_GEMM_SWIZZLED_SCALES>;
+                  assign_kernel_for_shape(std::false_type{}, std::true_type{});
                   break;
                 }
                 case ScalingType::BIDIMENSIONAL: {
-                  kernel =
-                      group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                  OType, true, true, WITH_GEMM_SWIZZLED_SCALES>;
+                  assign_kernel_for_shape(std::true_type{}, std::true_type{});
                   break;
                 }
               }
@@ -1213,8 +1287,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
               kernel<<<grid, block_size, dshmem_size, stream>>>(
                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                  tensor_map_output_colwise, shape_rep, num_tensors, first_logical_dim,
-                  last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
+                  tensor_map_output_colwise, num_tensors, first_logical_dim, last_logical_dim,
+                  offsets_ptr, first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
                   scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr, work_blocks_X,
                   work_blocks_Y);
 
