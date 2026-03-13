@@ -567,6 +567,11 @@ class QuantizedTensor(torch.Tensor):
             dtype = kwargs.get("dtype", tensor.dtype)
             device = kwargs.get("device", tensor.device)
             pin_memory = kwargs.get("pin_memory", False)
+            if tensor._quantizer is None:
+                raise RuntimeError(
+                    f"{type(tensor).__name__} does not have a quantizer; "
+                    "cannot create new_empty QuantizedTensor"
+                )
             out = tensor._quantizer.make_empty(
                 shape=torch.Size(size),
                 dtype=dtype,

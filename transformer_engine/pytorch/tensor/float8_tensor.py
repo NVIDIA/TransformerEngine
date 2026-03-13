@@ -994,7 +994,9 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         for compatibility with torch.load(weights_only=True), which is
         used by DCP async save staging.
         """
-        if self.is_cpu:
+        data_is_cpu = self._data is not None and self._data.is_cpu
+        transpose_is_cpu = self._transpose is not None and self._transpose.is_cpu
+        if data_is_cpu or transpose_is_cpu:
             return self.dequantize(dtype=self.dtype).__reduce_ex__(protocol)
         return (
             Float8Tensor._make_in_reduce_ex,

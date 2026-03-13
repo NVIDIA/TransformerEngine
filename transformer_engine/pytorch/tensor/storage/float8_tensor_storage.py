@@ -139,7 +139,11 @@ class Float8TensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "data_transpose": self._transpose,
             "quantizer": self._quantizer,
-            "device": self.device,
+            "device": (
+                self._data.device
+                if self._data is not None
+                else (self._transpose.device if self._transpose is not None else None)
+            ),
             "fake_dtype": self._dtype,
         }
 
