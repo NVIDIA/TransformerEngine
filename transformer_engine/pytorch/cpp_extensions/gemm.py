@@ -307,7 +307,9 @@ def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
 
 
 @functools.lru_cache(maxsize=None)
-def _get_grouped_gemm_workspaces(device: int, num_tensors: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def _get_grouped_gemm_workspaces(
+    device: int, num_tensors: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
     setup_size = get_grouped_gemm_setup_workspace_size(num_tensors)
     workspace_setup = torch.empty(setup_size, dtype=torch.uint8, device=device)
     workspace_cublas = torch.empty(
