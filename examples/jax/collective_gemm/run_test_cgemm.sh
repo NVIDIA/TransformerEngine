@@ -120,7 +120,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
 
     # Remove the log files after processing them
     wait
-    rm ${TEST_FILE}_gpu_*.log
+    rm ${TEST_FILE}_gpu_*_${backend}.log
   done
 done
 

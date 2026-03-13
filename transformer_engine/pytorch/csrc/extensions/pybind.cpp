@@ -605,11 +605,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
            py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
-           py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 3,
-           py::arg("set_sm_margin") = true, py::arg("atomic_gemm") = false,
+           py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
+           py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
       .def(py::init<CommOverlapHelper *, int, int, int, bool>(), py::arg("helper"),
-           py::arg("tp_rank"), py::arg("tp_size"), py::arg("num_comm_sm") = 3,
+           py::arg("tp_rank"), py::arg("tp_size"), py::arg("num_comm_sm") = 1,
            py::arg("atomic_gemm") = false, py::call_guard<py::gil_scoped_release>())
       .def("copy_into_buffer",
            static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(

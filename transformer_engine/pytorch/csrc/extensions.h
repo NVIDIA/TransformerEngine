@@ -642,11 +642,11 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  CommOverlapHelper *helper, int tp_size,
                  transformer_engine::CommOverlapType comm_type,
                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
-                 bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
+                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 1,
+                 bool set_sm_margin = false, bool atomic_gemm = false, bool use_ce = true,
                  bool aggregate = false);
 
-  CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size, int num_comm_sm = 3,
+  CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size, int num_comm_sm = 1,
                  bool atomic_gemm = false)
       : CommOverlapP2PBase(helper->get_nccl_comm_ptr("intra"), tp_rank, tp_size, num_comm_sm,
                            atomic_gemm) {}
