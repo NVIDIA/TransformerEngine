@@ -64,6 +64,49 @@ using ExtraTensorList = std::vector<std::pair<std::string, TensorAttr>>;
 
 constexpr char kDlpackCapsuleName[] = "dltensor";
 
+struct DlpackTensorView {
+  PyObject *capsule = nullptr;
+  DLManagedTensor *managed = nullptr;
+
+  DlpackTensorView() = default;
+  DlpackTensorView(PyObject *capsule_obj, DLManagedTensor *managed_tensor)
+      : capsule(capsule_obj), managed(managed_tensor) {}
+
+  DlpackTensorView(const DlpackTensorView &) = delete;
+  auto operator=(const DlpackTensorView &) -> DlpackTensorView & = delete;
+
+  DlpackTensorView(DlpackTensorView &&other) noexcept
+      : capsule(other.capsule), managed(other.managed) {
+    other.capsule = nullptr;
+    other.managed = nullptr;
+  }
+
+  auto operator=(DlpackTensorView &&other) noexcept -> DlpackTensorView & {
+    if (this != &other) {
+      reset();
+      capsule = other.capsule;
+      managed = other.managed;
+      other.capsule = nullptr;
+      other.managed = nullptr;
+    }
+    return *this;
+  }
+
+  ~DlpackTensorView() { reset(); }
+
+  void reset() {
+    if (capsule == nullptr) {
+      return;
+    }
+    py::gil_scoped_acquire gil;
+    Py_DECREF(capsule);
+    capsule = nullptr;
+    managed = nullptr;
+  }
+};
+
+using DlpackTensorViews = std::vector<DlpackTensorView>;
+
 cudnn_frontend::DataType_t convert_dlpack_dtype(const DLDataType &dtype) {
   switch (dtype.code) {
     case DLDataTypeCode::kDLUInt:
@@ -127,10 +170,16 @@ decltype(auto) with_dlpack_tensor(py::handle tensor_obj, Fn &&fn) {
   return std::forward<Fn>(fn)(*managed);
 }
 
-void *get_dlpack_data_pointer(py::handle tensor_obj) {
-  return with_dlpack_tensor(tensor_obj, [](const DLManagedTensor &managed) -> void * {
-    return static_cast<char *>(managed.dl_tensor.data) + managed.dl_tensor.byte_offset;
-  });
+DlpackTensorView make_dlpack_tensor_view(py::handle tensor_obj) {
+  NVTE_CHECK(py::hasattr(tensor_obj, "__dlpack__"),
+             "score_mod_tensors entries must support __dlpack__().");
+  py::capsule capsule = tensor_obj.attr("__dlpack__")();
+  NVTE_CHECK(!capsule.is_none(), "Failed to retrieve DLPack capsule for score_mod_tensors entry.");
+  auto *managed =
+      static_cast<DLManagedTensor *>(PyCapsule_GetPointer(capsule.ptr(), kDlpackCapsuleName));
+  NVTE_CHECK(managed != nullptr, "Invalid DLPack capsule in score_mod_tensors entry.");
+  Py_INCREF(capsule.ptr());
+  return DlpackTensorView(capsule.ptr(), managed);
 }
 
 TensorAttr create_tensor_attr_from_dlpack(const std::shared_ptr<cudnn_frontend::graph::Graph> &graph,
@@ -229,20 +278,26 @@ py::dict get_score_mod_tensor_attrs(const std::shared_ptr<cudnn_frontend::graph:
   return callback_tensors;
 }
 
-void extend_variant_pack_with_extra_tensors(
+DlpackTensorViews extend_variant_pack_with_extra_tensors(
     void *extra_tensors_ptr, const ExtraTensorList &extra_tensor_attrs,
     std::unordered_map<TensorAttr, void *> &variant_pack) {
+  DlpackTensorViews views;
   if (extra_tensors_ptr == nullptr || extra_tensor_attrs.empty()) {
-    return;
+    return views;
   }
 
   py::gil_scoped_acquire gil;
   py::dict extra_tensors = py::reinterpret_borrow<py::dict>(reinterpret_cast<PyObject *>(extra_tensors_ptr));
+  views.reserve(extra_tensor_attrs.size());
   for (const auto &[name, tensor_attr] : extra_tensor_attrs) {
     py::str key(name);
     NVTE_CHECK(extra_tensors.contains(key), "Missing score_mod tensor entry: ", name);
-    variant_pack[tensor_attr] = get_dlpack_data_pointer(extra_tensors[key]);
+    auto view = make_dlpack_tensor_view(extra_tensors[key]);
+    variant_pack[tensor_attr] =
+        static_cast<char *>(view.managed->dl_tensor.data) + view.managed->dl_tensor.byte_offset;
+    views.emplace_back(std::move(view));
   }
+  return views;
 }
 
 auto make_attention_score_modifier(void *callback_ptr, void *extra_tensors_ptr,
@@ -788,7 +843,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       variant_pack[softmax_offset] = devPtrSoftmaxOffset;
     }
 
-    extend_variant_pack_with_extra_tensors(score_mod_tensors, score_mod_extra_tensors, variant_pack);
+    auto score_mod_tensor_views =
+        extend_variant_pack_with_extra_tensors(score_mod_tensors, score_mod_extra_tensors, variant_pack);
 
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
   } catch (cudnn_frontend::cudnnException &e) {
@@ -1320,9 +1376,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       variant_pack[d_softmax_offset] = devPtrdSoftmaxOffset;
     }
 
-    extend_variant_pack_with_extra_tensors(score_mod_tensors, score_mod_extra_tensors, variant_pack);
-    extend_variant_pack_with_extra_tensors(score_mod_bprop_tensors, score_mod_bprop_extra_tensors,
-                                           variant_pack);
+    auto score_mod_tensor_views =
+        extend_variant_pack_with_extra_tensors(score_mod_tensors, score_mod_extra_tensors, variant_pack);
+    auto score_mod_bprop_tensor_views = extend_variant_pack_with_extra_tensors(
+        score_mod_bprop_tensors, score_mod_bprop_extra_tensors, variant_pack);
 
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
   } catch (cudnn_frontend::cudnnException &e) {

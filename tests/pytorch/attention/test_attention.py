@@ -1715,7 +1715,8 @@ def test_dpa_score_mod_causal(dtype, model_configs, model):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("model_configs", [model_configs_score_mod])
 @pytest.mark.parametrize("model", model_configs_score_mod.keys())
-def test_dpa_score_mod_causal_external_neg_inf(dtype, model_configs, model):
+@pytest.mark.parametrize("neg_inf_device", ["cuda", "cpu"], ids=["cuda_tensor", "cpu_by_value_tensor"])
+def test_dpa_score_mod_causal_external_neg_inf(dtype, model_configs, model, neg_inf_device):
     """Test DotProductAttention causal masking via score_mod with external variant-pack tensor."""
 
     config = model_configs[model]
@@ -1748,7 +1749,7 @@ def test_dpa_score_mod_causal_external_neg_inf(dtype, model_configs, model):
     v = (torch.randn(b, sq, h, d, dtype=dtype, device="cuda") * 0.1).detach().requires_grad_(True)
     cu_seqlens = torch.arange(0, (b + 1) * sq, sq, dtype=torch.int32, device="cuda")
     out_grad = (torch.randn(b, sq, h * d, dtype=dtype, device="cuda") * 0.01).detach()
-    neg_inf = torch.full((1, 1, 1, 1), float("-inf"), dtype=torch.float32, device="cuda")
+    neg_inf = torch.full((1, 1, 1, 1), float("-inf"), dtype=torch.float32, device=neg_inf_device)
 
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
