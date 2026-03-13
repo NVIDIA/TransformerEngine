@@ -846,6 +846,35 @@ class GroupedLinear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, f"bias{i}"), True, 0, 1)
 
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        """Load state, including compatibility with legacy grouped-weight checkpoints."""
+        if self.single_grouped_parameter:
+            grouped_weight_key = f"{prefix}weight"
+            legacy_weight_keys = [f"{prefix}weight{i}" for i in range(self.num_gemms)]
+            has_grouped_weight = grouped_weight_key in state_dict
+            has_legacy_weights = all(key in state_dict for key in legacy_weight_keys)
+
+            # Backward compatibility: checkpoints saved without single_grouped_parameter
+            # store one weight tensor per expert (weight0..weightN). Convert them into a
+            # single stacked grouped weight expected by this module configuration.
+            if not has_grouped_weight and has_legacy_weights:
+                legacy_weights = [state_dict.pop(key) for key in legacy_weight_keys]
+                legacy_weights = [
+                    weight.dequantize() if isinstance(weight, QuantizedTensorStorage) else weight
+                    for weight in legacy_weights
+                ]
+                state_dict[grouped_weight_key] = torch.stack(legacy_weights, dim=0)
+            elif has_grouped_weight:
+                # Drop any redundant legacy keys to avoid strict-load unexpected-key errors.
+                for key in legacy_weight_keys:
+                    state_dict.pop(key, None)
+
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
     @no_torch_dynamo()
     def forward(
         self,
