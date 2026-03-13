@@ -299,18 +299,10 @@ class FP8GlobalState:
     global_amax_history_buffer: Dict[str, list] = field(default_factory=dict)
     global_scale_buffer: Dict[str, list] = field(default_factory=dict)
     fp8_tensors_recompute_buffer: list = field(default_factory=list)
-    fp8_available: Optional[bool] = None
-    reason_for_no_fp8: str = ""
     autocast_arguments: Dict[Any, Tuple[Recipe, Optional[dist_group_type]]] = field(
         default_factory=dict
     )
     skip_fp8_weight_update_tensor: Optional[torch.Tensor] = None
-    mxfp8_available: Optional[bool] = None
-    reason_for_no_mxfp8: str = ""
-    fp8_block_scaling_available: Optional[bool] = None
-    reason_for_no_fp8_block_scaling: str = ""
-    nvfp4_available: Optional[bool] = None
-    reason_for_no_nvfp4: str = ""
 
 class FP8GlobalStateManager:
     """Class to keep track of and manipulate the global
