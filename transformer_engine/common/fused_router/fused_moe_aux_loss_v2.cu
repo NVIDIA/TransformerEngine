@@ -24,8 +24,8 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
                                                      const IndexType* tokens_per_expert,
                                                      int total_num_tokens, int num_experts,
                                                      int num_rows, int num_cols, int topk,
-                                                     float coeff,
-                                                     DataType* aux_loss, float* Const_buf) {
+                                                     float coeff, DataType* aux_loss,
+                                                     float* Const_buf) {
   // -----------------------------------------------------------------------
   // 1) Compute the constant coefficient (identical for all threads)
   // -----------------------------------------------------------------------
@@ -71,10 +71,8 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
   const int warp_id = threadIdx.x / kThreadsPerWarp;
   const int lane_id = threadIdx.x % kThreadsPerWarp;
   if (warp_id == 0) {
-    CompType block_sum = warp_reduce_on_shmem(shmem_block,
-                                              blockDim.x,
-                                              ReduceFuncType::SUM,
-                                              lane_id);
+    CompType block_sum =
+        warp_reduce_on_shmem(shmem_block, blockDim.x, ReduceFuncType::SUM, lane_id);
     __syncwarp();
 
     // -----------------------------------------------------------------------
@@ -82,8 +80,7 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
     //    The multiplication by C_coeff is folded into the atomic.
     // -----------------------------------------------------------------------
     if (lane_id == 0) {
-      atomicAdd(reinterpret_cast<float*>(aux_loss),
-                static_cast<float>(block_sum * C_coeff));
+      atomicAdd(reinterpret_cast<float*>(aux_loss), static_cast<float>(block_sum * C_coeff));
     }
   }
 }
@@ -96,9 +93,8 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
                                                    const IndexType* tokens_per_expert,
                                                    int total_num_tokens, int num_experts,
                                                    int num_rows, int num_cols, int topk,
-                                                   float coeff,
-                                                   DataType* aux_loss, float* Const_buf,
-                                                   cudaStream_t stream) {
+                                                   float coeff, DataType* aux_loss,
+                                                   float* Const_buf, cudaStream_t stream) {
   const int block_size = std::min(1024, num_cols);
   const int grid_size = sm_count() * 2;
 
@@ -106,23 +102,16 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
   const size_t smem_size = block_size * sizeof(CompType);
 
   fused_moe_aux_loss_forward_kernel_v2<DataType, IndexType>
-      <<<grid_size, block_size, smem_size, stream>>>(probs,
-                                                     tokens_per_expert,
-                                                     total_num_tokens,
-                                                     num_experts,
-                                                     num_rows,
-                                                     num_cols,
-                                                     topk,
-                                                     coeff,
-                                                     aux_loss,
-                                                     Const_buf);
+      <<<grid_size, block_size, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens,
+                                                     num_experts, num_rows, num_cols, topk, coeff,
+                                                     aux_loss, Const_buf);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fused_moe_aux_loss_forward_v2(const Tensor& probs, const Tensor& tokens_per_expert,
-                                   int total_num_tokens, int num_experts, int num_rows, int num_cols,
-                                   int topk, float coeff, Tensor& aux_loss, Tensor& Const_buf,
-                                   cudaStream_t stream) {
+                                   int total_num_tokens, int num_experts, int num_rows,
+                                   int num_cols, int topk, float coeff, Tensor& aux_loss,
+                                   Tensor& Const_buf, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       probs.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
