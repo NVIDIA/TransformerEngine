@@ -11,13 +11,14 @@
 #include <pybind11/cast.h>
 #include <pybind11/pybind11.h>
 
+#include <dlpack/dlpack.h>
+
 #include <algorithm>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "../../../3rdparty/cudnn-frontend/python/pygraph/pygraph.h"
-#include "../../../3rdparty/dlpack/include/dlpack/dlpack.h"
 #include "../common.h"
 #include "../cudnn_utils.h"
 #include "../util/cuda_runtime.h"
