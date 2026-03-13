@@ -570,17 +570,13 @@ def test_dcp_output_parity(recipe=None, async_save=False):
     else:
         model_state = model.state_dict()
 
+    save_state = {"model": model_state, "optimizer": optimizer.state_dict()}
+
     if not async_save:
-        dcp.save(
-            {"model": model_state, "optimizer": optimizer.state_dict()},
-            checkpoint_id=checkpoint_dir,
-        )
-        future = None
+        dcp.save(save_state, checkpoint_id=checkpoint_dir)
     else:
-        future = dcp.async_save(
-            {"model": model_state, "optimizer": optimizer.state_dict()},
-            checkpoint_id=checkpoint_dir,
-        )
+        future = dcp.async_save(save_state, checkpoint_id=checkpoint_dir)
+        future.result()  # Block on async save completion
 
     # ── Build a fresh model and load the checkpoint ──────────────────
     model2 = _build_model(fp8_init=True, recipe=recipe)
@@ -609,9 +605,6 @@ def test_dcp_output_parity(recipe=None, async_save=False):
 
     state_to_load = {"model": model2_state, "optimizer": optimizer2.state_dict()}
 
-    if async_save:
-        future.result()  # Block on async save completion
-
     dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
     model2.load_state_dict(
         state_to_load["model"],
@@ -636,7 +629,7 @@ def test_dcp_output_parity(recipe=None, async_save=False):
             ref_output,
             rtol=0.05,
             atol=0.1,
-            msg="Fresh model loaded from DCP checkpoint produces different output",
+            msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
         )
     else:
         torch.testing.assert_close(
@@ -644,7 +637,7 @@ def test_dcp_output_parity(recipe=None, async_save=False):
             ref_output,
             rtol=0,
             atol=0,
-            msg="Fresh model loaded from DCP checkpoint produces different output",
+            msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
         )
 
     # ── Verify one more training step produces identical results ─────

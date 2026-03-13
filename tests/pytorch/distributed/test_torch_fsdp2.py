@@ -196,16 +196,6 @@ def test_fsdp2_dcp_output_parity(fp_recipe):
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
 def test_fsdp2_dcp_output_parity_async(fp_recipe):
     """DCP save/load round-trip into a fresh model produces identical outputs."""
-    if fp_recipe in ("DelayedScaling", "Float8CurrentScaling"):
-        pytest.xfail(
-            f"async DCP save/load with {fp_recipe} uses StateDictStager._offload_tensor() which "
-            "tries to deep-copy the tensor's underlying storage. Float8Tensor is a wrapper subclass"
-            "(_make_wrapper_subclass) with data_ptr() == 0 (empty storage). The staging code at "
-            "line 215 skips the storage copy for wrapper subclasses, creating a plain tensor with "
-            "uninitialized garbage data. The actual FP8 data (in _data, _scale_inv attributes) is "
-            "deep-copied but ignored by DCP when writing."
-        )
-
     if fp_recipe == "MXFP8BlockScaling":
         pytest.xfail(
             "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
