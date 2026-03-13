@@ -30,7 +30,6 @@ enum NVTE_QKV_Matrix {
   NVTE_V_Matrix_Transpose = 4,  // values transposed
   NVTE_S_Matrix = 5,            // output of GEMM1
   NVTE_O_Matrix = 6,            // final output
-  NVTE_Q_Matrix_Transpose = 7,  // queries transposed
 };
 
 // Padded sizes for MXFP8 layout (s_q/s_kv/d_qk/d_v and their scaled dimensions)
@@ -118,7 +117,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       q_strides[h_dim] = d_qk;
       q_strides[s_dim] = b * 3 * h * d_qk;
       q_strides[d_dim] = 1;
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 4; i++) {
         k_strides[i] = v_strides[i] = q_strides[i];
       }
       break;
@@ -127,7 +126,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       q_strides[h_dim] = 3 * d_qk;
       q_strides[s_dim] = b * 3 * h * d_qk;
       q_strides[d_dim] = 1;
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 4; i++) {
         k_strides[i] = v_strides[i] = q_strides[i];
       }
       break;
@@ -140,7 +139,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
         k_strides[h_dim] = d_qk;
         k_strides[s_dim] = b * 2 * hg * d_qk;
         k_strides[d_dim] = 1;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 4; i++) {
           v_strides[i] = k_strides[i];
         }
       break;
@@ -153,7 +152,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       k_strides[h_dim] = 2 * d_qk;
       k_strides[s_dim] = b * 2 * hg * d_qk;
       k_strides[d_dim] = 1;
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 4; i++) {
         v_strides[i] = k_strides[i];
       }
       break;
@@ -178,7 +177,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       q_strides[h_dim] = d_qk;
       q_strides[s_dim] = 3 * h * d_qk;
       q_strides[d_dim] = 1;
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 4; i++) {
         k_strides[i] = v_strides[i] = q_strides[i];
       }
       break;
@@ -188,7 +187,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       q_strides[h_dim] = 3 * d_qk;
       q_strides[s_dim] = 3 * h * d_qk;
       q_strides[d_dim] = 1;
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 4; i++) {
         k_strides[i] = v_strides[i] = q_strides[i];
       }
       break;
@@ -202,7 +201,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       k_strides[h_dim] = d_qk;
       k_strides[s_dim] = 2 * hg * d_qk;
       k_strides[d_dim] = 1;
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 4; i++) {
         v_strides[i] = k_strides[i];
       }
       break;
@@ -216,7 +215,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       k_strides[h_dim] = 2 * d_qk;
       k_strides[s_dim] = 2 * hg * d_qk;
       k_strides[d_dim] = 1;
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 4; i++) {
         v_strides[i] = k_strides[i];
       }
       break;

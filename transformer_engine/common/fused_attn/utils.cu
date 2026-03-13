@@ -312,11 +312,6 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
         strideA[head_dim_idx] = s_kv * d;
         strideA[seqlen_transpose_dim_idx] = d;
         strideA[hidden_transpose_dim_idx] = 1;
-      } else if (matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix_Transpose) {
-        strideA[batch_dim_idx] = h * s_q * d;
-        strideA[head_dim_idx] = s_q * d;
-        strideA[seqlen_transpose_dim_idx] = d;
-        strideA[hidden_transpose_dim_idx] = 1;
       }
       break;
   }
