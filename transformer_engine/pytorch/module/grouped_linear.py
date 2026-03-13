@@ -333,9 +333,9 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.ub_overlap_rs_dgrad = False
                 ctx.ub_bulk_dgrad = False
                 ctx.ub_bulk_wgrad = False
-                ctx.grad_input_quantizer = None
-                ctx.grad_weight_quantizer = None
-                ctx.grad_output_quantizer = None
+                ctx.grad_input_quantizers = [None] * num_gemms
+                ctx.grad_weight_quantizers = [None] * num_gemms
+                ctx.grad_output_quantizers = [None] * num_gemms
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
