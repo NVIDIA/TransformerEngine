@@ -36,6 +36,7 @@ from transformer_engine.jax.quantize import (
     ScaledTensor1x,
     ScaledTensor2x,
     GroupedScaledTensor1x,
+    GroupedNoScaleTensor,
     ScalingMode,
     QuantizerFactory,
     QuantizeLayout,
@@ -1787,13 +1788,18 @@ class TestGroupedDense:
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         # jitting grouped_gemm
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, first_dims=group_sizes, last_dims=None, group_axis=0, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, first_dims=None, last_dims=None, group_axis=0, original_shape=rhs.shape
+        )
         prim_out = jax.jit(
             tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
         )(
-            lhs,
-            rhs,
-            group_sizes,
-            contracting_dims,
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
             use_async_d2h_group_sizes=True,
         )
 
@@ -1825,8 +1831,17 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, first_dims=group_sizes, last_dims=None, group_axis=0, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, first_dims=None, last_dims=None, group_axis=0, original_shape=rhs.shape
+        )
         prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-            lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
+            quantizer_set=quantizer_set,
         )
 
         allclose_dtype = jnp.float8_e4m3fn

@@ -1203,6 +1203,7 @@ def grouped_quantize(
     ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
     group_axis = 0
 
+    ragged_first_dims = group_sizes  # None if no explicit group_sizes (kernel case)
     if group_sizes is None:
         group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
 
@@ -1280,7 +1281,7 @@ def grouped_quantize(
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
-        group_sizes=group_sizes,
+        first_dims=ragged_first_dims,
         original_shape=original_shape,
         group_axis=group_axis,
     )
