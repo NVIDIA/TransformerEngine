@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -64,33 +65,87 @@ def fp_recipe(request):
 def _run_test(fp_init, sharding_dims, recipe, layer_type):
     test_path = Path(__file__).parent.resolve() / "run_fsdp2_model.py"
     test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(test_path)]
-
     if fp_init:
         test_cmd += ["--fp8-init"]
-
-    if len(sharding_dims) == 1:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0])]
-    elif len(sharding_dims) == 2:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0]), str(sharding_dims[1])]
-    else:
-        assert False
+    test_cmd += ["--sharding-dims"]
+    for x in sharding_dims:
+        test_cmd.append(str(x))
     test_cmd += ["--recipe", recipe]
     test_cmd += ["--layer-type", layer_type]
-
     subprocess.run(test_cmd, env=os.environ, check=True)
 
 
-@pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
+@pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs.")
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
-@pytest.mark.parametrize("sharding_dims", ([NUM_PROCS], [2, NUM_PROCS // 2]))
+@pytest.mark.parametrize(
+    "sharding_dims",
+    (
+        # FSDP
+        [NUM_PROCS],
+        # HSDP
+        [2, NUM_PROCS // 2],
+        # (H/F)SDP-TP
+        [NUM_PROCS // 4, 2, 2],
+    ),
+)
 @pytest.mark.parametrize("fp8_init", (False, True))
 @pytest.mark.parametrize("layer_type", ("LayerNormLinear", "TransformerLayer"))
 def test_distributed(fp8_init, sharding_dims, fp_recipe, layer_type):
 
-    if fp_recipe in ("Float8BlockScaling", "NVFP4BlockScaling") and fp8_init:
-        pytest.xfail(f"{fp_recipe} + fp8_init: test_fp8_fsdp2_allgather is currently failing.")
+    parallel_size = math.prod(x for x in sharding_dims if x != 0)
+    if NUM_PROCS < parallel_size:
+        pytest.skip(
+            f"Insufficient devices ({NUM_PROCS}) to test sharding configuration: {sharding_dims}"
+        )
 
     _run_test(fp8_init, sharding_dims, fp_recipe, layer_type)
+
+
+## ── FP8 FSDP2 all-gather correctness test ───────────────────────────
+
+
+def _run_allgather_test(sharding_dims, recipe):
+    test_path = Path(__file__).parent.resolve() / "run_fsdp2_allgather.py"
+    test_cmd = [
+        "torchrun",
+        f"--nproc_per_node={NUM_PROCS}",
+        str(test_path),
+        "--sharding-dims",
+        *[str(x) for x in sharding_dims],
+        "--recipe",
+        recipe,
+    ]
+    subprocess.run(test_cmd, env=os.environ, check=True)
+
+
+@pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs.")
+@pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
+@pytest.mark.parametrize(
+    "sharding_dims",
+    (
+        # FSDP
+        [NUM_PROCS],
+        # HSDP
+        [2, NUM_PROCS // 2],
+        # (H/F)SDP-TP
+        [NUM_PROCS // 4, 2, 2],
+    ),
+)
+def test_fp8_fsdp2_allgather(sharding_dims, fp_recipe):
+    """Verify FSDP2 FP8 all-gather matches a manual dequantize-then-gather reference."""
+    if fp_recipe in ("Float8BlockScaling", "NVFP4BlockScaling"):
+        pytest.xfail(
+            f"{fp_recipe}: block-scaled quantization formats are not supported by the "
+            "FP8 FSDP2 all-gather correctness test."
+        )
+
+    parallel_size = math.prod(x for x in sharding_dims if x != 0)
+    if NUM_PROCS < parallel_size:
+        pytest.skip(
+            f"Insufficient devices ({NUM_PROCS}) to test sharding configuration: {sharding_dims}"
+        )
+
+    _run_allgather_test(sharding_dims, fp_recipe)
 
 
 ## ── FusedAdam + FSDP2 tests ─────────────────────────────────────────
