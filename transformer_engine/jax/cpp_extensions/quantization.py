@@ -993,7 +993,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
     Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
     """
 
-    name = "te_grouped_quantize_ffi"
+    name = "te_grouped_quantize_ffi"      # V1: non-MXFP8
+    name_v2 = "te_grouped_quantize_v2_ffi"  # V2: MXFP8, CUDA-graph safe
     multiple_results = True
     impl_static_args = (
         3,
@@ -1050,7 +1051,17 @@ class GroupedQuantizePrimitive(BasePrimitive):
             rowwise_scale_inv_shape = (1,)
         rowwise_out_aval = jax.core.ShapedArray(shape=rowwise_out_shape, dtype=out_dtype)
 
-        amax_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
+        is_mxfp8 = ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING
+        if is_mxfp8:
+            # V2 path: 5th output is int64_workspace (n_groups * sizeof(int64_t) bytes as uint8)
+            fifth_out_aval = jax.core.ShapedArray(
+                shape=(group_sizes_aval.size * 8,), dtype=jnp.uint8
+            )
+        else:
+            # V1 path: 5th output is amax
+            fifth_out_aval = jax.core.ShapedArray(
+                shape=(group_sizes_aval.size,), dtype=jnp.float32
+            )
 
         if q_layout.has_colwise:
             colwise_out_shape = out_shape
@@ -1070,7 +1081,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out_aval,
             rowwise_scale_inv_aval,
             colwise_scale_inv_aval,
-            amax_aval,
+            fifth_out_aval,
         )
 
     @staticmethod
@@ -1084,9 +1095,15 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out,
             scale_inv,
             colwise_scale_inv,
-            updated_amax,
+            fifth_out,
         ) = GroupedQuantizePrimitive.abstract(*args, **kwargs)
-        return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
+        # For MXFP8, the inner abstract returns int64_workspace as the 5th output.
+        # The outer interface always presents amax (float32, n_groups) for a consistent API.
+        scaling_mode = kwargs.get("scaling_mode")
+        group_sizes_aval = args[2]
+        if ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING:
+            fifth_out = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
+        return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, fifth_out
 
     @staticmethod
     def lowering(
@@ -1111,6 +1128,17 @@ class GroupedQuantizePrimitive(BasePrimitive):
         assert scale_aval.dtype == jnp.float32
         assert group_sizes_aval.dtype == jnp.int32
         assert group_axis == 0
+        is_mxfp8 = ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING
+        if is_mxfp8:
+            # V2: CUDA-graph safe; scale is passed but ignored by the C++ handler
+            return ffi.ffi_lowering(GroupedQuantizePrimitive.name_v2)(
+                ctx,
+                x,
+                scale,
+                group_sizes,
+                q_layout=q_layout.value.value,
+                flatten_axis=flatten_axis,
+            )
         return ffi.ffi_lowering(GroupedQuantizePrimitive.name)(
             ctx,
             x,
@@ -1142,7 +1170,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out,
             rowwise_scale_inv,
             colwise_scale_inv,
-            updated_amax,
+            fifth,
         ) = GroupedQuantizePrimitive.inner_primitive.bind(
             x,
             scale,
@@ -1154,6 +1182,12 @@ class GroupedQuantizePrimitive(BasePrimitive):
             group_axis=group_axis,
             scale_dtype=scale_dtype,
         )
+        is_mxfp8 = ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING
+        if is_mxfp8:
+            # fifth is int64_workspace; return a dummy zero amax for interface compatibility
+            updated_amax = jnp.zeros((group_sizes.size,), jnp.float32)
+        else:
+            updated_amax = fifth
         return (rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax)
 
 
