@@ -371,7 +371,7 @@ void performTest(const ProcessingMethod processing_method,
 
     NVTEShape logical_shape_ = nvte_make_shape(logical_shape_vec.data(), logical_shape_vec.size());
 
-    std::vector<size_t> dbias_logical_shape_vec= {num_tensors, cols};
+    std::vector<size_t> dbias_logical_shape_vec = {num_tensors, cols};
     NVTEShape dbias_logical_shape_ = nvte_make_shape(dbias_logical_shape_vec.data(),
                                                      dbias_logical_shape_vec.size());
 
@@ -554,6 +554,11 @@ void performTest(const ProcessingMethod processing_method,
     const double abs_tolerable_mismatches_limit = 0.0;
     const double rel_tolerable_mismatches_limit = 0.0;
 
+    // Compare only allocated contiguous output range.
+    // In graph-safe mode logical shape may include trailing garbage beyond offsets_h.back().
+    const size_t compare_rows = 1;
+    const size_t compare_cols = elts_num;
+
     if (rowwise) {
         cudaMemcpy(out_data_rowwise_h.data(), out_data_rowwise_d, out_data_size, cudaMemcpyDeviceToHost);
         cudaMemcpy(out_scales_rowwise_h.data(), out_scales_rowwise_d, rowwise_scales_size, cudaMemcpyDeviceToHost);
@@ -566,7 +571,8 @@ void performTest(const ProcessingMethod processing_method,
         const size_t mismatches_elts = 32 * mismatches_scales;
 
         compare_scaled_elts<OutputType>("rowwise_output", out_data_rowwise_ref.data(),
-                                        out_data_rowwise_h.data(), rows, cols, true, mismatches_elts);
+                                        out_data_rowwise_h.data(), compare_rows, compare_cols,
+                                        true, mismatches_elts);
     }
 
     if (colwise) {
@@ -581,7 +587,8 @@ void performTest(const ProcessingMethod processing_method,
         const size_t mismatches_elts = 32 * mismatches_scales;
 
         compare_scaled_elts<OutputType>("colwise_output", out_data_colwise_ref.data(),
-                                        out_data_colwise_h.data(), rows, cols, false, mismatches_elts);
+                                        out_data_colwise_h.data(), compare_rows, compare_cols,
+                                        false, mismatches_elts);
     }
 
     if (compute_dbias) {
@@ -651,6 +658,7 @@ std::vector<std::vector<size_t>> input_config = {
     {VARYING_FIRST_DIM,     3,      1024,144,                   128,384,512},
     {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
     {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
+    {VARYING_FIRST_DIM,     5,      16 * 4096,512,              128,256,384,1024,2304},
     {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
     {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
     {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},

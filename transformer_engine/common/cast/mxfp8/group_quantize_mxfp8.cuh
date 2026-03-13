@@ -17,6 +17,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
+#include "../../util/cuda_runtime.h"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
@@ -36,16 +37,33 @@ __device__ alignas(128) CUtensorMap g_tensor_maps_act_input[MAX_SUPPORTED_TENSOR
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_rowwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 __device__ alignas(128) CUtensorMap g_tensor_maps_output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 
+struct TunableConfig {
+  static constexpr size_t CHUNK_DIM_Y = 128;
+  static constexpr size_t CHUNK_DIM_X = 128;
+  static constexpr size_t THREADS_PER_CHUNK = 128;
+  static constexpr size_t PREFETCH_STAGES = 1;
+  // true  -> static persistent grid-stride scheduler
+  // false -> non-persistent one-job-per-CTA execution
+  static constexpr bool PERSISTENT = true;
+  // Launch static persistent grid as (SM_count * STATIC_PERSISTENT_BLOCKS_PER_SM, 1, 1).
+  static constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = 4;
+};
+
+constexpr bool PERSISTENT = TunableConfig::PERSISTENT;
+static_assert(!PERSISTENT || (TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM > 0),
+              "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero in persistent mode.");
+
 constexpr size_t SCALE_DIM_Y = 32;
 constexpr size_t SCALE_DIM_X = 32;
 
-constexpr size_t BUFFS_NUM = 2;
+constexpr size_t PREFETCH_STAGES = TunableConfig::PREFETCH_STAGES;
+constexpr size_t BUFFS_NUM = PREFETCH_STAGES + 1;
 constexpr size_t PACK_SIZE = 4;
 constexpr size_t WAVES = SCALE_DIM_X / PACK_SIZE;
 
-constexpr size_t CHUNK_DIM_Y = 128;
-constexpr size_t CHUNK_DIM_X = 128;
-constexpr size_t THREADS_PER_CHUNK = 128;
+constexpr size_t CHUNK_DIM_Y = TunableConfig::CHUNK_DIM_Y;
+constexpr size_t CHUNK_DIM_X = TunableConfig::CHUNK_DIM_X;
+constexpr size_t THREADS_PER_CHUNK = TunableConfig::THREADS_PER_CHUNK;
 
 constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
 
@@ -124,9 +142,93 @@ __device__ __forceinline__ size_t get_tensor_cols_num(
     case ShapeRepresentation::VARYING_LAST_DIM:
     case ShapeRepresentation::VARYING_BOTH_DIMS:
       cols_num = static_cast<size_t>(last_dims_ptr[tensor_id]);
+      if (cols_num % 128 != 0) {
+        NVTE_DEVICE_ERROR(
+            "For non-single tensors, the last dimension of each tensor in a group "
+            "must be divisible by 128.");
+      }
       break;
   }
   return cols_num;
+}
+
+// Logical work-item decoded from CTA coordinates.
+struct JobDescriptor {
+  size_t block_id = 0;
+  size_t block_global_offset = 0;
+  size_t tensor_id = 0;
+  size_t rows = 0;
+  size_t cols = 0;
+};
+
+// Tensor-local coordinates for a work-item.
+struct BlockDescriptor {
+  size_t tensor_base = 0;
+  size_t block_id_in_current_tensor = 0;
+  size_t block_id_Y = 0;
+  size_t block_id_X = 0;
+  size_t block_offset_Y = 0;
+  size_t block_offset_X = 0;
+};
+
+__device__ __forceinline__ JobDescriptor decode_job(
+    const ShapeRepresentation shape_rep, const bool is_single_tensor, const size_t num_tensors,
+    const size_t first_logical_dim, const size_t last_logical_dim, const size_t work_blocks_X,
+    const int32_t ctaid_X, const int32_t ctaid_Y, const int64_t *const __restrict__ offsets_ptr,
+    const int64_t *const __restrict__ first_dims_ptr,
+    const int64_t *const __restrict__ last_dims_ptr) {
+  JobDescriptor job{};
+  job.block_id = ctaid_Y * work_blocks_X + ctaid_X;
+  job.block_global_offset = is_single_tensor
+                                ? (ctaid_Y * CHUNK_DIM_Y * last_logical_dim + ctaid_X * CHUNK_DIM_X)
+                                : (job.block_id * ELTS_PER_CHUNK);
+  job.tensor_id = get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset, ctaid_Y,
+                                        first_logical_dim, last_logical_dim, offsets_ptr);
+  job.rows =
+      get_tensor_rows_num(job.tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+  job.cols = get_tensor_cols_num(job.tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
+  return job;
+}
+
+__device__ __forceinline__ bool is_job_valid(const JobDescriptor &job,
+                                             const ShapeRepresentation shape_rep,
+                                             const size_t total_work_blocks,
+                                             const int64_t *const __restrict__ offsets_ptr) {
+  bool is_valid = (job.block_id < total_work_blocks) && (job.rows != 0) && (job.cols != 0);
+  if (!is_valid || shape_rep == SAME_BOTH_DIMS) {
+    return is_valid;
+  }
+
+  const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[job.tensor_id]);
+  const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[job.tensor_id + 1]);
+  if (job.block_global_offset >= tensor_end_offset) {
+    return false;
+  }
+
+  const size_t tensor_offset_from_start = job.block_global_offset - tensor_start_offset;
+  const size_t block_offset_Y_in_tensor = tensor_offset_from_start / job.cols;
+  const size_t block_offset_X_in_tensor = tensor_offset_from_start % job.cols;
+  if (block_offset_Y_in_tensor >= job.rows || block_offset_X_in_tensor >= job.cols) {
+    return false;
+  }
+
+  return true;
+}
+
+__device__ __forceinline__ BlockDescriptor
+decode_block(const JobDescriptor &job, const bool is_single_tensor,
+             const int64_t *const __restrict__ offsets_ptr) {
+  BlockDescriptor block{};
+  block.tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[job.tensor_id]);
+  const size_t CHUNK_DIM_X_ = CHUNK_DIM_X;
+  const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, CHUNK_DIM_X_);
+  block.block_id_in_current_tensor =
+      is_single_tensor ? job.block_id : (job.block_id - block.tensor_base / ELTS_PER_CHUNK);
+  block.block_id_Y = block.block_id_in_current_tensor / blocks_X_num_in_current_tensor;
+  block.block_id_X = block.block_id_in_current_tensor % blocks_X_num_in_current_tensor;
+  block.block_offset_Y = block.block_id_Y * CHUNK_DIM_Y;
+  block.block_offset_X = block.block_id_X * CHUNK_DIM_X;
+  return block;
 }
 
 // Copies the base tensor map to shmem, modifies the copy, stores the modified tensor map at index
@@ -228,6 +330,294 @@ __device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tenso
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
+// Issue TMA global->shared transfer for one stage of input (and optional activation input).
+template <typename IType, bool IS_DACT>
+__device__ __forceinline__ void prefetch_input_stage(
+    IType *in_sh, IType *act_in_sh, const CUtensorMap &tensor_map_input,
+    const CUtensorMap &tensor_map_act_input, const size_t global_offset_X,
+    const size_t global_offset_Y, const size_t buff_offset, const size_t shmem_buff_size,
+    uint64_t *barrier, const bool leading_thread) {
+  if (leading_thread) {
+    ptx::mbarrier_arrive_expect_tx(barrier, shmem_buff_size);
+    ptx::cp_async_bulk_tensor_2d_global_to_shared(
+        reinterpret_cast<uint64_t *>(&in_sh[buff_offset]),
+        reinterpret_cast<const uint64_t *>(&tensor_map_input), global_offset_X, global_offset_Y,
+        barrier);
+    if constexpr (IS_DACT) {
+      ptx::cp_async_bulk_tensor_2d_global_to_shared(
+          reinterpret_cast<uint64_t *>(&act_in_sh[buff_offset]),
+          reinterpret_cast<const uint64_t *>(&tensor_map_act_input), global_offset_X,
+          global_offset_Y, barrier);
+    }
+  }
+}
+
+// Issue TMA shared->global transfer for one stage of outputs.
+template <typename OType, bool ROWWISE_SCALING, bool COLWISE_SCALING>
+__device__ __forceinline__ void store_output_stage(OType *out_rowwise_data_sh,
+                                                   OType *out_colwise_data_sh,
+                                                   const CUtensorMap &tensor_map_output_rowwise,
+                                                   const CUtensorMap &tensor_map_output_colwise,
+                                                   const int global_offset_X,
+                                                   const int global_offset_Y, const int buff_offset,
+                                                   const bool leading_thread) {
+  if (!leading_thread) {
+    return;
+  }
+
+  if constexpr (ROWWISE_SCALING) {
+    ptx::cp_async_bulk_tensor_2d_shared_to_global(
+        reinterpret_cast<const uint64_t *>(&tensor_map_output_rowwise), global_offset_X,
+        global_offset_Y, reinterpret_cast<uint64_t *>(&out_rowwise_data_sh[buff_offset]));
+  }
+  if constexpr (COLWISE_SCALING) {
+    ptx::cp_async_bulk_tensor_2d_shared_to_global(
+        reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise), global_offset_X,
+        global_offset_Y, reinterpret_cast<uint64_t *>(&out_colwise_data_sh[buff_offset]));
+  }
+  ptx::cp_async_bulk_commit_group();
+}
+
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
+          bool WITH_GEMM_SWIZZLED_SCALES>
+__device__ __forceinline__ float process_colwise_stage(
+    const size_t buff, const int stage, const size_t tid_X_colwise,
+    const size_t scales_offset_Y_colwise, const size_t scales_offset_X_colwise,
+    const size_t scale_stride_colwise, const size_t tensor_base_for_scales, const size_t rows,
+    const size_t cols, IType *in_sh, IType *act_in_sh, IType *cached_act_sh,
+    OType *out_colwise_data_sh, e8m0_t *scales_colwise, float &partial_dbias_colwise) {
+  constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
+  constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
+  constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING;
+
+  const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
+  float thread_amax = 0.0f;
+  float in_compute_colwise[BUFF_DIM_Y];
+  IType in_colwise_IType[BUFF_DIM_Y];
+
+  if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+    IType thread_amax_f16 = static_cast<IType>(0.0f);
+#pragma unroll
+    for (int i = 0; i < BUFF_DIM_Y; ++i) {
+      const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+      in_colwise_IType[i] = in_sh[shmem_offset_colwise];
+      thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
+    }
+    thread_amax = static_cast<float>(thread_amax_f16);
+  } else {
+#pragma unroll
+    for (int i = 0; i < BUFF_DIM_Y; ++i) {
+      const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+
+      float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
+      if constexpr (IS_ACT) {
+        elt = OP(elt, {});
+      }
+      if constexpr (IS_DACT) {
+        float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
+        elt *= OP(act_in_elt, {});
+      }
+      if constexpr (IS_DBIAS) {
+        partial_dbias_colwise += elt;
+      }
+      if constexpr (!std::is_same_v<IType, float>) {
+        elt = static_cast<float>(static_cast<IType>(elt));
+      }
+      if constexpr (IS_CACHED_ACT_OP) {
+        cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
+      }
+      thread_amax = fmaxf(thread_amax, fabsf(elt));
+      in_compute_colwise[i] = elt;
+    }
+  }
+
+  const e8m0_t biased_exponent =
+      ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+
+  const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
+  const size_t global_scales_offset_X = scales_offset_X_colwise;
+
+  size_t scale_idx = 0;
+  if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+    const size_t tensor_base_row = tensor_base_for_scales / cols;
+    const size_t tensor_scales_offset_Y_base = tensor_base_row / SCALE_DIM_Y;
+    const size_t tensor_scales_offset_colwise_base = tensor_base_for_scales / SCALE_DIM_Y;
+    const size_t local_scales_offset_Y = global_scales_offset_Y - tensor_scales_offset_Y_base;
+    scale_idx =
+        tensor_scales_offset_colwise_base +
+        transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
+            global_scales_offset_X, local_scales_offset_Y, DIVUP(rows, static_cast<size_t>(128)));
+  } else {
+    scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+  }
+  scales_colwise[scale_idx] = biased_exponent;
+
+  const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+
+#pragma unroll
+  for (int i = 0; i < SCALE_DIM_Y; ++i) {
+    float in;
+    if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+      in = static_cast<float>(in_colwise_IType[i]);
+    } else {
+      in = in_compute_colwise[i];
+    }
+    const float scaled_out = in * block_scale_inverse;
+
+    const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
+    out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
+  }
+
+  return thread_amax;
+}
+
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &), typename IType, typename OType, bool COLWISE_SCALING,
+          bool WITH_GEMM_SWIZZLED_SCALES>
+__device__ __forceinline__ float process_rowwise_stage(
+    const size_t buff, const size_t stage_offset_Y, const size_t thread_offset_Y_rowwise,
+    const size_t thread_offset_X_rowwise, const int bank_group,
+    const size_t scales_offset_Y_rowwise, const size_t scales_offset_X_rowwise,
+    const size_t scale_stride_rowwise, const bool rowwise_scale_is_within_bounds, const size_t cols,
+    IType *in_sh, IType *act_in_sh, IType *cached_act_sh, OType *out_rowwise_data_sh,
+    e8m0_t *scales_rowwise, float *thread_dbias_rowwise) {
+  using IType2 = typename ptx::FPx2<IType>;
+  using OType2 = typename ptx::FPx2<OType>;
+  constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
+  constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
+  constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && COLWISE_SCALING;
+
+  const size_t shmem_offset_base_rowwise = buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
+  float thread_amax = 0.0f;
+  float in_compute_rowwise[SCALE_DIM_X];
+  Vec<IType, PACK_SIZE> in_cached[WAVES];
+  Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
+
+  if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+    IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#pragma unroll
+    for (int w = 0; w < WAVES; ++w) {
+      const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+      const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+      const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
+      in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
+#pragma unroll
+      for (int e = 0; e < PACK_SIZE / 2; ++e) {
+        ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
+      }
+    }
+    thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+  } else if constexpr (IS_CACHED_ACT_OP) {
+    __syncthreads();
+    IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#pragma unroll
+    for (int w = 0; w < WAVES; ++w) {
+      const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+      const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+      const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
+      in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
+      if constexpr (std::is_same_v<IType, float>) {
+#pragma unroll
+        for (int e = 0; e < PACK_SIZE; ++e) {
+          thread_amax = fmaxf(thread_amax, fabsf(in_cached[w].data.elt[e]));
+        }
+      } else {
+#pragma unroll
+        for (int e = 0; e < PACK_SIZE; e += 2) {
+          const IType2 in_cached_2x = {in_cached[w].data.elt[e], in_cached[w].data.elt[e + 1]};
+          ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
+        }
+      }
+    }
+    if constexpr (!std::is_same_v<IType, float>) {
+      thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+    }
+  } else {
+#pragma unroll
+    for (int w = 0; w < WAVES; ++w) {
+      const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+      const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+      const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
+
+      Vec<IType, PACK_SIZE> in;
+      Vec<IType, PACK_SIZE> act_in;
+
+      in.load_from(&in_sh[shmem_offset_rowwise]);
+      if constexpr (IS_DACT) {
+        act_in.load_from(&act_in_sh[shmem_offset_rowwise]);
+      }
+#pragma unroll
+      for (int e = 0; e < PACK_SIZE; ++e) {
+        const int j = w * PACK_SIZE + e;
+        float elt = static_cast<float>(in.data.elt[e]);
+        if constexpr (IS_ACT) {
+          elt = OP(elt, {});
+        }
+        if constexpr (IS_DACT) {
+          float act_in_elt = static_cast<float>(act_in.data.elt[e]);
+          elt *= OP(act_in_elt, {});
+        }
+
+        if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
+          thread_dbias_rowwise[j] += elt;
+        }
+        if constexpr (!std::is_same_v<IType, float>) {
+          elt = static_cast<float>(static_cast<IType>(elt));
+        }
+        thread_amax = fmaxf(thread_amax, fabsf(elt));
+        in_compute_rowwise[j] = elt;
+      }
+    }
+  }
+
+  const e8m0_t biased_exponent =
+      ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+  const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
+  const int stage_scales_offset_X = scales_offset_X_rowwise;
+
+  size_t scale_idx = 0;
+  if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+    scale_idx = transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
+        stage_scales_offset_Y, stage_scales_offset_X, DIVUP(cols, static_cast<size_t>(128)));
+  } else {
+    scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
+  }
+  if (rowwise_scale_is_within_bounds) {
+    scales_rowwise[scale_idx] = biased_exponent;
+  }
+
+  const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+  const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
+
+#pragma unroll
+  for (int w = 0; w < WAVES; ++w) {
+    Vec<OType2, PACK_SIZE / 2> out;
+#pragma unroll
+    for (int e = 0; e < PACK_SIZE / 2; ++e) {
+      IType2 in;
+      OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
+      if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+        in = in_IType[w].data.elt[e];
+      } else if constexpr (IS_CACHED_ACT_OP) {
+        in.x = in_cached[w].data.elt[2 * e];
+        in.y = in_cached[w].data.elt[2 * e + 1];
+      } else {
+        const int j = w * PACK_SIZE + 2 * e;
+        in.x = in_compute_rowwise[j];
+        in.y = in_compute_rowwise[j + 1];
+      }
+      ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
+    }
+    const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+    const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+    const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
+    out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
+  }
+
+  return thread_amax;
+}
+
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES>
@@ -241,15 +631,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, e8m0_t *const __restrict__ scales_rowwise_ptr,
     e8m0_t *const __restrict__ scales_colwise_ptr, const float *__restrict__ noop,
-    float *const __restrict__ dbias_workspace, float *const __restrict__ amax_ptr) {
+    float *const __restrict__ dbias_workspace, float *const __restrict__ amax_ptr,
+    const size_t work_blocks_X, const size_t work_blocks_Y) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
-
-  using IType2 = typename ptx::FPx2<IType>;
-  using OType2 = typename ptx::FPx2<OType>;
-
-  using transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx;
 
   if constexpr (NO_ACTIVATIONS) {
     if (noop != nullptr && noop[0] == 1.0f) {
@@ -257,96 +643,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
   }
 
-  constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING && COLWISE_SCALING;
-
   const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
-  const size_t block_ID = blockIdx.y * gridDim.x + blockIdx.x;
-  const size_t block_global_offset =
-      is_single_tensor ? (blockIdx.y * CHUNK_DIM_Y * last_logical_dim + blockIdx.x * CHUNK_DIM_X)
-                       : (block_ID * ELTS_PER_CHUNK);
-
-  const size_t tensor_id =
-      get_current_tensor_id(shape_rep, num_tensors, block_global_offset, blockIdx.y,
-                            first_logical_dim, last_logical_dim, offsets_ptr);
-
-  const size_t rows =
-      get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
-  const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-
-  const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
-  const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
-
-  // grouped tensor can be treated as continuous tensor for MXFP8
-  const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[tensor_id]);
-  // For grouped tensors represented as a single logical tensor, scale swizzle must still be
-  // computed per tensor (expert) and then concatenated along dim-0.
-  const size_t tensor_base_for_scales = (is_single_tensor && num_tensors > 1)
-                                            ? static_cast<size_t>(offsets_ptr[tensor_id])
-                                            : tensor_base;
-
-  // In graph-safe paged stashing, the logical shape can include trailing garbage. Skip CTAs that
-  // map outside the current tensor's valid [rows, cols] region.
-  if (rows == 0 || cols == 0) {
-    return;
-  }
-  if (shape_rep != SAME_BOTH_DIMS) {
-    const size_t tensor_start_offset = static_cast<size_t>(offsets_ptr[tensor_id]);
-    const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
-    if (block_global_offset >= tensor_end_offset) {
-      return;
-    }
-    const size_t tensor_offset_from_start = block_global_offset - tensor_start_offset;
-    const size_t block_offset_Y_in_tensor = tensor_offset_from_start / cols;
-    const size_t block_offset_X_in_tensor = tensor_offset_from_start % cols;
-    if (block_offset_Y_in_tensor >= rows || block_offset_X_in_tensor >= cols) {
-      return;
-    }
-  }
-
-  const CUtensorMap &tensor_map_input =
-      is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[tensor_id];
-  const CUtensorMap &tensor_map_act_input =
-      is_single_tensor ? tensor_map_act_input_static : g_tensor_maps_act_input[tensor_id];
-  const CUtensorMap &tensor_map_output_rowwise =
-      is_single_tensor ? tensor_map_output_rowwise_static : g_tensor_maps_output_rowwise[tensor_id];
-  const CUtensorMap &tensor_map_output_colwise =
-      is_single_tensor ? tensor_map_output_colwise_static : g_tensor_maps_output_colwise[tensor_id];
-
   const bool leading_thread = (threadIdx.x == 0);
-
-  if (leading_thread && (!is_single_tensor)) {
-    fence_acquire_tensormap(&tensor_map_input);
-    if constexpr (COMPUTE_ACTIVATIONS) {
-      fence_acquire_tensormap(&tensor_map_act_input);
-    }
-    if constexpr (ROWWISE_SCALING) {
-      fence_acquire_tensormap(&tensor_map_output_rowwise);
-    }
-    if constexpr (COLWISE_SCALING) {
-      fence_acquire_tensormap(&tensor_map_output_colwise);
-    }
-  }
-
-  const size_t blocks_X_num_in_current_tensor = DIVUP(cols, static_cast<size_t>(128));
-  const size_t block_id_in_current_tensor =
-      is_single_tensor ? block_ID : (block_ID - tensor_base / ELTS_PER_CHUNK);
-
-  const size_t block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
-  const size_t block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
-
-  const size_t block_offset_Y = block_id_Y * CHUNK_DIM_Y;
-  const size_t block_offset_X = block_id_X * CHUNK_DIM_X;
-
-  e8m0_t *const scales_rowwise =
-      scales_rowwise_ptr + (is_single_tensor ? 0 : tensor_base / SCALE_DIM_X);
-  e8m0_t *const scales_colwise =
-      scales_colwise_ptr + (is_single_tensor ? 0 : tensor_base / SCALE_DIM_Y);
-
-  const size_t scales_block_offset_Y_rowwise = block_id_Y * CHUNK_DIM_Y;
-  const size_t scales_block_offset_X_rowwise = block_id_X * CHUNK_DIM_X / SCALE_DIM_X;
-  const size_t scales_block_offset_Y_colwise = block_id_Y * CHUNK_DIM_Y / SCALE_DIM_Y;
-  const size_t scales_block_offset_X_colwise = block_id_X * CHUNK_DIM_X;
 
   const size_t tid_Y_rowwise = threadIdx.x / THREADS_X;
   const size_t tid_X_rowwise = threadIdx.x % THREADS_X;
@@ -355,11 +654,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
   const size_t thread_offset_Y_rowwise = tid_Y_rowwise;
   const size_t thread_offset_X_rowwise = tid_X_rowwise * SCALE_DIM_X;
-
-  const size_t scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
-  const size_t scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
-  const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
-  const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
   // helps resolving bank conflicts in shmem
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
@@ -390,374 +684,331 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   OType *out_colwise_data_sh = reinterpret_cast<OType *>(dshmem + in_mem + out_mem_rowwise);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
-  constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
-
-  float partial_dbias_colwise = 0.0f;
-  float thread_dbias_rowwise[SCALE_DIM_X];
-  if constexpr (IS_DBIAS) {
-#pragma unroll
-    for (int j = 0; j < SCALE_DIM_X; ++j) {
-      thread_dbias_rowwise[j] = 0.0f;
-    }
-  }
+  constexpr size_t shmem_buff_size = (IS_DACT ? 2 : 1) * buff_size_aligned_in / BUFFS_NUM;
 
   float block_amax = 0.0f;
 
-// Initialize shared memory barrier with the number of threads participating in the barrier.
-#pragma nv_diag_suppress static_var_with_dynamic_init
-  __shared__ alignas(8) uint64_t mbar[STAGES];
+  __shared__ uint64_t IN_buff_readable_mbar[BUFFS_NUM];
 
-  initialize_barriers<STAGES, THREADS_PER_CHUNK>(mbar, leading_thread);
+  // Initialize barriers shared by the entire CTA:
+  // - IN_buff_readable_mbar tracks per-buffer TMA global->shared completion.
+  if (leading_thread) {
+#pragma unroll
+    for (int buff = 0; buff < BUFFS_NUM; ++buff) {
+      ptx::mbarrier_init(&IN_buff_readable_mbar[buff], 1);
+    }
+    ptx::fence_proxy_async_shared_cta();
+  }
+  __syncthreads();
 
-  int parity = 0;
+  const size_t total_work_blocks = work_blocks_X * work_blocks_Y;
+  const size_t launch_block_id = blockIdx.y * gridDim.x + blockIdx.x;
 
-  if constexpr (IS_DACT) {
-    copy_2d_to_sharedx2(&in_sh[0], &tensor_map_input, block_offset_X, block_offset_Y, &act_in_sh[0],
-                        &tensor_map_act_input, block_offset_X, block_offset_Y, shmem_buff_size,
-                        &mbar[0], leading_thread);
-  } else {
-    copy_2d_to_shared(&in_sh[0], &tensor_map_input, block_offset_X, block_offset_Y, shmem_buff_size,
-                      &mbar[0], leading_thread);
+  int IN_buff_readable_parity[BUFFS_NUM] = {0};
+  int32_t ctaid_X = static_cast<int32_t>(blockIdx.x);
+  int32_t ctaid_Y = static_cast<int32_t>(blockIdx.y);
+  size_t static_next_block_id = 0;
+  size_t static_block_stride = 0;
+  // In persistent mode, physical CTAs iterate over a virtual work grid via grid-stride.
+  if constexpr (PERSISTENT) {
+    if (launch_block_id >= total_work_blocks) {
+      return;
+    }
+    ctaid_X = static_cast<int32_t>(launch_block_id % work_blocks_X);
+    ctaid_Y = static_cast<int32_t>(launch_block_id / work_blocks_X);
+    static_block_stride = gridDim.x * gridDim.y;
+    static_next_block_id = launch_block_id + static_block_stride;
+  }
+  bool job_finished = false;
+  int buff_in = 0;
+  bool has_prefetched_current_job = true;
+
+  // Prime the pipeline with stage-0 of the first job assigned to this CTA.
+  {
+    const JobDescriptor first_job =
+        decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
+                   work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
+    if (!is_job_valid(first_job, shape_rep, total_work_blocks, offsets_ptr)) {
+      return;
+    }
+    const BlockDescriptor first_block = decode_block(first_job, is_single_tensor, offsets_ptr);
+
+    const CUtensorMap &tensor_map_input =
+        is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[first_job.tensor_id];
+    const CUtensorMap &tensor_map_act_input = is_single_tensor
+                                                  ? tensor_map_act_input_static
+                                                  : g_tensor_maps_act_input[first_job.tensor_id];
+
+    if (leading_thread && (!is_single_tensor)) {
+      fence_acquire_tensormap(&tensor_map_input);
+      if constexpr (COMPUTE_ACTIVATIONS) {
+        fence_acquire_tensormap(&tensor_map_act_input);
+      }
+    }
+
+#pragma unroll
+    for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
+      const size_t buff = stage;
+      const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+      const size_t global_offset_Y = first_block.block_offset_Y + stage_offset_Y;
+      const size_t global_offset_X = first_block.block_offset_X;
+      const size_t buff_offset = buff * BUFF_DIM;
+      uint64_t *barrier = &IN_buff_readable_mbar[buff];
+      prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, tensor_map_input, tensor_map_act_input,
+                                           global_offset_X, global_offset_Y, buff_offset,
+                                           shmem_buff_size, barrier, leading_thread);
+    }
   }
 
-#pragma unroll
-  for (int stage = 0; stage < STAGES; ++stage) {
-    const size_t buff = stage % BUFFS_NUM;
-    const size_t next_stage = stage + 1;
-    const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+  // Main work loop: decode current job, run all 32-row stages, schedule/prefetch next job.
+  while (!job_finished) {
+    // Decode CTA assignment into logical tensor coordinates and validate bounds.
+    const JobDescriptor current_job =
+        decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim, last_logical_dim,
+                   work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
+    const bool current_job_is_valid =
+        is_job_valid(current_job, shape_rep, total_work_blocks, offsets_ptr);
+    if (!current_job_is_valid) {
+      if (has_prefetched_current_job) {
+        // A stage-0 prefetch may already be in flight for this CTA. Drain it before exiting.
+        ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
+                                                         IN_buff_readable_parity[buff_in]);
+        IN_buff_readable_parity[buff_in] ^= 1;
+        ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+      }
+      break;
+    }
 
-    if (next_stage < STAGES) {
-      // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<1>();
+    const size_t tensor_id = current_job.tensor_id;
+    const size_t rows = current_job.rows;
+    const size_t cols = current_job.cols;
+    const BlockDescriptor current_block = decode_block(current_job, is_single_tensor, offsets_ptr);
 
-      const size_t next_buff = next_stage % BUFFS_NUM;
-      const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
-      const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
-      const size_t global_offset_X = block_offset_X;
-      const size_t next_buff_offset = next_buff * BUFF_DIM;
-      if constexpr (IS_DACT) {
-        copy_2d_to_sharedx2(&in_sh[next_buff_offset], &tensor_map_input, global_offset_X,
-                            global_offset_Y, &act_in_sh[next_buff_offset], &tensor_map_act_input,
-                            global_offset_X, global_offset_Y, shmem_buff_size, &mbar[next_stage],
-                            leading_thread);
-      } else {
-        copy_2d_to_shared(&in_sh[next_buff_offset], &tensor_map_input, global_offset_X,
-                          global_offset_Y, shmem_buff_size, &mbar[next_stage], leading_thread);
+    const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
+    const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
+
+    const size_t tensor_base = current_block.tensor_base;
+    const size_t tensor_base_for_scales = (is_single_tensor && num_tensors > 1)
+                                              ? static_cast<size_t>(offsets_ptr[tensor_id])
+                                              : tensor_base;
+    const size_t block_id_Y = current_block.block_id_Y;
+    const size_t block_id_X = current_block.block_id_X;
+    const size_t block_offset_Y = current_block.block_offset_Y;
+    const size_t block_offset_X = current_block.block_offset_X;
+
+    e8m0_t *const scales_rowwise =
+        scales_rowwise_ptr + (is_single_tensor ? 0 : tensor_base / SCALE_DIM_X);
+    e8m0_t *const scales_colwise =
+        scales_colwise_ptr + (is_single_tensor ? 0 : tensor_base / SCALE_DIM_Y);
+
+    const size_t scales_block_offset_Y_rowwise = block_id_Y * CHUNK_DIM_Y;
+    const size_t scales_block_offset_X_rowwise = block_id_X * CHUNK_DIM_X / SCALE_DIM_X;
+    const size_t scales_block_offset_Y_colwise = block_id_Y * CHUNK_DIM_Y / SCALE_DIM_Y;
+    const size_t scales_block_offset_X_colwise = block_id_X * CHUNK_DIM_X;
+
+    const size_t scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
+    const size_t scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
+    const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
+    const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
+
+    const bool rowwise_scale_is_within_bounds = scales_offset_X_rowwise < cols;
+
+    const int dbias_offset_Y = block_id_Y;
+    const int dbias_offset_X = block_id_X * CHUNK_DIM_X + threadIdx.x;
+
+    const CUtensorMap &tensor_map_input =
+        is_single_tensor ? tensor_map_input_static : g_tensor_maps_input[tensor_id];
+    const CUtensorMap &tensor_map_act_input =
+        is_single_tensor ? tensor_map_act_input_static : g_tensor_maps_act_input[tensor_id];
+    const CUtensorMap &tensor_map_output_rowwise = is_single_tensor
+                                                       ? tensor_map_output_rowwise_static
+                                                       : g_tensor_maps_output_rowwise[tensor_id];
+    const CUtensorMap &tensor_map_output_colwise = is_single_tensor
+                                                       ? tensor_map_output_colwise_static
+                                                       : g_tensor_maps_output_colwise[tensor_id];
+
+    if (leading_thread && (!is_single_tensor)) {
+      fence_acquire_tensormap(&tensor_map_input);
+      if constexpr (COMPUTE_ACTIVATIONS) {
+        fence_acquire_tensormap(&tensor_map_act_input);
+      }
+      if constexpr (ROWWISE_SCALING) {
+        fence_acquire_tensormap(&tensor_map_output_rowwise);
+      }
+      if constexpr (COLWISE_SCALING) {
+        fence_acquire_tensormap(&tensor_map_output_colwise);
       }
     }
 
-    ptx::fence_proxy_async_shared_cta();
-
-    // Wait for the data to have arrived
-    ptx::mbarrier_wait_parity(&mbar[stage], parity);
-
-    float thread_amax = 0.0f;
-    if constexpr (COLWISE_SCALING) {
-      const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
-      thread_amax = 0.0f;
-      float in_compute_colwise[BUFF_DIM_Y];
-      IType in_colwise_IType[BUFF_DIM_Y];
-
-      // 1. Read/Compute elements. Find MXFP8-block AMAX
-      if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-        IType thread_amax_f16 = static_cast<IType>(0.0f);
+    float partial_dbias_colwise = 0.0f;
+    float thread_dbias_rowwise[SCALE_DIM_X];
+    if constexpr (IS_DBIAS) {
 #pragma unroll
-        for (int i = 0; i < BUFF_DIM_Y; ++i) {
-          const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-          in_colwise_IType[i] = in_sh[shmem_offset_colwise];
-          thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
-        }
-        thread_amax = static_cast<float>(thread_amax_f16);
-      } else {
-#pragma unroll
-        for (int i = 0; i < BUFF_DIM_Y; ++i) {
-          const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-
-          float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
-          if constexpr (IS_ACT) {
-            elt = OP(elt, {});
-          }
-          if constexpr (IS_DACT) {
-            float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
-            elt *= OP(act_in_elt, {});
-          }
-          if constexpr (IS_DBIAS) {
-            partial_dbias_colwise += elt;
-          }
-          // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
-          if constexpr (!std::is_same_v<IType, float>) {
-            elt = static_cast<float>(static_cast<IType>(elt));
-          }
-          // Cache computed activations to avoid computing them again in the 2nd pass along another dimension
-          if constexpr (IS_CACHED_ACT_OP) {
-            cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
-          }
-          thread_amax = fmaxf(thread_amax, fabsf(elt));
-          in_compute_colwise[i] = elt;
-        }
+      for (int j = 0; j < SCALE_DIM_X; ++j) {
+        thread_dbias_rowwise[j] = 0.0f;
       }
+    }
 
-      // 2. Compute E8M0 scaling factor
-      const e8m0_t biased_exponent =
-          ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-
-      const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
-      const size_t global_scales_offset_X = scales_offset_X_colwise;
-
-      size_t scale_idx = 0;
-      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        const size_t tensor_base_row = tensor_base_for_scales / cols;
-        const size_t tensor_scales_offset_Y_base = tensor_base_row / SCALE_DIM_Y;
-        const size_t tensor_scales_offset_colwise_base = tensor_base_for_scales / SCALE_DIM_Y;
-        const size_t local_scales_offset_Y = global_scales_offset_Y - tensor_scales_offset_Y_base;
-        scale_idx = tensor_scales_offset_colwise_base +
-                    gemm_swizzled_scale_idx(global_scales_offset_X, local_scales_offset_Y,
-                                            DIVUP(rows, static_cast<size_t>(128)));
-      } else {
-        scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-      }
-      scales_colwise[scale_idx] = biased_exponent;
-
-      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-      const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
-
-// 3. Scale elements
+    bool prefetched_next_job = false;
+    // Process one [CHUNK_DIM_Y x CHUNK_DIM_X] block in STAGES slices (32 rows each).
 #pragma unroll
-      for (int i = 0; i < SCALE_DIM_Y; ++i) {
-        float in;
-        if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-          in = static_cast<float>(in_colwise_IType[i]);
+    for (int stage = 0; stage < STAGES; ++stage) {
+      const size_t stage_offset_Y = stage * BUFF_DIM_Y;
+      bool allow_next_job_prefetch = true;
+      JobDescriptor prefetch_job = current_job;
+      BlockDescriptor prefetch_block = current_block;
+
+      if (stage == STAGES - PREFETCH_STAGES) {
+        if constexpr (PERSISTENT) {
+          if (static_next_block_id < total_work_blocks) {
+            ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
+            ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
+            static_next_block_id += static_block_stride;
+          } else {
+            // Next loop iteration exits via current_job_is_valid check.
+            ctaid_X = 0;
+            ctaid_Y = static_cast<int32_t>(work_blocks_Y);
+            allow_next_job_prefetch = false;
+          }
         } else {
-          in = in_compute_colwise[i];
+          ctaid_X = -1;
+          ctaid_Y = -1;
         }
-        const float scaled_out = in * block_scale_inverse;
-
-        const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-        out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
-      }
-    }
-
-    if constexpr (ROWWISE_SCALING) {
-      const size_t shmem_offset_base_rowwise =
-          buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
-      thread_amax = 0.0f;
-      float in_compute_rowwise[SCALE_DIM_X];
-      Vec<IType, PACK_SIZE> in_cached[WAVES];
-
-      // used as an IType container for BF16/FP16 --> MXFP8 CAST ONLY
-      Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
-
-      // 1. Read/Compute elements. Find MXFP8-block AMAX
-      if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-          const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-          // Load elements
-          in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
-#pragma unroll
-          for (int e = 0; e < PACK_SIZE / 2; ++e) {
-            ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
-          }
-        }
-        thread_amax =
-            static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
-      } else if constexpr (IS_CACHED_ACT_OP) {
-        // ensures that all writes to cache made in the section above are visible to all threads
-        __syncthreads();
-        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-          const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-
-          // Load cached elements
-          in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
-          // Since TMA requirement for the data alignment is 16B (i.e. cols % 8 == 0, in case of BF16 elements)
-          // only single check (w.r.t. column direction) is sufficient to be sure the entire wave is inside the boundaries
-          if constexpr (std::is_same_v<IType, float>) {
-#pragma unroll
-            for (int e = 0; e < PACK_SIZE; ++e) {
-              thread_amax = fmaxf(thread_amax, fabsf(in_cached[w].data.elt[e]));
-            }
-          } else {
-#pragma unroll
-            for (int e = 0; e < PACK_SIZE; e += 2) {
-              const IType2 in_cached_2x = {in_cached[w].data.elt[e], in_cached[w].data.elt[e + 1]};
-              ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
-            }
-          }
-        }
-        if constexpr (!std::is_same_v<IType, float>) {
-          thread_amax =
-              static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
-        }
-      } else {
-#pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-          const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-
-          Vec<IType, PACK_SIZE> in;
-          Vec<IType, PACK_SIZE> act_in;
-
-          in.load_from(&in_sh[shmem_offset_rowwise]);
-          if constexpr (IS_DACT) {
-            act_in.load_from(&act_in_sh[shmem_offset_rowwise]);
-          }
-#pragma unroll
-          for (int e = 0; e < PACK_SIZE; ++e) {
-            const int j = w * PACK_SIZE + e;
-            // Compute element
-            float elt = static_cast<float>(in.data.elt[e]);
-            if constexpr (IS_ACT) {
-              elt = OP(elt, {});
-            }
-            if constexpr (IS_DACT) {
-              float act_in_elt = static_cast<float>(act_in.data.elt[e]);
-              elt *= OP(act_in_elt, {});
-            }
-
-            // If DBIAS was computed in the 1st pass (COLWISE) then no need to compute it again
-            if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
-              thread_dbias_rowwise[j] += elt;
-            }
-            // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
-            if constexpr (!std::is_same_v<IType, float>) {
-              elt = static_cast<float>(static_cast<IType>(elt));
-            }
-            thread_amax = fmaxf(thread_amax, fabsf(elt));
-            in_compute_rowwise[j] = elt;
+        if constexpr (!PERSISTENT) {
+          if (ctaid_X == -1 && ctaid_Y == -1) {
+            job_finished = true;
           }
         }
       }
 
-      // 2. Compute E8M0 scaling factor
-      const e8m0_t biased_exponent =
-          ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-      const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
-      const int stage_scales_offset_X = scales_offset_X_rowwise;
-
-      size_t scale_idx = 0;
-      if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
-        scale_idx = gemm_swizzled_scale_idx(stage_scales_offset_Y, stage_scales_offset_X,
-                                            DIVUP(cols, static_cast<size_t>(128)));
-      } else {
-        scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
-      }
-      scales_rowwise[scale_idx] = biased_exponent;
-
-      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-      const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
-
-// 3. Scale elements
-#pragma unroll
-      for (int w = 0; w < WAVES; ++w) {
-        Vec<OType2, PACK_SIZE / 2> out;
-#pragma unroll
-        for (int e = 0; e < PACK_SIZE / 2; ++e) {
-          IType2 in;
-          OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
-          if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-            in = in_IType[w].data.elt[e];
-          } else if constexpr (IS_CACHED_ACT_OP) {
-            in.x = in_cached[w].data.elt[2 * e];
-            in.y = in_cached[w].data.elt[2 * e + 1];
-          } else {
-            const int j = w * PACK_SIZE + 2 * e;
-            in.x = in_compute_rowwise[j];
-            in.y = in_compute_rowwise[j + 1];
-          }
-          ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
+      // Stage-(STAGES - PREFETCH_STAGES) prefetches stage-0 of the next job.
+      // Validate that job before issuing TMA reads to avoid OOB accesses on graph-safe tails.
+      if ((stage >= STAGES - PREFETCH_STAGES) && allow_next_job_prefetch && !job_finished) {
+        prefetch_job = decode_job(shape_rep, is_single_tensor, num_tensors, first_logical_dim,
+                                  last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr,
+                                  first_dims_ptr, last_dims_ptr);
+        allow_next_job_prefetch =
+            is_job_valid(prefetch_job, shape_rep, total_work_blocks, offsets_ptr);
+        if (allow_next_job_prefetch) {
+          prefetch_block = decode_block(prefetch_job, is_single_tensor, offsets_ptr);
         }
-        const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-        const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-        const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
-        out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
       }
-    }
 
-    __builtin_assume(block_amax >= 0);
-    __builtin_assume(thread_amax >= 0);
-    block_amax = fmaxf(block_amax, thread_amax);
+      if ((stage < STAGES - PREFETCH_STAGES) || (allow_next_job_prefetch && !job_finished)) {
+        const size_t next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
+        const size_t next_prefetch_stage = (stage + PREFETCH_STAGES) % STAGES;
+        const size_t next_prefetch_stage_offset_Y = next_prefetch_stage * BUFF_DIM_Y;
+        if (stage >= STAGES - PREFETCH_STAGES) {
+          prefetched_next_job = true;
+        }
 
-    // Wait for shared memory writes to be visible to TMA engine.
-    ptx::fence_proxy_async_shared_cta();
-    __syncthreads();
-    // After syncthreads, writes by all threads are visible to TMA engine.
+        const size_t global_offset_Y = prefetch_block.block_offset_Y + next_prefetch_stage_offset_Y;
+        const size_t global_offset_X = prefetch_block.block_offset_X;
+        const size_t next_prefetch_buff_offset = next_prefetch_buff * BUFF_DIM;
 
-    // Initiate TMA transfer to copy shared memory to global memory
-    if (leading_thread) {
+        const CUtensorMap &prefetch_tensor_map_input =
+            is_single_tensor ? tensor_map_input_static
+                             : g_tensor_maps_input[prefetch_job.tensor_id];
+        const CUtensorMap &prefetch_tensor_map_act_input =
+            is_single_tensor ? tensor_map_act_input_static
+                             : g_tensor_maps_act_input[prefetch_job.tensor_id];
+
+        uint64_t *barrier = &IN_buff_readable_mbar[next_prefetch_buff];
+        if (leading_thread) {
+          if ((!is_single_tensor) && (stage == STAGES - PREFETCH_STAGES)) {
+            fence_acquire_tensormap(&prefetch_tensor_map_input);
+            if constexpr (COMPUTE_ACTIVATIONS) {
+              fence_acquire_tensormap(&prefetch_tensor_map_act_input);
+            }
+          }
+        }
+        prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, prefetch_tensor_map_input,
+                                             prefetch_tensor_map_act_input, global_offset_X,
+                                             global_offset_Y, next_prefetch_buff_offset,
+                                             shmem_buff_size, barrier, leading_thread);
+        ptx::fence_proxy_async_shared_cta();
+      }
+
+      ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
+                                                       IN_buff_readable_parity[buff_in]);
+      IN_buff_readable_parity[buff_in] ^= 1;
+      ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
+
+      const size_t buff = buff_in;
+      float thread_amax = 0.0f;
+      if constexpr (COLWISE_SCALING) {
+        thread_amax = process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                            ROWWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
+            buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
+            scale_stride_colwise, tensor_base_for_scales, rows, cols, in_sh, act_in_sh,
+            cached_act_sh, out_colwise_data_sh, scales_colwise, partial_dbias_colwise);
+      }
+
+      if constexpr (ROWWISE_SCALING) {
+        thread_amax = process_rowwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                            COLWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
+            buff, stage_offset_Y, thread_offset_Y_rowwise, thread_offset_X_rowwise, bank_group,
+            scales_offset_Y_rowwise, scales_offset_X_rowwise, scale_stride_rowwise,
+            rowwise_scale_is_within_bounds, cols, in_sh, act_in_sh, cached_act_sh,
+            out_rowwise_data_sh, scales_rowwise, thread_dbias_rowwise);
+      }
+
+      __builtin_assume(block_amax >= 0);
+      __builtin_assume(thread_amax >= 0);
+      block_amax = fmaxf(block_amax, thread_amax);
+
+      ptx::fence_proxy_async_shared_cta();
+      __syncthreads();
+
+      // Publish the stage from shared memory into global outputs via TMA.
       const int global_offset_Y = block_offset_Y + stage_offset_Y;
       const int global_offset_X = block_offset_X;
       const int buff_offset = buff * BUFF_DIM;
+      store_output_stage<OType, ROWWISE_SCALING, COLWISE_SCALING>(
+          out_rowwise_data_sh, out_colwise_data_sh, tensor_map_output_rowwise,
+          tensor_map_output_colwise, global_offset_X, global_offset_Y, buff_offset, leading_thread);
 
-      if constexpr (ROWWISE_SCALING) {
-        ptx::cp_async_bulk_tensor_2d_shared_to_global(
-            reinterpret_cast<const uint64_t *>(&tensor_map_output_rowwise), global_offset_X,
-            global_offset_Y, reinterpret_cast<uint64_t *>(&out_rowwise_data_sh[buff_offset]));
-      }
-      if constexpr (COLWISE_SCALING) {
-        ptx::cp_async_bulk_tensor_2d_shared_to_global(
-            reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise), global_offset_X,
-            global_offset_Y, reinterpret_cast<uint64_t *>(&out_colwise_data_sh[buff_offset]));
-      }
-
-      // Create a "bulk async-group" out of the previous bulk copy operation.
-      ptx::cp_async_bulk_commit_group();
+      buff_in = (buff_in + 1) % BUFFS_NUM;
     }
-  }
+    has_prefetched_current_job = prefetched_next_job;
 
-  parity ^= 1;
+    if constexpr (IS_DBIAS) {
+      if (is_single_tensor) {
+        float thread_partial_dbias = 0.0f;
+        if constexpr (COLWISE_SCALING) {
+          thread_partial_dbias = partial_dbias_colwise;
+        } else {
+          float *partial_dbias_rowwise = reinterpret_cast<float *>(dshmem);
 
-  if constexpr (IS_DBIAS) {
-    if (is_single_tensor) {
-      float thread_partial_dbias = 0.0f;
-      if constexpr (COLWISE_SCALING) {
-        thread_partial_dbias = partial_dbias_colwise;
-      } else {
-        // Reusing dshmem (in_sh) as dbias buffer [HEIGHT x WIDTH]
-        // HEIGHT = THREADS_Y
-        // WIDTH = THREADS_X * (SCALE_DIM_X + 1)
-        // Added extra 1-element padding per thread_X to reduce bank conflicts
-        float *partial_dbias_rowwise = reinterpret_cast<float *>(dshmem);
+          constexpr int DBIAS_BUFF_WIDTH = THREADS_X * (SCALE_DIM_X + 1);
 
-        constexpr int DBIAS_BUFF_WIDTH = THREADS_X * (SCALE_DIM_X + 1);
-
-        const int shmem_thread_offset =
-            tid_Y_rowwise * DBIAS_BUFF_WIDTH + tid_X_rowwise * (SCALE_DIM_X + 1);
+          const int shmem_thread_offset =
+              tid_Y_rowwise * DBIAS_BUFF_WIDTH + tid_X_rowwise * (SCALE_DIM_X + 1);
 #pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-          const int swizzled_group_offset = shmem_thread_offset + swizzled_group_idx;
+          for (int w = 0; w < WAVES; ++w) {
+            const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+            const int swizzled_group_offset = shmem_thread_offset + swizzled_group_idx;
 #pragma unroll
-          for (int e = 0; e < PACK_SIZE; ++e) {
-            const int j = w * PACK_SIZE + e;
-            const int shmem_elt_idx = swizzled_group_offset + e;
-            partial_dbias_rowwise[shmem_elt_idx] = thread_dbias_rowwise[j];
+            for (int e = 0; e < PACK_SIZE; ++e) {
+              const int j = w * PACK_SIZE + e;
+              const int shmem_elt_idx = swizzled_group_offset + e;
+              partial_dbias_rowwise[shmem_elt_idx] = thread_dbias_rowwise[j];
+            }
+          }
+          __syncthreads();
+#pragma unroll
+          for (int i = 0; i < THREADS_Y; ++i) {
+            const int scaling_block = threadIdx.x / SCALE_DIM_X;
+            thread_partial_dbias +=
+                partial_dbias_rowwise[i * DBIAS_BUFF_WIDTH + threadIdx.x + scaling_block];
           }
         }
-        __syncthreads();
-#pragma unroll
-        for (int i = 0; i < THREADS_Y; ++i) {
-          // Add extra element offset per MXFP8 scaling block [1x32]
-          const int scaling_block = threadIdx.x / SCALE_DIM_X;
-          thread_partial_dbias +=
-              partial_dbias_rowwise[i * DBIAS_BUFF_WIDTH + threadIdx.x + scaling_block];
+        const int dbias_stride = cols;
+        const int dbias_idx = dbias_offset_Y * dbias_stride + dbias_offset_X;
+        const bool col_out_of_bounds_dbias = (dbias_offset_X >= cols);
+        if (!col_out_of_bounds_dbias) {
+          dbias_workspace[dbias_idx] = thread_partial_dbias;
         }
-      }
-      const int dbias_stride = cols;
-      const int dbias_offset_Y = block_id_Y;
-      const int dbias_offset_X = block_id_X * CHUNK_DIM_X + threadIdx.x;
-      const int dbias_idx = dbias_offset_Y * dbias_stride + dbias_offset_X;
-      const bool col_out_of_bounds_dbias = (dbias_offset_X >= cols);
-      if (!col_out_of_bounds_dbias) {
-        dbias_workspace[dbias_idx] = thread_partial_dbias;
       }
     }
   }
@@ -772,7 +1023,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     atomicMaxFloat(amax_ptr, block_amax);
   }
 
-  destroy_barriers<STAGES>(mbar, leading_thread);
+  if (leading_thread) {
+#pragma unroll
+    for (int buff = 0; buff < BUFFS_NUM; ++buff) {
+      ptx::mbarrier_invalid(&IN_buff_readable_mbar[buff]);
+    }
+  }
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 }  // namespace group_quantize_kernel
@@ -832,20 +1088,30 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
 
   const size_t num_tensors = input->num_tensors;
 
-  size_t blocks_X = 0;
-  size_t blocks_Y = 0;
+  size_t work_blocks_X = 0;
+  size_t work_blocks_Y = 0;
 
   if (is_single_tensor) {
-    blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
-    blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
+    work_blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
+    work_blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
   } else {
     NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
                "Number of tensors in a group is larger than "
                "the MAX number of supported descriptors (64).");
-    blocks_Y = 1;
-    blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
+    work_blocks_Y = 1;
+    work_blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
   }
-  const dim3 grid(blocks_X, blocks_Y);
+
+  size_t launch_blocks_X = work_blocks_X;
+  size_t launch_blocks_Y = work_blocks_Y;
+  if constexpr (PERSISTENT) {
+    const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
+    const size_t static_grid_size = sm_num * TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM;
+    NVTE_CHECK(static_grid_size > 0, "Static persistent grid size must be greater than zero.");
+    launch_blocks_X = static_grid_size;
+    launch_blocks_Y = 1;
+  }
+  const dim3 grid(launch_blocks_X, launch_blocks_Y);
   const size_t block_size = THREADS_PER_CHUNK;
 
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
@@ -1001,7 +1267,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                   tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                   tensor_map_output_colwise, shape_rep, num_tensors, first_logical_dim,
                   last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
-                  scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr);
+                  scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr, work_blocks_X,
+                  work_blocks_Y);
 
               if constexpr (IS_DBIAS) {
                 common::grouped_reduce_dbias<IType>(
