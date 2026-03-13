@@ -2805,10 +2805,13 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   void* devPtrDescaleQ = input_Q->scale_inv.dptr;
   void* devPtrDescaleK = input_K->scale_inv.dptr;
   void* devPtrDescaleV = input_V->scale_inv.dptr;
-  void* devPtrQ_t = input_Q->columnwise_data.dptr;
-  void* devPtrK_t = input_K->columnwise_data.dptr;
-  void* devPtrDescaleQ_t = input_Q->columnwise_scale_inv.dptr;
-  void* devPtrDescaleK_t = input_K->columnwise_scale_inv.dptr;
+  void* devPtrQ_t = nullptr, *devPtrK_t = nullptr, *devPtrDescaleQ_t = nullptr, *devPtrDescaleK_t = nullptr;
+  if (input_Q->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    devPtrQ_t = input_Q->columnwise_data.dptr;
+    devPtrDescaleQ_t = input_Q->columnwise_scale_inv.dptr;
+    devPtrK_t = input_K->columnwise_data.dptr;
+    devPtrDescaleK_t = input_K->columnwise_scale_inv.dptr;
+  }
 
   void* devPtrO = input_O->data.dptr;
   const DType O_type = input_O->data.dtype;
@@ -2818,9 +2821,12 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   }
   void* devPtrdO = input_dO->data.dptr;
   void* devPtrDescaledO = input_dO->scale_inv.dptr;
-  void* devPtrdO_t = input_dO->columnwise_data.dptr;
-  void* devPtrdO_f16 = input_dO_f16->data.dptr;
-  void* devPtrDescaledO_t = input_dO->columnwise_scale_inv.dptr;
+  void* devPtrdO_t = nullptr, *devPtrdO_f16 = nullptr, *devPtrDescaledO_t = nullptr;
+  if (input_dO->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    devPtrdO_t = input_dO->columnwise_data.dptr;
+    devPtrdO_f16 = input_dO_f16->data.dptr;
+    devPtrDescaledO_t = input_dO->columnwise_scale_inv.dptr;
+  }
 
   void* devPtrM = input_M->data.dptr;
   void* devPtrZInv = input_ZInv->data.dptr;
