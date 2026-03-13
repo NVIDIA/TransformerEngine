@@ -110,6 +110,11 @@ void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor to
                                      int num_cols, int topk, float coeff, NVTETensor aux_loss,
                                      NVTETensor Const_buf, cudaStream_t stream);
 
+void nvte_fused_moe_aux_loss_forward_v2(const NVTETensor probs, const NVTETensor tokens_per_expert,
+                                        int total_num_tokens, int num_experts, int num_rows,
+                                        int num_cols, int topk, float coeff, NVTETensor aux_loss,
+                                        NVTETensor Const_buf, cudaStream_t stream);
+
 /*! \brief Backward pass for auxiliary loss.
  *
  *  \param[in]     Const_buf       Constant buffer from the forward pass.
