@@ -131,10 +131,6 @@ def _initialize_distributed(args):
     )
 
     _distributed_initialized = True
-    jax.clear_caches()
-    jax.config.update(
-        "jax_use_shardy_partitioner", False
-    )  # CollectiveGEMM does not work with Shardy yet
 
     assert jax.local_device_count() == 1, (
         f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found"

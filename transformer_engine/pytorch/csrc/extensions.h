@@ -27,23 +27,22 @@ namespace transformer_engine::pytorch {
  **************************************************************************************************/
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
-    at::Tensor logits, int topk, bool use_pre_softmax, c10::optional<int> num_groups,
-    c10::optional<int> group_topk, c10::optional<float> scaling_factor, std::string score_function,
-    c10::optional<at::Tensor> expert_bias);
+    at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
+    std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
+    std::optional<at::Tensor> expert_bias);
 
-at::Tensor fused_topk_with_score_function_bwd(int num_tokens, int num_experts,
-                                              at::Tensor routing_map,
-                                              at::Tensor intermediate_output, at::Tensor grad_probs,
-                                              int topk, bool use_pre_softmax,
-                                              c10::optional<float> scaling_factor,
-                                              std::string score_function);
+void fused_topk_with_score_function_bwd(int num_tokens, int num_experts, at::Tensor routing_map,
+                                        at::Tensor intermediate_output, at::Tensor grad_probs,
+                                        at::Tensor grad_logits, int topk, bool use_pre_softmax,
+                                        std::optional<float> scaling_factor,
+                                        std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
     at::Tensor logits, int topk, std::string score_function);
 
-at::Tensor fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
-                                            at::Tensor intermediate_output, at::Tensor grad_probs,
-                                            int topk, std::string score_function);
+void fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
+                                      at::Tensor intermediate_output, at::Tensor grad_probs,
+                                      at::Tensor grad_logits, int topk, std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
                                                           at::Tensor tokens_per_expert,
@@ -157,6 +156,39 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 
+at::Tensor nvfp4_data_transpose(at::Tensor input, std::optional<at::Tensor> output = std::nullopt);
+
+void nvfp4_2d_scale_transpose(at::Tensor input, at::Tensor output, int64_t M_tiles,
+                              int64_t K_tiles);
+
+void nvfp4_2d_multi_tensor_transpose(std::vector<at::Tensor> rowwise_data_list,
+                                     std::vector<at::Tensor> columnwise_data_list,
+                                     std::vector<at::Tensor> rowwise_scale_inv_list,
+                                     std::vector<at::Tensor> columnwise_scale_inv_list,
+                                     std::vector<int64_t> M_list, std::vector<int64_t> K_list);
+
+void nvfp4_multi_tensor_compute_partial_amax(
+    std::vector<at::Tensor> master_weight_list, std::vector<at::Tensor> partial_amax_list,
+    std::vector<at::Tensor> global_amax_list, std::vector<int64_t> h_list,
+    std::vector<int64_t> w_list, std::vector<int64_t> start_offset_list, int64_t block_len);
+
+void nvfp4_expand_scale_to_fp8(at::Tensor input, at::Tensor output, int64_t tile_rows,
+                               int64_t tile_cols, int64_t rows_padded, int64_t block_len);
+
+void nvfp4_compute_per_block_scale(at::Tensor block_amax, at::Tensor scale, at::Tensor global_amax);
+
+void nvfp4_fused_scale(at::Tensor block_amax, at::Tensor global_amax, at::Tensor per_block_scale,
+                       at::Tensor target_scale, at::Tensor target_amax, int64_t tile_rows,
+                       int64_t tile_cols, int64_t rows_padded, int64_t block_len);
+
+void nvfp4_multi_tensor_fused_scale(
+    std::vector<at::Tensor> block_amax_list, std::vector<at::Tensor> global_amax_list,
+    std::vector<at::Tensor> per_block_scale_list, std::vector<at::Tensor> target_scale_list,
+    std::vector<at::Tensor> target_amax_list, std::vector<int64_t> tile_rows_list,
+    std::vector<int64_t> tile_cols_list, std::vector<int64_t> rows_padded_list, int64_t block_len);
+
+void nvfp4_compute_global_scale(at::Tensor global_amax, at::Tensor global_scale);
+
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
 /***************************************************************************************************
@@ -255,6 +287,9 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
 py::object dequantize(const py::handle &input, DType otype);
 
+py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
+                          std::optional<at::Tensor> first_dims);
+
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
 
@@ -342,6 +377,19 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
                                     size_t h, size_t w, size_t start_offset, size_t block_len,
                                     const DType out_dtype);
 
+void nvfp4_2d_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h, size_t w,
+                                   size_t start_offset, size_t block_len);
+
+void nvfp4_2d_partial_cast(const at::Tensor &inp, py::handle out, const at::Tensor &scale,
+                           const at::Tensor &global_scale, size_t h, size_t w, size_t start_offset,
+                           size_t block_len);
+
+void nvfp4_multi_tensor_2d_partial_cast(std::vector<at::Tensor> inp_list,
+                                        std::vector<at::Tensor> out_list,
+                                        std::vector<at::Tensor> scale_list,
+                                        std::vector<at::Tensor> global_scale_list,
+                                        std::vector<int64_t> h_list, std::vector<int64_t> w_list,
+                                        std::vector<int64_t> start_offset_list, int64_t block_len);
 void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
                                         at::Tensor amax_colwise, int rows, int cols,
                                         size_t start_offset);
@@ -387,6 +435,8 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
+at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
+
 /***************************************************************************************************
  * Support THD format for Context Parallel
  **************************************************************************************************/
@@ -417,6 +467,10 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 
 void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
                              std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
+
+void multi_tensor_scale_tensor_cuda(int chunk_size, at::Tensor is_infinite,
+                                    std::vector<std::vector<at::Tensor>> tensor_lists,
+                                    at::Tensor scale);
 
 std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,

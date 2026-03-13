@@ -439,7 +439,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
-                Parameter(torch.empty(self.num_attention_heads // self.tp_size, device="cuda")),
+                Parameter(torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
 

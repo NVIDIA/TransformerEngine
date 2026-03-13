@@ -913,7 +913,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
 
           // Prepare stochastic rounding random state if enabled
           uint4 random_uint4 = uint4{0, 0, 0, 0};
-          transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+          transformer_engine::curanddx::detail::philox4x32_native_state<
+              NVTE_BUILD_NUM_PHILOX_ROUNDS>
+              rng;
           // "Prefetch" a stochastic rounding state for the first tile
           if constexpr (kEnableStochasticRounding) {
             const size_t rng_sequence = global_thread_idx + k_tile * 512 +
@@ -1072,7 +1074,9 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
           Tensor amax =
               make_tensor<ElementAccumulator>(prepend(take<1, rank(tQArA)>(tQArA.shape()), _1{}));
           Tensor pvscales = make_tensor_like<ElementAccumulator>(amax);
-          transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+          transformer_engine::curanddx::detail::philox4x32_native_state<
+              NVTE_BUILD_NUM_PHILOX_ROUNDS>
+              rng;
           if constexpr (kEnableStochasticRounding) {
             const size_t rng_sequence = global_thread_idx + k_tile * 512 +
                                         scheduler.get_linear_tile_idx() * K_TILE_MAX * 512 +
@@ -1428,9 +1432,8 @@ void group_hadamard_transform_cast_fusion_graph_safe(const GroupedTensor *input,
   float *const amax_rowwise_base_ptr = reinterpret_cast<float *>(output->amax.dptr);
   float *const amax_colwise_base_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
 
-  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
-  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
-  // const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
+  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
+  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
 
   const bool is_const_last_dim = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
                                   shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
@@ -1441,7 +1444,7 @@ void group_hadamard_transform_cast_fusion_graph_safe(const GroupedTensor *input,
 
   int k_tile_size = 1024;
 
-  const bool use_swizzle_sf_output = false;
+  const bool use_swizzle_sf_output = output->with_gemm_swizzled_scales;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, kEnableStochasticRounding,
