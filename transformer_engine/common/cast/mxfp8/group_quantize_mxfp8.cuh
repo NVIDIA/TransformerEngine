@@ -159,6 +159,17 @@ struct JobDescriptor {
   size_t tensor_id = 0;
   size_t rows = 0;
   size_t cols = 0;
+
+  __host__ __device__ __forceinline__ constexpr JobDescriptor() = default;
+
+  __host__ __device__ __forceinline__ constexpr JobDescriptor(
+      const size_t block_id_, const size_t block_global_offset_, const size_t tensor_id_,
+      const size_t rows_, const size_t cols_)
+      : block_id(block_id_),
+        block_global_offset(block_global_offset_),
+        tensor_id(tensor_id_),
+        rows(rows_),
+        cols(cols_) {}
 };
 
 // Tensor-local coordinates for a work-item.
@@ -169,6 +180,19 @@ struct BlockDescriptor {
   size_t block_id_X = 0;
   size_t block_offset_Y = 0;
   size_t block_offset_X = 0;
+
+  __host__ __device__ __forceinline__ constexpr BlockDescriptor() = default;
+
+  __host__ __device__ __forceinline__ constexpr BlockDescriptor(
+      const size_t tensor_base_, const size_t block_id_in_current_tensor_,
+      const size_t block_id_Y_, const size_t block_id_X_, const size_t block_offset_Y_,
+      const size_t block_offset_X_)
+      : tensor_base(tensor_base_),
+        block_id_in_current_tensor(block_id_in_current_tensor_),
+        block_id_Y(block_id_Y_),
+        block_id_X(block_id_X_),
+        block_offset_Y(block_offset_Y_),
+        block_offset_X(block_offset_X_) {}
 };
 
 __device__ __forceinline__ JobDescriptor decode_job(
@@ -177,17 +201,17 @@ __device__ __forceinline__ JobDescriptor decode_job(
     const int32_t ctaid_X, const int32_t ctaid_Y, const int64_t *const __restrict__ offsets_ptr,
     const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr) {
-  JobDescriptor job{};
-  job.block_id = ctaid_Y * work_blocks_X + ctaid_X;
-  job.block_global_offset = is_single_tensor
-                                ? (ctaid_Y * CHUNK_DIM_Y * last_logical_dim + ctaid_X * CHUNK_DIM_X)
-                                : (job.block_id * ELTS_PER_CHUNK);
-  job.tensor_id = get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset, ctaid_Y,
-                                        first_logical_dim, last_logical_dim, offsets_ptr);
-  job.rows =
-      get_tensor_rows_num(job.tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
-  job.cols = get_tensor_cols_num(job.tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-  return job;
+  const size_t block_id = ctaid_Y * work_blocks_X + ctaid_X;
+  const size_t block_global_offset =
+      is_single_tensor ? (ctaid_Y * CHUNK_DIM_Y * last_logical_dim + ctaid_X * CHUNK_DIM_X)
+                       : (block_id * ELTS_PER_CHUNK);
+  const size_t tensor_id =
+      get_current_tensor_id(shape_rep, num_tensors, block_global_offset, ctaid_Y,
+                            first_logical_dim, last_logical_dim, offsets_ptr);
+  const size_t rows =
+      get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+  const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
+  return JobDescriptor(block_id, block_global_offset, tensor_id, rows, cols);
 }
 
 __device__ __forceinline__ bool is_job_valid(const JobDescriptor &job,
@@ -218,17 +242,17 @@ __device__ __forceinline__ bool is_job_valid(const JobDescriptor &job,
 __device__ __forceinline__ BlockDescriptor
 decode_block(const JobDescriptor &job, const bool is_single_tensor,
              const int64_t *const __restrict__ offsets_ptr) {
-  BlockDescriptor block{};
-  block.tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[job.tensor_id]);
   const size_t CHUNK_DIM_X_ = CHUNK_DIM_X;
   const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, CHUNK_DIM_X_);
-  block.block_id_in_current_tensor =
-      is_single_tensor ? job.block_id : (job.block_id - block.tensor_base / ELTS_PER_CHUNK);
-  block.block_id_Y = block.block_id_in_current_tensor / blocks_X_num_in_current_tensor;
-  block.block_id_X = block.block_id_in_current_tensor % blocks_X_num_in_current_tensor;
-  block.block_offset_Y = block.block_id_Y * CHUNK_DIM_Y;
-  block.block_offset_X = block.block_id_X * CHUNK_DIM_X;
-  return block;
+  const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[job.tensor_id]);
+  const size_t block_id_in_current_tensor =
+      is_single_tensor ? job.block_id : (job.block_id - tensor_base / ELTS_PER_CHUNK);
+  const size_t block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
+  const size_t block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
+  const size_t block_offset_Y = block_id_Y * CHUNK_DIM_Y;
+  const size_t block_offset_X = block_id_X * CHUNK_DIM_X;
+  return BlockDescriptor(tensor_base, block_id_in_current_tensor, block_id_Y, block_id_X,
+                         block_offset_Y, block_offset_X);
 }
 
 // Copies the base tensor map to shmem, modifies the copy, stores the modified tensor map at index
