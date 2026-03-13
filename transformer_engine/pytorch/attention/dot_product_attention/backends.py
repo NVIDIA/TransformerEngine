@@ -1184,6 +1184,8 @@ class FusedAttnFunc(torch.autograd.Function):
         return_max_logit,
         score_mod,
         score_mod_bprop,
+        score_mod_tensors,
+        score_mod_bprop_tensors,
     ):
         # pylint: disable=missing-function-docstring
 
@@ -1280,6 +1282,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 rng_gen,
                 softmax_offset,
                 score_mod=score_mod,
+                score_mod_tensors=score_mod_tensors,
                 cuda_graph=is_graph_capturing(),
             )
 
@@ -1361,6 +1364,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 return_max_logit,
                 is_graph_capturing(),
                 score_mod=score_mod,
+                score_mod_tensors=score_mod_tensors,
             )
             out = out_
             out_ret = out_
@@ -1452,6 +1456,8 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.score_mod = score_mod
         ctx.score_mod_bprop = score_mod_bprop
+        ctx.score_mod_tensors = score_mod_tensors
+        ctx.score_mod_bprop_tensors = score_mod_bprop_tensors
 
         if return_max_logit:
             return out_ret, *max_logit
@@ -1602,6 +1608,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         is_graph_capturing(),
                         score_mod=ctx.score_mod,
                         score_mod_bprop=ctx.score_mod_bprop,
+                        score_mod_tensors=ctx.score_mod_tensors,
+                        score_mod_bprop_tensors=ctx.score_mod_bprop_tensors,
                     )
 
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1670,6 +1678,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         is_graph_capturing(),
                         score_mod=ctx.score_mod,
                         score_mod_bprop=ctx.score_mod_bprop,
+                        score_mod_tensors=ctx.score_mod_tensors,
+                        score_mod_bprop_tensors=ctx.score_mod_bprop_tensors,
                     )
 
         d_bias = None
@@ -1709,6 +1719,8 @@ class FusedAttnFunc(torch.autograd.Function):
             None,
             None,
             d_softmax_offset,
+            None,
+            None,
             None,
             None,
             None,
@@ -1824,6 +1836,8 @@ class FusedAttention(torch.nn.Module):
         softmax_offset: torch.Tensor = None,
         score_mod: Optional[Callable] = None,
         score_mod_bprop: Optional[Callable] = None,
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
         fp8_output: bool = False,
     ) -> torch.Tensor:
         """fused attention fprop"""
@@ -2039,6 +2053,8 @@ class FusedAttention(torch.nn.Module):
                     self.return_max_logit,
                     score_mod,
                     score_mod_bprop,
+                    score_mod_tensors,
+                    score_mod_bprop_tensors,
                 )
 
         if self.return_max_logit:

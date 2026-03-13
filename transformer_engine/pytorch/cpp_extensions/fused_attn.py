@@ -144,6 +144,7 @@ def fused_attn_fwd(
     return_max_logit: bool = False,
     cuda_graph: bool = False,
     score_mod=None,
+    score_mod_tensors=None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
 
@@ -226,6 +227,8 @@ def fused_attn_fwd(
                 See softmax_type in DotProductAttention for details.
     score_mod : Callable, default = None
                 Optional cuDNN flexible-graph score modifier callback.
+    score_mod_tensors : Dict[str, torch.Tensor], default = None
+                Extra tensors to expose to the score modifier callback via the variant pack.
     return_max_logit : bool, default = False
                       whether to return the maximum attention score
     cuda_graph : bool, default = False
@@ -292,6 +295,8 @@ def fused_attn_fwd(
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
 
+    if score_mod_tensors is not None:
+        assert score_mod is not None, "score_mod_tensors requires score_mod."
     if score_mod is not None:
         assert (
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -354,6 +359,7 @@ def fused_attn_fwd(
         attn_bias,
         softmax_offset,
         score_mod,
+        score_mod_tensors,
         rng_gen,
         rng_elts_per_thread,
         return_max_logit,
@@ -409,6 +415,8 @@ def fused_attn_bwd(
     cuda_graph: bool = False,
     score_mod=None,
     score_mod_bprop=None,
+    score_mod_tensors=None,
+    score_mod_bprop_tensors=None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -488,6 +496,10 @@ def fused_attn_bwd(
                 Optional cuDNN flexible-graph score modifier callback.
     score_mod_bprop : Callable, default = None
                 Optional cuDNN flexible-graph score modifier backward callback.
+    score_mod_tensors : Dict[str, torch.Tensor], default = None
+                Extra tensors to expose to the score modifier callback via the variant pack.
+    score_mod_bprop_tensors : Dict[str, torch.Tensor], default = None
+                Extra tensors to expose to the score modifier backward callback via the variant pack.
     cuda_graph : bool, default = False
                 whether or not cuda graph capture is enabled.
 
@@ -524,6 +536,10 @@ def fused_attn_bwd(
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
 
+    if score_mod_tensors is not None:
+        assert score_mod is not None, "score_mod_tensors requires score_mod."
+    if score_mod_bprop_tensors is not None:
+        assert score_mod_bprop is not None, "score_mod_bprop_tensors requires score_mod_bprop."
     if score_mod is not None or score_mod_bprop is not None:
         assert (
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -590,6 +606,8 @@ def fused_attn_bwd(
         dqkv_quantizer,
         score_mod,
         score_mod_bprop,
+        score_mod_tensors,
+        score_mod_bprop_tensors,
         cuda_graph,
     )
 

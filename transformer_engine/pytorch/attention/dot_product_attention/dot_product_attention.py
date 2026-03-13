@@ -828,6 +828,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         pad_between_seqs: Optional[bool] = None,
         score_mod: Optional[Callable] = None,
         score_mod_bprop: Optional[Callable] = None,
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
         fp8_output: Optional[bool] = False,
         num_splits: Optional[int] = 1,
     ) -> torch.Tensor:
@@ -1526,6 +1528,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         softmax_offset=softmax_offset,
                         score_mod=score_mod,
                         score_mod_bprop=score_mod_bprop,
+                        score_mod_tensors=score_mod_tensors,
+                        score_mod_bprop_tensors=score_mod_bprop_tensors,
                         fp8_output=fp8_output,
                     )
                 return self.fused_attention(
@@ -1559,6 +1563,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     softmax_offset=softmax_offset,
                     score_mod=score_mod,
                     score_mod_bprop=score_mod_bprop,
+                    score_mod_tensors=score_mod_tensors,
+                    score_mod_bprop_tensors=score_mod_bprop_tensors,
                     fp8_output=fp8_output,
                 )
 

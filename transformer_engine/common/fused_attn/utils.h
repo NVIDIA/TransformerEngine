@@ -120,6 +120,8 @@ struct FADescriptor_v1 {
   cudnn_frontend::DataType_t dqkv_tensor_type;
   std::uintptr_t score_mod_id;
   std::uintptr_t score_mod_bprop_id;
+  std::uint64_t score_mod_tensors_id;
+  std::uint64_t score_mod_bprop_tensors_id;
   bool generate_max_sum_exp;
 
   bool operator<(const FADescriptor_v1 &rhs) const {
@@ -128,7 +130,8 @@ struct FADescriptor_v1 {
                     bias_skv, attnScale, isTraining, dropoutProbability, layout, mask_type,
                     softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
                     deterministic, bias_type, qkv_tensor_type, o_tensor_type, do_tensor_type,
-                    dqkv_tensor_type, score_mod_id, score_mod_bprop_id, generate_max_sum_exp) <
+                    dqkv_tensor_type, score_mod_id, score_mod_bprop_id, score_mod_tensors_id,
+                    score_mod_bprop_tensors_id, generate_max_sum_exp) <
            std::tie(rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d_qk, rhs.d_v, rhs.num_pages_k,
                     rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
                     rhs.max_pages_per_seq_v, rhs.bias_b, rhs.bias_h, rhs.bias_sq, rhs.bias_skv,
@@ -137,6 +140,7 @@ struct FADescriptor_v1 {
                     rhs.bottom_right_diagonal, rhs.deterministic, rhs.bias_type,
                     rhs.qkv_tensor_type, rhs.o_tensor_type, rhs.do_tensor_type,
                     rhs.dqkv_tensor_type, rhs.score_mod_id, rhs.score_mod_bprop_id,
+                    rhs.score_mod_tensors_id, rhs.score_mod_bprop_tensors_id,
                     rhs.generate_max_sum_exp);
   }
 };
