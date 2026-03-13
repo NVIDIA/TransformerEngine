@@ -64,6 +64,47 @@ using ExtraTensorList = std::vector<std::pair<std::string, TensorAttr>>;
 
 constexpr char kDlpackCapsuleName[] = "dltensor";
 
+cudnn_frontend::DataType_t convert_dlpack_dtype(const DLDataType &dtype) {
+  switch (dtype.code) {
+    case DLDataTypeCode::kDLUInt:
+      if (dtype.bits == 8) {
+        return cudnn_frontend::DataType_t::UINT8;
+      }
+      break;
+    case DLDataTypeCode::kDLInt:
+      switch (dtype.bits) {
+        case 8:
+          return cudnn_frontend::DataType_t::INT8;
+        case 32:
+          return cudnn_frontend::DataType_t::INT32;
+        case 64:
+          return cudnn_frontend::DataType_t::INT64;
+      }
+      break;
+    case DLDataTypeCode::kDLFloat:
+      switch (dtype.bits) {
+        case 16:
+          return cudnn_frontend::DataType_t::HALF;
+        case 32:
+          return cudnn_frontend::DataType_t::FLOAT;
+        case 64:
+          return cudnn_frontend::DataType_t::DOUBLE;
+      }
+      break;
+    case DLDataTypeCode::kDLBfloat:
+      if (dtype.bits == 16) {
+        return cudnn_frontend::DataType_t::BFLOAT16;
+      }
+      break;
+    case DLDataTypeCode::kDLBool:
+      if (dtype.bits == 8) {
+        return cudnn_frontend::DataType_t::BOOLEAN;
+      }
+      break;
+  }
+  return cudnn_frontend::DataType_t::NOT_SET;
+}
+
 std::vector<std::string> get_sorted_extra_tensor_names(const py::dict &extra_tensors) {
   std::vector<std::string> names;
   names.reserve(extra_tensors.size());
@@ -88,6 +129,38 @@ DLManagedTensor *get_dlpack_tensor(py::handle tensor_obj) {
 void *get_dlpack_data_pointer(py::handle tensor_obj) {
   auto *managed = get_dlpack_tensor(tensor_obj);
   return static_cast<char *>(managed->dl_tensor.data) + managed->dl_tensor.byte_offset;
+}
+
+TensorAttr create_tensor_attr_from_dlpack(const std::shared_ptr<cudnn_frontend::graph::Graph> &graph,
+                                          py::handle tensor_obj, const std::string &name) {
+  auto *managed = get_dlpack_tensor(tensor_obj);
+  const auto device_type = managed->dl_tensor.device.device_type;
+  NVTE_CHECK(device_type == kDLCPU || device_type == kDLCUDAHost || device_type == kDLCUDA ||
+                 device_type == kDLCUDAManaged,
+             "Invalid device type in score_mod_tensors entry.");
+
+  const auto ndim = managed->dl_tensor.ndim;
+  std::vector<int64_t> dims(managed->dl_tensor.shape, managed->dl_tensor.shape + ndim);
+  const auto tensor_dtype = convert_dlpack_dtype(managed->dl_tensor.dtype);
+  NVTE_CHECK(tensor_dtype != cudnn_frontend::DataType_t::NOT_SET,
+             "Unsupported DLPack dtype in score_mod_tensors entry.");
+
+  auto props = cudnn_frontend::graph::Tensor_attributes()
+                   .set_name(name)
+                   .set_data_type(tensor_dtype)
+                   .set_is_virtual(false)
+                   .set_is_pass_by_value(device_type == kDLCPU)
+                   .set_dim(dims);
+
+  if (managed->dl_tensor.strides == nullptr) {
+    auto stride_order = cudnn_frontend::detail::generate_row_major_stride_order(ndim);
+    props.set_stride(cudnn_frontend::detail::generate_stride(dims, stride_order));
+  } else {
+    std::vector<int64_t> strides(managed->dl_tensor.strides, managed->dl_tensor.strides + ndim);
+    props.set_stride(strides);
+  }
+
+  return graph->tensor(props);
 }
 
 template <typename T>
@@ -124,9 +197,8 @@ std::uint64_t get_extra_tensor_signature(void *extra_tensors_ptr) {
   return signature;
 }
 
-py::dict get_score_mod_tensor_attrs(
-    const std::shared_ptr<cudnn_frontend::python_bindings::PyGraph> &py_graph, void *extra_tensors_ptr,
-    ExtraTensorList *extra_tensor_attrs) {
+py::dict get_score_mod_tensor_attrs(const std::shared_ptr<cudnn_frontend::graph::Graph> &graph,
+                                    void *extra_tensors_ptr, ExtraTensorList *extra_tensor_attrs) {
   py::dict callback_tensors;
   if (extra_tensors_ptr == nullptr) {
     return callback_tensors;
@@ -142,8 +214,7 @@ py::dict get_score_mod_tensor_attrs(
   py::dict extra_tensors = py::reinterpret_borrow<py::dict>(reinterpret_cast<PyObject *>(extra_tensors_ptr));
   for (const auto &name : get_sorted_extra_tensor_names(extra_tensors)) {
     py::handle tensor_obj = extra_tensors[py::str(name)];
-    auto tensor_attr = py_graph->tensor_like(py::reinterpret_borrow<py::object>(tensor_obj));
-    tensor_attr->set_name(name);
+    auto tensor_attr = create_tensor_attr_from_dlpack(graph, tensor_obj, name);
     callback_tensors[py::str(name)] = py::cast(tensor_attr);
     if (extra_tensor_attrs != nullptr) {
       extra_tensor_attrs->emplace_back(name, std::move(tensor_attr));
@@ -190,7 +261,7 @@ auto make_attention_score_modifier(void *callback_ptr, void *extra_tensors_ptr,
            auto py_graph =
                std::make_shared<cudnn_frontend::python_bindings::PyGraph>(graph);
            py::dict callback_tensors =
-               get_score_mod_tensor_attrs(py_graph, extra_tensors_ptr, extra_tensor_attrs);
+               get_score_mod_tensor_attrs(graph, extra_tensors_ptr, extra_tensor_attrs);
 
            py::object result = callback_tensors.empty()
                                    ? callback_fn(*py_graph, score_tensor)
