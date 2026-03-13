@@ -2213,8 +2213,10 @@ void fused_attn_fp8_bwd_impl_v1(
       std::vector<int64_t> k_strides(4);
       std::vector<int64_t> v_strides(4);
       std::vector<int64_t> o_strides(4);
+      std::vector<int64_t> dO_strides(4);
       generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(), k_strides.data(), v_strides.data(), qkv_layout);
       generateMatrixStridesWithFormat(b, h, s_q, d_v, o_strides.data(), o_format);
+      generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_strides.data(), d_out_format);
       Q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("Q")
                                 .set_dim({b, h, s_q, d_qk})
@@ -2238,7 +2240,7 @@ void fused_attn_fp8_bwd_impl_v1(
       dO = mha_graph->tensor(fe::graph::Tensor_attributes()
                                  .set_name("dO")
                                  .set_dim({b, h, s_q, d_v})
-                                 .set_stride(o_strides)
+                                 .set_stride(dO_strides)
                                  .set_data_type(do_tensor_type));
       Stats = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("Stats")
@@ -2286,31 +2288,31 @@ void fused_attn_fp8_bwd_impl_v1(
         NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
         NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
         // Q_t, K_t, dO_t, dO_f16
-        std::vector<int64_t> q_t_stride(4);
-        std::vector<int64_t> k_t_stride(4);
-        std::vector<int64_t> dO_t_stride(4);
-        generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_t_stride.data(), q_format);
-        generateMatrixStridesWithFormat(b, hg, s_kv, d_qk, k_t_stride.data(), kv_format);
-        generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_t_stride.data(), d_out_format);
+        std::vector<int64_t> q_t_strides(4);
+        std::vector<int64_t> k_t_strides(4);
+        std::vector<int64_t> dO_t_strides(4);
+        generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_t_strides.data(), q_format);
+        generateMatrixStridesWithFormat(b, hg, s_kv, d_qk, k_t_strides.data(), kv_format);
+        generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_t_strides.data(), d_out_format);
         Q_t = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("Q_t")
                                     .set_dim({b, h, s_q, d_qk})
-                                    .set_stride(q_t_stride)
+                                    .set_stride(q_t_strides)
                                     .set_data_type(qkv_tensor_type));
         K_t = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("K_t")
                                     .set_dim({b, hg, s_kv, d_qk})
-                                    .set_stride(k_t_stride)
+                                    .set_stride(k_t_strides)
                                     .set_data_type(qkv_tensor_type));
         dO_t = mha_graph->tensor(fe::graph::Tensor_attributes()
                                      .set_name("dO_t")
                                      .set_dim({b, h, s_q, d_v})
-                                     .set_stride(dO_t_stride)
+                                     .set_stride(dO_t_strides)
                                      .set_data_type(do_tensor_type));
         dO_f16 = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("dO_f16")
                                        .set_dim({b, h, s_q, d_v})
-                                       .set_stride(o_strides)
+                                       .set_stride(dO_strides)
                                        .set_data_type(o_tensor_type));
         // Descale_q, Descale_q_t, Descale_k, Descale_k_t, Descale_v, Descale_dO, Descale_dO_t
         auto padded = pad_s_d_for_mxfp8(s_q, s_kv, d_qk, d_v);
