@@ -1774,29 +1774,24 @@ void fused_attn_fp8_fwd_impl_v1(
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
       // Q, K, V, attn_scale
-      std::vector<int64_t> q_stride(4);
-      std::vector<int64_t> k_stride(4);
-      std::vector<int64_t> v_stride(4);
-      generateMatrixStrides_v1(b, h, hg, s_q, s_kv, d_qk, d_v, q_stride.data(), qkv_layout,
-                               NVTE_QKV_Matrix::NVTE_Q_Matrix);
-      generateMatrixStrides_v1(b, h, hg, s_q, s_kv, d_qk, d_v, k_stride.data(), qkv_layout,
-                               NVTE_QKV_Matrix::NVTE_K_Matrix);
-      generateMatrixStrides_v1(b, h, hg, s_q, s_kv, d_qk, d_v, v_stride.data(), qkv_layout,
-                               NVTE_QKV_Matrix::NVTE_V_Matrix);
+      std::vector<int64_t> q_strides(4);
+      std::vector<int64_t> k_strides(4);
+      std::vector<int64_t> v_strides(4);
+      generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(), k_strides.data(), v_strides.data(), qkv_layout);
       Q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("Q")
                                 .set_dim({b, h, s_q, d_qk})
-                                .set_stride(q_stride)
+                                .set_stride(q_strides)
                                 .set_data_type(qkv_tensor_type));
       K = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("K")
                                 .set_dim({b, hg, s_kv, d_qk})
-                                .set_stride(k_stride)
+                                .set_stride(k_strides)
                                 .set_data_type(qkv_tensor_type));
       V = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("V")
                                 .set_dim({b, hg, s_kv, d_v})
-                                .set_stride(v_stride)
+                                .set_stride(v_strides)
                                 .set_data_type(qkv_tensor_type));
       attn_scale = mha_graph->tensor(fe::graph::Tensor_attributes()
                                          .set_name("attn_scale")
@@ -1831,11 +1826,11 @@ void fused_attn_fp8_fwd_impl_v1(
         std::vector<int64_t> v_scale_strides(4);
         auto padded = pad_s_d_for_mxfp8(s_q, s_kv, d_qk, d_v);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_qk_scale_padded,
-                                        q_scale_strides.data(), q_format, false);
+                                        q_scale_strides.data(), q_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_qk_scale_padded,
-                                        k_scale_strides.data(), kv_format, false);
+                                        k_scale_strides.data(), kv_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_scale_padded, padded.d_v_padded,
-                                        v_scale_strides.data(), kv_format, false);
+                                        v_scale_strides.data(), kv_format);
         descale_q =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Descale_q")
@@ -1916,12 +1911,7 @@ void fused_attn_fp8_fwd_impl_v1(
       }
 
       std::shared_ptr<fe::graph::Tensor_attributes> O, Stats, amax_s, amax_o;
-      if (is_mxfp8) {
-        auto outputs = mha_graph->sdpa_fp8(Q, K, V, descale_q, descale_k, descale_v, sdpa_options);
-        O = outputs[0];
-        Stats = outputs[1];
-        amax_o = outputs[2];
-      } else {
+      if (is_delayed_scaling || is_current_scaling) {
         auto outputs = mha_graph->sdpa_fp8(Q, K, V, descale_q, descale_k, descale_v, descale_s,
                                            scale_s, scale_o, sdpa_options);
         O = outputs[0];
@@ -1932,13 +1922,18 @@ void fused_attn_fp8_fwd_impl_v1(
             .set_dim({1, 1, 1, 1})
             .set_stride({1, 1, 1, 1})
             .set_data_type(fe::DataType_t::FLOAT);
+      } else if (is_mxfp8) {
+        auto outputs = mha_graph->sdpa_fp8(Q, K, V, descale_q, descale_k, descale_v, sdpa_options);
+        O = outputs[0];
+        Stats = outputs[1];
+        amax_o = outputs[2];
       }
 
-      std::vector<int64_t> o_stride(4);
-      generateMatrixStridesWithFormat(b, h, s_q, d_v, o_stride.data(), o_format, false);
+      std::vector<int64_t> o_strides(4);
+      generateMatrixStridesWithFormat(b, h, s_q, d_v, o_strides.data(), o_format);
       O->set_output(true)
           .set_dim({b, h, s_q, d_v})
-          .set_stride(o_stride)
+          .set_stride(o_strides)
           .set_data_type(o_tensor_type);
       amax_o->set_output(true)
           .set_dim({1, 1, 1, 1})
@@ -2048,6 +2043,7 @@ void fused_attn_fp8_fwd_impl_v1(
       variant_pack[dropout_seed] = devPtrDropoutSeed;
       variant_pack[dropout_offset] = devPtrDropoutOffset;
     }
+
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
   } catch (cudnn_frontend::cudnnException& e) {
     NVTE_ERROR(e.what());
@@ -2213,41 +2209,36 @@ void fused_attn_fp8_bwd_impl_v1(
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
       // Q, K, V, O, dO, stats, attn_scale
-      std::vector<int64_t> q_stride(4);
-      std::vector<int64_t> k_stride(4);
-      std::vector<int64_t> v_stride(4);
-      std::vector<int64_t> o_stride(4);
-      generateMatrixStrides_v1(b, h, hg, s_q, s_kv, d_qk, d_v, q_stride.data(), qkv_layout,
-                               NVTE_QKV_Matrix::NVTE_Q_Matrix);
-      generateMatrixStrides_v1(b, hg, hg, s_q, s_kv, d_qk, d_v, k_stride.data(), qkv_layout,
-                               NVTE_QKV_Matrix::NVTE_K_Matrix);
-      generateMatrixStrides_v1(b, hg, hg, s_q, s_kv, d_qk, d_v, v_stride.data(), qkv_layout,
-                               NVTE_QKV_Matrix::NVTE_V_Matrix);
-      generateMatrixStridesWithFormat(b, h, s_q, d_v, o_stride.data(), o_format, false);
+      std::vector<int64_t> q_strides(4);
+      std::vector<int64_t> k_strides(4);
+      std::vector<int64_t> v_strides(4);
+      std::vector<int64_t> o_strides(4);
+      generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(), k_strides.data(), v_strides.data(), qkv_layout);
+      generateMatrixStridesWithFormat(b, h, s_q, d_v, o_strides.data(), o_format);
       Q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("Q")
                                 .set_dim({b, h, s_q, d_qk})
-                                .set_stride(q_stride)
+                                .set_stride(q_strides)
                                 .set_data_type(qkv_tensor_type));
       K = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("K")
                                 .set_dim({b, hg, s_kv, d_qk})
-                                .set_stride(k_stride)
+                                .set_stride(k_strides)
                                 .set_data_type(qkv_tensor_type));
       V = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("V")
                                 .set_dim({b, hg, s_kv, d_v})
-                                .set_stride(v_stride)
+                                .set_stride(v_strides)
                                 .set_data_type(qkv_tensor_type));
       O = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("O")
                                 .set_dim({b, h, s_q, d_v})
-                                .set_stride(o_stride)
+                                .set_stride(o_strides)
                                 .set_data_type(o_tensor_type));
       dO = mha_graph->tensor(fe::graph::Tensor_attributes()
                                  .set_name("dO")
                                  .set_dim({b, h, s_q, d_v})
-                                 .set_stride(o_stride)
+                                 .set_stride(o_strides)
                                  .set_data_type(do_tensor_type));
       Stats = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("Stats")
@@ -2298,9 +2289,9 @@ void fused_attn_fp8_bwd_impl_v1(
         std::vector<int64_t> q_t_stride(4);
         std::vector<int64_t> k_t_stride(4);
         std::vector<int64_t> dO_t_stride(4);
-        generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_t_stride.data(), q_format, false);
-        generateMatrixStridesWithFormat(b, hg, s_kv, d_qk, k_t_stride.data(), kv_format, false);
-        generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_t_stride.data(), d_out_format, false);
+        generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_t_stride.data(), q_format);
+        generateMatrixStridesWithFormat(b, hg, s_kv, d_qk, k_t_stride.data(), kv_format);
+        generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_t_stride.data(), d_out_format);
         Q_t = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("Q_t")
                                     .set_dim({b, h, s_q, d_qk})
@@ -2319,7 +2310,7 @@ void fused_attn_fp8_bwd_impl_v1(
         dO_f16 = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("dO_f16")
                                        .set_dim({b, h, s_q, d_v})
-                                       .set_stride(o_stride)
+                                       .set_stride(o_strides)
                                        .set_data_type(o_tensor_type));
         // Descale_q, Descale_q_t, Descale_k, Descale_k_t, Descale_v, Descale_dO, Descale_dO_t
         auto padded = pad_s_d_for_mxfp8(s_q, s_kv, d_qk, d_v);
@@ -2331,19 +2322,19 @@ void fused_attn_fp8_bwd_impl_v1(
         std::vector<int64_t> dO_scale_strides(4);
         std::vector<int64_t> dO_t_scale_strides(4);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_qk_scale_padded,
-                                        q_scale_strides.data(), q_format, false);
+                                        q_scale_strides.data(), q_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_qk_padded,
-                                        q_t_scale_strides.data(), q_format, false);
+                                        q_t_scale_strides.data(), q_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_qk_scale_padded,
-                                        k_scale_strides.data(), kv_format, false);
+                                        k_scale_strides.data(), kv_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_scale_padded, padded.d_qk_padded,
-                                        k_t_scale_strides.data(), kv_format, false);
+                                        k_t_scale_strides.data(), kv_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_v_scale_padded,
-                                        v_scale_strides.data(), kv_format, false);
+                                        v_scale_strides.data(), kv_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_v_scale_padded,
-                                        dO_scale_strides.data(), d_out_format, false);
+                                        dO_scale_strides.data(), d_out_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_v_padded,
-                                        dO_t_scale_strides.data(), d_out_format, false);
+                                        dO_t_scale_strides.data(), d_out_format);
         descale_q =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Descale_q")
@@ -2490,26 +2481,21 @@ void fused_attn_fp8_bwd_impl_v1(
         amax_dK = outputs[4];
         amax_dV = outputs[5];
       }
-      std::vector<int64_t> dq_stride(4);
-      std::vector<int64_t> dk_stride(4);
-      std::vector<int64_t> dv_stride(4);
-      generateMatrixStrides_v1(b, h, hg, s_q, s_kv, d_qk, d_v, dq_stride.data(), dqkv_layout,
-                               NVTE_QKV_Matrix::NVTE_Q_Matrix);
-      generateMatrixStrides_v1(b, hg, hg, s_q, s_kv, d_qk, d_v, dk_stride.data(), dqkv_layout,
-                               NVTE_QKV_Matrix::NVTE_K_Matrix);
-      generateMatrixStrides_v1(b, hg, hg, s_q, s_kv, d_qk, d_v, dv_stride.data(), dqkv_layout,
-                               NVTE_QKV_Matrix::NVTE_V_Matrix);
+      std::vector<int64_t> dq_strides(4);
+      std::vector<int64_t> dk_strides(4);
+      std::vector<int64_t> dv_strides(4);
+      generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, dq_strides.data(), dk_strides.data(), dv_strides.data(), dqkv_layout);
       dQ->set_output(true)
           .set_dim({b, h, s_q, d_qk})
-          .set_stride(dq_stride)
+          .set_stride(dq_strides)
           .set_data_type(dqkv_tensor_type);
       dK->set_output(true)
           .set_dim({b, hg, s_kv, d_qk})
-          .set_stride(dk_stride)
+          .set_stride(dk_strides)
           .set_data_type(dqkv_tensor_type);
       dV->set_output(true)
           .set_dim({b, hg, s_kv, d_v})
-          .set_stride(dv_stride)
+          .set_stride(dv_strides)
           .set_data_type(dqkv_tensor_type);
       amax_dQ->set_output(true)
           .set_dim({1, 1, 1, 1})
@@ -2523,7 +2509,7 @@ void fused_attn_fp8_bwd_impl_v1(
           .set_dim({1, 1, 1, 1})
           .set_stride({1, 1, 1, 1})
           .set_data_type(fe::DataType_t::FLOAT);
-      if (!is_mxfp8) {
+      if (is_delayed_scaling || is_current_scaling) {
         amax_dP->set_output(true)
             .set_dim({1, 1, 1, 1})
             .set_stride({1, 1, 1, 1})
@@ -2643,9 +2629,9 @@ void fused_attn_fp8_bwd_impl_v1(
       variant_pack[dO_t] = devPtrdO_t;
       variant_pack[descale_q_t] = devPtrDescaleQ_t;
       variant_pack[descale_k_t] = devPtrDescaleK_t;
-      // variant_pack[descale_dO] = devPtrDescaledO;
       variant_pack[descale_dO_t] = devPtrDescaledO_t;
     }
+
     /* if (is_bias) {
        variant_pack[bias] = devPtrBias;
        if ((bias_b == 1) && (bias_h == h)) {
@@ -2698,50 +2684,35 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
                         const Tensor* rng_state, Tensor* workspace, cudaStream_t stream,
                         cudnnHandle_t handle) {
   using namespace transformer_engine;
-  void* devPtrQ = nullptr;
-  void* devPtrK = nullptr;
-  void* devPtrV = nullptr;
-  void* devPtrDescaleQ = nullptr;
-  void* devPtrDescaleK = nullptr;
-  void* devPtrDescaleV = nullptr;
-  void* devPtrO = nullptr;
-  void* devPtrAmaxO = nullptr;
-  void* devPtrScaleO = nullptr;
-  void* devPtrAmaxS = nullptr;
-  void* devPtrScaleS = nullptr;
-  void* devPtrDescaleS = nullptr;
-  if (input_Q->scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    devPtrQ = input_Q->data.dptr;
-    devPtrDescaleQ = input_Q->scale_inv.dptr;
-    devPtrK = input_K->data.dptr;
-    devPtrDescaleK = input_K->scale_inv.dptr;
-    // devPtrV = input_V->data.dptr;
-    // devPtrDescaleV = input_V->scale_inv.dptr;
-    devPtrV = input_V->columnwise_data.dptr;
-    devPtrDescaleV = input_V->columnwise_scale_inv.dptr;
-    devPtrO = output_O->data.dptr;
-    devPtrAmaxO = output_O->amax.dptr;
-  } else {
-    devPtrQ = input_Q->data.dptr;
-    devPtrDescaleQ = input_Q->scale_inv.dptr;
-    devPtrK = input_K->data.dptr;
-    devPtrDescaleK = input_K->scale_inv.dptr;
+  void* devPtrQ = nullptr, *devPtrK = nullptr, *devPtrV = nullptr;
+  void* devPtrDescaleQ = nullptr, *devPtrDescaleK = nullptr, *devPtrDescaleV = nullptr;
+  void* devPtrO = nullptr, *devPtrAmaxO = nullptr, *devPtrScaleO = nullptr;
+  void* devPtrAmaxS = nullptr, *devPtrScaleS = nullptr, *devPtrDescaleS = nullptr;
+  devPtrQ = input_Q->data.dptr;
+  devPtrDescaleQ = input_Q->scale_inv.dptr;
+  devPtrK = input_K->data.dptr;
+  devPtrDescaleK = input_K->scale_inv.dptr;
+  devPtrO = output_O->data.dptr;
+  devPtrAmaxO = output_O->amax.dptr;
+  if (input_Q->scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     devPtrV = input_V->data.dptr;
     devPtrDescaleV = input_V->scale_inv.dptr;
-    devPtrO = output_O->data.dptr;
-    devPtrAmaxO = output_O->amax.dptr;
     devPtrScaleO = output_O->scale.dptr;
     devPtrAmaxS = input_output_S->amax.dptr;
     devPtrScaleS = input_output_S->scale.dptr;
     devPtrDescaleS = input_output_S->scale_inv.dptr;
+  } else if (input_Q->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    devPtrV = input_V->columnwise_data.dptr;
+    devPtrDescaleV = input_V->columnwise_scale_inv.dptr;
   }
   void* devPtrM = nullptr;
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 3;
-    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
+    int i=0;
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_M->data.dptr = nullptr;
     output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
     output_M->data.dtype = DType::kFloat32;
@@ -2752,9 +2723,10 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
+    int i=0;
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;
