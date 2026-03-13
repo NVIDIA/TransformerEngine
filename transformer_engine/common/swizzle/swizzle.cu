@@ -1282,24 +1282,24 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
             cudaFuncSetAttribute(unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(
-                input_scale_inv_ptr, output_scale_inv_ptr, m, k, true);
+            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
+                                                           output_scale_inv_ptr, m, k, true);
         break;
       case 2:
         NVTE_CHECK_CUDA(
             cudaFuncSetAttribute(unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(
-                input_scale_inv_ptr, output_scale_inv_ptr, m, k, true);
+            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
+                                                           output_scale_inv_ptr, m, k, true);
         break;
       case 1:
         NVTE_CHECK_CUDA(
             cudaFuncSetAttribute(unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(
-                input_scale_inv_ptr, output_scale_inv_ptr, m, k, true);
+            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
+                                                           output_scale_inv_ptr, m, k, true);
         break;
       default:
         NVTE_ERROR("Not valid vec_load_size.");
@@ -1325,27 +1325,24 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
             cudaFuncSetAttribute(unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(input->columnwise_scale_inv.dptr,
-                                                           output->columnwise_scale_inv.dptr, m, k,
-                                                           false);
+            <<<num_blocks, block_size, slm_size, stream>>>(
+                input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr, m, k, false);
         break;
       case 2:
         NVTE_CHECK_CUDA(
             cudaFuncSetAttribute(unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(input->columnwise_scale_inv.dptr,
-                                                           output->columnwise_scale_inv.dptr, m, k,
-                                                           false);
+            <<<num_blocks, block_size, slm_size, stream>>>(
+                input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr, m, k, false);
         break;
       case 1:
         NVTE_CHECK_CUDA(
             cudaFuncSetAttribute(unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(input->columnwise_scale_inv.dptr,
-                                                           output->columnwise_scale_inv.dptr, m, k,
-                                                           false);
+            <<<num_blocks, block_size, slm_size, stream>>>(
+                input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr, m, k, false);
         break;
       default:
         NVTE_ERROR("Not valid vec_load_size.");
@@ -1356,8 +1353,7 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
 }
 
 void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
-                                            std::vector<Tensor*>& output,
-                                            cudaStream_t stream) {
+                                            std::vector<Tensor*>& output, cudaStream_t stream) {
   size_t num_tensors = input.size();
   const auto& first_scaling_mode = input[0]->scaling_mode;
 
