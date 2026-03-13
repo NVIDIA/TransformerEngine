@@ -139,7 +139,7 @@ void performTestSwizzle1D(const int num_tiles_M, const int num_tiles_K, bool row
   }
 }
 
-void performTestUnswizzle1D(const int num_tiles_M, const int num_tiles_K, bool rowwise, bool columnwise, const bool transa) {
+void performTestUnswizzle1D(const size_t M, const size_t K, bool rowwise, bool columnwise, const bool transa) {
   using namespace test;
 
   int SF_MODE_X, SF_MODE_Y;
@@ -162,11 +162,7 @@ void performTestUnswizzle1D(const int num_tiles_M, const int num_tiles_K, bool r
 
   DType dtype = DType::kFloat8E4M3;
 
-  const size_t M = num_tiles_M * MAT_TILE_DIM_M;
-  const size_t K = num_tiles_K * MAT_TILE_DIM_K;
   const auto data_shape = transa ? std::vector<size_t>{M, K} : std::vector<size_t>{K, M};
-
-  const auto scale_shape = std::vector<size_t>{data_shape[0] / SF_MODE_X, data_shape[1] /SF_MODE_Y};
 
   Tensor input("input", data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
   input.set_with_gemm_swizzled_scales(true);
@@ -174,14 +170,22 @@ void performTestUnswizzle1D(const int num_tiles_M, const int num_tiles_K, bool r
 
   fillUniform(&input);
 
-  std::unique_ptr<uint8_t[]> ref_output = std::make_unique<uint8_t[]>(scale_shape[0] * scale_shape[1]);
+  // Use the actual padded compact scale shape from the tensor for both the reference
+  // and the comparison. This correctly covers padded cases where M is not a multiple
+  // of 128 or K/32 is not a multiple of 4.
+  const auto padded_scale_shape = rowwise
+    ? input.rowwise_scale_inv_shape()
+    : input.columnwise_scale_inv_shape();
+  const size_t padded_dim0 = padded_scale_shape.data[0];
+  const size_t padded_dim1 = padded_scale_shape.data[1];
+  std::unique_ptr<uint8_t[]> ref_output = std::make_unique<uint8_t[]>(padded_dim0 * padded_dim1);
 
   nvte_unswizzle_scaling_factors(input.data(), output.data(), 0);
 
   if (rowwise)
-    compute_ref_unswizzle<128, 4, true>(input.rowwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(), scale_shape[0], scale_shape[1]);
+    compute_ref_unswizzle<128, 4, true>(input.rowwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(), padded_dim0, padded_dim1);
   else
-    compute_ref_unswizzle<128, 4, false>(input.columnwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(), scale_shape[1], scale_shape[0]);
+    compute_ref_unswizzle<128, 4, false>(input.columnwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(), padded_dim1, padded_dim0);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -189,9 +193,9 @@ void performTestUnswizzle1D(const int num_tiles_M, const int num_tiles_K, bool r
 
   output.to_cpu();
   if (rowwise) {
-    compareResults("output_unswizzle", output.rowwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(), scale_shape[0] * scale_shape[1]);
+    compareResults("output_unswizzle", output.rowwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(), padded_dim0 * padded_dim1);
   } else {
-    compareResults("output_unswizzle", output.columnwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(), scale_shape[0] * scale_shape[1]);
+    compareResults("output_unswizzle", output.columnwise_cpu_scale_inv_ptr<uint8_t>(), ref_output.get(), padded_dim0 * padded_dim1);
   }
 }
 
@@ -211,17 +215,17 @@ TEST_P(SwizzleTestSuite, TestSwizzle) {
                        transa);
 }
 
-class UnswizzleTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool>> {};
+class UnswizzleTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<size_t, size_t>, std::pair<bool, bool>, bool>> {};
 
 TEST_P(UnswizzleTestSuite, TestUnswizzle) {
     using namespace transformer_engine;
     using namespace test;
 
-  const auto num_tiles = std::get<0>(GetParam());
+  const auto data_shape = std::get<0>(GetParam());
   const auto scaling_mode = std::get<1>(GetParam());
   const auto transa = std::get<2>(GetParam());
 
-  performTestUnswizzle1D(num_tiles.first, num_tiles.second,
+  performTestUnswizzle1D(data_shape.first, data_shape.second,
                          scaling_mode.first, scaling_mode.second,
                          transa);
 }
@@ -236,6 +240,23 @@ std::vector<std::pair<int, int>> num_tiles = {
   {65, 257},
   {65, 258},
   {65, 259},
+};
+
+// Raw {M, K} data shapes for unswizzle tests. Includes aligned cases (scale dims
+// already multiples of 128 and 4) and padded cases where M or K/32 are not yet
+// aligned, forcing the compact scale_inv to carry a padded tail.
+// All K values must be multiples of 32 (MXFP8 block size).
+std::vector<std::pair<size_t, size_t>> unswizzle_data_shapes = {
+  // Aligned: scale dims are already multiples of 128 and 4
+  {128, 128},
+  {128, 16896},   // K = 132 * 128, large K
+  {16896, 128},   // M = 132 * 128, large M
+  // M-padding only: M not a multiple of 128 (scale-M needs padding to 256)
+  {160, 128},
+  // scale-K padding only: K/32 = 3, padded to 4
+  {128, 96},
+  // Both M and scale-K need padding
+  {160, 96},
 };
 
 std::vector<std::pair<bool, bool>> scaling_mode = {
@@ -269,12 +290,12 @@ INSTANTIATE_TEST_SUITE_P(
   OperatorTest,
   UnswizzleTestSuite,
   ::testing::Combine(
-    ::testing::ValuesIn(num_tiles),
+    ::testing::ValuesIn(unswizzle_data_shapes),
     ::testing::ValuesIn(scaling_mode),
     ::testing::ValuesIn(transa)
   ),
   [](const testing::TestParamInfo<UnswizzleTestSuite::ParamType>& info) {
-    std::string name = "ntiles" +
+    std::string name = "MK" +
       std::to_string(std::get<0>(info.param).first) + "X" +
       std::to_string(std::get<0>(info.param).second) + "smode" +
       std::to_string(std::get<1>(info.param).first) + "X"+
