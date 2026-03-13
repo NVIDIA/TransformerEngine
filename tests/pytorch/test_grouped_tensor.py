@@ -472,7 +472,6 @@ class TestGroupedTensor:
         out_features = 32
         dtype = torch.float32
 
-        # Source module: checkpoint format with one parameter per GEMM.
         src = te.GroupedLinear(
             num_gemms=num_gemms,
             in_features=in_features,
@@ -494,10 +493,8 @@ class TestGroupedTensor:
         torch.save(src.state_dict(), ckpt_path)
         del src
 
-        # Load checkpoint from disk, as done in real checkpoint restore flows.
-        src_state_dict = torch.load(ckpt_path, map_location="cpu")
+        src_state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
-        # Destination module: single_grouped_parameter=True expects `weight`.
         dst = te.GroupedLinear(
             num_gemms=num_gemms,
             in_features=in_features,
@@ -509,9 +506,49 @@ class TestGroupedTensor:
         assert len(load_result.missing_keys) == 0
         assert len(load_result.unexpected_keys) == 0
 
-        # Verify grouped storage preserved each per-GEMM weight value exactly.
         assert getattr(dst, "weight", None) is not None
         loaded_weights = dst.weight.split_into_quantized_tensors()
         assert len(loaded_weights) == num_gemms
         for loaded_weight, expected_weight in zip(loaded_weights, expected_weights):
             assert torch.equal(loaded_weight, expected_weight)
+
+    def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
+        """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
+        num_gemms = 3
+        in_features = 64
+        out_features = 32
+        dtype = torch.float32
+
+        src = te.GroupedLinear(
+            num_gemms=num_gemms,
+            in_features=in_features,
+            out_features=out_features,
+            params_dtype=dtype,
+            single_grouped_parameter=True,
+        ).cuda()
+        with torch.no_grad():
+            source_weights = src.weight.split_into_quantized_tensors()
+            for i in range(num_gemms):
+                source_weights[i].copy_(
+                    torch.randn(out_features, in_features, device="cuda", dtype=dtype)
+                )
+        expected_weights = [weight.detach().clone() for weight in source_weights]
+        ckpt_path = tmp_path / "grouped_linear_single_param.pt"
+        torch.save(src.state_dict(), ckpt_path)
+        del src
+
+        src_state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+        dst = te.GroupedLinear(
+            num_gemms=num_gemms,
+            in_features=in_features,
+            out_features=out_features,
+            params_dtype=dtype,
+            single_grouped_parameter=False,
+        ).cuda()
+        load_result = dst.load_state_dict(src_state_dict, strict=True)
+        assert len(load_result.missing_keys) == 0
+        assert len(load_result.unexpected_keys) == 0
+
+        for i, expected_weight in enumerate(expected_weights):
+            assert torch.equal(getattr(dst, f"weight{i}"), expected_weight)
