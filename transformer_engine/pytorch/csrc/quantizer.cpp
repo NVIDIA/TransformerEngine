@@ -73,11 +73,15 @@ std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
              "first_dims must have length ", num_tensors, ".");
 
   const int64_t logical_last_dim_i64 = static_cast<int64_t>(logical_last_dim);
-  auto scaled_first_dims = (first_dims_tensor * logical_last_dim_i64).contiguous();
-  // Single kernel needed for these ops.
-  auto cumsum = at::cumsum(scaled_first_dims, 0);
-  auto zero = at::zeros({1}, cumsum.options());
-  return at::cat({zero, cumsum});
+  const auto first_dims_contiguous = first_dims_tensor.contiguous();
+  auto tensor_offsets =
+      at::empty({static_cast<int64_t>(num_tensors) + 1}, first_dims_contiguous.options());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_splits_to_offsets(static_cast<const int64_t*>(first_dims_contiguous.data_ptr()),
+                           static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+                           logical_last_dim_i64, at::cuda::getCurrentCUDAStream());
+  });
+  return tensor_offsets;
 }
 
 at::TensorOptions grouped_tensor_data_options(const DType dtype) {
