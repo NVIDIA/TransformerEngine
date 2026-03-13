@@ -374,8 +374,7 @@ def general_grouped_gemm_for_grouped_tensor(
     if not alpha.is_cuda or not beta.is_cuda:
         raise ValueError("alpha and beta must be CUDA tensors.")
 
-    device_index = device.index if isinstance(device, torch.device) else device
-    workspace_setup, workspace_cublas = _get_grouped_gemm_workspaces(device_index, num_tensors)
+    workspace_setup, workspace_cublas = _get_grouped_gemm_workspaces(device.index, num_tensors)
 
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
