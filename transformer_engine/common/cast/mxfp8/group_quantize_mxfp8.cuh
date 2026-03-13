@@ -46,7 +46,7 @@ struct TunableConfig {
   // false -> non-persistent one-job-per-CTA execution
   static constexpr bool PERSISTENT = true;
   // Launch static persistent grid as (SM_count * STATIC_PERSISTENT_BLOCKS_PER_SM, 1, 1).
-  static constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = 4;
+  static constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = 24;
 };
 
 constexpr bool PERSISTENT = TunableConfig::PERSISTENT;
@@ -908,7 +908,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
                                              global_offset_X, global_offset_Y,
                                              next_prefetch_buff_offset, shmem_buff_size, barrier,
                                              leading_thread);
-        ptx::fence_proxy_async_shared_cta();
       }
 
       ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
