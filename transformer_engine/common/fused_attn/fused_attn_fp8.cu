@@ -1655,14 +1655,15 @@ void fused_attn_fp8_fwd_impl_v1(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d_qk, int64_t d_v,
     bool is_training, float scaling_factor, float dropout_probability, NVTE_QKV_Layout qkv_layout,
     NVTE_QKV_Format o_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal, void* devPtrQ,
-    void* devPtrK, void* devPtrV, void* devPtrM, void* devPtrZInv, void* devPtrO,
-    void* devPtrDescaleQ, void* devPtrDescaleK, void* devPtrDescaleV, void* devPtrDescaleS,
-    void* devPtrScaleS, void* devPtrScaleO, void* devPtrAmaxO, void* devPtrAmaxS,
-    void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV, void* devPtrDropoutSeed,
-    void* devPtrDropoutOffset, cudnn_frontend::DataType_t qkv_tensor_type,
-    cudnn_frontend::DataType_t o_tensor_type, NVTEScalingMode scaling_mode, void* workspace,
-    size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, void* devPtrQ, void* devPtrK, void* devPtrV,
+    void* devPtrSoftmaxOffset, void* devPtrM, void* devPtrZInv, void* devPtrO, void* devPtrDescaleQ,
+    void* devPtrDescaleK, void* devPtrDescaleV, void* devPtrDescaleS, void* devPtrScaleS,
+    void* devPtrScaleO, void* devPtrAmaxO, void* devPtrAmaxS, void* devPtrcuSeqlensQ,
+    void* devPtrcuSeqlensKV, void* devPtrDropoutSeed, void* devPtrDropoutOffset,
+    cudnn_frontend::DataType_t qkv_tensor_type, cudnn_frontend::DataType_t o_tensor_type,
+    NVTEScalingMode scaling_mode, void* workspace, size_t* workspace_size, cudaStream_t stream,
+    cudnnHandle_t handle) {
   using namespace transformer_engine;
   const auto cudnn_runtime_version = cudnnGetVersion();
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -1672,6 +1673,7 @@ void fused_attn_fp8_fwd_impl_v1(
   bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (is_training && dropout_probability != 0.0f);
+  bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   auto bias_b = b;
   auto bias_h = h;
   auto bias_sq = s_q;
@@ -1715,7 +1717,7 @@ void fused_attn_fp8_fwd_impl_v1(
                                qkv_layout,
                                bias_type,
                                mask_type,
-                               NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX,
+                               softmax_type,
                                window_size_left,
                                window_size_right,
                                bottom_right_diagonal,
@@ -1744,6 +1746,7 @@ void fused_attn_fp8_fwd_impl_v1(
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // amax_o
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // Stats
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // bias
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // softmax_offset
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
@@ -1770,7 +1773,7 @@ void fused_attn_fp8_fwd_impl_v1(
       std::shared_ptr<fe::graph::Tensor_attributes> Q, K, V, attn_scale;
       std::shared_ptr<fe::graph::Tensor_attributes> descale_q, descale_k, descale_v;
       std::shared_ptr<fe::graph::Tensor_attributes> descale_s, scale_s, scale_o;
-      std::shared_ptr<fe::graph::Tensor_attributes> bias, seq_q, seq_kv;
+      std::shared_ptr<fe::graph::Tensor_attributes> bias, softmax_offset, seq_q, seq_kv;
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
       // Q, K, V, attn_scale
@@ -1910,6 +1913,15 @@ void fused_attn_fp8_fwd_impl_v1(
         sdpa_options.set_dropout(dropout_probability, dropout_seed, dropout_offset);
       }
 
+      if (is_softmax_offset) {
+        softmax_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                               .set_name("softmax_offset")
+                                               .set_dim({1, h, 1, 1})
+                                               .set_stride({h, 1, 1, 1})
+                                               .set_data_type(fe::DataType_t::FLOAT));
+        // sdpa_options.set_sink_token(softmax_offset);
+      }
+
       std::shared_ptr<fe::graph::Tensor_attributes> O, Stats, amax_s, amax_o;
       if (is_delayed_scaling || is_current_scaling) {
         auto outputs = mha_graph->sdpa_fp8(Q, K, V, descale_q, descale_k, descale_v, descale_s,
@@ -1965,6 +1977,8 @@ void fused_attn_fp8_fwd_impl_v1(
                                          scale_s, scale_o, attn_scale, O, amax_s, amax_o);
       auto Stats_tuple = std::make_tuple(Stats);
       auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
+      auto softmax_offset_tuple =
+          is_softmax_offset ? std::make_tuple(softmax_offset) : std::make_tuple(nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
@@ -1976,15 +1990,16 @@ void fused_attn_fp8_fwd_impl_v1(
       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
       auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple,
-                                         bias_tuple, padding_tuple, dropout_tuple);
+                                         bias_tuple, softmax_offset_tuple, padding_tuple,
+                                         dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
     };
 
     auto [mha_graph, Q, K, V, descale_q, descale_k, descale_v, descale_s, scale_s, scale_o,
-          attn_scale, O, amax_s, amax_o, Stats, bias, seq_q, seq_kv, dropout_seed, dropout_offset] =
-        get_graph(sdpa_fp8_fprop_cache, descriptor);
+          attn_scale, O, amax_s, amax_o, Stats, bias, softmax_offset, seq_q, seq_kv,
+          dropout_seed, dropout_offset] = get_graph(sdpa_fp8_fprop_cache, descriptor);
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
@@ -2044,6 +2059,10 @@ void fused_attn_fp8_fwd_impl_v1(
       variant_pack[dropout_offset] = devPtrDropoutOffset;
     }
 
+    if (is_softmax_offset) {
+      variant_pack[softmax_offset] = devPtrSoftmaxOffset;
+    }
+
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
   } catch (cudnn_frontend::cudnnException& e) {
     NVTE_ERROR(e.what());
@@ -2055,20 +2074,23 @@ void fused_attn_fp8_bwd_impl_v1(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d_qk, int64_t d_v,
     float scaling_factor, float dropout_probability, NVTE_QKV_Layout qkv_layout,
     NVTE_QKV_Format o_format, NVTE_QKV_Format d_out_format, NVTE_QKV_Layout dqkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, int64_t window_size_left,
-    int64_t window_size_right, bool bottom_right_diagonal, bool deterministic, void* devPtrQ,
-    void* devPtrK, void* devPtrV, void* devPtrM, void* devPtrZInv, void* devPtrO, void* devPtrdO,
-    void* devPtrdQ, void* devPtrdK, void* devPtrdV, void* devPtrDescaleQ, void* devPtrDescaleK,
-    void* devPtrDescaleV, void* devPtrDescaleO, void* devPtrDescaledO, void* devPtrDescaleS,
-    void* devPtrDescaledP, void* devPtrScaleS, void* devPtrScaledP, void* devPtrScaledQ,
-    void* devPtrScaledK, void* devPtrScaledV, void* devPtrAmaxdP, void* devPtrAmaxdQ,
-    void* devPtrAmaxdK, void* devPtrAmaxdV, void* devPtrQ_t, void* devPtrK_t, void* devPtrdO_f16,
-    void* devPtrdO_t, void* devPtrDescaleQ_t, void* devPtrDescaleK_t, void* devPtrDescaledO_t,
-    void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV, void* devPtrDropoutSeed,
-    void* devPtrDropoutOffset, cudnn_frontend::DataType_t qkv_tensor_type,
-    cudnn_frontend::DataType_t o_tensor_type, cudnn_frontend::DataType_t do_tensor_type,
-    cudnn_frontend::DataType_t dqkv_tensor_type, NVTEScalingMode scaling_mode, void* workspace,
-    size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    bool deterministic, void* devPtrQ, void* devPtrK, void* devPtrV,
+    void* devPtrM, void* devPtrZInv,
+    void* devPtrO, void* devPtrdO, void* devPtrSoftmaxOffset, void* devPtrdQ, void* devPtrdK, void* devPtrdV,
+    void* devPtrdSoftmaxOffset, void* devPtrDescaleQ,
+    void* devPtrDescaleK, void* devPtrDescaleV, void* devPtrDescaleO, void* devPtrDescaledO,
+    void* devPtrDescaleS, void* devPtrDescaledP, void* devPtrScaleS, void* devPtrScaledP,
+    void* devPtrScaledQ, void* devPtrScaledK, void* devPtrScaledV, void* devPtrAmaxdP,
+    void* devPtrAmaxdQ, void* devPtrAmaxdK, void* devPtrAmaxdV, void* devPtrQ_t, void* devPtrK_t,
+    void* devPtrdO_f16, void* devPtrdO_t, void* devPtrDescaleQ_t, void* devPtrDescaleK_t,
+    void* devPtrDescaledO_t, void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
+    void* devPtrDropoutSeed, void* devPtrDropoutOffset,
+    cudnn_frontend::DataType_t qkv_tensor_type, cudnn_frontend::DataType_t o_tensor_type,
+    cudnn_frontend::DataType_t do_tensor_type, cudnn_frontend::DataType_t dqkv_tensor_type,
+    NVTEScalingMode scaling_mode, void* workspace, size_t* workspace_size, cudaStream_t stream,
+    cudnnHandle_t handle) {
   using namespace transformer_engine;
   const auto cudnn_runtime_version = cudnnGetVersion();
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -2078,6 +2100,7 @@ void fused_attn_fp8_bwd_impl_v1(
   bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (dropout_probability != 0.0f);
+  bool is_softmax_offset = (softmax_type != NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX);
   auto bias_b = b;
   auto bias_h = h;
   auto bias_sq = s_q;
@@ -2124,7 +2147,7 @@ void fused_attn_fp8_bwd_impl_v1(
                                qkv_layout,
                                bias_type,
                                mask_type,
-                               NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX,
+                               softmax_type,
                                window_size_left,
                                window_size_right,
                                bottom_right_diagonal,
@@ -2173,6 +2196,8 @@ void fused_attn_fp8_bwd_impl_v1(
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // amax_dP
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // bias
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // dBias
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // softmax_offset
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // d_softmax_offset
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
@@ -2205,7 +2230,8 @@ void fused_attn_fp8_bwd_impl_v1(
       std::shared_ptr<fe::graph::Tensor_attributes> descale_dP, descale_dO, descale_dO_t;
       std::shared_ptr<fe::graph::Tensor_attributes> scale_s, scale_dP;
       std::shared_ptr<fe::graph::Tensor_attributes> scale_dQ, scale_dK, scale_dV;
-      std::shared_ptr<fe::graph::Tensor_attributes> bias, dBias, seq_q, seq_kv;
+      std::shared_ptr<fe::graph::Tensor_attributes> bias, dBias, softmax_offset, d_softmax_offset;
+      std::shared_ptr<fe::graph::Tensor_attributes> seq_q, seq_kv;
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
       // Q, K, V, O, dO, stats, attn_scale
@@ -2458,6 +2484,22 @@ void fused_attn_fp8_bwd_impl_v1(
                                                .set_data_type(fe::DataType_t::INT64));
         sdpa_backward_options.set_dropout(dropout_probability, dropout_seed, dropout_offset);
       }
+
+      if (is_softmax_offset) {
+        softmax_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                               .set_name("softmax_offset")
+                                               .set_dim({1, h, 1, 1})
+                                               .set_stride({h, 1, 1, 1})
+                                               .set_data_type(fe::DataType_t::FLOAT));
+        // sdpa_backward_options.set_sink_token(softmax_offset);
+        d_softmax_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                                 .set_name("d_softmax_offset")
+                                                 .set_dim({1, h, 1, 1})
+                                                 .set_stride({h, 1, 1, 1})
+                                                 .set_data_type(fe::DataType_t::FLOAT));
+        // sdpa_backward_options.set_dsink_token(d_softmax_offset);
+      }
+
       std::shared_ptr<fe::graph::Tensor_attributes> dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP;
       if (is_delayed_scaling || is_current_scaling) {
         auto outputs = mha_graph->sdpa_fp8_backward(Q, K, V, O, dO, Stats, descale_q, descale_k,
@@ -2552,6 +2594,9 @@ void fused_attn_fp8_bwd_impl_v1(
           is_mxfp8 ? std::make_tuple(Q_t, K_t, dO_f16, dO_t, descale_q_t, descale_k_t, descale_dO_t)
                    : std::make_tuple(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
       auto bias_tuple = is_bias ? std::make_tuple(bias, dBias) : std::make_tuple(nullptr, nullptr);
+      auto softmax_offset_tuple = is_softmax_offset
+                                      ? std::make_tuple(softmax_offset, d_softmax_offset)
+                                      : std::make_tuple(nullptr, nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
@@ -2565,7 +2610,7 @@ void fused_attn_fp8_bwd_impl_v1(
 
       auto return_tuple =
           std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, mxfp8_tensors_tuple,
-                         bias_tuple, padding_tuple, dropout_tuple);
+                         bias_tuple, softmax_offset_tuple, padding_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
@@ -2573,8 +2618,8 @@ void fused_attn_fp8_bwd_impl_v1(
     auto [mha_graph, Q, K, V, O, Stats, dO, attn_scale, descale_q, descale_k, descale_v, descale_o,
           descale_dO, descale_s, descale_dP, scale_s, scale_dQ, scale_dK, scale_dV, scale_dP, dQ,
           dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP, Q_t, K_t, dO_f16, dO_t, descale_q_t,
-          descale_k_t, descale_dO_t, bias, dBias, seq_q, seq_kv, dropout_seed, dropout_offset] =
-        get_graph(sdpa_fp8_bprop_cache, descriptor);
+          descale_k_t, descale_dO_t, bias, dBias, softmax_offset, d_softmax_offset, seq_q, seq_kv,
+          dropout_seed, dropout_offset] = get_graph(sdpa_fp8_bprop_cache, descriptor);
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
@@ -2662,6 +2707,11 @@ void fused_attn_fp8_bwd_impl_v1(
       variant_pack[dropout_offset] = devPtrDropoutOffset;
     }
 
+    if (is_softmax_offset) {
+      variant_pack[softmax_offset] = devPtrSoftmaxOffset;
+      variant_pack[d_softmax_offset] = devPtrdSoftmaxOffset;
+    }
+
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
   } catch (cudnn_frontend::cudnnException& e) {
     NVTE_ERROR(e.what());
@@ -2678,9 +2728,11 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
                         size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
                         size_t head_dim_v, bool is_training, float attn_scale, float p_dropout,
                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-                        NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, size_t window_size_left,
+                        NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+                        NVTE_Softmax_Type softmax_type, size_t window_size_left,
                         size_t window_size_right, bool bottom_right_diagonal, const Tensor* input_Q,
-                        const Tensor* input_K, const Tensor* input_V, Tensor* input_output_S,
+                        const Tensor* input_K, const Tensor* input_V,
+                        const Tensor* input_SoftmaxOffset, Tensor* input_output_S,
                         Tensor* output_O, NVTETensorPack* Aux_CTX_Tensors,
                         const Tensor* cu_seqlens_q, const Tensor* cu_seqlens_kv,
                         const Tensor* rng_state, Tensor* workspace, cudaStream_t stream,
@@ -2707,11 +2759,14 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
     devPtrV = input_V->columnwise_data.dptr;
     devPtrDescaleV = input_V->columnwise_scale_inv.dptr;
   }
+  void* devPtrSoftmaxOffset = nullptr;
+  if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+    devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
+  }
   void* devPtrM = nullptr;
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
-    Aux_CTX_Tensors->size = 3;
-    int i=0;
+    int i = 0;
     Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -2724,14 +2779,25 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
     output_rng_state->data.dptr = nullptr;
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
-  } else if (Aux_CTX_Tensors->size == 3) {
-    int i=0;
+    if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+      Tensor* output_softmax_offset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_softmax_offset->data.dptr = nullptr;
+      output_softmax_offset->data.shape = {1, num_attn_heads, 1, 1};
+      output_softmax_offset->data.dtype = DType::kFloat32;
+    }
+    Aux_CTX_Tensors->size = i;
+  } else if (Aux_CTX_Tensors->size >= 3) {
+    int i = 0;
     Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;
+    if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+      Tensor* output_softmax_offset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_softmax_offset->data.dptr = devPtrSoftmaxOffset;
+    }
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
   }
@@ -2755,12 +2821,12 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
     fused_attn::fused_attn_fp8_fwd_impl_v1(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
         is_training, attn_scale, p_dropout, qkv_layout, o_format, bias_type, mask_type,
-        window_size_left, window_size_right, bottom_right_diagonal, devPtrQ, devPtrK, devPtrV,
-        devPtrM, devPtrZInv, devPtrO, devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV,
-        devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO, devPtrAmaxS, devPtrcuSeqlensQ,
-        devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
-        get_cudnn_fe_dtype(O_type), input_Q->scaling_mode, workspace->data.dptr, &workspace_size,
-        stream, handle);
+        softmax_type, window_size_left, window_size_right, bottom_right_diagonal, devPtrQ,
+        devPtrK, devPtrV, devPtrSoftmaxOffset, devPtrM, devPtrZInv, devPtrO, devPtrDescaleQ,
+        devPtrDescaleK, devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO,
+        devPtrAmaxS, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset,
+        get_cudnn_fe_dtype(QKV_type), get_cudnn_fe_dtype(O_type), input_Q->scaling_mode,
+        workspace->data.dptr, &workspace_size, stream, handle);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
     fused_attn::fused_attn_fp8_fwd_impl(
         batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim_qk, is_training, attn_scale,
@@ -2791,13 +2857,15 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
                         size_t head_dim_v, float attn_scale, float p_dropout,
                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
                         NVTE_QKV_Format d_out_format, NVTE_QKV_Layout dqkv_layout,
-                        NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, size_t window_size_left,
+                        NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+                        NVTE_Softmax_Type softmax_type, size_t window_size_left,
                         size_t window_size_right, bool bottom_right_diagonal, bool deterministic,
                         const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V,
                         const Tensor* input_O, const Tensor* input_dO, const Tensor* input_dO_f16,
                         const Tensor* input_M, const Tensor* input_ZInv, const Tensor* input_S,
-                        Tensor* input_output_dP, const Tensor* output_dQ, const Tensor* output_dK,
-                        const Tensor* output_dV, const Tensor* cu_seqlens_q,
+                        const Tensor* input_SoftmaxOffset, Tensor* input_output_dP,
+                        const Tensor* output_dQ, const Tensor* output_dK, const Tensor* output_dV,
+                        Tensor* output_dSoftmaxOffset, const Tensor* cu_seqlens_q,
                         const Tensor* cu_seqlens_kv, const Tensor* rng_state, Tensor* workspace,
                         cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
@@ -2839,6 +2907,13 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   void* devPtrScaledP = input_output_dP->scale.dptr;
   void* devPtrDescaledP = input_output_dP->scale_inv.dptr;
 
+  void* devPtrSoftmaxOffset = nullptr;
+  void* devPtrdSoftmaxOffset = nullptr;
+  if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+    devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
+    devPtrdSoftmaxOffset = output_dSoftmaxOffset->data.dptr;
+  }
+
   void* devPtrdQ = output_dQ->data.dptr;
   void* devPtrdK = output_dK->data.dptr;
   void* devPtrdV = output_dV->data.dptr;
@@ -2869,16 +2944,16 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
     fused_attn::fused_attn_fp8_bwd_impl_v1(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
         attn_scale, p_dropout, qkv_layout, o_format, d_out_format, dqkv_layout, bias_type,
-        mask_type, window_size_left, window_size_right, bottom_right_diagonal, deterministic,
-        devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv, devPtrO, devPtrdO, devPtrdQ, devPtrdK,
-        devPtrdV, devPtrDescaleQ, devPtrDescaleK, devPtrDescaleV, devPtrDescaleO, devPtrDescaledO,
-        devPtrDescaleS, devPtrDescaledP, devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK,
-        devPtrScaledV, devPtrAmaxdP, devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t,
-        devPtrdO_f16, devPtrdO_t, devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t,
-        devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset,
-        get_cudnn_fe_dtype(QKV_type), get_cudnn_fe_dtype(O_type), get_cudnn_fe_dtype(dO_type),
-        get_cudnn_fe_dtype(dQKV_type), input_dO->scaling_mode, workspace->data.dptr,
-        &workspace_size, stream, handle);
+        mask_type, softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
+        deterministic, devPtrQ, devPtrK, devPtrV,
+        devPtrM, devPtrZInv, devPtrO, devPtrdO, devPtrSoftmaxOffset, devPtrdQ, devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ,
+        devPtrDescaleK, devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS,
+        devPtrDescaledP, devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV,
+        devPtrAmaxdP, devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16,
+        devPtrdO_t, devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ,
+        devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
+        get_cudnn_fe_dtype(O_type), get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type),
+        input_dO->scaling_mode, workspace->data.dptr, &workspace_size, stream, handle);
   } else if (dqkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
     fused_attn::fused_attn_fp8_bwd_impl(
         batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim_qk, attn_scale, p_dropout,

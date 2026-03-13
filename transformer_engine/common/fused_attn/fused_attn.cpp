@@ -643,9 +643,10 @@ void nvte_fused_attn_fwd(
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, is_training,
                        attn_scale, dropout, qkv_layout, o_format, bias_type, attn_mask_type,
-                       window_size_left, window_size_right, bottom_right_diagonal, input_Q, input_K,
-                       input_V, input_output_S, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
-                       input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
+                       softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
+                       input_Q, input_K, input_V, input_SoftmaxOffset, input_output_S, output_O,
+                       Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state,
+                       wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
@@ -742,20 +743,25 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 #endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
-    const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    const Tensor *input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    const Tensor *input_dO_f16;
+    size_t i = 0;
+    const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    const Tensor *input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    const Tensor *input_dO_f16 = nullptr;
     if (input_dO->scaling_mode == NVTE_MXFP8_1D_SCALING) {
-      input_dO_f16 = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[3]);
+      input_dO_f16 = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    }
+    const Tensor *input_SoftmaxOffset = nullptr;
+    if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+      input_SoftmaxOffset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }
     fused_attn_fp8_bwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, attn_scale, dropout,
                        qkv_layout, o_format, d_out_format, dqkv_layout, bias_type, attn_mask_type,
-                       window_size_left, window_size_right, bottom_right_diagonal, deterministic,
-                       input_Q, input_K, input_V, input_O, input_dO, input_dO_f16, input_M,
-                       input_ZInv, input_S, input_output_dP, output_dQ, output_dK, output_dV,
-                       input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state, wkspace, stream,
-                       handle);
+                       softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
+                       deterministic, input_Q, input_K, input_V, input_O, input_dO, input_dO_f16,
+                       input_M, input_ZInv, input_S, input_SoftmaxOffset, input_output_dP,
+                       output_dQ, output_dK, output_dV, output_dSoftmaxOffset, input_cu_seqlens_q,
+                       input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
 #endif
