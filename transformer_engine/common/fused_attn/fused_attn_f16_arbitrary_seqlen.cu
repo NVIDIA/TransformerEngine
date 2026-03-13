@@ -8,7 +8,6 @@
 #include <cuda_fp16.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
-#include <dlpack/dlpack.h>
 #include <pybind11/cast.h>
 #include <pybind11/pybind11.h>
 
@@ -18,6 +17,7 @@
 #include <vector>
 
 #include "../../../3rdparty/cudnn-frontend/python/pygraph/pygraph.h"
+#include "../../../3rdparty/dlpack/include/dlpack/dlpack.h"
 #include "../common.h"
 #include "../cudnn_utils.h"
 #include "../util/cuda_runtime.h"
