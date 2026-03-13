@@ -53,6 +53,32 @@ if bf16_available:
     _core_dtypes.insert(1, torch.bfloat16)
     _fused_dtypes.insert(1, torch.bfloat16)
 
+_quantized_numerics_recipe_list = [
+    pytest.param(
+        "fp8_current_scaling",
+        marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+        id="Float8CurrentScaling",
+    ),
+    pytest.param(
+        "mxfp8",
+        marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+        id="MXFP8BlockScaling",
+    ),
+    pytest.param(
+        "fp8_block_scaling",
+        marks=pytest.mark.skipif(
+            not fp8_block_scaling_available,
+            reason=reason_for_no_fp8_block_scaling,
+        ),
+        id="Float8BlockScaling",
+    ),
+    pytest.param(
+        "nvfp4",
+        marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+        id="NVFP4BlockScaling",
+    ),
+]
+
 
 @pytest.fixture(autouse=True)
 def _reset_global_fp8_state():
@@ -68,29 +94,210 @@ def backward_mode(request: pytest.FixtureRequest) -> str:
 
 
 # --------------------------
+# Test cases
+# --------------------------
+
+
+_shape_test_cases = [
+    pytest.param((1, 64), 64, id="2d_m1_k64_n64"),
+    pytest.param((32, 64), 64, id="2d_m32_k64_n64"),
+    pytest.param((32, 96), 96, id="2d_m32_k96_n96"),
+    pytest.param((32, 1, 64), 64, id="3d_m32_s1_k64_n64"),
+    pytest.param((8, 4, 64), 128, id="3d_m32_k64_n128"),
+    pytest.param((16, 2, 128), 64, id="3d_m32_k128_n64"),
+    pytest.param((160, 64), 64, id="2d_m160_k64_n64"),
+    pytest.param((5, 64, 64), 64, id="3d_m320_k64_n64"),
+    pytest.param((3, 5, 32, 64), 96, id="4d_m480_k64_n96"),
+    pytest.param((2, 5, 16, 128), 64, id="4d_m160_k128_n64"),
+    # Intentionally unaligned token dimensions to exercise skip/support logic.
+    pytest.param((3, 64), 64, id="2d_m3_k64_n64_unaligned"),
+    pytest.param((3, 10, 64), 64, id="3d_m30_k64_n64_unaligned"),
+    pytest.param((3, 10, 96), 96, id="3d_m30_k96_n96_unaligned"),
+]
+
+_bias_activation_shape_cases = [
+    pytest.param((32, 64), id="2d_m32_k64"),
+    pytest.param((32, 96), id="2d_m32_k96"),
+    pytest.param((8, 4, 64), id="3d_m32_k64"),
+    pytest.param((160, 64), id="2d_m160_k64"),
+    pytest.param((5, 64, 64), id="3d_m320_k64"),
+    pytest.param((3, 5, 32, 64), id="4d_m480_k64"),
+    # Intentionally unaligned token dimensions to exercise skip/support logic.
+    pytest.param((3, 64), id="2d_m3_k64_unaligned"),
+    pytest.param((3, 10, 64), id="3d_m30_k64_unaligned"),
+    pytest.param((3, 10, 96), id="3d_m30_k96_unaligned"),
+]
+
+_grouped_m_split_cases = [
+    pytest.param([32, 32, 32, 32], id="uniform_splits"),
+    pytest.param([64, 0, 32, 32], id="with_empty_split"),
+    pytest.param([1, 31, 0, 96], id="small_and_empty_splits"),
+    pytest.param([64, 192, 0, 128], id="64_divisible_splits"),
+]
+
+_linear_feature_cases = [
+    pytest.param(64, 64, id="k64_n64"),
+    pytest.param(64, 128, id="k64_n128"),
+    pytest.param(128, 64, id="k128_n64"),
+    pytest.param(96, 96, id="k96_n96"),
+    pytest.param(64, 96, id="k64_n96"),
+    pytest.param(96, 64, id="k96_n64"),
+    pytest.param(128, 96, id="k128_n96"),
+    pytest.param(96, 128, id="k96_n128"),
+]
+
+_output_feature_cases = [
+    pytest.param(64, id="n64"),
+    pytest.param(96, id="n96"),
+    pytest.param(128, id="n128"),
+]
+
+# --------------------------
+# Skip helpers
+# --------------------------
+
+
+def _maybe_skip_recipe_dtype(
+    recipe_name: str,
+    dtype: torch.dtype,
+    module_type: Optional[str] = None,
+) -> None:
+    if dtype == torch.bfloat16 and not bf16_available:
+        pytest.skip(reason_for_no_bf16)
+    if recipe_name == "nvfp4":
+        if module_type in ("linear", "layernorm_linear") and dtype not in (
+            torch.bfloat16,
+            torch.float32,
+        ):
+            pytest.skip(f"NVFP4 only supports BF16 and FP32 for {module_type} in this test")
+        elif module_type in ("ops_linear", "grouped_linear") and dtype != torch.bfloat16:
+            pytest.skip(f"NVFP4 only supports BF16 for {module_type} in this test")
+
+
+def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: str) -> None:
+    if module_type == "ops_linear" and recipe_name == "fp8_block_scaling":
+        pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
+
+
+def _maybe_skip_unsupported_recipe_shape(
+    recipe_name: str,
+    input_shape: tuple[int, ...],
+    module_type: str,
+) -> None:
+    flat_first_dim = math.prod(input_shape[:-1])
+    last_dim = input_shape[-1]
+
+    if module_type in ("linear", "layernorm_linear"):
+        if recipe_name == "mxfp8" and (flat_first_dim % 32 != 0 or last_dim % 32 != 0):
+            pytest.skip(
+                "Linear/LayerNormLinear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible"
+                " by 32."
+            )
+            return
+        if recipe_name == "nvfp4" and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
+            pytest.skip(
+                "Linear/LayerNormLinear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible"
+                " by 16."
+            )
+            return
+        if flat_first_dim % 8 != 0 or last_dim % 16 != 0:
+            pytest.skip(
+                "Linear/LayerNormLinear FP8 execution requires prod(shape[:-1]) divisible by 8 "
+                "and shape[-1] divisible by 16."
+            )
+    elif module_type == "ops_linear":
+        if recipe_name == "mxfp8" and (flat_first_dim % 32 != 0 or last_dim % 32 != 0):
+            pytest.skip(
+                "te_ops.Linear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible by 32."
+            )
+        if recipe_name == "nvfp4" and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
+            pytest.skip(
+                "te_ops.Linear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible by 16."
+            )
+
+
+def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]) -> None:
+    non_empty_splits = [m for m in m_splits if m > 0]
+    if recipe_name == "mxfp8" and any(m % 32 != 0 for m in non_empty_splits):
+        pytest.skip("GroupedLinear + MXFP8 requires each non-empty m_split divisible by 32.")
+    if recipe_name == "nvfp4" and any(m % 16 != 0 for m in non_empty_splits):
+        pytest.skip("GroupedLinear + NVFP4 requires each non-empty m_split divisible by 16.")
+    if recipe_name == "nvfp4" and any(m % 64 != 0 for m in non_empty_splits):
+        pytest.skip(
+            "GroupedLinear + NVFP4 grouped split_quantize currently requires each non-empty "
+            "m_split divisible by 64 due to grouped amax kernel constraints."
+        )
+    if recipe_name == "fp8_block_scaling" and any(m % 4 != 0 for m in non_empty_splits):
+        pytest.skip(
+            "GroupedLinear + Float8BlockScaling requires each non-empty m_split divisible by 4."
+        )
+
+
+# --------------------------
 # Shared helpers
 # --------------------------
 
 
-def _restore_saved_operands(output: torch.Tensor) -> list[Optional[torch.Tensor]]:
-    if output.grad_fn is None:
-        raise RuntimeError("Output tensor has no grad_fn; cannot inspect saved operands")
-    if not hasattr(output.grad_fn, "tensor_objects"):
-        raise RuntimeError("grad_fn does not expose tensor_objects for saved operand restoration")
-    return restore_from_saved(output.grad_fn.tensor_objects, list(output.grad_fn.saved_tensors))
-
-
-def _extract_linear_saved_operands(
-    saved_operands: list[Optional[torch.Tensor]],
+def _make_linear_like_module(
+    module_type: str,
+    in_features: int,
+    out_features: int,
+    dtype: torch.dtype,
     *,
-    context: str,
-) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-    if len(saved_operands) < 2:
-        raise RuntimeError(
-            f"Insufficient saved operands for {context} dequant reference "
-            f"(got {len(saved_operands)}, expected at least 2)."
+    bias: bool,
+) -> torch.nn.Module:
+    if module_type == "linear":
+        return te.Linear(
+            in_features,
+            out_features,
+            bias=bias,
+            params_dtype=dtype,
+            device="cuda",
         )
-    return saved_operands[0], saved_operands[1]
+    if module_type == "layernorm_linear":
+        return te.LayerNormLinear(
+            in_features,
+            out_features,
+            bias=bias,
+            params_dtype=dtype,
+            device="cuda",
+        )
+    if module_type == "ops_linear":
+        return te_ops.Linear(
+            in_features,
+            out_features,
+            bias=bias,
+            dtype=dtype,
+            device="cuda",
+        )
+    raise ValueError(f"Unsupported module type: {module_type}")
+
+
+def _make_fused_model(
+    pattern: str,
+    in_features: int,
+    out_features: int,
+    dtype: torch.dtype,
+    *,
+    scale: float = 0.5,
+) -> te_ops.Sequential:
+    if pattern == "bias_activation":
+        return te_ops.Sequential(
+            te_ops.Linear(in_features, out_features, bias=True, device="cuda", dtype=dtype),
+            te_ops.ReLU(),
+        )
+    if pattern == "bias_add":
+        return te_ops.Sequential(
+            te_ops.Linear(in_features, out_features, bias=True, device="cuda", dtype=dtype),
+            te_ops.AddExtraInput(in_place=True),
+        )
+    if pattern == "scale_add":
+        return te_ops.Sequential(
+            te_ops.Linear(in_features, out_features, bias=False, device="cuda", dtype=dtype),
+            te_ops.ConstantScale(scale),
+            te_ops.AddExtraInput(in_place=True),
+        )
+    raise ValueError(f"Unsupported fused test pattern: {pattern}")
 
 
 def _dequantize_saved_operand(
@@ -117,6 +324,66 @@ def _dequantize_saved_operand(
     return saved_operand.dequantize(dtype=dtype)
 
 
+def _snapshot_saved_quantized_operand_layout(
+    saved_operand: Optional[torch.Tensor],
+    *,
+    name: str,
+) -> dict[str, object]:
+    _assert_saved_quantized_operand_uses_rowwise_only(saved_operand, name=name)
+    rowwise_present = None
+    columnwise_present = None
+    rowwise_obj_id = None
+    if hasattr(saved_operand, "_rowwise_data"):
+        rowwise_data = getattr(saved_operand, "_rowwise_data")
+        rowwise_present = rowwise_data is not None
+        if rowwise_data is not None:
+            rowwise_obj_id = id(rowwise_data)
+    if hasattr(saved_operand, "_columnwise_data"):
+        columnwise_present = getattr(saved_operand, "_columnwise_data") is not None
+    return {
+        "name": name,
+        "saved_operand": saved_operand,
+        "rowwise_present": rowwise_present,
+        "columnwise_present": columnwise_present,
+        "rowwise_obj_id": rowwise_obj_id,
+    }
+
+
+def _snapshot_layout_invariants(
+    guard_operands: list[tuple[str, Optional[torch.Tensor]]],
+) -> list[dict[str, object]]:
+    """Capture saved-operand layout invariants before backward runs."""
+    return [
+        _snapshot_saved_quantized_operand_layout(saved_operand, name=name)
+        for name, saved_operand in guard_operands
+    ]
+
+
+def _snapshot_backward_ctx_state(
+    output: torch.Tensor,
+) -> tuple[str, bool, object, bool]:
+    if output.grad_fn is None:
+        raise RuntimeError("Output tensor has no grad_fn; cannot inspect backward context state.")
+    required_attrs = (
+        "backward_mode",
+        "fp8",
+        "grad_output_quantizer",
+        "reduce_and_update_bwd_fp8_tensors",
+    )
+    missing_attrs = [attr for attr in required_attrs if not hasattr(output.grad_fn, attr)]
+    if missing_attrs:
+        raise RuntimeError(
+            "grad_fn does not expose required backward context attributes: "
+            f"{', '.join(missing_attrs)}."
+        )
+    return (
+        getattr(output.grad_fn, "backward_mode"),
+        bool(getattr(output.grad_fn, "fp8")),
+        getattr(output.grad_fn, "grad_output_quantizer"),
+        bool(getattr(output.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
+    )
+
+
 def _assert_saved_quantized_operand_uses_rowwise_only(
     saved_operand: Optional[torch.Tensor],
     *,
@@ -141,31 +408,6 @@ def _assert_saved_quantized_operand_uses_rowwise_only(
         raise RuntimeError(
             f"Saved dequant {name} operand unexpectedly carries column-wise payload."
         )
-
-
-def _snapshot_saved_quantized_operand_layout(
-    saved_operand: Optional[torch.Tensor],
-    *,
-    name: str,
-) -> dict[str, object]:
-    _assert_saved_quantized_operand_uses_rowwise_only(saved_operand, name=name)
-    rowwise_present = None
-    columnwise_present = None
-    rowwise_obj_id = None
-    if hasattr(saved_operand, "_rowwise_data"):
-        rowwise_data = getattr(saved_operand, "_rowwise_data")
-        rowwise_present = rowwise_data is not None
-        if rowwise_data is not None:
-            rowwise_obj_id = id(rowwise_data)
-    if hasattr(saved_operand, "_columnwise_data"):
-        columnwise_present = getattr(saved_operand, "_columnwise_data") is not None
-    return {
-        "name": name,
-        "saved_operand": saved_operand,
-        "rowwise_present": rowwise_present,
-        "columnwise_present": columnwise_present,
-        "rowwise_obj_id": rowwise_obj_id,
-    }
 
 
 def _assert_saved_quantized_operand_layout_unchanged(snapshot: dict[str, object]) -> None:
@@ -206,16 +448,6 @@ def _assert_saved_quantized_operand_layout_unchanged(snapshot: dict[str, object]
             )
 
 
-def _snapshot_layout_invariants(
-    guard_operands: list[tuple[str, Optional[torch.Tensor]]],
-) -> list[dict[str, object]]:
-    """Capture saved-operand layout invariants before backward runs."""
-    return [
-        _snapshot_saved_quantized_operand_layout(saved_operand, name=name)
-        for name, saved_operand in guard_operands
-    ]
-
-
 def _assert_layout_invariants_unchanged(layout_invariants: list[dict[str, object]]) -> None:
     """Validate saved-operand layout invariants after backward runs."""
     for layout_invariant in layout_invariants:
@@ -226,6 +458,15 @@ def _raise_if_ref_failed(ref_exc: Optional[Exception]) -> None:
     """Re-raise deferred reference exceptions after layout checks."""
     if ref_exc is not None:
         raise ref_exc
+
+
+def _copy_named_parameters(src_module: torch.nn.Module, dst_module: torch.nn.Module) -> None:
+    src_params = dict(src_module.named_parameters())
+    with torch.no_grad():
+        for name, dst_param in dst_module.named_parameters():
+            if name not in src_params:
+                raise RuntimeError(f"Parameter {name} missing in source module")
+            dst_param.copy_(src_params[name])
 
 
 def _compute_linear_backward_reference_from_saved_operands(
@@ -283,179 +524,6 @@ def _compute_linear_backward_reference_from_saved_operands(
     return dx_ref, dw_ref, db_ref
 
 
-_quantized_numerics_recipe_list = [
-    pytest.param(
-        "fp8_current_scaling",
-        marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
-        id="Float8CurrentScaling",
-    ),
-    pytest.param(
-        "mxfp8",
-        marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
-        id="MXFP8BlockScaling",
-    ),
-    pytest.param(
-        "fp8_block_scaling",
-        marks=pytest.mark.skipif(
-            not fp8_block_scaling_available,
-            reason=reason_for_no_fp8_block_scaling,
-        ),
-        id="Float8BlockScaling",
-    ),
-    pytest.param(
-        "nvfp4",
-        marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
-        id="NVFP4BlockScaling",
-    ),
-]
-
-_shape_test_cases = [
-    pytest.param((1, 64), 64, id="2d_m1_k64_n64"),
-    pytest.param((32, 64), 64, id="2d_m32_k64_n64"),
-    pytest.param((32, 96), 96, id="2d_m32_k96_n96"),
-    pytest.param((32, 1, 64), 64, id="3d_m32_s1_k64_n64"),
-    pytest.param((8, 4, 64), 128, id="3d_m32_k64_n128"),
-    pytest.param((16, 2, 128), 64, id="3d_m32_k128_n64"),
-    pytest.param((160, 64), 64, id="2d_m160_k64_n64"),
-    pytest.param((5, 64, 64), 64, id="3d_m320_k64_n64"),
-    pytest.param((3, 5, 32, 64), 96, id="4d_m480_k64_n96"),
-    pytest.param((2, 5, 16, 128), 64, id="4d_m160_k128_n64"),
-    # Intentionally unaligned token dimensions to exercise skip/support logic.
-    pytest.param((3, 64), 64, id="2d_m3_k64_n64_unaligned"),
-    pytest.param((3, 10, 64), 64, id="3d_m30_k64_n64_unaligned"),
-    pytest.param((3, 10, 96), 96, id="3d_m30_k96_n96_unaligned"),
-]
-
-_bias_activation_shape_cases = [
-    pytest.param((32, 64), id="2d_m32_k64"),
-    pytest.param((32, 96), id="2d_m32_k96"),
-    pytest.param((8, 4, 64), id="3d_m32_k64"),
-    pytest.param((160, 64), id="2d_m160_k64"),
-    pytest.param((5, 64, 64), id="3d_m320_k64"),
-    pytest.param((3, 5, 32, 64), id="4d_m480_k64"),
-    # Intentionally unaligned token dimensions to exercise skip/support logic.
-    pytest.param((3, 64), id="2d_m3_k64_unaligned"),
-    pytest.param((3, 10, 64), id="3d_m30_k64_unaligned"),
-    pytest.param((3, 10, 96), id="3d_m30_k96_unaligned"),
-]
-
-_grouped_m_split_cases = [
-    pytest.param([32, 32, 32, 32], id="uniform_splits"),
-    pytest.param([64, 0, 32, 32], id="with_empty_split"),
-    pytest.param([1, 31, 0, 96], id="small_and_empty_splits"),
-]
-
-_linear_feature_cases = [
-    pytest.param(64, 64, id="k64_n64"),
-    pytest.param(64, 128, id="k64_n128"),
-    pytest.param(128, 64, id="k128_n64"),
-    pytest.param(96, 96, id="k96_n96"),
-    pytest.param(64, 96, id="k64_n96"),
-    pytest.param(96, 64, id="k96_n64"),
-    pytest.param(128, 96, id="k128_n96"),
-    pytest.param(96, 128, id="k96_n128"),
-]
-
-_output_feature_cases = [
-    pytest.param(64, id="n64"),
-    pytest.param(96, id="n96"),
-    pytest.param(128, id="n128"),
-]
-
-
-def _copy_named_parameters(src_module: torch.nn.Module, dst_module: torch.nn.Module) -> None:
-    src_params = dict(src_module.named_parameters())
-    with torch.no_grad():
-        for name, dst_param in dst_module.named_parameters():
-            if name not in src_params:
-                raise RuntimeError(f"Parameter {name} missing in source module")
-            dst_param.copy_(src_params[name])
-
-
-def _maybe_skip_recipe_dtype(recipe_name: str, dtype: torch.dtype) -> None:
-    if dtype == torch.bfloat16 and not bf16_available:
-        pytest.skip(reason_for_no_bf16)
-    if recipe_name == "nvfp4" and dtype != torch.bfloat16:
-        pytest.skip("NVFP4 is only supported with BF16 in this test")
-
-
-def _make_linear_like_module(
-    module_type: str,
-    in_features: int,
-    out_features: int,
-    dtype: torch.dtype,
-    *,
-    bias: bool,
-) -> torch.nn.Module:
-    if module_type == "linear":
-        return te.Linear(
-            in_features,
-            out_features,
-            bias=bias,
-            params_dtype=dtype,
-            device="cuda",
-        )
-    if module_type == "layernorm_linear":
-        return te.LayerNormLinear(
-            in_features,
-            out_features,
-            bias=bias,
-            params_dtype=dtype,
-            device="cuda",
-        )
-    if module_type == "ops_linear":
-        return te_ops.Linear(
-            in_features,
-            out_features,
-            bias=bias,
-            dtype=dtype,
-            device="cuda",
-        )
-    raise ValueError(f"Unsupported module type: {module_type}")
-
-
-def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: str) -> None:
-    if module_type == "ops_linear" and recipe_name == "fp8_block_scaling":
-        pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
-
-
-def _maybe_skip_unsupported_recipe_shape(
-    recipe_name: str,
-    input_shape: tuple[int, ...],
-    module_type: str,
-) -> None:
-    flat_first_dim = math.prod(input_shape[:-1])
-    last_dim = input_shape[-1]
-
-    if module_type in ("linear", "layernorm_linear"):
-        if flat_first_dim % 8 != 0 or last_dim % 16 != 0:
-            pytest.skip(
-                "Linear/LayerNormLinear FP8 execution requires prod(shape[:-1]) divisible by 8 "
-                "and shape[-1] divisible by 16."
-            )
-        return
-
-    if module_type == "ops_linear":
-        if recipe_name == "mxfp8" and (flat_first_dim % 32 != 0 or last_dim % 32 != 0):
-            pytest.skip(
-                "te_ops.Linear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible by 32."
-            )
-        if recipe_name == "nvfp4" and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
-            pytest.skip(
-                "te_ops.Linear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible by 16."
-            )
-
-
-def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]) -> None:
-    non_empty_splits = [m for m in m_splits if m > 0]
-    if recipe_name == "mxfp8" and any(m % 32 != 0 for m in non_empty_splits):
-        pytest.skip("GroupedLinear + MXFP8 requires each non-empty m_split divisible by 32.")
-    if recipe_name == "fp8_block_scaling" and any(m % 4 != 0 for m in non_empty_splits):
-        pytest.skip(
-            "GroupedLinear + Float8BlockScaling requires each non-empty m_split divisible by 4."
-        )
-
-
 def _run_single_step(
     module: torch.nn.Module,
     x: torch.Tensor,
@@ -499,7 +567,7 @@ def _run_single_step_with_saved_operands(
         y = module(x_run)
         if isinstance(y, tuple):
             y = y[0]
-        saved_operands = _restore_saved_operands(y)
+        saved_operands = restore_from_saved(y.grad_fn.tensor_objects, list(y.grad_fn.saved_tensors))
     return y, x_run, saved_operands
 
 
@@ -544,35 +612,8 @@ def _run_grouped_linear_step_with_saved_operands(
     x_run = x.detach().clone().requires_grad_(True)
     with te.autocast(enabled=True, recipe=fp8_recipe):
         y = module(x_run, m_splits)
-        saved_operands = _restore_saved_operands(y)
+        saved_operands = restore_from_saved(y.grad_fn.tensor_objects, list(y.grad_fn.saved_tensors))
     return y, x_run, saved_operands
-
-
-def _make_fused_model(
-    pattern: str,
-    in_features: int,
-    out_features: int,
-    dtype: torch.dtype,
-    *,
-    scale: float = 0.5,
-) -> te_ops.Sequential:
-    if pattern == "bias_activation":
-        return te_ops.Sequential(
-            te_ops.Linear(in_features, out_features, bias=True, device="cuda", dtype=dtype),
-            te_ops.ReLU(),
-        )
-    if pattern == "bias_add":
-        return te_ops.Sequential(
-            te_ops.Linear(in_features, out_features, bias=True, device="cuda", dtype=dtype),
-            te_ops.AddExtraInput(in_place=True),
-        )
-    if pattern == "scale_add":
-        return te_ops.Sequential(
-            te_ops.Linear(in_features, out_features, bias=False, device="cuda", dtype=dtype),
-            te_ops.ConstantScale(scale),
-            te_ops.AddExtraInput(in_place=True),
-        )
-    raise ValueError(f"Unsupported fused test pattern: {pattern}")
 
 
 def _run_fused_single_step(
@@ -635,7 +676,7 @@ def _run_fused_single_step_with_saved_operands(
             y = model(x1_run, x2_run)
         else:
             y = model(x1_run)
-        saved_operands = _restore_saved_operands(y)
+        saved_operands = restore_from_saved(y.grad_fn.tensor_objects, list(y.grad_fn.saved_tensors))
     return y, x1_run, x2_run, saved_operands
 
 
@@ -654,31 +695,6 @@ def _run_quantize_op_single_step(
     y.backward(dy)
     assert x_run.grad is not None
     return y.detach().clone(), x_run.grad.detach().clone()
-
-
-def _snapshot_backward_ctx_state(
-    output: torch.Tensor,
-) -> tuple[str, bool, object, bool]:
-    if output.grad_fn is None:
-        raise RuntimeError("Output tensor has no grad_fn; cannot inspect backward context state.")
-    required_attrs = (
-        "backward_mode",
-        "fp8",
-        "grad_output_quantizer",
-        "reduce_and_update_bwd_fp8_tensors",
-    )
-    missing_attrs = [attr for attr in required_attrs if not hasattr(output.grad_fn, attr)]
-    if missing_attrs:
-        raise RuntimeError(
-            "grad_fn does not expose required backward context attributes: "
-            f"{', '.join(missing_attrs)}."
-        )
-    return (
-        getattr(output.grad_fn, "backward_mode"),
-        bool(getattr(output.grad_fn, "fp8")),
-        getattr(output.grad_fn, "grad_output_quantizer"),
-        bool(getattr(output.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
-    )
 
 
 def _run_single_step_with_ctx_state(
@@ -801,7 +817,7 @@ def test_linear_like_backward_mode_matches_reference(
     backward_mode: str,
 ) -> None:
     reset_rng_states()
-    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_recipe_dtype(recipe_name, dtype, module_type)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, module_type)
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
 
@@ -921,10 +937,7 @@ def test_linear_like_backward_mode_matches_reference(
                 )
                 dx_ref = dx_ref.view_as(x_bwd_mode)
             else:
-                saved_input, saved_weight = _extract_linear_saved_operands(
-                    saved_operands,
-                    context=f"{module_type}",
-                )
+                saved_input, saved_weight = saved_operands[0], saved_operands[1]
                 guard_operands.extend(
                     [
                         (f"{module_type}_input", saved_input),
@@ -982,11 +995,10 @@ def test_grouped_linear_backward_mode_matches_reference(
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
-    if recipe_name == "nvfp4":
-        pytest.skip("NVFP4 not supported for grouped linear")
 
     reset_rng_states()
-    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_recipe_dtype(recipe_name, dtype, "grouped_linear")
+    _maybe_skip_unsupported_recipe_module_combo(recipe_name, "grouped_linear")
     _maybe_skip_unsupported_grouped_splits(recipe_name, m_splits)
     num_gemms = len(m_splits)
     num_tokens = sum(m_splits)
@@ -1144,7 +1156,7 @@ def test_linear_like_runtime_backward_mode_switch_updates_ctx(
     backward_mode: str,
 ) -> None:
     reset_rng_states()
-    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_recipe_dtype(recipe_name, dtype, module_type)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, module_type)
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
 
@@ -1210,11 +1222,10 @@ def test_grouped_linear_runtime_backward_mode_switch_updates_ctx(
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
-    if recipe_name == "nvfp4":
-        pytest.skip("NVFP4 not supported for grouped linear")
 
     reset_rng_states()
-    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_recipe_dtype(recipe_name, dtype, "grouped_linear")
+    _maybe_skip_unsupported_recipe_module_combo(recipe_name, "grouped_linear")
     _maybe_skip_unsupported_grouped_splits(recipe_name, m_splits)
 
     num_tokens = sum(m_splits)
@@ -1290,7 +1301,7 @@ def test_fused_linear_paths_match_backward_mode_reference(
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
-    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     _maybe_skip_unsupported_recipe_shape(recipe_name, (m, in_features), "ops_linear")
 
@@ -1362,10 +1373,7 @@ def test_fused_linear_paths_match_backward_mode_reference(
         guard_operands: list[tuple[str, Optional[torch.Tensor]]] = []
         ref_exc: Optional[Exception] = None
         try:
-            saved_input, saved_weight = _extract_linear_saved_operands(
-                saved_operands,
-                context=f"fused_{fused_pattern}",
-            )
+            saved_input, saved_weight = saved_operands[0], saved_operands[1]
             guard_operands.extend(
                 [
                     (f"fused_{fused_pattern}_input", saved_input),
@@ -1431,7 +1439,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
-    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, "ops_linear")
 
@@ -1501,10 +1509,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
         guard_operands: list[tuple[str, Optional[torch.Tensor]]] = []
         ref_exc: Optional[Exception] = None
         try:
-            saved_input, saved_weight = _extract_linear_saved_operands(
-                saved_operands,
-                context="fused_bias_activation",
-            )
+            saved_input, saved_weight = saved_operands[0], saved_operands[1]
             guard_operands.extend(
                 [
                     ("fused_bias_activation_input", saved_input),
@@ -1630,7 +1635,7 @@ def test_quantize_op_respects_backward_mode(
     dtype: torch.dtype,
     backward_mode: str,
 ) -> None:
-    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     reset_rng_states()
 
@@ -1664,7 +1669,7 @@ def test_backward_mode_memory_peak_report(
     in_features = input_shape[-1]
     use_bias = True
 
-    _maybe_skip_recipe_dtype(recipe_name, dtype)
+    _maybe_skip_recipe_dtype(recipe_name, dtype, module_type)
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, module_type)
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
 
