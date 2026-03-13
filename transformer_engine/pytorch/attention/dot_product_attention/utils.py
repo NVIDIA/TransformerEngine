@@ -877,7 +877,7 @@ def get_attention_backend(
             use_fused_attention = False
         elif (
             window_size is not None
-            and window_size[0] != -1 and window_size[1] not in [-1, 0]
+            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
             and cp_comm_type in ["p2p", "a2a+p2p"]
         ):
             logger.debug(
@@ -1080,8 +1080,7 @@ def get_attention_backend(
         if (
             use_fused_attention
             and window_size is not None
-            and window_size[0] != -1
-            and window_size[1] not in [-1, 0]
+            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
             and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
         ):
             logger.debug(

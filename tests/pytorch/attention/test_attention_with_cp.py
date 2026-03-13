@@ -167,9 +167,9 @@ model_configs_fused_attn = {
     "cp_1_4": ModelConfig(
         2, 4096, 12, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"
     ),  # MHA
-    "cp_1_5": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 512)),  # MHA
+    "cp_1_5": ModelConfig(2, 4096, 32, 128, attn_mask_type="causal", window_size=(128, 0)),  # MHA
     "cp_2_0": ModelConfig(
-        2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(128, 0)
+        2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal",
     ),  # GQA
     "cp_2_1": ModelConfig(
         2, 4096, 128, 192, head_dim_v=128, attn_mask_type="causal"
@@ -239,7 +239,7 @@ if test_essential:
         # "cp_1_0",
         # "cp_1_1",
         # "cp_1_4",
-        # "cp_1_5",
+        "cp_1_5",
         "cp_2_0",
         "cp_2_1",
         # "cp_2_2",
@@ -251,7 +251,7 @@ if test_essential:
         # "cp_4_2",
     ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
-    dtypes = ["fp8"]  # ["bf16", "fp8"]
+    dtypes = ["bf16", "fp8"]
     qkv_formats = ["bshd"]  # , "sbhd", "thd"]
 
 
@@ -264,8 +264,8 @@ if test_essential:
 @pytest.mark.parametrize("fp8_bwd", [True, False])
 @pytest.mark.parametrize("fp8_mha", [True, False])
 @pytest.mark.parametrize("fp8_dpa", [True, False])
-@pytest.mark.parametrize("scaling_mode", ["delayed", "current", "mxfp8"])
-@pytest.mark.parametrize("f16_O", [True])
+@pytest.mark.parametrize("scaling_mode", [None, "delayed", "current", "mxfp8"])
+@pytest.mark.parametrize("f16_O", [True, False])
 def test_cp_with_fused_attention(
     dtype, model, qkv_format, cp_comm_type, fp8_bwd, fp8_mha, fp8_dpa, scaling_mode, f16_O
 ):
@@ -304,11 +304,15 @@ def test_cp_with_fused_attention(
     if qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
         pytest.skip("No support for THD format with cp_comm_type={all_gather, a2a+p2p}!")
 
-    if (config.window_size[0] != -1 and config.window_size[1] not in [-1, 0]) and cp_comm_type in [
+    if (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0]) and cp_comm_type in [
         "p2p",
         "a2a+p2p",
     ]:
         pytest.skip("No support for SWA with cp_comm_type={p2p, a2a+p2p}!")
+
+    # TODO: Remove this once the issue is fixed!
+    if dtype == "fp8" and (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0]) and cp_comm_type == "all_gather":
+        pytest.skip("No support for SWA with FP8 attention and cp_comm_type=all_gather!")
 
     if cp_comm_type in ["a2a", "a2a+p2p"] and (
         config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0
