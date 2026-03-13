@@ -364,7 +364,6 @@ def fused_attn_bwd(
     o: torch.Tensor,
     d_o: torch.Tensor,
     fake_dtype: torch.dtype,
-    # dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     cu_seqlens_q_padded: torch.Tensor = None,
@@ -417,8 +416,6 @@ def fused_attn_bwd(
     fake_dtype : tex.DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
-    # dqkv_dtype : tex.DType
-    #             data type of dQ, dK and dV; in tex.DType, not torch.dtype
     aux_ctx_tensors : List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
@@ -507,14 +504,6 @@ def fused_attn_bwd(
             len(aux_ctx_tensors) >= 1
         ), "aux_ctx_tensors must contain rng_state as its last element."
 
-    if fused_attention_backend == FusedAttnBackend["FP8"]:
-        # assert (
-        #     dqkv_dtype is not None
-        # ), "dqkv_dtype is required as an input for FP8 fused attention backward."
-        assert (
-            len(aux_ctx_tensors) >= 3
-        ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
-
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -539,7 +528,6 @@ def fused_attn_bwd(
         o,
         d_o,
         fake_dtype,
-        # dqkv_dtype,
         aux_ctx_tensors,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,

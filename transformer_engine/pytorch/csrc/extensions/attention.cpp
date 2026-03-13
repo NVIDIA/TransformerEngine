@@ -105,7 +105,7 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
       std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
       NVTE_CHECK(
           !data.has_value(),
-          "Float8CurrentScalingQuantizer::create_tensor() does not take data tensor as input!");
+          "MXFP8Quantizer::create_tensor() does not take data tensor as input!");
     }
   }
   return {std::move(te_T), std::move(py_T)};
@@ -334,7 +334,7 @@ std::vector<py::object> fused_attn_bwd(
     bool bottom_right_diagonal, bool deterministic, const at::Tensor cu_seqlens_q,
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
     const py::handle O, const py::handle dO,
-    const at::ScalarType fake_dtype,  //const DType dqkv_type,
+    const at::ScalarType fake_dtype,
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,

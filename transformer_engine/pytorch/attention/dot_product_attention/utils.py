@@ -41,6 +41,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
+from transformer_engine.pytorch.tensor.float8_tensor import Float8TensorStorage
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from transformer_engine.pytorch.tensor.storage.grouped_tensor import GroupedTensor
@@ -455,15 +456,18 @@ def get_attention_backend(
                 qkv_dtype,
             )
         use_flash_attention_2 = False
-    if qkv_dtype not in [torch.bfloat16, torch.float16, torch.float8_e4m3fn] or issubclass(qkv_type, (
+    if qkv_dtype not in [torch.bfloat16, torch.float16, torch.float8_e4m3fn] or qkv_type not in (
         torch.Tensor,
-        QuantizedTensorStorage,
-    )):
+        Float8Tensor,
+        Float8TensorStorage,
+        MXFP8Tensor,
+        MXFP8TensorStorage,
+    ):
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug(
                 "Disabling FlashAttention 3 for unsupported qkv_dtype = %s, qkv_type = %s. "
                 "Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, "
-                "qkv_type = {torch.Tensor, QuantizedTensorStorage}. ",
+                "qkv_type = {torch.Tensor, Float8Tensor, Float8TensorStorage, MXFP8Tensor, MXFP8TensorStorage}. ",
                 qkv_dtype,
                 qkv_type,
             )
@@ -472,16 +476,18 @@ def get_attention_backend(
             logger.debug(
                 "Disabling FusedAttention for unsupported qkv_dtype = %s, qkv_type = %s. "
                 "Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, "
-                "qkv_type = {torch.Tensor, QuantizedTensorStorage}. ",
+                "qkv_type = {torch.Tensor, Float8Tensor, Float8TensorStorage, MXFP8Tensor, MXFP8TensorStorage}. ",
                 qkv_dtype,
                 qkv_type,
             )
             use_fused_attention = False
 
     # Filter: Execution type
-    fp8_recipe = fp8_meta["recipe"]
-    if fp8_meta.get("local_recipes", None) is not None:
-        fp8_recipe = fp8_meta["local_recipes"][0]
+    fp8_recipe = None
+    if fp8:
+        fp8_recipe = fp8_meta["recipe"] if fp8_meta is not None else None
+        if fp8_meta.get("local_recipes", None) is not None:
+            fp8_recipe = fp8_meta["local_recipes"][0]
     if fp8 and fp8_recipe.fp8_dpa:
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for FP8 attention")
@@ -2164,7 +2170,7 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
         return [None] * 6
 
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-    QKV_quantizer.internal = True
+    QKV_quantizer.internal = False
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
 
     S_quantizer = quantizers["scaling_fwd"][META_S]
@@ -2176,7 +2182,7 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
     O_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dO_quantizer = quantizers["scaling_bwd"][META_DO]
-    dO_quantizer.internal = True
+    dO_quantizer.internal = False
     dO_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
@@ -2184,7 +2190,7 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
     dP_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
-    dQKV_quantizer.interal = True
+    dQKV_quantizer.interal = False
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
 
     if fp8_recipe.mxfp8():
