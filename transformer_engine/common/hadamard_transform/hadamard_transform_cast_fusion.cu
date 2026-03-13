@@ -516,7 +516,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
         const size_t rng_sequence
           = thread_idx + k_tile * 256 + linear_tile_idx * K_TILE_MAX * 256;
 
-        transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+        transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>
+            rng;
         rng.init(rng_seed, rng_sequence, rng_offset);
         uint4 random_uint4 = uint4{0, 0, 0, 0};
 
@@ -739,6 +740,7 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
   NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
              "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
+  NVTE_CHECK(!output_.with_gemm_swizzled_scales, "Output must have scales in compact format.");
   const SimpleTensor &input = input_.data;
   SimpleTensor &global_amax = output_.amax;
   SimpleTensor &output_t = output_.data;

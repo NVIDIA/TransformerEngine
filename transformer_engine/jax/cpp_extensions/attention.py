@@ -70,6 +70,7 @@ __all__ = [
         "is_training",
         "max_segments_per_seq",
         "window_size",
+        "bottom_right_diagonal",
         "context_parallel_load_balanced",
         "cp_axis",
         "cp_striped_window_size",
@@ -91,6 +92,7 @@ class _FusedAttnConfig:
     is_training: bool
     max_segments_per_seq: int
     window_size: Tuple[int, int]
+    bottom_right_diagonal: bool
     context_parallel_load_balanced: bool
     cp_axis: str
     cp_striped_window_size: Tuple[int, int]  # Only for CP + Ring P2P + THD + SWA
@@ -144,6 +146,7 @@ class FusedAttnHelper:
             self.head_dim_v,
             self.window_size[0],
             self.window_size[1],
+            not self.is_non_deterministic_allowed(),
         )
 
     @staticmethod
@@ -162,13 +165,25 @@ class FusedAttnHelper:
             kv_max_seqlen = q_max_seqlen
             num_gqa_groups = attn_heads
             v_head_dim = q_head_dim
-            assert nqkv == 3
+            assert nqkv == 3, (
+                f"Expected nqkv == 3 for qkvpacked layout, but got nqkv={nqkv} from"
+                f" q_aval.shape={q_aval.shape}"
+            )
         elif qkv_layout.is_kvpacked():
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
             *kv_batch_shape, kv_max_seqlen, nkv, num_gqa_groups, v_head_dim = k_aval.shape
-            assert q_batch_shape == kv_batch_shape
-            assert q_head_dim == v_head_dim
-            assert nkv == 2
+            assert q_batch_shape == kv_batch_shape, (
+                f"Mismatched batch shapes for kvpacked layout: q_batch_shape={q_batch_shape},"
+                f" kv_batch_shape={kv_batch_shape}"
+            )
+            assert q_head_dim == v_head_dim, (
+                f"Mismatched head dims for kvpacked layout: q_head_dim={q_head_dim},"
+                f" v_head_dim={v_head_dim}"
+            )
+            assert nkv == 2, (
+                f"Expected nkv == 2 for kvpacked layout, but got nkv={nkv} from"
+                f" k_aval.shape={k_aval.shape}"
+            )
         elif qkv_layout.is_separate():
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
             *k_batch_shape, k_max_seqlen, k_num_gqa_groups, k_head_dim = k_aval.shape
@@ -241,9 +256,13 @@ class _FusedAttnRNGStateChecker:
             )
             seed = seed.astype(self.rng_state_dtype)
 
-        assert seed.dtype == self.rng_state_dtype
+        assert (
+            seed.dtype == self.rng_state_dtype
+        ), f"Expected seed.dtype={self.rng_state_dtype}, but got seed.dtype={seed.dtype}"
         # Backend takes an int64_t seed, so only the first two u32 elements are taken
-        assert seed.size >= self.seed_size
+        assert (
+            seed.size >= self.seed_size
+        ), f"Expected seed.size >= {self.seed_size}, but got seed.size={seed.size}"
 
         return seed
 
@@ -360,7 +379,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         # 32-bit unsigned int to get the buffer size we need in the C++ kernel
         checker = _FusedAttnRNGStateChecker()
         seed_dtype = dtypes.canonicalize_dtype(seed_aval.dtype)
-        assert seed_dtype == checker.rng_state_dtype
+        assert (
+            seed_dtype == checker.rng_state_dtype
+        ), f"Expected seed_dtype={checker.rng_state_dtype}, but got seed_dtype={seed_dtype}"
         rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
         rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
 
@@ -369,6 +390,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         else:
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
+
+        bottom_right_diagonal = config.attn_mask_type in [
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
 
         # do a dummy kernel call here to get workspace buffer shapes/dtypes that XLA needs to
         # prepare for the active fused-attn backend
@@ -394,16 +420,25 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.max_segments_per_seq,
             config.window_size[0],
             config.window_size[1],
+            bottom_right_diagonal,
         )
         wkspace_aval = q_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
 
-        assert softmax_offset_aval.dtype == jnp.float32
+        assert (
+            softmax_offset_aval.dtype == jnp.float32
+        ), f"Expected softmax_offset_aval.dtype=float32, but got {softmax_offset_aval.dtype}"
         if config.softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
-            assert softmax_offset_aval.shape == (1, attn_heads, 1, 1)
+            assert softmax_offset_aval.shape == (1, attn_heads, 1, 1), (
+                f"Expected softmax_offset_aval.shape=(1, {attn_heads}, 1, 1) for"
+                f" {config.softmax_type}, but got {softmax_offset_aval.shape}"
+            )
         else:
-            assert softmax_offset_aval.shape == (0,)
+            assert softmax_offset_aval.shape == (0,), (
+                "Expected softmax_offset_aval.shape=(0,) for VANILLA_SOFTMAX, but got"
+                f" {softmax_offset_aval.shape}"
+            )
 
         return out_aval, softmax_aux_aval, rng_state_aval, wkspace_aval
 
@@ -502,6 +537,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
             window_size_left=window_size_left,
             window_size_right=window_size_right,
+            bottom_right_diagonal=config.bottom_right_diagonal,
             softmax_type=int(config.softmax_type.value),
         )
 
@@ -523,7 +559,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         _kv_segment_pos,
         config: _FusedAttnConfig,
     ):
-        assert FusedAttnFwdPrimitive.inner_primitive is not None
+        assert (
+            FusedAttnFwdPrimitive.inner_primitive is not None
+        ), "FusedAttnFwdPrimitive.inner_primitive has not been registered"
 
         sequence_descriptor = SequenceDescriptor(
             seqlens=(q_seqlen, kv_seqlen),
@@ -616,10 +654,14 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, config):
+        # batch_dims: each element is the batch axis (0, ...) or None. Only 0 or None allowed.
         check_valid_batch_dims(batch_dims)
-        assert FusedAttnFwdPrimitive.outer_primitive is not None
+        assert (
+            FusedAttnFwdPrimitive.outer_primitive is not None
+        ), "FusedAttnFwdPrimitive.outer_primitive has not been registered"
         q_bdim, _, _, _, _, seed_bdim, *_ = batch_dims
-
+        # Pass through; segment_ids/segment_pos may have different batch dims (e.g. vmapped ids,
+        # replicated pos). get_seqlens_and_offsets() in attention.py handles conversion without expanding.
         out_bdims = q_bdim, q_bdim, seed_bdim
         return (
             FusedAttnFwdPrimitive.outer_primitive.bind(*batched_args, config=config),
@@ -768,8 +810,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         v_dtype = dtypes.canonicalize_dtype(v_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
         doutput_dtype = dtypes.canonicalize_dtype(doutput_aval.dtype)
-        assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype
-        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
+        assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype, (
+            f"Mismatched dtypes: q_dtype={q_dtype}, k_dtype={k_dtype}, v_dtype={v_dtype},"
+            f" bias_dtype={bias_dtype}, doutput_dtype={doutput_dtype}"
+        )
+        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype, (
+            "Mismatched seqlen dtypes:"
+            f" q_seqlen_or_cu_seqlen_aval.dtype={q_seqlen_or_cu_seqlen_aval.dtype},"
+            f" kv_seqlen_or_cu_seqlen_aval.dtype={kv_seqlen_or_cu_seqlen_aval.dtype}"
+        )
 
         (
             batch_shape,
@@ -812,6 +861,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             config.max_segments_per_seq,
             config.window_size[0],
             config.window_size[1],
+            config.bottom_right_diagonal,
         )
 
         dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
@@ -947,6 +997,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
             window_size_left=window_size_left,
             window_size_right=window_size_right,
+            bottom_right_diagonal=config.bottom_right_diagonal,
             softmax_type=int(config.softmax_type.value),
         )
 
@@ -971,7 +1022,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         _kv_segment_pos,
         config,
     ):
-        assert FusedAttnBwdPrimitive.inner_primitive is not None
+        assert (
+            FusedAttnBwdPrimitive.inner_primitive is not None
+        ), "FusedAttnBwdPrimitive.inner_primitive has not been registered"
 
         sequence_descriptor = SequenceDescriptor(
             seqlens=(q_seqlen, kv_seqlen),
@@ -1011,7 +1064,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             batch, q_max_seqlen, kv_max_seqlen, *_ = FusedAttnHelper.parse_qkv_aval(
                 q, k, v, config.qkv_layout
             )
-            assert len(batch) == 1
+            assert (
+                len(batch) == 1
+            ), f"Expected len(batch) == 1, but got len(batch)={len(batch)}, batch={batch}"
             kv_batch = q_batch = batch[0]
 
             # Gather valid q_seqlen, which is greater than 0
@@ -1070,9 +1125,11 @@ class FusedAttnBwdPrimitive(BasePrimitive):
     @staticmethod
     def batcher(batched_args, batch_dims, *, config):
         check_valid_batch_dims(batch_dims)
-        assert FusedAttnBwdPrimitive.outer_primitive is not None
+        assert (
+            FusedAttnBwdPrimitive.outer_primitive is not None
+        ), "FusedAttnBwdPrimitive.outer_primitive has not been registered"
         q_bdim, k_bdim, v_bdim, bias_bdim, softmax_offset_bdim, *_ = batch_dims
-
+        # Pass through; segment_ids/segment_pos may have different batch dims. Conversion is in attention.py.
         out_bdims = q_bdim, k_bdim, v_bdim, bias_bdim, softmax_offset_bdim
         return (
             FusedAttnBwdPrimitive.outer_primitive.bind(*batched_args, config=config),
@@ -1356,9 +1413,10 @@ class _FusedAttnCPWithAllGatherHelper:
 
     def get_step_config(self) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call to fused attention."""
+        adjusted_mask = self.get_adjusted_mask()
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
-            attn_mask_type=self.get_adjusted_mask(),
+            attn_mask_type=adjusted_mask,
             softmax_type=self.config.softmax_type,
             qkv_layout=self.config.qkv_layout,
             scaling_factor=self.config.scaling_factor,
@@ -1366,6 +1424,7 @@ class _FusedAttnCPWithAllGatherHelper:
             is_training=self.config.is_training,
             max_segments_per_seq=self.config.max_segments_per_seq,
             window_size=self.config.window_size,
+            bottom_right_diagonal=adjusted_mask.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
@@ -1374,9 +1433,10 @@ class _FusedAttnCPWithAllGatherHelper:
 
     def get_step_config_for_striped(self, max_seqlen, cp_size) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call (made via a striped AG primitive) to fused attention."""
+        adjusted_mask = self.get_adjusted_mask()
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
-            attn_mask_type=self.get_adjusted_mask(),
+            attn_mask_type=adjusted_mask,
             softmax_type=self.config.softmax_type,
             qkv_layout=self.config.qkv_layout,
             scaling_factor=self.config.scaling_factor,
@@ -1384,6 +1444,7 @@ class _FusedAttnCPWithAllGatherHelper:
             is_training=self.config.is_training,
             max_segments_per_seq=self.get_adjusted_max_segments_per_seq(max_seqlen, cp_size),
             window_size=self.config.window_size,
+            bottom_right_diagonal=adjusted_mask.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
@@ -2429,6 +2490,7 @@ class _FusedAttnCPWithP2PHelper:
             is_training=self.config.is_training,
             max_segments_per_seq=self.config.max_segments_per_seq,
             window_size=self.config.window_size,
+            bottom_right_diagonal=attn_mask_type.is_bottom_right(),
             context_parallel_load_balanced=self.config.context_parallel_load_balanced,
             cp_axis=self.config.cp_axis,
             cp_striped_window_size=None,
@@ -3379,7 +3441,9 @@ def fused_attn_fwd(
         raise ValueError(f"Unknown {qkv_layout=}")
 
     if attn_bias_type == AttnBiasType.NO_BIAS:
-        assert bias is None
+        assert (
+            bias is None
+        ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias={bias}"
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
     if softmax_offset is None:
@@ -3397,10 +3461,16 @@ def fused_attn_fwd(
                 softmax_offset, (None, HEAD_AXES, None, None)
             )
         else:
-            assert softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX
+            assert softmax_type == AttnSoftmaxType.VANILLA_SOFTMAX, (
+                "Expected VANILLA_SOFTMAX when softmax_offset is None and not OFF_BY_ONE_SOFTMAX,"
+                f" but got softmax_type={softmax_type}"
+            )
             softmax_offset = jnp.zeros(0, dtype=jnp.float32)
     else:
-        assert softmax_offset.dtype == jnp.float32
+        assert softmax_offset.dtype == jnp.float32, (
+            "Expected softmax_offset.dtype=float32, but got"
+            f" softmax_offset.dtype={softmax_offset.dtype}"
+        )
         # Shard by heads dimension if not VANILLA_SOFTMAX
         if softmax_type != AttnSoftmaxType.VANILLA_SOFTMAX:
             softmax_offset = with_sharding_constraint_by_logical_axes(
@@ -3417,6 +3487,7 @@ def fused_attn_fwd(
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=(-1, -1) if window_size is None else window_size,
+        bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,
@@ -3538,7 +3609,9 @@ def fused_attn_bwd(
         raise ValueError(f"Unknown {qkv_layout=}")
 
     if attn_bias_type == AttnBiasType.NO_BIAS:
-        assert bias is None
+        assert (
+            bias is None
+        ), f"bias must be None when attn_bias_type is NO_BIAS, but got bias with type={type(bias)}"
         bias = jnp.zeros(0, dtype=qkv[0].dtype)
 
     if softmax_offset is None:
@@ -3563,13 +3636,21 @@ def fused_attn_bwd(
                 softmax_offset, (None, HEAD_AXES, None, None)
             )
 
-    # TODO(KshitijLakhani): Add a check for cuDNN version when determinism does get supported on
-    # sm100+
     compute_capabilities = get_all_device_compute_capability()
-    if any(x >= 100 for x in compute_capabilities):
-        assert not (
-            attn_bias_type != AttnBiasType.NO_BIAS and dropout_probability != 0
-        ), "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
+    if any(x >= 100 for x in compute_capabilities) and is_training:
+        assert (
+            FusedAttnHelper.is_non_deterministic_allowed()
+            and get_cudnn_version() >= (9, 7, 0)
+            and (attn_bias_type == AttnBiasType.NO_BIAS or dropout_probability == 0.0)
+        ) or (
+            not FusedAttnHelper.is_non_deterministic_allowed()
+            and get_cudnn_version() >= (9, 18, 1)
+            and attn_bias_type == AttnBiasType.NO_BIAS
+            and dropout_probability == 0.0
+        ), (
+            "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with dropout,"
+            " and deterministic bprop (cuDNN 9.18.1+) does not support bias or dropout"
+        )
 
     fused_config = _FusedAttnConfig(
         attn_bias_type=attn_bias_type,
@@ -3581,6 +3662,7 @@ def fused_attn_bwd(
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=(-1, -1) if window_size is None else window_size,
+        bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
         cp_striped_window_size=None,

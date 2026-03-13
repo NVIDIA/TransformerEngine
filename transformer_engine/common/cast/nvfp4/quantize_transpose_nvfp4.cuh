@@ -21,6 +21,7 @@
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "core_nvfp4.cuh"
+#include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -134,7 +135,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
   rng.init(rng_seed, rng_sequence, rng_offset);
   uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
   // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
@@ -646,7 +647,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
   rng.init(rng_seed, rng_sequence, rng_offset);
   uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
   int rnd_idx =
@@ -1159,12 +1160,18 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
 #if FP4_TYPE_SUPPORTED
   using namespace quantize_transpose_kernel;
   using namespace ptx;
+
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
   // TODO(Frank): Is there a better way to do this?
   bool return_transpose = output->has_columnwise_data();
+
+  if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
+    quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
+    return;
+  }
 
   constexpr bool COMPUTE_ACTIVATIONS = false;
   using ParamOP = Empty;
@@ -1179,6 +1186,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   NVTE_CHECK(output->has_data(), "NVFP4 output tensor must be allocated.");
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+  NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
   if (return_transpose) {
     NVTE_CHECK(output->has_columnwise_data(), "NVFP4 transposed output tensor must be allocated.");
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),

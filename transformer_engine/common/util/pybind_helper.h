@@ -83,7 +83,8 @@
   pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
       .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
-      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT);                \
+      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT)                 \
+      .value("INVALID", transformer_engine::Float8BlockScaleTensorFormat::INVALID);                \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
       .value("RS", transformer_engine::CommOverlapType::RS)                                        \

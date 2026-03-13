@@ -5,10 +5,9 @@
 """Multi-head Attention."""
 import os
 import collections
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
@@ -32,6 +31,7 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
+from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
 
 from transformer_engine.pytorch.cpu_offload import start_offload, is_cpu_offload_enabled
 
@@ -93,6 +93,11 @@ class MultiheadAttention(torch.nn.Module):
                 map to ``window_size = (-1, 0)`` and Transformer Engine distinguishes them based on
                 ``attn_mask_type``. Similar to :attr:`attn_mask_type`, ``window_size`` can
                 be overridden by :attr:`window_size` in :meth:`forward` as well.
+    bottom_right_diagonal: Optional[bool], default = `None`
+                          Align sliding window and ALiBi diagonal to the top left (`False`)
+                          or bottom right (`True`) corner of the softmax matrix in the encoder.
+                          If `None`, it will be set to `False` for `attn_mask_type` =
+                          {`causal`, `padding_causal`} and `True` for other mask types.
     num_gqa_groups : int, default = None
                          number of GQA groups in the transformer layer.
                          Grouped Query Attention is described in
@@ -248,6 +253,7 @@ class MultiheadAttention(torch.nn.Module):
         layer_number: Optional[int] = None,
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         num_gqa_groups: Optional[int] = None,
@@ -286,6 +292,7 @@ class MultiheadAttention(torch.nn.Module):
         self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
+        self.bottom_right_diagonal = bottom_right_diagonal
         self.layer_number = 1 if layer_number is None else layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -335,6 +342,7 @@ class MultiheadAttention(torch.nn.Module):
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
         self.name = name
+        TransformerEngineBaseModule._validate_name(self)
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -347,7 +355,7 @@ class MultiheadAttention(torch.nn.Module):
         }
 
         self.q_norm, self.k_norm = self._create_qk_norm_modules(
-            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size
+            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size, params_dtype
         )
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
@@ -470,6 +478,10 @@ class MultiheadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """Fast attribute set for non-parameter fields."""
+        self.__dict__[name] = value
+
     def _create_qk_norm_modules(
         self,
         qk_norm_type: Optional[str],
@@ -477,6 +489,7 @@ class MultiheadAttention(torch.nn.Module):
         device: Union[torch.device, str],
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
+        params_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[Optional[torch.nn.Module], Optional[torch.nn.Module]]:
         """
         Create query and key normalization modules based on the specified normalization type.
@@ -493,6 +506,8 @@ class MultiheadAttention(torch.nn.Module):
             Sequence length for L2Normalization optimization
         micro_batch_size : Optional[int], default = None
             Micro batch size for L2Normalization optimization
+        params_dtype : Optional[torch.dtype], default = None
+            Data type for the normalization modules
 
         Returns
         -------
@@ -516,11 +531,13 @@ class MultiheadAttention(torch.nn.Module):
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             k_norm = RMSNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             return q_norm, k_norm
 
@@ -529,11 +546,13 @@ class MultiheadAttention(torch.nn.Module):
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             k_norm = LayerNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             return q_norm, k_norm
 
@@ -621,6 +640,7 @@ class MultiheadAttention(torch.nn.Module):
         encoder_output: Optional[torch.Tensor] = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[InferenceParams] = None,
@@ -667,6 +687,11 @@ class MultiheadAttention(torch.nn.Module):
                        aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = None
                     sliding window size for local attention.
+        bottom_right_diagonal: Optional[bool], default = `None`
+                              Align sliding window and ALiBi diagonal to the top left (`False`)
+                              or bottom right (`True`) corner of the softmax matrix in the encoder.
+                              If `None`, it will be set to `False` for `attn_mask_type` =
+                              {`causal`, `padding_causal`} and `True` for other mask types.
         encoder_output : Optional[torch.Tensor], default = None
              Output of the encoder block to be fed into the decoder block if using
              ``layer_type="decoder"``.
@@ -731,6 +756,17 @@ class MultiheadAttention(torch.nn.Module):
         if window_size is None:
             window_size = self.window_size
 
+        window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+        if bottom_right_diagonal is None:
+            bottom_right_diagonal = self.bottom_right_diagonal
+        if attn_mask_type in {"causal", "padding_causal"}:
+            bottom_right_diagonal = False
+        if bottom_right_diagonal is None or attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }:
+            bottom_right_diagonal = True
+
         if "padding" in attn_mask_type and attention_mask is not None:
             for mask in attention_mask:
                 assert mask.dtype == torch.bool, "Attention mask must be in boolean type!"
@@ -738,9 +774,6 @@ class MultiheadAttention(torch.nn.Module):
         assert (
             core_attention_bias_type in AttnBiasTypes
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
-
-        if TEDebugState.debug_enabled:
-            TransformerEngineBaseModule._validate_name(self)
 
         # =================================================
         # Pre-allocate memory for key-value cache for inference
@@ -1004,6 +1037,7 @@ class MultiheadAttention(torch.nn.Module):
             attention_mask=attention_mask,
             attn_mask_type=attn_mask_type,
             window_size=window_size,
+            bottom_right_diagonal=bottom_right_diagonal,
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,

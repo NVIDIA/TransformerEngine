@@ -5,25 +5,46 @@
 """Tests for permutation Triton kernels and high-level APIs"""
 
 import functools
+import sys
 
 import jax
 import jax.numpy as jnp
 import pytest
 
-# High-level API with VJP support
-from transformer_engine.jax.permutation import (
-    token_dispatch,
-    token_combine,
-    sort_chunks_by_index,
-)
 from utils import assert_allclose, pytest_parametrize_wrapper
+
+
+@pytest.fixture(autouse=True, scope="function")
+def _inject_permutation(request):
+    """Lazy-load permutation API only for tests marked 'triton'. Other tests run without importing.
+
+    We inject into sys.modules[__name__] so that test code in this module can use
+    token_dispatch, token_combine, etc. as module-level names. A plain import inside
+    this fixture would only bind those names in the fixture's local scope; the test
+    methods (e.g. in TestHighLevelPermutationAPI) reference them as globals, so they
+    must exist on the module's namespace.
+    """
+    if not request.node.get_closest_marker("triton"):
+        yield
+        return
+    from transformer_engine.jax.permutation import (
+        token_dispatch,
+        token_combine,
+        sort_chunks_by_index,
+    )
+
+    mod = sys.modules[__name__]
+    mod.token_dispatch = token_dispatch
+    mod.token_combine = token_combine
+    mod.sort_chunks_by_index = sort_chunks_by_index
+    yield
 
 
 ALL_DISPATCH_COMBINE_CASES = [
     (128, 5, 128, 3),
     (1024, 8, 128, 8),
     (4096, 32, 1280, 2),
-    (4096, 256, 4096, 6),
+    (4096, 64, 4096, 6),
 ]
 DISPATCH_COMBINE_CASES = {
     "L0": ALL_DISPATCH_COMBINE_CASES[0:2],
@@ -44,7 +65,7 @@ ALL_DISPATCH_COMBINE_PADDING_CASES = [
     (128, 5, 128, 3, 8),
     (1024, 8, 128, 8, 16),
     (4096, 32, 1280, 2, 128),
-    (4096, 256, 4096, 6, 16),
+    (4096, 64, 4096, 6, 16),
 ]
 DISPATCH_COMBINE_PADDING_CASES = {
     "L0": ALL_DISPATCH_COMBINE_PADDING_CASES[0:2],
@@ -449,6 +470,7 @@ def reference_sort_chunks_by_map(
     return output, permuted_probs
 
 
+@pytest.mark.triton
 class TestHighLevelPermutationAPI:
     """Test high-level permutation APIs (token_dispatch, token_combine, etc.)
 

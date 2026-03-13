@@ -272,7 +272,8 @@ at::Tensor allocateSpace(const NVTEShape& shape, const transformer_engine::DType
   } else if (size == 1) {
     return at::empty({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
   }
-  NVTE_CHECK(false, "Should never reach here! func: allocateSpace");
+  NVTE_ERROR("Unsupported tensor allocation: ndim=", size, ", init_to_zeros=", init_to_zeros,
+             ". Only 1D and 2D tensors are supported.");
 }
 
 at::Tensor allocateTorchTensor(int M, int N, transformer_engine::DType dtype) {
@@ -301,10 +302,12 @@ std::vector<size_t> convertShape(const NVTEShape& shape) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-size_t roundup(const size_t value, const size_t multiple) {
+size_t roundup(size_t value, size_t multiple) {
   assert(multiple > 0);
   return ((value + multiple - 1) / multiple) * multiple;
 }
+
+size_t ceildiv(size_t numer, size_t denom) { return (numer + denom - 1) / denom; }
 
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) {
   NVTE_SCOPED_GIL_RELEASE({
