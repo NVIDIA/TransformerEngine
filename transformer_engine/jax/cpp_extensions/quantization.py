@@ -993,7 +993,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
     Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
     """
 
-    name = "te_grouped_quantize_ffi"      # V1: non-MXFP8
+    name = "te_grouped_quantize_ffi"  # V1: non-MXFP8
     name_v2 = "te_grouped_quantize_v2_ffi"  # V2: MXFP8, CUDA-graph safe
     multiple_results = True
     impl_static_args = (
@@ -1059,9 +1059,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             )
         else:
             # V1 path: 5th output is amax
-            fifth_out_aval = jax.core.ShapedArray(
-                shape=(group_sizes_aval.size,), dtype=jnp.float32
-            )
+            fifth_out_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
 
         if q_layout.has_colwise:
             colwise_out_shape = out_shape

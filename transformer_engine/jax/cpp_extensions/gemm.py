@@ -1332,7 +1332,6 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
 register_primitive(GroupedGemmCopySizesPrimitive)
 
 
-
 def _assert_grouped_gemm_dims_shapes(
     lhs_first_dims_aval,
     lhs_last_dims_aval,
@@ -2036,8 +2035,7 @@ def grouped_gemm(
         rhs_group_axis = getattr(rhs, "group_axis", 0)
     else:
         raise TypeError(
-            "lhs must be GroupedNoScaleTensor or GroupedScaledTensor1x, "
-            f"got type={type(lhs)}"
+            f"lhs must be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(lhs)}"
         )
 
     if isinstance(rhs, GroupedNoScaleTensor):
@@ -2061,8 +2059,7 @@ def grouped_gemm(
             scaling_mode = lhs.scaling_mode
     else:
         raise TypeError(
-            "rhs must be GroupedNoScaleTensor or GroupedScaledTensor1x, "
-            f"got type={type(rhs)}"
+            f"rhs must be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(rhs)}"
         )
 
     # Infer output dims from which operand has the ragged non-contracting dim.
@@ -2130,7 +2127,9 @@ def grouped_gemm(
         )
         lhs_input_data = lhs.data if isinstance(lhs, GroupedNoScaleTensor) else lhs_data
         rhs_input_data = rhs.data if isinstance(rhs, GroupedNoScaleTensor) else rhs_data
-        lhs_q = grouped_quantize(lhs_input_data, quantizer_set.x, active_group_sizes, lhs_flatten_axis)
+        lhs_q = grouped_quantize(
+            lhs_input_data, quantizer_set.x, active_group_sizes, lhs_flatten_axis
+        )
         rhs_q = grouped_quantize(
             rhs_input_data, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
         )
