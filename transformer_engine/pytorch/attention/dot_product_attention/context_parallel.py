@@ -1392,6 +1392,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
+        orig_o_shape = q.shape[:-1] + v.shape[-1:]
         batch_dim = None
         seq_dim = None
         cu_seqlens_q_half, cu_seqlens_kv_half = None, None
@@ -2124,6 +2125,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.k_shape = k_shape
         ctx.v_shape = v_shape
         ctx.o_shape = o_shape
+        ctx.orig_o_shape = orig_o_shape
 
         ctx.fwd_nominal_dtype = fwd_nominal_dtype
         ctx.dQKV_quantizer = dQKV_quantizer
@@ -2364,7 +2366,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if cp_size_a2a > 1:
             if not ctx.use_fused_attention:
                 # out = out.view(ctx.batch_size, -1, *out.shape[-2:])
-                dout = dout.view(*out.shape)
+                dout = dout.view(ctx.orig_o_shape)
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(
                 cp_size_a2a, out.device
             )
