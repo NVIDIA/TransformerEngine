@@ -150,18 +150,18 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
-def skip_unsupported_backward_mode(
+def skip_unsupported_backward_override(
     layer_type: str,
-    quant_recipe: Recipe,
-    backward_mode: str,
+    quant_recipe: Optional[Recipe],
+    backward_override: Optional[str],
 ) -> None:
-    """Skip known unsupported layer/recipe/backward-mode combinations used in tests."""
-    if backward_mode is None or backward_mode == "default":
+    """Skip known unsupported layer/recipe/backward-override combinations used in tests."""
+    if backward_override is None:
         return
-    if quant_recipe is None and backward_mode in ("unquant", "dequant"):
-        pytest.skip(f"Not a quantized recipe, cannot use backward mode {backward_mode}.")
-    if quant_recipe.delayed() and backward_mode in ("unquant", "dequant"):
-        pytest.skip(f"Delayed scaling does not support backward mode {backward_mode}.")
+    if quant_recipe is None and backward_override is not None:
+        pytest.skip(f"Not a quantized recipe, cannot use backward override {backward_override}.")
+    if quant_recipe.delayed() and backward_override is not None:
+        pytest.skip(f"Delayed scaling does not support backward override {backward_override}.")
     if layer_type in (
         "layernorm_mlp",
         "layernorm_mlp_nocheckpoint",
@@ -169,7 +169,7 @@ def skip_unsupported_backward_mode(
         "transformer",
         "transformer_layer",
     ):
-        pytest.skip(f"{layer_type} does not support NVTE_BACKWARD_MODE={backward_mode}.")
+        pytest.skip(f"{layer_type} does not support NVTE_BACKWARD_OVERRIDE={backward_override}.")
 
 
 # Cached RNG state

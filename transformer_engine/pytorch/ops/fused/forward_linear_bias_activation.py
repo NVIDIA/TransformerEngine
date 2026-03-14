@@ -93,9 +93,9 @@ class ForwardLinearBiasActivation(FusedOperation):
         grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         if with_quantized_compute:
-            backward_mode = FP8GlobalStateManager.get_fp8_recipe().backward_mode
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
         else:
-            backward_mode = "default"
+            backward_override = None
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
@@ -113,7 +113,7 @@ class ForwardLinearBiasActivation(FusedOperation):
             tensor_parallel_group=linear_op.tensor_parallel_group,
             sequence_parallel=linear_op.sequence_parallel,
             with_quantized_compute=with_quantized_compute,
-            backward_mode=backward_mode,
+            backward_override=backward_override,
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=output_quantizer,
@@ -123,7 +123,7 @@ class ForwardLinearBiasActivation(FusedOperation):
 
         # Save state for backward pass
         if linear_op_ctx.requires_grad:
-            if backward_mode == "unquant":
+            if backward_override == "high_precision":
                 saved_input = input_ if weight_requires_grad else None
                 saved_weight = linear_op.weight if input_requires_grad else None
             else:
@@ -133,9 +133,9 @@ class ForwardLinearBiasActivation(FusedOperation):
                 mark_activation_offload(saved_input)
             linear_op_ctx.save_for_backward(saved_input, saved_weight)
             linear_op_ctx.with_quantized_compute = (
-                with_quantized_compute and backward_mode == "default"
+                with_quantized_compute and backward_override is None
             )
-            linear_op_ctx.backward_mode = backward_mode
+            linear_op_ctx.backward_override = backward_override
             linear_op_ctx.input_quantizer = input_quantizer
             linear_op_ctx.weight_quantizer = weight_quantizer
             linear_op_ctx.grad_output_quantizer = grad_output_quantizer
@@ -145,7 +145,7 @@ class ForwardLinearBiasActivation(FusedOperation):
             linear_op_ctx.weight_requires_grad = weight_requires_grad
         if bias_op is not None and bias_op_ctx.requires_grad:
             bias_op_ctx.grad_input_quantizer = linear_op.get_grad_output_quantizer()
-            if backward_mode in ("unquant", "dequant"):
+            if backward_override is not None:
                 bias_op_ctx.grad_input_quantizer = None
 
         return output, [() for _ in range(len(self.basic_ops))]

@@ -388,17 +388,17 @@ class UserbuffersForwardLinear(FusedOperation):
 
         """
 
-        # Disable Userbuffers for non-quantized backward modes.
-        # In unquant/dequant modes we want to avoid all UB-specific overlap
+        # Disable Userbuffers for backward overrides.
+        # In high_precision/dequantized modes we want to avoid all UB-specific overlap
         # paths and run through the standard non-UB operator sequence instead.
         recipe = unused.get("recipe", None)
         if recipe is not None:
-            backward_mode = recipe.backward_mode
+            backward_override = recipe.backward_override
         elif FP8GlobalStateManager.is_fp8_enabled():
-            backward_mode = FP8GlobalStateManager.get_fp8_recipe().backward_mode
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
         else:
-            backward_mode = "default"
-        if backward_mode in ("unquant", "dequant"):
+            backward_override = None
+        if backward_override is not None:
             return ops
 
         # Return immediately if environment is not distributed

@@ -30,7 +30,7 @@ from utils import (
     assert_close,
     make_recipe,
     reset_rng_states,
-    skip_unsupported_backward_mode,
+    skip_unsupported_backward_override,
 )
 
 
@@ -38,7 +38,7 @@ from utils import (
 # Mode and capability config
 # --------------------------
 
-_NON_QUANT_BACKWARD_MODES = ("unquant", "dequant")
+_BACKWARD_OVERRIDES = ("high_precision", "dequantized")
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
@@ -88,9 +88,9 @@ def _reset_global_fp8_state():
     FP8GlobalStateManager.reset()
 
 
-@pytest.fixture(params=_NON_QUANT_BACKWARD_MODES, ids=lambda mode: f"mode_{mode}")
-def backward_mode(request: pytest.FixtureRequest) -> str:
-    """Backward mode under test."""
+@pytest.fixture(params=_BACKWARD_OVERRIDES, ids=lambda mode: f"mode_{mode}")
+def backward_override(request: pytest.FixtureRequest) -> str:
+    """backward override under test."""
     return request.param
 
 
@@ -325,7 +325,7 @@ def _dequantize_saved_operand(
 ) -> torch.Tensor:
     if saved_operand is None:
         raise RuntimeError("Expected saved operand but got None")
-    # In dequant mode we must consume the fprop-saved quantized payload directly.
+    # In dequantized mode we must consume the fprop-saved quantized payload directly.
     # If row-wise payload is missing, the tensor was retargeted to a transpose-only
     # layout and no longer represents the original fprop operand.
     if (
@@ -334,7 +334,7 @@ def _dequantize_saved_operand(
         and getattr(saved_operand, "_rowwise_data") is None
     ):
         raise RuntimeError(
-            "Saved dequant operand lost row-wise fprop payload (likely usage retarget)."
+            "Saved dequantized operand lost row-wise fprop payload (likely usage retarget)."
         )
     if isinstance(saved_operand, torch.Tensor):
         return saved_operand.to(dtype)
@@ -384,7 +384,7 @@ def _snapshot_backward_ctx_state(
     if output.grad_fn is None:
         raise RuntimeError("Output tensor has no grad_fn; cannot inspect backward context state.")
     required_attrs = (
-        "backward_mode",
+        "backward_override",
         "fp8",
         "grad_output_quantizer",
         "reduce_and_update_bwd_fp8_tensors",
@@ -396,7 +396,7 @@ def _snapshot_backward_ctx_state(
             f"{', '.join(missing_attrs)}."
         )
     return (
-        getattr(output.grad_fn, "backward_mode"),
+        getattr(output.grad_fn, "backward_override"),
         bool(getattr(output.grad_fn, "fp8")),
         getattr(output.grad_fn, "grad_output_quantizer"),
         bool(getattr(output.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
@@ -412,20 +412,20 @@ def _assert_saved_quantized_operand_uses_rowwise_only(
         raise RuntimeError(f"Expected quantized saved {name} operand but got None")
     if isinstance(saved_operand, torch.Tensor):
         raise RuntimeError(
-            f"Dequant reference expects quantized saved {name} operand, got torch.Tensor."
+            f"dequantized reference expects quantized saved {name} operand, got torch.Tensor."
         )
     if not hasattr(saved_operand, "dequantize"):
         raise RuntimeError(f"Unsupported saved {name} operand type: {type(saved_operand)}")
     if hasattr(saved_operand, "_rowwise_data") and getattr(saved_operand, "_rowwise_data") is None:
         raise RuntimeError(
-            f"Saved dequant {name} operand lost row-wise fprop payload (likely usage retarget)."
+            f"Saved dequantized {name} operand lost row-wise fprop payload (likely usage retarget)."
         )
     if (
         hasattr(saved_operand, "_columnwise_data")
         and getattr(saved_operand, "_columnwise_data") is not None
     ):
         raise RuntimeError(
-            f"Saved dequant {name} operand unexpectedly carries column-wise payload."
+            f"Saved dequantized {name} operand unexpectedly carries column-wise payload."
         )
 
 
@@ -442,7 +442,7 @@ def _assert_saved_quantized_operand_layout_unchanged(snapshot: dict[str, object]
         rowwise_now = rowwise_data_now is not None
         if rowwise_now != rowwise_present:
             raise RuntimeError(
-                f"Saved dequant {name} operand row-wise payload presence changed "
+                f"Saved dequantized {name} operand row-wise payload presence changed "
                 f"from {rowwise_present} to {rowwise_now}."
             )
         # Guard against hidden requantization that swaps in a new row-wise payload.
@@ -453,7 +453,7 @@ def _assert_saved_quantized_operand_layout_unchanged(snapshot: dict[str, object]
             and id(rowwise_data_now) != rowwise_obj_id
         ):
             raise RuntimeError(
-                f"Saved dequant {name} operand row-wise payload identity changed "
+                f"Saved dequantized {name} operand row-wise payload identity changed "
                 "(likely rewritten/requantized)."
             )
 
@@ -462,7 +462,7 @@ def _assert_saved_quantized_operand_layout_unchanged(snapshot: dict[str, object]
         columnwise_now = getattr(saved_operand, "_columnwise_data", None) is not None
         if columnwise_now != columnwise_present:
             raise RuntimeError(
-                f"Saved dequant {name} operand column-wise payload presence changed "
+                f"Saved dequantized {name} operand column-wise payload presence changed "
                 f"from {columnwise_present} to {columnwise_now}."
             )
 
@@ -497,7 +497,7 @@ def _compute_linear_backward_reference_from_saved_operands(
     out_dtype: torch.dtype,
     with_bias: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # Dequant reference path:
+    # dequantized reference path:
     # 1) use the exact operands saved by quantized forward,
     # 2) dequantize them to the active high-precision compute dtype,
     # 3) run backward GEMMs in high precision and compare exactly.
@@ -509,7 +509,9 @@ def _compute_linear_backward_reference_from_saved_operands(
     if dy_mat.shape[0] == 0:
         out_features = dy_mat.shape[-1]
         if saved_input is None:
-            raise RuntimeError("Expected saved input operand for empty-chunk dequant reference.")
+            raise RuntimeError(
+                "Expected saved input operand for empty-chunk dequantized reference."
+            )
         in_features = saved_input.size(-1)
         dx_ref = torch.zeros(*dy.shape[:-1], in_features, dtype=out_dtype, device=dy.device)
         dw_ref = torch.zeros(out_features, in_features, dtype=out_dtype, device=dy.device)
@@ -781,7 +783,7 @@ def _run_grouped_linear_single_step_with_ctx_state(
                 "Output tensor has no grad_fn; cannot inspect grouped backward state."
             )
         required_attrs = (
-            "backward_mode",
+            "backward_override",
             "fp8",
             "reduce_and_update_bwd_fp8_tensors",
         )
@@ -792,7 +794,7 @@ def _run_grouped_linear_single_step_with_ctx_state(
                 f"{', '.join(missing_attrs)}."
             )
         ctx_state = (
-            getattr(y.grad_fn, "backward_mode"),
+            getattr(y.grad_fn, "backward_override"),
             bool(getattr(y.grad_fn, "fp8")),
             bool(getattr(y.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
         )
@@ -815,14 +817,14 @@ def _run_grouped_linear_single_step_with_ctx_state(
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
-def test_backward_mode_recipe_matches_requested_mode(
+def test_backward_override_recipe_matches_requested_mode(
     recipe_name: str,
-    backward_mode: str,
+    backward_override: str,
 ) -> None:
-    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
-    quant_recipe = make_recipe(recipe_name, backward_mode="default")
-    assert mode_recipe.backward_mode == backward_mode
-    assert quant_recipe.backward_mode == "default"
+    mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    quant_recipe = make_recipe(recipe_name)
+    assert mode_recipe.backward_override == backward_override
+    assert quant_recipe.backward_override is None
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -830,14 +832,14 @@ def test_backward_mode_recipe_matches_requested_mode(
 @pytest.mark.parametrize("input_shape,out_features", _shape_test_cases)
 @pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
 @pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
-def test_linear_like_backward_mode_matches_reference(
+def test_linear_like_backward_override_matches_reference(
     recipe_name: str,
     module_type: str,
     input_shape: tuple[int, ...],
     out_features: int,
     use_bias: bool,
     dtype: torch.dtype,
-    backward_mode: str,
+    backward_override: str,
 ) -> None:
     reset_rng_states()
     _maybe_skip_recipe_dtype(recipe_name, dtype, module_type)
@@ -845,9 +847,9 @@ def test_linear_like_backward_mode_matches_reference(
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
 
     in_features = input_shape[-1]
-    quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
-    skip_unsupported_backward_mode(module_type, mode_recipe, backward_mode)
+    quantized_ref_recipe = make_recipe(recipe_name)
+    mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override(module_type, mode_recipe, backward_override)
 
     module_quantized_ref = _make_linear_like_module(
         module_type,
@@ -870,8 +872,8 @@ def test_linear_like_backward_mode_matches_reference(
     dy = torch.randn(*output_shape, dtype=dtype, device="cuda")
 
     y_quantized_ref, _, _, _ = _run_single_step(module_quantized_ref, x, dy, quantized_ref_recipe)
-    if backward_mode == "unquant":
-        # Unquant reference path: compare against a plain high-precision backward run
+    if backward_override == "high_precision":
+        # high_precision reference path: compare against a plain high-precision backward run
         # (no fp8/autocast), starting from the same params and inputs.
         module_unquantized_ref = _make_linear_like_module(
             module_type,
@@ -894,7 +896,7 @@ def test_linear_like_backward_mode_matches_reference(
             None,
         )
     else:
-        # Dequant reference path: capture saved forward operands from the real dequant-mode
+        # dequantized reference path: capture saved forward operands from the real dequantized-override
         # execution, then rebuild backward reference from those saved operands.
         y_bwd_mode, x_bwd_mode, saved_operands = _run_single_step_with_saved_operands(
             module_bwd_mode, x, mode_recipe
@@ -909,14 +911,14 @@ def test_linear_like_backward_mode_matches_reference(
         ref_exc: Optional[Exception] = None
         try:
             if module_type == "layernorm_linear":
-                # LayerNormLinear dequant reference:
+                # LayerNormLinear dequantized reference:
                 # 1) Compute d(ln_out), dw, db from linear backward with saved operands.
                 # 2) Compute exact dx via layernorm_bwd with saved norm statistics.
                 # _LayerNormLinear forward saves operands as:
                 # [inputmat, weightmat, origin_weight, bias, ln_weight, ln_out, mu, rsigma, ...]
                 if len(saved_operands) < 8:
                     raise RuntimeError(
-                        "Insufficient saved operands for layernorm_linear dequant reference "
+                        "Insufficient saved operands for layernorm_linear dequantized reference "
                         f"(got {len(saved_operands)}, expected at least 8)."
                     )
                 saved_input = saved_operands[0]
@@ -1012,14 +1014,14 @@ def test_linear_like_backward_mode_matches_reference(
 @pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
 @pytest.mark.parametrize("m_splits", _grouped_m_split_cases)
 @pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
-def test_grouped_linear_backward_mode_matches_reference(
+def test_grouped_linear_backward_override_matches_reference(
     recipe_name: str,
     in_features: int,
     out_features: int,
     use_bias: bool,
     m_splits: list[int],
     dtype: torch.dtype,
-    backward_mode: str,
+    backward_override: str,
 ) -> None:
 
     reset_rng_states()
@@ -1029,8 +1031,8 @@ def test_grouped_linear_backward_mode_matches_reference(
     num_gemms = len(m_splits)
     num_tokens = sum(m_splits)
 
-    quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+    quantized_ref_recipe = make_recipe(recipe_name)
+    mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
 
     module_quantized_ref = te.GroupedLinear(
         num_gemms,
@@ -1060,8 +1062,8 @@ def test_grouped_linear_backward_mode_matches_reference(
         dy,
         quantized_ref_recipe,
     )
-    if backward_mode == "unquant":
-        # Unquant reference path: grouped module in plain high precision.
+    if backward_override == "high_precision":
+        # high_precision reference path: grouped module in plain high precision.
         module_unquantized_ref = te.GroupedLinear(
             num_gemms,
             in_features,
@@ -1086,7 +1088,7 @@ def test_grouped_linear_backward_mode_matches_reference(
             None,
         )
     else:
-        # Dequant reference path for grouped GEMMs:
+        # dequantized reference path for grouped GEMMs:
         # each GEMM restores its own saved input/weight pair and computes its own ref grads.
         y_bwd_mode, x_bwd_mode, saved_operands = _run_grouped_linear_step_with_saved_operands(
             module_bwd_mode, x, m_splits, mode_recipe
@@ -1102,7 +1104,7 @@ def test_grouped_linear_backward_mode_matches_reference(
         try:
             if len(saved_operands) < 2 * num_gemms:
                 raise RuntimeError(
-                    "Insufficient saved operands for GroupedLinear dequant reference "
+                    "Insufficient saved operands for GroupedLinear dequantized reference "
                     f"(got {len(saved_operands)}, expected at least {2 * num_gemms})."
                 )
 
@@ -1173,14 +1175,14 @@ def test_grouped_linear_backward_mode_matches_reference(
 @pytest.mark.parametrize("input_shape,out_features", _shape_test_cases)
 @pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
 @pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
-def test_linear_like_runtime_backward_mode_switch_updates_ctx(
+def test_linear_like_runtime_backward_override_switch_updates_ctx(
     recipe_name: str,
     module_type: str,
     input_shape: tuple[int, ...],
     out_features: int,
     use_bias: bool,
     dtype: torch.dtype,
-    backward_mode: str,
+    backward_override: str,
 ) -> None:
     reset_rng_states()
     _maybe_skip_recipe_dtype(recipe_name, dtype, module_type)
@@ -1197,9 +1199,9 @@ def test_linear_like_runtime_backward_mode_switch_updates_ctx(
     x = torch.randn(*input_shape, dtype=dtype, device="cuda")
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
-    default_recipe = make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
-    skip_unsupported_backward_mode(module_type, mode_recipe, backward_mode)
+    default_recipe = make_recipe(recipe_name)
+    mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override(module_type, mode_recipe, backward_override)
 
     *_, default_ctx = _run_single_step_with_ctx_state(module, x, dy, default_recipe)
     (
@@ -1208,7 +1210,7 @@ def test_linear_like_runtime_backward_mode_switch_updates_ctx(
         default_grad_output_quantizer,
         default_reduce_and_update,
     ) = default_ctx
-    assert default_mode == "default"
+    assert default_mode is None
     assert default_fp8
     assert default_grad_output_quantizer is not None
     assert default_reduce_and_update
@@ -1217,7 +1219,7 @@ def test_linear_like_runtime_backward_mode_switch_updates_ctx(
     switched_mode, switched_fp8, switched_grad_output_quantizer, switched_reduce_and_update = (
         switched_ctx
     )
-    assert switched_mode == backward_mode
+    assert switched_mode == backward_override
     assert not switched_fp8
     assert switched_grad_output_quantizer is None
     assert not switched_reduce_and_update
@@ -1229,7 +1231,7 @@ def test_linear_like_runtime_backward_mode_switch_updates_ctx(
         default_grad_output_quantizer_after,
         default_reduce_and_update_after,
     ) = default_ctx_after
-    assert default_mode_after == "default"
+    assert default_mode_after is None
     assert default_fp8_after
     assert default_grad_output_quantizer_after is not None
     assert default_reduce_and_update_after
@@ -1240,14 +1242,14 @@ def test_linear_like_runtime_backward_mode_switch_updates_ctx(
 @pytest.mark.parametrize("m_splits", _grouped_m_split_cases)
 @pytest.mark.parametrize("use_bias", (False, True), ids=("no_bias", "bias"))
 @pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
-def test_grouped_linear_runtime_backward_mode_switch_updates_ctx(
+def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
     recipe_name: str,
     in_features: int,
     out_features: int,
     m_splits: list[int],
     use_bias: bool,
     dtype: torch.dtype,
-    backward_mode: str,
+    backward_override: str,
 ) -> None:
 
     reset_rng_states()
@@ -1267,8 +1269,8 @@ def test_grouped_linear_runtime_backward_mode_switch_updates_ctx(
     x = torch.randn(num_tokens, in_features, dtype=dtype, device="cuda")
     dy = torch.randn(num_tokens, out_features, dtype=dtype, device="cuda")
 
-    default_recipe = make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
+    default_recipe = make_recipe(recipe_name)
+    mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
 
     *_, default_ctx = _run_grouped_linear_single_step_with_ctx_state(
         module,
@@ -1278,7 +1280,7 @@ def test_grouped_linear_runtime_backward_mode_switch_updates_ctx(
         default_recipe,
     )
     default_mode, default_fp8, default_reduce_and_update = default_ctx
-    assert default_mode == "default"
+    assert default_mode is None
     assert default_fp8
     assert default_reduce_and_update
 
@@ -1290,7 +1292,7 @@ def test_grouped_linear_runtime_backward_mode_switch_updates_ctx(
         mode_recipe,
     )
     switched_mode, switched_fp8, switched_reduce_and_update = switched_ctx
-    assert switched_mode == backward_mode
+    assert switched_mode == backward_override
     assert not switched_fp8
     assert not switched_reduce_and_update
 
@@ -1302,7 +1304,7 @@ def test_grouped_linear_runtime_backward_mode_switch_updates_ctx(
         default_recipe,
     )
     default_mode_after, default_fp8_after, default_reduce_and_update_after = default_ctx_after
-    assert default_mode_after == "default"
+    assert default_mode_after is None
     assert default_fp8_after
     assert default_reduce_and_update_after
 
@@ -1318,7 +1320,7 @@ def test_grouped_linear_runtime_backward_mode_switch_updates_ctx(
 @pytest.mark.parametrize("in_features,out_features", _linear_feature_cases)
 @pytest.mark.parametrize("m", (1, 32), ids=("m1", "m32"))
 @pytest.mark.parametrize("dtype", _fused_dtypes, ids=str)
-def test_fused_linear_paths_match_backward_mode_reference(
+def test_fused_linear_paths_match_backward_override_reference(
     recipe_name: str,
     fused_pattern: str,
     expected_fused_op: type,
@@ -1326,7 +1328,7 @@ def test_fused_linear_paths_match_backward_mode_reference(
     out_features: int,
     m: int,
     dtype: torch.dtype,
-    backward_mode: str,
+    backward_override: str,
 ) -> None:
     _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
@@ -1334,9 +1336,9 @@ def test_fused_linear_paths_match_backward_mode_reference(
 
     reset_rng_states()
 
-    quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
-    skip_unsupported_backward_mode("ops_linear", mode_recipe, backward_mode)
+    quantized_ref_recipe = make_recipe(recipe_name)
+    mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
     model_quantized_ref = _make_fused_model(fused_pattern, in_features, out_features, dtype)
     model_bwd_mode = _make_fused_model(fused_pattern, in_features, out_features, dtype)
@@ -1357,8 +1359,8 @@ def test_fused_linear_paths_match_backward_mode_reference(
         x2=x2,
     )
 
-    if backward_mode == "unquant":
-        # Unquant reference path: replay the same fused model structure in plain
+    if backward_override == "high_precision":
+        # high_precision reference path: replay the same fused model structure in plain
         # high precision and compare backward outputs exactly.
         model_unquantized_ref = _make_fused_model(fused_pattern, in_features, out_features, dtype)
         _copy_named_parameters(model_quantized_ref, model_unquantized_ref)
@@ -1380,7 +1382,7 @@ def test_fused_linear_paths_match_backward_mode_reference(
             x2=x2,
         )
     else:
-        # Dequant reference path: compute backward reference from saved quantized
+        # dequantized reference path: compute backward reference from saved quantized
         # linear operands (with branch-specific dy handling for fused epilogues).
         y_bwd_mode, x1_bwd_mode, x2_bwd_mode_ref, saved_operands = (
             _run_fused_single_step_with_saved_operands(
@@ -1465,7 +1467,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     input_shape: tuple[int, ...],
     out_features: int,
     dtype: torch.dtype,
-    backward_mode: str,
+    backward_override: str,
 ) -> None:
     _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
@@ -1474,9 +1476,9 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     reset_rng_states()
     in_features = input_shape[-1]
 
-    quantized_ref_recipe = make_recipe(recipe_name, backward_mode="default")
-    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
-    skip_unsupported_backward_mode("ops_linear", mode_recipe, backward_mode)
+    quantized_ref_recipe = make_recipe(recipe_name)
+    mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
     model_quantized_ref = _make_fused_model("bias_activation", in_features, out_features, dtype)
     model_bwd_mode = _make_fused_model("bias_activation", in_features, out_features, dtype)
@@ -1493,8 +1495,8 @@ def test_fused_bias_activation_matches_masked_linear_backward(
         quantized_ref_recipe,
     )
 
-    if backward_mode == "unquant":
-        # Unquant reference path: build a plain linear reference and apply the
+    if backward_override == "high_precision":
+        # high_precision reference path: build a plain linear reference and apply the
         # same activation mask (from quantized forward output) before backward.
         linear_unquantized_ref = _make_linear_like_module(
             "ops_linear",
@@ -1520,7 +1522,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
             None,
         )
     else:
-        # Dequant reference path: restore saved linear operands from fused forward,
+        # dequantized reference path: restore saved linear operands from fused forward,
         # apply the same activation mask, then run linear backward reference.
         y_bwd_mode, x1_bwd_mode, _, saved_operands = _run_fused_single_step_with_saved_operands(
             "bias_activation",
@@ -1576,7 +1578,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     assert len(fused_ops) >= 1
     assert isinstance(fused_ops[0][0], ForwardLinearBiasActivation)
 
-    # In unquant/dequant modes, backward-activation+bias fusion should be disabled.
+    # In high_precision/dequantized modes, backward-activation+bias fusion should be disabled.
     bwd_mode_backward_ops = model_bwd_mode._module_groups[0]._backward_ops
     assert not any(isinstance(op, BackwardActivationBias) for op, _ in bwd_mode_backward_ops)
 
@@ -1596,12 +1598,12 @@ def test_fused_bias_activation_matches_masked_linear_backward(
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
 @pytest.mark.parametrize("in_features,out_features", _linear_feature_cases)
 @pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
-def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
+def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_override_switch(
     recipe_name: str,
     in_features: int,
     out_features: int,
     dtype: torch.dtype,
-    backward_mode: str,
+    backward_override: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Simulate a distributed setup to exercise Userbuffers fusion eligibility
@@ -1611,7 +1613,7 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
 
     # Use a mutable recipe holder so we can switch fusion behavior on the same
     # fuser object and verify that the cached fusion plan is refreshed.
-    current_recipe = {"value": make_recipe(recipe_name, backward_mode="default")}
+    current_recipe = {"value": make_recipe(recipe_name)}
     monkeypatch.setattr(FP8GlobalStateManager, "get_fp8_recipe", lambda: current_recipe["value"])
 
     reset_rng_states()
@@ -1635,8 +1637,8 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
     x = torch.randn(32, in_features, dtype=dtype, device="cuda", requires_grad=True)
     extra_inputs = [() for _ in range(fuser._num_basic_ops)]
 
-    quant_recipe = make_recipe(recipe_name, backward_mode="default")
-    skip_unsupported_backward_mode("ops_linear", quant_recipe, backward_mode)
+    quant_recipe = make_recipe(recipe_name)
+    skip_unsupported_backward_override("ops_linear", quant_recipe, backward_override)
     fuser.maybe_fuse_ops(
         is_grad_enabled=True,
         recipe=quant_recipe,
@@ -1645,8 +1647,8 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
     )
     assert any(isinstance(op, UserbuffersForwardLinear) for op, _ in fuser._forward_ops)
 
-    non_quant_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
-    skip_unsupported_backward_mode("ops_linear", non_quant_recipe, backward_mode)
+    non_quant_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override("ops_linear", non_quant_recipe, backward_override)
     current_recipe["value"] = non_quant_recipe
     fuser.maybe_fuse_ops(
         is_grad_enabled=True,
@@ -1659,10 +1661,10 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_mode_switch(
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
 @pytest.mark.parametrize("dtype", _core_dtypes, ids=str)
-def test_quantize_op_respects_backward_mode(
+def test_quantize_op_respects_backward_override(
     recipe_name: str,
     dtype: torch.dtype,
-    backward_mode: str,
+    backward_override: str,
 ) -> None:
     _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
@@ -1674,8 +1676,8 @@ def test_quantize_op_respects_backward_mode(
     model_override = te_ops.Sequential(te_ops.Quantize(forward=True, backward=True))
     model_ref = te_ops.Sequential(te_ops.Quantize(forward=True, backward=False))
 
-    mode_recipe = make_recipe(recipe_name, backward_mode=backward_mode)
-    skip_unsupported_backward_mode("ops_linear", mode_recipe, backward_mode)
+    mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
     y_override, dx_override = _run_quantize_op_single_step(model_override, x, dy, mode_recipe)
     y_ref, dx_ref = _run_quantize_op_single_step(model_ref, x, dy, mode_recipe)
@@ -1686,11 +1688,11 @@ def test_quantize_op_respects_backward_mode(
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
 @pytest.mark.parametrize("module_type", ("linear", "layernorm_linear"))
-def test_backward_mode_memory_peak_report(
+def test_backward_override_memory_peak_report(
     recipe_name: str,
     module_type: str,
 ) -> None:
-    """Diagnostic-only memory report for default/unquant/dequant backward modes."""
+    """Diagnostic-only memory report for None/high_precision/dequantized backward overrides."""
     reset_rng_states()
     dtype = torch.bfloat16
     input_shape = (2048, 2048)
@@ -1713,77 +1715,78 @@ def test_backward_mode_memory_peak_report(
     x = torch.randn(*input_shape, dtype=dtype, device="cuda")
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
-    modes = ("default", "unquant", "dequant")
+    modes = (None, "high_precision", "dequantized")
     mode_results: dict[str, dict[str, float] | str] = {}
 
     for mode in modes:
-        try:
-            mode_recipe = make_recipe(recipe_name, backward_mode=mode)
+        mode_str = "default" if mode is None else mode
+        # try:
+        mode_recipe = make_recipe(recipe_name, backward_override=mode)
 
-            # Keep params identical across modes for a cleaner apples-to-apples read.
-            module = _make_linear_like_module(
-                module_type,
-                in_features,
-                out_features,
-                dtype,
-                bias=use_bias,
-            )
-            _copy_named_parameters(base_module, module)
+        # Keep params identical across modes for a cleaner apples-to-apples read.
+        module = _make_linear_like_module(
+            module_type,
+            in_features,
+            out_features,
+            dtype,
+            bias=use_bias,
+        )
+        _copy_named_parameters(base_module, module)
 
-            # Warmup run to reduce first-use kernel setup noise.
-            _run_single_step(module, x, dy, mode_recipe)
+        # Warmup run to reduce first-use kernel setup noise.
+        _run_single_step(module, x, dy, mode_recipe)
 
-            module.zero_grad(set_to_none=True)
-            x_run = x.detach().clone().requires_grad_(True)
-            autocast_ctx = te.autocast(enabled=True, recipe=mode_recipe)
+        module.zero_grad(set_to_none=True)
+        x_run = x.detach().clone().requires_grad_(True)
+        autocast_ctx = te.autocast(enabled=True, recipe=mode_recipe)
 
-            torch.cuda.synchronize()
-            torch.cuda.reset_peak_memory_stats()
-            fwd_start_mem = torch.cuda.memory_allocated()
-            with autocast_ctx:
-                y = module(x_run)
-                if isinstance(y, tuple):
-                    y = y[0]
-            torch.cuda.synchronize()
-            fwd_peak_alloc = float(torch.cuda.max_memory_allocated() - fwd_start_mem)
-            fwd_peak_reserved = float(torch.cuda.max_memory_reserved())
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        fwd_start_mem = torch.cuda.memory_allocated()
+        with autocast_ctx:
+            y = module(x_run)
+            if isinstance(y, tuple):
+                y = y[0]
+        torch.cuda.synchronize()
+        fwd_peak_alloc = float(torch.cuda.max_memory_allocated() - fwd_start_mem)
+        fwd_peak_reserved = float(torch.cuda.max_memory_reserved())
 
-            torch.cuda.reset_peak_memory_stats()
-            bwd_start_mem = torch.cuda.memory_allocated()
-            y.backward(dy)
-            torch.cuda.synchronize()
-            bwd_peak_alloc = float(torch.cuda.max_memory_allocated() - bwd_start_mem)
-            bwd_peak_reserved = float(torch.cuda.max_memory_reserved())
+        torch.cuda.reset_peak_memory_stats()
+        bwd_start_mem = torch.cuda.memory_allocated()
+        y.backward(dy)
+        torch.cuda.synchronize()
+        bwd_peak_alloc = float(torch.cuda.max_memory_allocated() - bwd_start_mem)
+        bwd_peak_reserved = float(torch.cuda.max_memory_reserved())
 
-            module.zero_grad(set_to_none=True)
-            x_run = x.detach().clone().requires_grad_(True)
-            autocast_ctx = te.autocast(enabled=True, recipe=mode_recipe)
+        module.zero_grad(set_to_none=True)
+        x_run = x.detach().clone().requires_grad_(True)
+        autocast_ctx = te.autocast(enabled=True, recipe=mode_recipe)
 
-            torch.cuda.synchronize()
-            torch.cuda.reset_peak_memory_stats()
-            e2e_start_mem = torch.cuda.memory_allocated()
-            with autocast_ctx:
-                y = module(x_run)
-                if isinstance(y, tuple):
-                    y = y[0]
-            y.backward(dy)
-            torch.cuda.synchronize()
-            e2e_peak_alloc = float(torch.cuda.max_memory_allocated() - e2e_start_mem)
-            e2e_peak_reserved = float(torch.cuda.max_memory_reserved())
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        e2e_start_mem = torch.cuda.memory_allocated()
+        with autocast_ctx:
+            y = module(x_run)
+            if isinstance(y, tuple):
+                y = y[0]
+        y.backward(dy)
+        torch.cuda.synchronize()
+        e2e_peak_alloc = float(torch.cuda.max_memory_allocated() - e2e_start_mem)
+        e2e_peak_reserved = float(torch.cuda.max_memory_reserved())
 
-            mode_results[mode] = {
-                "fwd_peak_alloc_mb": fwd_peak_alloc / (1024**2),
-                "fwd_peak_reserved_mb": fwd_peak_reserved / (1024**2),
-                "bwd_peak_alloc_mb": bwd_peak_alloc / (1024**2),
-                "bwd_peak_reserved_mb": bwd_peak_reserved / (1024**2),
-                "e2e_peak_alloc_mb": e2e_peak_alloc / (1024**2),
-                "e2e_peak_reserved_mb": e2e_peak_reserved / (1024**2),
-            }
-        except Exception as exc:  # pragma: no cover - diagnostic reporting path
-            mode_results[mode] = f"{type(exc).__name__}: {exc}"
+        mode_results[mode_str] = {
+            "fwd_peak_alloc_mb": fwd_peak_alloc / (1024**2),
+            "fwd_peak_reserved_mb": fwd_peak_reserved / (1024**2),
+            "bwd_peak_alloc_mb": bwd_peak_alloc / (1024**2),
+            "bwd_peak_reserved_mb": bwd_peak_reserved / (1024**2),
+            "e2e_peak_alloc_mb": e2e_peak_alloc / (1024**2),
+            "e2e_peak_reserved_mb": e2e_peak_reserved / (1024**2),
+        }
+        # except Exception as exc:  # pragma: no cover - diagnostic reporting path
+        #     mode_results[mode_str] = f"{type(exc).__name__}: {exc}"
 
     print(
-        "\n[backward_mode_memory_peak_report] "
+        "\n[backward_override_memory_peak_report] "
         f"recipe={recipe_name} module_type={module_type} "
         f"dtype={dtype} input_shape={input_shape} out_features={out_features}"
     )
@@ -1791,7 +1794,7 @@ def test_backward_mode_memory_peak_report(
     metric_col_width = 9
     delta_col_width = 18
     columns = (
-        ("mode", metric_col_width),
+        ("mode_str", delta_col_width),
         ("fwd_alloc", metric_col_width),
         ("bwd_alloc", metric_col_width),
         ("e2e_alloc", metric_col_width),
@@ -1813,9 +1816,10 @@ def test_backward_mode_memory_peak_report(
 
     default_metrics = mode_results.get("default")
     for mode in modes:
-        metrics = mode_results[mode]
+        mode_str = "default" if mode is None else mode
+        metrics = mode_results[mode_str]
         if isinstance(metrics, str):
-            print(f"{mode:>{metric_col_width}} | ERROR: {metrics}")
+            print(f"{mode_str:>{delta_col_width}} | ERROR: {metrics}")
             continue
 
         if isinstance(default_metrics, dict):
@@ -1831,7 +1835,7 @@ def test_backward_mode_memory_peak_report(
             delta_e2e_str = "n/a"
 
         print(
-            f"{mode:>{metric_col_width}} | "
+            f"{mode_str:>{delta_col_width}} | "
             f"{metrics['fwd_peak_alloc_mb']:{metric_col_width}.2f} | "
             f"{metrics['bwd_peak_alloc_mb']:{metric_col_width}.2f} | "
             f"{metrics['e2e_peak_alloc_mb']:{metric_col_width}.2f} | "

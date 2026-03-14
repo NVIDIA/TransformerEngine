@@ -105,8 +105,8 @@ class BackwardActivationBias(FusedOperation):
         """
 
         # Check if recipe supports bias activation fusion.
-        # unquant/dequant backward modes should use unfused backward ops.
-        if recipe is None or recipe.backward_mode in ("unquant", "dequant"):
+        # high_precision/dequantized backward overrides should use unfused backward ops.
+        if recipe is None or recipe.backward_override is not None:
             return ops
 
         # Scan through ops, fusing if possible

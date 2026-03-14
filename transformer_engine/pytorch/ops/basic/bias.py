@@ -127,7 +127,7 @@ class Bias(BasicOperation):
             ctx.grad_input_quantizer = prev_op_grad_output_quantizer
             if FP8GlobalStateManager.is_fp8_enabled():
                 fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-                if fp8_recipe.backward_mode in ("unquant", "dequant"):
+                if fp8_recipe.backward_override is not None:
                     ctx.grad_input_quantizer = None
 
         return x + b

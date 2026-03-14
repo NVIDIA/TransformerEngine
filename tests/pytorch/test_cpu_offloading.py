@@ -19,7 +19,7 @@ from transformer_engine.pytorch.cpu_offload import (
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from utils import ModelConfig, skip_unsupported_backward_mode
+from utils import ModelConfig, skip_unsupported_backward_override
 import transformer_engine_torch as tex
 
 # Check supported quantization schemes
@@ -417,14 +417,14 @@ class TestsDefaultOffloadSynchronizer:
 class TestTELayers:
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    @pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
-    def test_sanity(self, layer_type, recipe, backward_mode):
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+    def test_sanity(self, layer_type, recipe, backward_override):
         Utils.memory_leak_check()
 
-        skip_unsupported_backward_mode(layer_type, recipe, backward_mode)
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
         if recipe is not None:
             recipe = copy.deepcopy(recipe)
-            recipe.backward_mode = backward_mode
+            recipe.backward_override = backward_override
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
             layer_type in ["linear_op", "layernorm_mlp_ops"]
@@ -464,14 +464,14 @@ class TestTELayers:
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    @pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
-    def test_memory(self, layer_type, recipe, backward_mode):
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+    def test_memory(self, layer_type, recipe, backward_override):
         Utils.memory_leak_check()
 
-        skip_unsupported_backward_mode(layer_type, recipe, backward_mode)
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
         if recipe is not None:
             recipe = copy.deepcopy(recipe)
-            recipe.backward_mode = backward_mode
+            recipe.backward_override = backward_override
 
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
@@ -536,7 +536,7 @@ class TestTELayers:
             out = out + 1
         out = sync_function(out)
         del inp
-        if backward_mode == "default":
+        if backward_override is None:
             assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
         else:
             assert (
@@ -555,14 +555,14 @@ class TestTELayers:
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    @pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
-    def test_manual_synchronization(self, recipe, layer_type, backward_mode):
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+    def test_manual_synchronization(self, recipe, layer_type, backward_override):
         Utils.memory_leak_check()
 
-        skip_unsupported_backward_mode(layer_type, recipe, backward_mode)
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
         if recipe is not None:
             recipe = copy.deepcopy(recipe)
-            recipe.backward_mode = backward_mode
+            recipe.backward_override = backward_override
 
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
@@ -624,7 +624,7 @@ class TestTELayers:
         out_2.sum().backward()
 
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    @pytest.mark.parametrize("backward_mode", ["default", "unquant", "dequant"])
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("use_cuda_graphs", [True, False])
     @pytest.mark.parametrize("retain_pinned_cpu_buffers", [True, False])
@@ -632,16 +632,16 @@ class TestTELayers:
     def test_numerics(
         self,
         recipe,
-        backward_mode,
+        backward_override,
         layer_type,
         use_cuda_graphs,
         backend,
         retain_pinned_cpu_buffers,
     ):
-        skip_unsupported_backward_mode(layer_type, recipe, backward_mode)
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
         if recipe is not None:
             recipe = copy.deepcopy(recipe)
-            recipe.backward_mode = backward_mode
+            recipe.backward_override = backward_override
 
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
