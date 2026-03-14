@@ -534,10 +534,6 @@ def run_dpa_with_cp(
     for i, tensor in enumerate(tensors):
         # dbias/dbias_ could be None, so skip check for it
         if tensor is not None:
-            print(
-                f"========= {torch.cuda.current_device()}: tensors[{i}].shape:"
-                f" {tensor.shape} {tensor.dtype} {torch.isnan(tensor).any()} {torch.isinf(tensor).any()}"
-            )
             assert torch.all(~torch.isnan(tensor))
             assert torch.all(~torch.isinf(tensor))
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
