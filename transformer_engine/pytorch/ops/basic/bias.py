@@ -5,9 +5,12 @@
 """Fusible operation for bias."""
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from ..compile_compat.tensor_info import TensorInfo, PseudoForwardResult
 
 import transformer_engine_torch as tex
 from ..op import BasicOperation, OperationContext
@@ -142,3 +145,36 @@ class Bias(BasicOperation):
         else:
             db = dy
         return dy, (db,)
+
+    def pseudo_forward(
+        self,
+        input_info: "TensorInfo",
+        extra_inputs_info: tuple["TensorInfo", ...],
+        **kwargs,
+    ) -> "PseudoForwardResult":
+        """Compute forward metadata for Bias.
+
+        Bias is element-wise addition - output shape equals input shape.
+        No tensors saved for backward.
+        """
+        from ..compile_compat.tensor_info import TensorInfo, PseudoForwardResult
+
+        # Output has same shape as input
+        output_info = TensorInfo(
+            shape=input_info.shape,
+            dtype=input_info.dtype,
+            requires_grad=input_info.requires_grad,
+        )
+
+        # Note: grad_input_quantizer is set by the fuser based on prev_op
+        # For now, set to None (will be overwritten by run_backward if needed)
+        return PseudoForwardResult(
+            output_info=output_info,
+            tensors_to_save_info=[],
+            extra_outputs_info=[],
+            ctx_data={
+                "num_saved_tensors": 0,
+                "grad_input_quantizer": None,
+            },
+            tensor_sources=[],
+        )
