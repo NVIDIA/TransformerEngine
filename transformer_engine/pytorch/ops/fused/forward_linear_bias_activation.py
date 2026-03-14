@@ -123,10 +123,12 @@ class ForwardLinearBiasActivation(FusedOperation):
 
         # Save state for backward pass
         if linear_op_ctx.requires_grad:
-            saved_input, saved_weight = x_local, w
             if backward_mode == "unquant":
-                saved_input = input_ if input_requires_grad else None
-                saved_weight = linear_op.weight if weight_requires_grad else None
+                saved_input = input_ if weight_requires_grad else None
+                saved_weight = linear_op.weight if input_requires_grad else None
+            else:
+                saved_input = x_local
+                saved_weight = w
             if is_cpu_offload_enabled():
                 mark_activation_offload(saved_input)
             linear_op_ctx.save_for_backward(saved_input, saved_weight)
