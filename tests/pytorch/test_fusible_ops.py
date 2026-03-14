@@ -3400,6 +3400,27 @@ class TestSequentialModules:
             y_test = module(x_test, split_sizes, probs_test, split_sizes)
         y_test.backward(dy_test)
 
+        # Check for expected fusions
+        if (
+            te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported()
+            and quantization == "mxfp8"
+            and dtype == torch.bfloat16
+            and not bias
+            and glu_interleave_size == 32
+        ):
+            forward_ops = module._module_groups[0]._forward_ops
+            backward_ops = module._module_groups[0]._backward_ops
+            assert len(forward_ops) == 1
+            assert isinstance(
+                forward_ops[0][0],
+                te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+            )
+            assert len(backward_ops) == 1
+            assert isinstance(
+                backward_ops[0][0],
+                te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
+            )
+
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
         if quantization == "nvfp4":
