@@ -56,8 +56,9 @@ def _build_scale_spec(x_spec, scale_shape, mesh):
 
     The scale tensor has smaller dimensions than the data tensor (each dimension
     divided by the MXFP8 block size). This function ensures that we only shard a
-    scale dimension by a mesh axis if scale_shape[i] is divisible by that axis's
-    size. If not, a ValueError is raised with a helpful diagnostic message.
+    scale dimension by a mesh axis (or tuple of axes) if scale_shape[i] is
+    divisible by the total axis size. If not, a ValueError is raised with a
+    helpful diagnostic message.
     """
     result = []
     for axis, scale_dim in zip(x_spec, scale_shape):
@@ -76,8 +77,24 @@ def _build_scale_spec(x_spec, scale_shape, mesh):
                     f"size along this axis. Try reducing expert parallelism (EP) so that "
                     f"EP divides the scale dimension, or increase the tensor size."
                 )
+        elif isinstance(axis, (tuple, list)):
+            # Multi-axis sharding (e.g. ('fsdp', 'expert')): check total combined size.
+            total_size = 1
+            for a in axis:
+                total_size *= mesh.shape.get(a, 1)
+            if scale_dim % total_size == 0:
+                result.append(axis)
+            else:
+                raise ValueError(
+                    f"Cannot partition MXFP8 scale tensor (shape={tuple(scale_shape)}) "
+                    f"by mesh axes {tuple(axis)} of combined size {total_size}: "
+                    f"scale dim {scale_dim} is not divisible by {total_size}. "
+                    f"The data tensor's sharding is incompatible with the MXFP8 block "
+                    f"size along this axis. Try reducing parallelism or increasing the "
+                    f"tensor size."
+                )
         else:
-            result.append(None)  # tuple axes: conservatively leave unsharded
+            result.append(None)
     return tuple(result)
 
 
