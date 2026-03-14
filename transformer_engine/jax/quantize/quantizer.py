@@ -948,7 +948,7 @@ class GroupedQuantizer(Quantizer):
             is_colwise=tensor_list[0].is_colwise,
             data_layout=tensor_list[0].data_layout,
             flatten_axis=tensor_list[0].flatten_axis,
-            group_sizes=group_sizes,
+            first_dims=group_sizes,
             original_shape=original_shape,
             group_axis=group_axis,
         )
