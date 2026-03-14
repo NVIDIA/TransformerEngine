@@ -508,26 +508,30 @@ def flash_attn_a2a_communicate(
                 with torch.cuda.stream(cp_stream):
                     a2a_reqs[i - 2].wait()
                     x = a2a_outputs[i - 2]
-                    # [cp, 2, b, s//2, np//cp, hn] -> [b, 2, s//2, cp, np//cp, hn]
+                    # [cp, 2, b, s//2, np//cp, hn] -> [2, b, s//2, cp, np//cp, hn]
                     # or [cp, 2, s//2, b, np//cp, hn] -> [2, s//2, b, cp, np//cp, hn]
-                    # or [cp, 2, b, np//cp, s//2, hn] -> [b, cp, np//cp, 2, s//2, hn]
+                    # or [cp, 2, b, np//cp, s//2, hn] -> [2, b, cp, np//cp, s//2, hn]
                     # or [cp, t, np//cp, hn] -> [t, cp, np//cp, hn]
                     tmp_list = [x for x in qkv_format]
                     if "t" not in qkv_format:
                         tmp_list.insert(0, "2")
                     tmp_list.insert(0, "c")
                     tmp_format = "".join(tmp_list)
-                    h_index = tmp_format.index("h")
-                    tmp_list.insert(h_index - 1, tmp_list.pop(0))
+                    head_dim_ = tmp_format.index("h")-1
+                    tmp_list.insert(head_dim_, tmp_list.pop(0))
                     tmp_format = "".join(tmp_list)
+                    x = x.movedim(0, head_dim_)
+                    # [2, b, s//2, cp, np//cp, hn] -> [b, 2, s//2, cp, np//cp, hn]
+                    # or [2, s//2, b, cp, np//cp, hn] -> [2, s//2, b, cp, np//cp, hn]
+                    # or [2, b, cp, np//cp, s//2, hn] -> [b, cp, np//cp, 2, s//2, hn]
+                    # or [t, cp, np//cp, hn] -> [t, cp, np//cp, hn]
                     if "t" not in qkv_format:
                         s_index = tmp_format.index("s")
                         tmp_list.insert(s_index - 1, tmp_list.pop(0))
                         tmp_format = "".join(tmp_list)
                         seq_dim_ = tmp_format.index("s")-1
-                    else:
-                        seq_dim_ = tmp_format.index("t")
-                    x = x.movedim(0, head_dim + 1).movedim(0, seq_dim_).contiguous()
+                        x = x.movedim(0, seq_dim_)
+                    x = x.contiguous()
                     # [b, 2, s//2, cp, np//cp, hn] -> [b*s, np, hn]
                     # or [2, s//2, b, cp, np//cp, hn] -> [s*b, np, hn]
                     # or [b, cp, np//cp, 2, s//2, hn] -> [b*np, s, hn]
