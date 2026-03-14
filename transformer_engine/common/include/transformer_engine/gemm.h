@@ -84,6 +84,8 @@ enum NVTEGroupedMatmulConfigAttribute {
   kNVTEGroupedMatmulConfigAvgK = 2,
   /*! Number of streaming multiprocessors to use in GEMM kernel. */
   kNVTEGroupedMatmulConfigSMCount = 3,
+  /*! Split accumulator mode. Only taken into account on Hopper. Default: true. */
+  kNVTEGroupedMatmulConfigUseSplitAccumulator = 4,
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
@@ -550,6 +552,13 @@ class GroupedMatmulConfigWrapper {
   void set_sm_count(int sm_count) {
     nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigSMCount, &sm_count,
                                              sizeof(int));
+  }
+
+  /*! \brief Set split accumulator mode. Only taken into account on Hopper. */
+  void set_use_split_accumulator(bool use_split_accumulator) {
+    const auto val = static_cast<uint8_t>(use_split_accumulator);
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigUseSplitAccumulator,
+                                             &val, sizeof(val));
   }
 
  private:
