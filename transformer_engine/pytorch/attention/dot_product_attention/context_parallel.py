@@ -433,7 +433,7 @@ def flash_attn_a2a_communicate(
     ), "cu_seqlens_padded is required for THD format!"
     a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
-    batch_dim, _, head_dim = get_bsh_dims(qkv_format)
+    _, _, head_dim = get_bsh_dims(qkv_format)
     if before_attn:
         for i in range(len(a2a_inputs) + 2):
             if 0 < i < len(a2a_inputs) + 1:
@@ -512,7 +512,22 @@ def flash_attn_a2a_communicate(
                     # or [cp, 2, s//2, b, np//cp, hn] -> [2, s//2, b, cp, np//cp, hn]
                     # or [cp, 2, b, np//cp, s//2, hn] -> [b, cp, np//cp, 2, s//2, hn]
                     # or [cp, t, np//cp, hn] -> [t, cp, np//cp, hn]
-                    x = x.movedim(0, head_dim + 1).movedim(0, seq_dim + 1).contiguous()
+                    tmp_list = [x for x in qkv_format]
+                    if "t" not in qkv_format:
+                        tmp_list.insert(0, "2")
+                    tmp_list.insert(0, "c")
+                    tmp_format = "".join(tmp_list)
+                    h_index = tmp_format.index("h")
+                    tmp_list.insert(h_index - 1, tmp_list.pop(0))
+                    tmp_format = "".join(tmp_list)
+                    if "t" not in qkv_format:
+                        s_index = tmp_format.index("s")
+                        tmp_list.insert(s_index - 1, tmp_list.pop(0))
+                        tmp_format = "".join(tmp_list)
+                        seq_dim_ = tmp_format.index("s")-1
+                    else:
+                        seq_dim_ = tmp_format.index("t")
+                    x = x.movedim(0, head_dim + 1).movedim(0, seq_dim_).contiguous()
                     # [b, 2, s//2, cp, np//cp, hn] -> [b*s, np, hn]
                     # or [2, s//2, b, cp, np//cp, hn] -> [s*b, np, hn]
                     # or [b, cp, np//cp, 2, s//2, hn] -> [b*np, s, hn]
