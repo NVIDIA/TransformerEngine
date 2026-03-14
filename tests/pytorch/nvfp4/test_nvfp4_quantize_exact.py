@@ -489,3 +489,43 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        (32, 128),
+    ],
+)
+@pytest.mark.parametrize(
+    "with_2d_quantization", [True, False], ids=["2d_quantization", "1d_quantization"]
+)
+def test_nvfp4_3d_shape_quantization(
+    M: int,
+    N: int,
+    with_2d_quantization: bool,
+):
+    te_dtype = tex.DType.kFloat4E2M1
+    device = "cuda"
+    # Input
+    x = torch.randn((M, 4, N), dtype=torch.bfloat16, device=device)
+
+    # Quantize
+    nvfp4_quantizer = NVFP4Quantizer(
+        fp4_dtype=te_dtype,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+        with_2d_quantization=with_2d_quantization,
+    )
+    q_x = nvfp4_quantizer(x)
+    x *= 2
+    nvfp4_quantizer.update_quantized(x, q_x)
+    assert q_x._rowwise_data is not None
+    assert len(q_x._rowwise_data.shape) == 3
+    assert q_x._columnwise_data is not None
+    assert len(q_x._columnwise_data.shape) == 2
