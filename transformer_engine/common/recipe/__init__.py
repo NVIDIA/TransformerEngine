@@ -14,17 +14,6 @@ from pydantic.dataclasses import dataclass
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 
 
-def _resolve_backward_override(mode: Optional[str] = None) -> Optional[str]:
-    """Return validated backward override from argument or NVTE_BACKWARD_OVERRIDE env."""
-    if mode is None:
-        mode = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
-    assert mode in _BACKWARD_OVERRIDES, (
-        f"Invalid NVTE_BACKWARD_OVERRIDE value {mode!r}. Supported values are:"
-        " high_precision|dequantized."
-    )
-    return mode
-
-
 class _FormatHelper(NamedTuple):
     """
     Stores max FP8 values for fprop and bprop a `Format`.
@@ -227,11 +216,13 @@ class DelayedScaling(Recipe):
     reduce_amax: bool = True
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    backward_override: Optional[str] = field(default_factory=_resolve_backward_override)
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        self.backward_override = _resolve_backward_override(self.backward_override)
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
         assert (
             self.backward_override is None
         ), "Delayed scaling only supports backward_override=None."
@@ -276,11 +267,13 @@ class Float8CurrentScaling(Recipe):
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    backward_override: Optional[str] = field(default_factory=_resolve_backward_override)
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        self.backward_override = _resolve_backward_override(self.backward_override)
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
         return (
@@ -332,11 +325,13 @@ class MXFP8BlockScaling(Recipe):
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    backward_override: Optional[str] = field(default_factory=_resolve_backward_override)
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        self.backward_override = _resolve_backward_override(self.backward_override)
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
         return (
@@ -393,10 +388,9 @@ class Float8BlockScaling(Recipe):
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    backward_override: Optional[str] = field(default_factory=_resolve_backward_override)
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        self.backward_override = _resolve_backward_override(self.backward_override)
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
         assert self.w_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for w"
         assert self.grad_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for grad"
@@ -416,6 +410,9 @@ class Float8BlockScaling(Recipe):
             not self.fp8_dpa and not self.fp8_mha
         ), "FP8 attention is not supported for Float8BlockScaling."
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
         return (
@@ -501,12 +498,14 @@ class NVFP4BlockScaling(Recipe):
     # Not applying quantization to attention for now
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    backward_override: Optional[str] = field(default_factory=_resolve_backward_override)
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        self.backward_override = _resolve_backward_override(self.backward_override)
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
         assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -577,10 +576,12 @@ class CustomRecipe(Recipe):
 
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    backward_override: Optional[str] = field(default_factory=_resolve_backward_override)
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
-        self.backward_override = _resolve_backward_override(self.backward_override)
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
         return (
