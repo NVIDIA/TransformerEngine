@@ -1025,17 +1025,26 @@ class GroupedQuantizePrimitive(BasePrimitive):
         but performs a D2H copy of group_sizes (not CUDA-graph safe).
         """
         if ScalingMode(scaling_mode) != ScalingMode.MXFP8_1D_SCALING:
+            assert False, "V2 grouped quantize kernel currently only supports MXFP8 1D scaling mode, but got scaling_mode {}".format(
+                scaling_mode
+            )
             return False
         ndim = len(x_shape)
         eff = flatten_axis if flatten_axis >= 0 else flatten_axis + ndim
         total_first_dim = math.prod(x_shape[:eff])
         if total_first_dim % 128 != 0:
+            assert False, "V2 grouped quantize kernel requires total first logical dimension (product of x_shape up to flatten_axis) to be divisible by 128, but got shape {} and flatten_axis {} with total_first_dim {}".format(
+                x_shape, flatten_axis, total_first_dim
+            )
             return False
         # For multi-dim group tensors (e.g., kernel shape G×K×N with eff=2),
         # non_group_m = K must also be 128-aligned.
         if eff > 1:
             non_group_m = math.prod(x_shape[1:eff])
             if non_group_m % 128 != 0:
+                assert False, "V2 grouped quantize kernel requires non-group dimension (product of x_shape[1:flatten_axis]) to be divisible by 128 for multi-dim group tensors, but got shape {} and flatten_axis {} with non_group_m {}".format(
+                    x_shape, flatten_axis, non_group_m
+                )
                 return False
         return True
 
