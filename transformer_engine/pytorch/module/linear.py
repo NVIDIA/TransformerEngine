@@ -509,6 +509,7 @@ class _Linear(torch.autograd.Function):
             # Non-quantized backward mode overrides
             if backward_mode in ("unquant", "dequant"):
                 ctx.fp8 = False
+                ctx.debug = False
                 ctx.ub_overlap_ag = False
                 ctx.ub_overlap_rs_dgrad = False
                 ctx.ub_bulk_dgrad = False

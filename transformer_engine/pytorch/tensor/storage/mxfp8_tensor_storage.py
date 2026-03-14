@@ -30,6 +30,11 @@ class _FromMXFP8Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
+        if tensor._rowwise_data is not None and tensor._rowwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+        if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+
         dtype = torch_to_transformer_engine_dtype[dtype]
 
         # Make sure FP8 data is in expected format
