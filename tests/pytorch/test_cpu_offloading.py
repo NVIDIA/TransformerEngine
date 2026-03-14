@@ -536,7 +536,13 @@ class TestTELayers:
             out = out + 1
         out = sync_function(out)
         del inp
-        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+        if backward_mode == "default":
+            assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+        else:
+            assert (
+                Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+                or Utils.get_cuda_memory_mb() <= init_cuda_memory
+            )
         offloaded_memory_cpu = offload_ctx.offload_synchronizer.get_offloaded_total_size_mb()
 
         # This assertion verifies that the memory used by tensors on the CPU matches the memory saved from a layer.

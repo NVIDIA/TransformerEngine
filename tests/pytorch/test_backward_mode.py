@@ -16,6 +16,7 @@ import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.cpp_extensions import general_gemm, layernorm_bwd
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
     ForwardLinearBiasActivation,
@@ -206,6 +207,15 @@ def _maybe_skip_unsupported_recipe_shape(
                 "and shape[-1] divisible by 16."
             )
     elif module_type == "ops_linear":
+        if (
+            recipe_name == "fp8_current_scaling"
+            and not is_non_tn_fp8_gemm_supported()
+            and flat_first_dim % 16 != 0
+        ):
+            pytest.skip(
+                "te_ops.Linear + Float8CurrentScaling on pre-Blackwell requires "
+                "prod(shape[:-1]) divisible by 16 for FP8 NT wgrad GEMM."
+            )
         if recipe_name == "mxfp8" and (flat_first_dim % 32 != 0 or last_dim % 32 != 0):
             pytest.skip(
                 "te_ops.Linear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible by 32."
@@ -218,6 +228,15 @@ def _maybe_skip_unsupported_recipe_shape(
 
 def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]) -> None:
     non_empty_splits = [m for m in m_splits if m > 0]
+    if (
+        recipe_name == "fp8_current_scaling"
+        and not is_non_tn_fp8_gemm_supported()
+        and any(m % 16 != 0 for m in non_empty_splits)
+    ):
+        pytest.skip(
+            "GroupedLinear + Float8CurrentScaling on pre-Blackwell requires each "
+            "non-empty m_split divisible by 16 for FP8 grouped NT wgrad GEMM."
+        )
     if recipe_name == "mxfp8" and any(m % 32 != 0 for m in non_empty_splits):
         pytest.skip("GroupedLinear + MXFP8 requires each non-empty m_split divisible by 32.")
     if recipe_name == "nvfp4" and any(m % 16 != 0 for m in non_empty_splits):
@@ -476,6 +495,7 @@ def _compute_linear_backward_reference_from_saved_operands(
     *,
     dequant_dtype: torch.dtype,
     out_dtype: torch.dtype,
+    with_bias: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Dequant reference path:
     # 1) use the exact operands saved by quantized forward,
@@ -506,10 +526,12 @@ def _compute_linear_backward_reference_from_saved_operands(
         out_dtype=out_dtype,
         layout="NN",
         grad=True,
+        use_split_accumulator=True,
     )
-    # Derive db from the same GEMM primitive used by runtime wgrad. This avoids
-    # tiny reduction-order drift vs. a standalone dy.sum() path in FP32 cases.
-    db_seed = torch.empty(dy_mat.shape[-1], dtype=out_dtype, device=dy_mat.device)
+    db_seed = (
+        torch.empty(dy_mat.shape[-1], dtype=out_dtype, device=dy_mat.device) if with_bias else None
+    )
+    # Derive db from the same GEMM primitive used by runtime wgrad when bias exists.
     dw_ref, db_ref, *_ = general_gemm(
         x_ref,
         dy_mat,
@@ -517,6 +539,7 @@ def _compute_linear_backward_reference_from_saved_operands(
         layout="NT",
         grad=True,
         bias=db_seed,
+        use_split_accumulator=True,
     )
     if db_ref is None:
         db_ref = dy_mat.sum(dim=0).to(out_dtype)
@@ -915,6 +938,7 @@ def test_linear_like_backward_mode_matches_reference(
                         dy,
                         dequant_dtype=dtype,
                         out_dtype=dtype,
+                        with_bias=use_bias,
                     )
                 )
                 input_ref = _dequantize_saved_operand(saved_input, dtype)
@@ -944,12 +968,14 @@ def test_linear_like_backward_mode_matches_reference(
                         (f"{module_type}_weight", saved_weight),
                     ]
                 )
+                linear_wgrad_with_bias = use_bias and module_type != "ops_linear"
                 dx_ref, dw_ref, db_ref = _compute_linear_backward_reference_from_saved_operands(
                     saved_input,
                     saved_weight,
                     dy,
                     dequant_dtype=dtype,
                     out_dtype=dtype,
+                    with_bias=linear_wgrad_with_bias,
                 )
                 if module_type == "ops_linear" and use_bias:
                     # te_ops bias grad is reduced by the Bias op from incoming dy.
@@ -1101,6 +1127,7 @@ def test_grouped_linear_backward_mode_matches_reference(
                     dy_chunk,
                     dequant_dtype=dtype,
                     out_dtype=dtype,
+                    with_bias=use_bias,
                 )
                 dx_chunks.append(dx_i)
                 dw_ref.append(dw_i)
@@ -1387,6 +1414,7 @@ def test_fused_linear_paths_match_backward_mode_reference(
                 dy_for_linear,
                 dequant_dtype=dtype,
                 out_dtype=dtype,
+                with_bias=False,
             )
             dx2_ref = dy if x2 is not None else None
         except Exception as exc:
@@ -1522,6 +1550,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
                 dy_after_activation,
                 dequant_dtype=dtype,
                 out_dtype=dtype,
+                with_bias=False,
             )
         except Exception as exc:
             ref_exc = exc
