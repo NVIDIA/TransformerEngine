@@ -379,6 +379,25 @@ def swizzled_scale(scale_inv, flatten_axis, is_colwise):
     return swizzled.reshape(original_shape)
 
 
+def _swizzle_grouped_scale(scale_inv, scale_2d_shape, is_colwise):
+    """Swizzle a 1D grouped scale_inv buffer using full-tensor swizzle.
+
+    The grouped scale_inv is 1D (worst-case padded). The meaningful prefix has size
+    equal to prod(scale_2d_shape). We reshape that prefix to 2D, swizzle it, and
+    write it back, leaving any trailing padding untouched.
+    """
+    useful_size = math.prod(scale_2d_shape)
+    if useful_size == scale_inv.shape[0]:
+        # No trailing padding — reshape, swizzle, flatten.
+        return swizzled_scale(scale_inv.reshape(scale_2d_shape), 1, is_colwise).reshape(
+            scale_inv.shape
+        )
+    # Split meaningful prefix from trailing padding, swizzle prefix only.
+    prefix = scale_inv[:useful_size].reshape(scale_2d_shape)
+    swizzled = swizzled_scale(prefix, 1, is_colwise).reshape((useful_size,))
+    return jnp.concatenate([swizzled, scale_inv[useful_size:]])
+
+
 def get_lhs_axis_boundary(lhs_cdims, is_transposed):
     """Get the axis boundary for the LHS operand."""
     return max(lhs_cdims) + 1 if is_transposed else min(lhs_cdims)
@@ -1626,9 +1645,11 @@ class GroupedGemmPrimitive(BasePrimitive):
             workspace_size += lhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
             workspace_size += rhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
-            # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
-            workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
-            workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
+            if not use_v2_ffi:
+                # V1 needs workspace for per-group swizzle output buffers.
+                # V2: scales are pre-swizzled in JAX, no extra workspace needed.
+                workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
+                workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
         return workspace_size
 
     @staticmethod
@@ -2024,11 +2045,14 @@ def _can_use_v2_grouped_gemm(
     scaling_mode: ScalingMode,
     dtype: jnp.dtype,
     has_bias: bool,
+    lhs_shape=None,
+    rhs_shape=None,
+    lhs_axis_boundary=None,
+    rhs_axis_boundary=None,
 ) -> bool:
     """Determine whether the cuda-graphable grouped GEMM implementation can be used based on the input parameters."""
-    # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
-    # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
-    # feature-compatible with the main branch.
+    # Use the cuda-graphable path for plain BF16 non-quantized inputs and MXFP8; fall back to
+    # the legacy nvte_multi_tensor_gemm path for all other cases (tensor-scaled FP8, etc.).
     # Bias can be supported in a kernel or in pure-JAX in the future.
 
     if not _v2_grouped_gemm_available:
@@ -2039,7 +2063,42 @@ def _can_use_v2_grouped_gemm(
     if get_device_compute_capability(0) < 100:
         return False
 
-    return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
+    if has_bias:
+        return False
+
+    if scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16:
+        return True
+    if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        # V2 MXFP8 requires that the total first dimension of both operands (up to
+        # axis_boundary) is divisible by 128, matching the quantize V2 kernel requirement.
+        # Individual group sizes must also be 128-aligned (dynamic constraint).
+        if lhs_shape is not None and lhs_axis_boundary is not None:
+            lhs_first_dim = math.prod(lhs_shape[:lhs_axis_boundary])
+            if lhs_first_dim % 128 != 0:
+                return False
+        if rhs_shape is not None and rhs_axis_boundary is not None:
+            rhs_first_dim = math.prod(rhs_shape[:rhs_axis_boundary])
+            if rhs_first_dim % 128 != 0:
+                return False
+        # V2 MXFP8 also requires that the "last" dimension (after axis_boundary) of both
+        # operands is a multiple of 128.  The V2 GEMM setup kernel computes per-group
+        # scale pointers as ``data_offset / 32``, which equals ``K_blocks * last_dim``.
+        # The quantize kernel, however, pads the colwise scale stride to
+        # ``ceil(last_dim / 128) * 128``, making per-group padded scale larger than
+        # ``K_blocks * last_dim`` when ``last_dim`` is not 128-aligned.  This causes
+        # adjacent groups' scales to overlap in the flat buffer.  Fall back to V1 (which
+        # swizzles per-group scales individually) when the condition is not met.
+        if lhs_shape is not None and lhs_axis_boundary is not None:
+            lhs_last_dim = math.prod(lhs_shape[lhs_axis_boundary:])
+            if lhs_last_dim % 128 != 0:
+                return False
+        if rhs_shape is not None and rhs_axis_boundary is not None:
+            rhs_last_dim = math.prod(rhs_shape[rhs_axis_boundary:])
+            if rhs_last_dim % 128 != 0:
+                return False
+        return True
+
+    return False
 
 
 def grouped_gemm(
@@ -2278,7 +2337,39 @@ def grouped_gemm(
             " and padded with zeros to not affect the result of the MoE block."
         )
 
-    use_v2_ffi = _can_use_v2_grouped_gemm(scaling_mode, lhs_data.dtype, has_bias)
+    use_v2_ffi = _can_use_v2_grouped_gemm(
+        scaling_mode, lhs_data.dtype, has_bias,
+        lhs_shape=lhs_data.shape, rhs_shape=rhs_data.shape,
+        lhs_axis_boundary=lhs_axis_boundary, rhs_axis_boundary=rhs_axis_boundary,
+    )
+    if use_v2_ffi and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        # Pre-swizzle full scale tensors in JAX (CUDA-graph safe).
+        # Grouped scale_inv is 1D (flat, worst-case padded). When all group sizes are
+        # multiples of 128 (V2 requirement), the per-group scales are contiguous with no
+        # inter-group padding gaps. We reshape the meaningful prefix to 2D, swizzle, and
+        # write it back into the original 1D buffer (extra trailing zeros stay untouched).
+        lhs_is_colwise = lhs_is_trans
+        rhs_is_colwise = not rhs_is_trans
+        lhs_scale_shape = scaling_mode.get_scale_shape(
+            lhs_data.shape, is_colwise=lhs_is_colwise, is_padded=True,
+            flatten_axis=lhs_axis_boundary,
+        )
+        rhs_scale_shape = scaling_mode.get_scale_shape(
+            rhs_data.shape, is_colwise=rhs_is_colwise, is_padded=True,
+            flatten_axis=rhs_axis_boundary,
+        )
+        # get_scale_shape may return a multi-dim shape (e.g. (8, 4, 128) for a 3D
+        # input), but _swizzle_grouped_scale needs a flat 2D shape (rows, cols) where
+        # cols = n_block_y (last dim) and rows = prod(all other dims). This correctly
+        # flattens the group/K-block axes into a single row dimension so the swizzle
+        # pattern operates on the full (K-blocks-across-groups × N-blocks) matrix.
+        lhs_n_block_y = lhs_scale_shape[-1]
+        rhs_n_block_y = rhs_scale_shape[-1]
+        lhs_scale_2d = (math.prod(lhs_scale_shape) // lhs_n_block_y, lhs_n_block_y)
+        rhs_scale_2d = (math.prod(rhs_scale_shape) // rhs_n_block_y, rhs_n_block_y)
+        lhs_scale_inv = _swizzle_grouped_scale(lhs_scale_inv, lhs_scale_2d, lhs_is_colwise)
+        rhs_scale_inv = _swizzle_grouped_scale(rhs_scale_inv, rhs_scale_2d, rhs_is_colwise)
+
     if use_v2_ffi:
         additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
         additional_arg_1 = jnp.zeros((num_gemms,), jnp.float32)  # beta

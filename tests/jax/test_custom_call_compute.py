@@ -2074,6 +2074,58 @@ class TestGroupedDenseMXFP8KernelSelection:
         )
         assert prim_out.shape == ref_out.shape
         assert jnp.all(jnp.isfinite(prim_out))
+        # Numerical check within FP8 tolerance
+        assert_allclose(prim_out, ref_out, dtype=jnp.float8_e4m3fn)
+
+    @pytest.mark.parametrize(
+        "input_shape",
+        GROUPED_DENSE_MXFP8_V2_INPUT_SHAPES,
+        ids=[f"v2_grad_{s}" for s in GROUPED_DENSE_MXFP8_V2_INPUT_SHAPES],
+    )
+    def test_grouped_dense_grad_mxfp8_v2(self, input_shape):
+        """MXFP8 V2 grouped GEMM gradient test (fwd + dgrad + wgrad)."""
+        lhs, rhs, group_sizes = self._generate_mxfp8_input(input_shape, group_size_multiplier=128)
+        n_groups = input_shape[0]
+        fwd_dtype = jnp.float8_e4m3fn
+        bwd_dtype = jnp.float8_e4m3fn
+
+        quantizer_set = QuantizerFactory.create_set(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+            fwd_dtype=fwd_dtype,
+            bwd_dtype=bwd_dtype,
+            is_2x2x=True,
+            n_groups=n_groups,
+        )
+
+        contracting_dims = ((1,), (1,))
+
+        def _ref_sum(x, kernel, group_sizes):
+            lhs_splits = jnp.split(x, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
+            rhs_splits = jnp.split(kernel, n_groups, axis=0)
+            out = jnp.concatenate(
+                [jnp.squeeze(li @ ri, axis=0) for li, ri in zip(lhs_splits, rhs_splits)], axis=0
+            )
+            return jnp.sum(out) / jnp.sqrt(x.size)
+
+        def _prim_sum(x, kernel, group_sizes):
+            out = grouped_dense(
+                x,
+                kernel,
+                group_sizes,
+                contracting_dims,
+                bias=None,
+                quantizer_set=quantizer_set,
+            )
+            return jnp.sum(jnp.asarray(out)) / jnp.sqrt(x.size)
+
+        ref_val, (ref_dx, ref_dk) = value_and_grad(_ref_sum, (0, 1))(lhs, rhs, group_sizes)
+        prim_val, (prim_dx, prim_dk) = jit(
+            value_and_grad(_prim_sum, (0, 1)), static_argnums=()
+        )(lhs, rhs, group_sizes)
+
+        assert_allclose(prim_val, ref_val, dtype=fwd_dtype)
+        assert_allclose(prim_dx, ref_dx, dtype=bwd_dtype)
+        assert_allclose(prim_dk, ref_dk, dtype=bwd_dtype)
 
 
 class TestDebugInspectFFI:
