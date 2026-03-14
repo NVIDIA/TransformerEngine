@@ -682,14 +682,13 @@ def get_attention_backend(
     # Filter: QKV layout
     if qkv_format == "thd":
         if pad_between_seqs:
-            if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
-                use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
-            ):
+            if use_flash_attention_2 and FlashAttentionUtils.is_installed:
                 logger.debug(
-                    "Disabling FlashAttention for qkv_format = thd when there is "
+                    "Disabling FlashAttention 2 for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
-            use_flash_attention = False
+            use_flash_attention_2 = False
+            # FA3 supports pad_between_seqs via seqused_q/seqused_k
         if device_compute_capability == (12, 0):
             if use_fused_attention:
                 logger.debug(

@@ -1473,6 +1473,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
                     num_splits=num_splits,
+                    cu_seqlens_q_padded=cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 )
 
             if use_fused_attention:

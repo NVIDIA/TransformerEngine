@@ -572,6 +572,8 @@ def get_fa_args(
     dq=None,
     dk=None,
     dv=None,
+    seqused_q=None,
+    seqused_k=None,
 ):
     """Get forward/backward arguments for flash-attn v2 and v3."""
     if use_flash_attn_3:
@@ -581,7 +583,9 @@ def get_fa_args(
                     *[None] * 4,  # k_new, v_new, qv, out
                     cu_seqlens_q,
                     cu_seqlens_kv,
-                    *[None] * 3,  # cu_seqlens_k_new, seqused_q, seqused_k
+                    None,  # cu_seqlens_k_new
+                    seqused_q,
+                    seqused_k,
                     max_seqlen_q,
                     max_seqlen_kv,
                     *[None]
@@ -599,8 +603,8 @@ def get_fa_args(
             return [
                 cu_seqlens_q,
                 cu_seqlens_kv,
-                None,  # sequed_q
-                None,  # sequed_k
+                seqused_q,
+                seqused_k,
                 max_seqlen_q,
                 max_seqlen_kv,
                 dq,
@@ -610,8 +614,8 @@ def get_fa_args(
         return [
             None,  # cu_seqlens_q
             None,  # cu_seqlens_kv
-            None,  # sequed_q
-            None,  # sequed_k
+            None,  # seqused_q
+            None,  # seqused_k
             max_seqlen_q,
             max_seqlen_kv,
             dq,
@@ -923,6 +927,9 @@ def cp_p2p_fwd_flash_attn(
     cu_seqlens_q_per_step,
     cu_seqlens_kv_per_step,
     section,
+    pad_between_seqs=False,
+    cu_seqlens_q_padded=None,
+    cu_seqlens_kv_padded=None,
 ):
     """Per-tile forward call of CP P2P with FlashAttention backend"""
     cu_seqlens_q_ = cu_seqlens_q_per_step
@@ -943,6 +950,20 @@ def cp_p2p_fwd_flash_attn(
             fa_forward_kwargs["window_size_left"] = -1
             fa_forward_kwargs["window_size_right"] = -1
 
+    seqused_q = None
+    seqused_k = None
+    if pad_between_seqs and use_flash_attn_3 and qkv_format == "thd":
+        # Derive actual token counts per batch element from cu_seqlens
+        seqused_q = cu_seqlens_q_per_step[1:] - cu_seqlens_q_per_step[:-1]
+        seqused_k = cu_seqlens_kv_per_step[1:] - cu_seqlens_kv_per_step[:-1]
+        # Override cu_seqlens to padded layout for tensor memory layout
+        cu_seqlens_q_ = cu_seqlens_q_padded
+        cu_seqlens_kv_ = cu_seqlens_kv_padded
+        if section == "lower-triangle":
+            cu_seqlens_kv_ = cu_seqlens_kv_padded // 2
+        elif section == "upper-triangle":
+            cu_seqlens_q_ = cu_seqlens_q_padded // 2
+
     fa_forward_args_thd = get_fa_args(
         True,
         use_flash_attn_3,
@@ -951,6 +972,8 @@ def cp_p2p_fwd_flash_attn(
         cu_seqlens_kv=cu_seqlens_kv_,
         max_seqlen_q=max_seqlen_q_,
         max_seqlen_kv=max_seqlen_kv_,
+        seqused_q=seqused_q,
+        seqused_k=seqused_k,
     )
     fa_outputs = flash_attn_fwd(
         q_part,
@@ -1186,10 +1209,19 @@ def cp_p2p_bwd_flash_attn(
     out_part,
     dout_part,
     section,
+    pad_between_seqs=False,
+    cu_seqlens_q_padded=None,
+    cu_seqlens_kv_padded=None,
 ):
     """Per-tile backward call of CP P2P with FlashAttention backend"""
-    dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
-    if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
+    if pad_between_seqs:
+        dq, dk, dv = [torch.zeros_like(x) for x in [q_part, k_part, v_part]]
+    else:
+        dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
+    if use_flash_attn_3:
+        fa_backward_kwargs["window_size_left"] = -1
+        fa_backward_kwargs["window_size_right"] = -1
+    elif fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size"] = (-1, -1)
     elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size_left"] = -1
@@ -1213,17 +1245,33 @@ def cp_p2p_bwd_flash_attn(
         max_seqlen_q_ = max_seqlen_q // 2
         softmax_lse__ = softmax_lse_
 
+    seqused_q = None
+    seqused_k = None
+    cu_seqlens_q_bwd = cu_seqlens_q_per_step[cp_size - step - 1]
+    cu_seqlens_kv_bwd = cu_seqlens_kv_per_step[cp_size - step - 1]
+    if pad_between_seqs and use_flash_attn_3 and qkv_format == "thd":
+        seqused_q = cu_seqlens_q_bwd[1:] - cu_seqlens_q_bwd[:-1]
+        seqused_k = cu_seqlens_kv_bwd[1:] - cu_seqlens_kv_bwd[:-1]
+        cu_seqlens_q_bwd = cu_seqlens_q_padded
+        cu_seqlens_kv_bwd = cu_seqlens_kv_padded
+        if section == "lower-triangle":
+            cu_seqlens_kv_bwd = cu_seqlens_kv_padded // 2
+        elif section == "upper-triangle":
+            cu_seqlens_q_bwd = cu_seqlens_q_padded // 2
+
     fa_backward_args_thd = get_fa_args(
         False,
         use_flash_attn_3,
         qkv_format,
-        cu_seqlens_q=cu_seqlens_q_per_step[cp_size - step - 1],
-        cu_seqlens_kv=cu_seqlens_kv_per_step[cp_size - step - 1],
+        cu_seqlens_q=cu_seqlens_q_bwd,
+        cu_seqlens_kv=cu_seqlens_kv_bwd,
         max_seqlen_q=max_seqlen_q_,
         max_seqlen_kv=max_seqlen_kv_,
         dq=dq,
         dk=dk,
         dv=dv,
+        seqused_q=seqused_q,
+        seqused_k=seqused_k,
     )
     if use_flash_attn_3:
         fa_backward_kwargs["is_causal"] = causal_
@@ -1681,7 +1729,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
+                                        *flash_attn_inputs,
+                                        *prepare_outputs,
+                                        section,
+                                        pad_between_seqs=pad_between_seqs,
+                                        cu_seqlens_q_padded=cu_seqlens_q_padded,
+                                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                                     )
                                 )
                         elif i <= rank:
@@ -1708,7 +1761,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
+                                        *flash_attn_inputs,
+                                        *prepare_outputs,
+                                        section,
+                                        pad_between_seqs=pad_between_seqs,
+                                        cu_seqlens_q_padded=cu_seqlens_q_padded,
+                                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                                     )
                                 )
                         else:
@@ -1735,7 +1793,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
                                     cp_p2p_fwd_flash_attn(
-                                        *flash_attn_inputs, *prepare_outputs, section
+                                        *flash_attn_inputs,
+                                        *prepare_outputs,
+                                        section,
+                                        pad_between_seqs=pad_between_seqs,
+                                        cu_seqlens_q_padded=cu_seqlens_q_padded,
+                                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                                     )
                                 )
                     else:
@@ -1760,7 +1823,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             ) = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
                         else:
                             out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
-                                cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                                cp_p2p_fwd_flash_attn(
+                                    *flash_attn_inputs,
+                                    *prepare_outputs,
+                                    section,
+                                    pad_between_seqs=pad_between_seqs,
+                                    cu_seqlens_q_padded=cu_seqlens_q_padded,
+                                    cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                                )
                             )
 
             # softmax_lse correction
@@ -2011,6 +2081,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.attn_bias_shape = None if attn_bias is None else attn_bias.shape
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
+        ctx.pad_between_seqs = pad_between_seqs
         ctx.softmax_lse_in_packed_format = softmax_lse_in_packed_format
         ctx.second_half_lse_seqlen = second_half_lse_seqlen
         ctx.fp8_meta = fp8_meta
@@ -2425,7 +2496,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         )
                     else:
                         dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
-                            *flash_attn_inputs, *prepare_outputs, section
+                            *flash_attn_inputs,
+                            *prepare_outputs,
+                            section,
+                            pad_between_seqs=ctx.pad_between_seqs,
+                            cu_seqlens_q_padded=cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                         )
                 elif i >= (cp_size - rank - 1):
                     section = "lower-triangle"
@@ -2436,7 +2512,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         )
                     else:
                         dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
-                            *flash_attn_inputs, *prepare_outputs, section
+                            *flash_attn_inputs,
+                            *prepare_outputs,
+                            section,
+                            pad_between_seqs=ctx.pad_between_seqs,
+                            cu_seqlens_q_padded=cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                         )
                 else:
                     section = "upper-triangle"
@@ -2447,7 +2528,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         )
                     else:
                         dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
-                            *flash_attn_inputs, *prepare_outputs, section
+                            *flash_attn_inputs,
+                            *prepare_outputs,
+                            section,
+                            pad_between_seqs=ctx.pad_between_seqs,
+                            cu_seqlens_q_padded=cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                         )
             else:
                 section = "all"
@@ -2458,7 +2544,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     )
                 else:
                     dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
-                        *flash_attn_inputs, *prepare_outputs, section
+                        *flash_attn_inputs,
+                        *prepare_outputs,
+                        section,
+                        pad_between_seqs=ctx.pad_between_seqs,
+                        cu_seqlens_q_padded=cu_seqlens_q_padded,
+                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                     )
 
             # dq, dk, dv are reduced across steps in higher precision
@@ -3331,6 +3422,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         cp_group,
         cp_stream,
         quantizers,
+        pad_between_seqs,
         use_flash_attn_3,
         softmax_type,
         softmax_offset,
@@ -3523,14 +3615,25 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 ):
                     out_part = O_quantizer(out_)
         else:
+            seqused_q = None
+            seqused_k = None
+            fa_cu_seqlens_q = cu_seqlens_q
+            fa_cu_seqlens_kv = cu_seqlens_kv
+            if pad_between_seqs and use_flash_attn_3 and qkv_format == "thd":
+                seqused_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                seqused_k = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                fa_cu_seqlens_q = cu_seqlens_q_padded
+                fa_cu_seqlens_kv = cu_seqlens_kv_padded
             fa_forward_args_thd = get_fa_args(
                 True,
                 use_flash_attn_3,
                 qkv_format,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv,
+                cu_seqlens_q=fa_cu_seqlens_q,
+                cu_seqlens_kv=fa_cu_seqlens_kv,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
+                seqused_q=seqused_q,
+                seqused_k=seqused_k,
             )
             fa_outputs = flash_attn_fwd(
                 q_part,
@@ -3635,6 +3738,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.fwd_nominal_dtype = fwd_nominal_dtype
         ctx.fp8_recipe = fp8_recipe
         ctx.use_flash_attn_3 = use_flash_attn_3
+        ctx.pad_between_seqs = pad_between_seqs
         ctx.softmax_type = softmax_type
 
         ctx.dQKV_quantizer = dQKV_quantizer
@@ -3813,18 +3917,32 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 dq, dk, dv = [x._data for x in [dq, dk, dv]]
         else:
             softmax_lse, rng_state = aux_ctx_tensors
-            dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
+            if ctx.pad_between_seqs:
+                dq, dk, dv = [torch.zeros_like(x) for x in [q, k, v]]
+            else:
+                dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
+            seqused_q = None
+            seqused_k = None
+            fa_cu_seqlens_q = cu_seqlens_q
+            fa_cu_seqlens_kv = cu_seqlens_kv
+            if ctx.pad_between_seqs and ctx.use_flash_attn_3 and qkv_format == "thd":
+                seqused_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                seqused_k = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                fa_cu_seqlens_q = cu_seqlens_q_padded
+                fa_cu_seqlens_kv = cu_seqlens_kv_padded
             fa_backward_args_thd = get_fa_args(
                 False,
                 ctx.use_flash_attn_3,
                 qkv_format,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv,
+                cu_seqlens_q=fa_cu_seqlens_q,
+                cu_seqlens_kv=fa_cu_seqlens_kv,
                 max_seqlen_q=ctx.max_seqlen_q,
                 max_seqlen_kv=ctx.max_seqlen_kv,
                 dq=dq,
                 dk=dk,
                 dv=dv,
+                seqused_q=seqused_q,
+                seqused_k=seqused_k,
             )
             if not ctx.use_flash_attn_3:
                 fa_backward_kwargs["rng_state"] = rng_state
@@ -3908,6 +4026,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             d_bias,
+            None,
             None,
             None,
             None,
@@ -4137,6 +4256,7 @@ def attn_forward_func_with_cp(
             cp_group,
             cp_stream,
             quantizers,
+            pad_between_seqs,
             use_flash_attn_3,
             softmax_type,
             softmax_offset,
