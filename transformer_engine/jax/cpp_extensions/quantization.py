@@ -993,7 +993,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
     Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
     """
 
-    name = "te_grouped_quantize_ffi"  # V1: non-MXFP8
+    name = "te_grouped_quantize_ffi"  # V1: fallback path (supports all shapes, not CUDA-graph safe)
     name_v2 = "te_grouped_quantize_v2_ffi"  # V2: MXFP8, CUDA-graph safe
     multiple_results = True
     impl_static_args = (
@@ -1006,6 +1006,38 @@ class GroupedQuantizePrimitive(BasePrimitive):
     )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype
     inner_primitive = None
     outer_primitive = None
+
+    @staticmethod
+    def _use_v2_kernel(scaling_mode, x_shape, flatten_axis):
+        """Return True when the V2 (CUDA-graph-safe) MXFP8 kernel can be used.
+
+        V2 requires:
+          1. The total first logical dimension (product of x_shape up to flatten_axis)
+             is divisible by 128.
+          2. For multi-dim group tensors (eff > 1, e.g., kernel shape G×K×N), the
+             per-group row count non_group_m = prod(x_shape[1:eff]) must also be
+             divisible by 128 (because group_sizes[i] counts slices, not rows, and
+             actual rows per group = group_sizes[i] * non_group_m).
+          3. For lhs-style tensors (eff == 1, shape M×K), individual group sizes must
+             be 128-aligned -- this is a dynamic constraint assumed by the caller.
+
+        Falls back to V1 when constraints are not met. V1 supports arbitrary shapes
+        but performs a D2H copy of group_sizes (not CUDA-graph safe).
+        """
+        if ScalingMode(scaling_mode) != ScalingMode.MXFP8_1D_SCALING:
+            return False
+        ndim = len(x_shape)
+        eff = flatten_axis if flatten_axis >= 0 else flatten_axis + ndim
+        total_first_dim = math.prod(x_shape[:eff])
+        if total_first_dim % 128 != 0:
+            return False
+        # For multi-dim group tensors (e.g., kernel shape G×K×N with eff=2),
+        # non_group_m = K must also be 128-aligned.
+        if eff > 1:
+            non_group_m = math.prod(x_shape[1:eff])
+            if non_group_m % 128 != 0:
+                return False
+        return True
 
     @staticmethod
     def abstract(
@@ -1051,11 +1083,14 @@ class GroupedQuantizePrimitive(BasePrimitive):
             rowwise_scale_inv_shape = (1,)
         rowwise_out_aval = jax.core.ShapedArray(shape=rowwise_out_shape, dtype=out_dtype)
 
-        is_mxfp8 = ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING
-        if is_mxfp8:
-            # V2 path: 5th output is int64_workspace (n_groups * sizeof(int64_t) bytes as uint8)
+        use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis)
+        if use_v2:
+            # V2 path: 5th output is int64_workspace laid out as:
+            #   [n_groups int64 group_sizes | n_groups+1 int64 offsets]
+            # = (2*n_groups + 1) * sizeof(int64_t) bytes stored as uint8.
+            n_groups = group_sizes_aval.size
             fifth_out_aval = jax.core.ShapedArray(
-                shape=(group_sizes_aval.size * 8,), dtype=jnp.uint8
+                shape=((2 * n_groups + 1) * 8,), dtype=jnp.uint8
             )
         else:
             # V1 path: 5th output is amax
@@ -1095,11 +1130,13 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_scale_inv,
             fifth_out,
         ) = GroupedQuantizePrimitive.abstract(*args, **kwargs)
-        # For MXFP8, the inner abstract returns int64_workspace as the 5th output.
+        # When V2 is used, the inner abstract returns int64_workspace as the 5th output.
         # The outer interface always presents amax (float32, n_groups) for a consistent API.
         scaling_mode = kwargs.get("scaling_mode")
+        x_aval = args[0]
         group_sizes_aval = args[2]
-        if ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING:
+        flatten_axis = kwargs.get("flatten_axis")
+        if GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis):
             fifth_out = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
         return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, fifth_out
 
@@ -1126,9 +1163,11 @@ class GroupedQuantizePrimitive(BasePrimitive):
         assert scale_aval.dtype == jnp.float32
         assert group_sizes_aval.dtype == jnp.int32
         assert group_axis == 0
-        is_mxfp8 = ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING
-        if is_mxfp8:
-            # V2: CUDA-graph safe; scale is passed but ignored by the C++ handler
+        use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis)
+        if use_v2:
+            # V2: CUDA-graph safe; scale is passed but ignored by the C++ handler.
+            # Requires total_first_dim % 128 == 0 (checked above) and all individual
+            # group sizes % 128 == 0 (dynamic constraint, enforced by the kernel).
             return ffi.ffi_lowering(GroupedQuantizePrimitive.name_v2)(
                 ctx,
                 x,
@@ -1137,6 +1176,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
                 q_layout=q_layout.value.value,
                 flatten_axis=flatten_axis,
             )
+        # V1: supports arbitrary shapes but not CUDA-graph safe (performs D2H copy of group_sizes).
+        # Used for non-MXFP8 scaling modes and for MXFP8 when total_first_dim % 128 != 0.
         return ffi.ffi_lowering(GroupedQuantizePrimitive.name)(
             ctx,
             x,
@@ -1180,8 +1221,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
             group_axis=group_axis,
             scale_dtype=scale_dtype,
         )
-        is_mxfp8 = ScalingMode(scaling_mode) == ScalingMode.MXFP8_1D_SCALING
-        if is_mxfp8:
+        use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x.shape, flatten_axis)
+        if use_v2:
             # fifth is int64_workspace; return a dummy zero amax for interface compatibility
             updated_amax = jnp.zeros((group_sizes.size,), jnp.float32)
         else:

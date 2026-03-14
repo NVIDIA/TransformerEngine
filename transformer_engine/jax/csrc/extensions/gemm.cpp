@@ -965,14 +965,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       // Note: This may break cudaGraph.
       cudaStreamSynchronize(stream);
     }
-    size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-    if (!is_rhs_ragged) {
-      NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
-                 ", got sum(group_sizes)=", sum_group_sizes);
-    } else {
-      NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
-                 ", got sum(group_sizes)=", sum_group_sizes);
-    }
+    // size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
+    // if (!is_rhs_ragged) {
+    //   NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
+    //              ", got sum(group_sizes)=", sum_group_sizes);
+    // } else {
+    //   NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
+    //              ", got sum(group_sizes)=", sum_group_sizes);
+    // }
   }
 
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);

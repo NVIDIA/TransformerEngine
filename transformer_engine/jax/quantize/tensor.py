@@ -412,6 +412,18 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             has_rht_applied=False,
         )
 
+    @property
+    def group_sizes(self) -> jnp.ndarray:
+        """Per-group sizes along the group axis.
+
+        When first_dims is set (ragged groups), returns first_dims.
+        When first_dims is None (equal-sized groups), returns an array of ones with
+        length equal to the number of groups.
+        """
+        if self.first_dims is not None and self.first_dims.size > 0:
+            return self.first_dims
+        return jnp.ones((self.original_shape[self.group_axis],), dtype=jnp.int32)
+
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
         assert self.data.ndim == 1, "Only support flattened data"
@@ -692,10 +704,8 @@ class ScaledTensorFactory:
 
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
 
-        if (
-            first_dims is not None
-            or last_dims is not None
-            or (original_shape is not None and group_axis is not None)
+        if first_dims is not None or last_dims is not None or (
+            original_shape is not None and group_axis is not None
         ):
             assert (
                 original_shape is not None
@@ -703,9 +713,7 @@ class ScaledTensorFactory:
             flatten_axis = (len(original_shape) + flatten_axis) % len(original_shape)
 
             # Determine num_groups from whichever dims array is provided, or from original_shape
-            active_dims = (
-                first_dims if first_dims is not None and first_dims.size > 0 else last_dims
-            )
+            active_dims = first_dims if first_dims is not None and first_dims.size > 0 else last_dims
             if active_dims is not None:
                 num_groups = active_dims.size
             else:

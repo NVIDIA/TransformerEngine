@@ -16,6 +16,9 @@ from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
+from transformer_engine.common.recipe import (
+    MXFP8BlockScaling,
+)
 
 from ..dense import dense, grouped_dense
 
@@ -1446,7 +1449,11 @@ def make_dot_general_cls(quantization_recipe):
 def make_grouped_dense_cls(quantization_recipe):
     """Creates a grouped dense (grouped GEMM) instance for use with TE state module."""
     if quantization_recipe is not None:
-        raise ValueError("Ragged dot grouped GEMM does not support quantization yet")
+        allowed_grouped_gemm_recipes = [MXFP8BlockScaling]
+        assert any(isinstance(quantization_recipe, r) for r in allowed_grouped_gemm_recipes), (
+            f"Only the following quantization recipes are supported for grouped GEMM or `None` for BF16 without quantization: {allowed_grouped_gemm_recipes}. "
+            f"Got {type(quantization_recipe)}."
+        )
 
     def te_grouped_dot_general(generate_quantizer_set, x, kernel, group_sizes, **kwargs):
         del kwargs  # Unused
