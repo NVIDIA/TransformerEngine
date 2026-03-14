@@ -2338,9 +2338,13 @@ def grouped_gemm(
         )
 
     use_v2_ffi = _can_use_v2_grouped_gemm(
-        scaling_mode, lhs_data.dtype, has_bias,
-        lhs_shape=lhs_data.shape, rhs_shape=rhs_data.shape,
-        lhs_axis_boundary=lhs_axis_boundary, rhs_axis_boundary=rhs_axis_boundary,
+        scaling_mode,
+        lhs_data.dtype,
+        has_bias,
+        lhs_shape=lhs_data.shape,
+        rhs_shape=rhs_data.shape,
+        lhs_axis_boundary=lhs_axis_boundary,
+        rhs_axis_boundary=rhs_axis_boundary,
     )
     if use_v2_ffi and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         # Pre-swizzle full scale tensors in JAX (CUDA-graph safe).
@@ -2351,11 +2355,15 @@ def grouped_gemm(
         lhs_is_colwise = lhs_is_trans
         rhs_is_colwise = not rhs_is_trans
         lhs_scale_shape = scaling_mode.get_scale_shape(
-            lhs_data.shape, is_colwise=lhs_is_colwise, is_padded=True,
+            lhs_data.shape,
+            is_colwise=lhs_is_colwise,
+            is_padded=True,
             flatten_axis=lhs_axis_boundary,
         )
         rhs_scale_shape = scaling_mode.get_scale_shape(
-            rhs_data.shape, is_colwise=rhs_is_colwise, is_padded=True,
+            rhs_data.shape,
+            is_colwise=rhs_is_colwise,
+            is_padded=True,
             flatten_axis=rhs_axis_boundary,
         )
         # get_scale_shape may return a multi-dim shape (e.g. (8, 4, 128) for a 3D

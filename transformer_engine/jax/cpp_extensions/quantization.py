@@ -73,9 +73,9 @@ def _build_scale_spec(x_spec, scale_shape, mesh):
                     f"Cannot partition MXFP8 scale tensor (shape={tuple(scale_shape)}) "
                     f"by mesh axis '{axis}' of size {axis_size}: "
                     f"scale dim {scale_dim} is not divisible by {axis_size}. "
-                    f"The data tensor's sharding is incompatible with the MXFP8 block "
-                    f"size along this axis. Try reducing expert parallelism (EP) so that "
-                    f"EP divides the scale dimension, or increase the tensor size."
+                    "The data tensor's sharding is incompatible with the MXFP8 block "
+                    "size along this axis. Try reducing expert parallelism (EP) so that "
+                    "EP divides the scale dimension, or increase the tensor size."
                 )
         elif isinstance(axis, (tuple, list)):
             # Multi-axis sharding (e.g. ('fsdp', 'expert')): check total combined size.
@@ -89,9 +89,9 @@ def _build_scale_spec(x_spec, scale_shape, mesh):
                     f"Cannot partition MXFP8 scale tensor (shape={tuple(scale_shape)}) "
                     f"by mesh axes {tuple(axis)} of combined size {total_size}: "
                     f"scale dim {scale_dim} is not divisible by {total_size}. "
-                    f"The data tensor's sharding is incompatible with the MXFP8 block "
-                    f"size along this axis. Try reducing parallelism or increasing the "
-                    f"tensor size."
+                    "The data tensor's sharding is incompatible with the MXFP8 block "
+                    "size along this axis. Try reducing parallelism or increasing the "
+                    "tensor size."
                 )
         else:
             result.append(None)
@@ -1084,16 +1084,21 @@ class GroupedQuantizePrimitive(BasePrimitive):
         but performs a D2H copy of group_sizes (not CUDA-graph safe).
         """
         if ScalingMode(scaling_mode) != ScalingMode.MXFP8_1D_SCALING:
-            assert False, "V2 grouped quantize kernel currently only supports MXFP8 1D scaling mode, but got scaling_mode {}".format(
-                scaling_mode
+            assert False, (
+                "V2 grouped quantize kernel currently only supports MXFP8 1D scaling mode, but got"
+                " scaling_mode {}".format(scaling_mode)
             )
             return False
         ndim = len(x_shape)
         eff = flatten_axis if flatten_axis >= 0 else flatten_axis + ndim
         total_first_dim = math.prod(x_shape[:eff])
         if total_first_dim % 128 != 0:
-            assert False, "V2 grouped quantize kernel requires total first logical dimension (product of x_shape up to flatten_axis) to be divisible by 128, but got shape {} and flatten_axis {} with total_first_dim {}".format(
-                x_shape, flatten_axis, total_first_dim
+            assert False, (
+                "V2 grouped quantize kernel requires total first logical dimension (product of"
+                " x_shape up to flatten_axis) to be divisible by 128, but got shape {} and"
+                " flatten_axis {} with total_first_dim {}".format(
+                    x_shape, flatten_axis, total_first_dim
+                )
             )
             return False
         # For multi-dim group tensors (e.g., kernel shape G×K×N with eff=2),
@@ -1101,8 +1106,12 @@ class GroupedQuantizePrimitive(BasePrimitive):
         if eff > 1:
             non_group_m = math.prod(x_shape[1:eff])
             if non_group_m % 128 != 0:
-                assert False, "V2 grouped quantize kernel requires non-group dimension (product of x_shape[1:flatten_axis]) to be divisible by 128 for multi-dim group tensors, but got shape {} and flatten_axis {} with non_group_m {}".format(
-                    x_shape, flatten_axis, non_group_m
+                assert False, (
+                    "V2 grouped quantize kernel requires non-group dimension (product of"
+                    " x_shape[1:flatten_axis]) to be divisible by 128 for multi-dim group tensors,"
+                    " but got shape {} and flatten_axis {} with non_group_m {}".format(
+                        x_shape, flatten_axis, non_group_m
+                    )
                 )
                 return False
         return True
@@ -1157,9 +1166,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             #   [n_groups int64 group_sizes | n_groups+1 int64 offsets]
             # = (2*n_groups + 1) * sizeof(int64_t) bytes stored as uint8.
             n_groups = group_sizes_aval.size
-            fifth_out_aval = jax.core.ShapedArray(
-                shape=((2 * n_groups + 1) * 8,), dtype=jnp.uint8
-            )
+            fifth_out_aval = jax.core.ShapedArray(shape=((2 * n_groups + 1) * 8,), dtype=jnp.uint8)
         else:
             # V1 path: 5th output is amax
             fifth_out_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)

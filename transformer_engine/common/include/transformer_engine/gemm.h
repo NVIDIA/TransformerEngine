@@ -368,7 +368,7 @@ void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cud
  *  \param[in]  stream      CUDA stream.
  */
 void nvte_convert_int32_to_int64_with_multiplier(const int32_t *src, int64_t *dst, size_t n,
-                                                  int64_t multiplier, cudaStream_t stream);
+                                                 int64_t multiplier, cudaStream_t stream);
 
 /*! \brief Compute exclusive prefix-sum offsets from per-group first-dimension sizes.
  *
@@ -383,8 +383,7 @@ void nvte_convert_int32_to_int64_with_multiplier(const int32_t *src, int64_t *ds
  *  \param[in]  stream      CUDA stream.
  */
 void nvte_compute_grouped_tensor_offsets(const int64_t *first_dims, int64_t *offsets,
-                                         size_t n_groups, int64_t last_dim,
-                                         cudaStream_t stream);
+                                         size_t n_groups, int64_t last_dim, cudaStream_t stream);
 
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
                        const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,

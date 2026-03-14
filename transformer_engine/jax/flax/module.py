@@ -1361,7 +1361,12 @@ class LayerNormMLP(TransformerEngineBase):
         return out, ln_output  # Output, layer_norm_output
 
 
-def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str] = None, quantization_checkpoint_name: Optional[str] = None):
+def wrap_function_in_te_state_module(
+    f,
+    quantization_recipe,
+    name: Optional[str] = None,
+    quantization_checkpoint_name: Optional[str] = None,
+):
     """Wraps the given function `f` to support TransformerEngine quantization.
 
     This method does a couple things:
@@ -1452,8 +1457,9 @@ def make_grouped_dense_cls(quantization_recipe, quantization_checkpoint_name: Op
     if quantization_recipe is not None:
         allowed_grouped_gemm_recipes = [MXFP8BlockScaling]
         assert any(isinstance(quantization_recipe, r) for r in allowed_grouped_gemm_recipes), (
-            f"Only the following quantization recipes are supported for grouped GEMM or `None` for BF16 without quantization: {allowed_grouped_gemm_recipes}. "
-            f"Got {type(quantization_recipe)}."
+            "Only the following quantization recipes are supported for grouped GEMM or `None` for"
+            f" BF16 without quantization: {allowed_grouped_gemm_recipes}. Got"
+            f" {type(quantization_recipe)}."
         )
 
     def te_grouped_dot_general(generate_quantizer_set, x, kernel, group_sizes, **kwargs):
@@ -1471,6 +1477,8 @@ def make_grouped_dense_cls(quantization_recipe, quantization_checkpoint_name: Op
         return out
 
     return wrap_function_in_te_state_module(
-        te_grouped_dot_general, quantization_recipe, "ragged_dot",
+        te_grouped_dot_general,
+        quantization_recipe,
+        "ragged_dot",
         quantization_checkpoint_name=quantization_checkpoint_name,
     )()

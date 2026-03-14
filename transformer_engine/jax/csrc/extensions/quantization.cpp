@@ -495,11 +495,10 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeHandler, GroupedQuantizeFFI,
                                   .Attr<JAXX_Quantize_Layout>("q_layout")
                                   .Attr<int64_t>("flatten_axis"));
 
-Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs,
-                                Buffer_Type scale_unused, Buffer_Type group_sizes,
-                                Result_Type rowwise_out, Result_Type colwise_out,
-                                Result_Type rowwise_sinv, Result_Type colwise_sinv,
-                                Result_Type int64_workspace,
+Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Type scale_unused,
+                                Buffer_Type group_sizes, Result_Type rowwise_out,
+                                Result_Type colwise_out, Result_Type rowwise_sinv,
+                                Result_Type colwise_sinv, Result_Type int64_workspace,
                                 JAXX_Quantize_Layout quantize_layout, int64_t flatten_axis) {
   (void)scale_unused;  // scale is unused for MXFP8; accepted to match V1 input arity
   auto in_dtype = convert_ffi_datatype_to_te_dtype(inputs.element_type());
@@ -539,8 +538,8 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs,
       non_group_m, stream);
 
   // Compute exclusive prefix-sum offsets on device (CUDA-graph safe, no D2H).
-  nvte_compute_grouped_tensor_offsets(int64_ptr, offsets_ptr_out, n_groups,
-                                      static_cast<int64_t>(n), stream);
+  nvte_compute_grouped_tensor_offsets(int64_ptr, offsets_ptr_out, n_groups, static_cast<int64_t>(n),
+                                      stream);
 
   NVTEShape data_shape{};
   data_shape.data[0] = m;
@@ -557,9 +556,8 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs,
   offsets_shape.data[0] = n_groups + 1;
 
   // Build input grouped tensor (plain float data, no quantization on the input side).
-  NVTEGroupedTensor in_grouped =
-      nvte_create_grouped_tensor(get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING),
-                                 n_groups, data_shape);
+  NVTEGroupedTensor in_grouped = nvte_create_grouped_tensor(
+      get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING), n_groups, data_shape);
   {
     NVTEBasicTensor in_data{reinterpret_cast<uint8_t *>(inputs.untyped_data()),
                             static_cast<NVTEDType>(in_dtype), data_shape};
@@ -574,9 +572,8 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs,
   }
 
   // Build output grouped tensor.
-  NVTEGroupedTensor out_grouped =
-      nvte_create_grouped_tensor(get_nvte_scaling_mode(JAXX_Scaling_Mode::MXFP8_1D_SCALING),
-                                 n_groups, data_shape);
+  NVTEGroupedTensor out_grouped = nvte_create_grouped_tensor(
+      get_nvte_scaling_mode(JAXX_Scaling_Mode::MXFP8_1D_SCALING), n_groups, data_shape);
 
   // Set group sizes and offsets on output tensor (same device pointers).
   {

@@ -823,7 +823,7 @@ __global__ void convert_int32_to_int64_kernel(const int32_t *src, int64_t *dst, 
 // Like convert_int32_to_int64_kernel but scales each element by multiplier.
 // Used to convert per-expert slice counts to per-expert row counts for multi-dim tensors.
 __global__ void convert_int32_to_int64_with_multiplier_kernel(const int32_t *src, int64_t *dst,
-                                                               size_t n, int64_t multiplier) {
+                                                              size_t n, int64_t multiplier) {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) dst[idx] = static_cast<int64_t>(src[idx]) * multiplier;
 }
@@ -850,22 +850,21 @@ void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cud
 }
 
 void nvte_convert_int32_to_int64_with_multiplier(const int32_t *src, int64_t *dst, size_t n,
-                                                  int64_t multiplier, cudaStream_t stream) {
+                                                 int64_t multiplier, cudaStream_t stream) {
   NVTE_API_CALL(nvte_convert_int32_to_int64_with_multiplier);
   if (n == 0) return;
   const int threads = 256;
   const int blocks = static_cast<int>((n + threads - 1) / threads);
   convert_int32_to_int64_with_multiplier_kernel<<<blocks, threads, 0, stream>>>(src, dst, n,
-                                                                                 multiplier);
+                                                                                multiplier);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void nvte_compute_grouped_tensor_offsets(const int64_t *first_dims, int64_t *offsets,
-                                         size_t n_groups, int64_t last_dim,
-                                         cudaStream_t stream) {
+                                         size_t n_groups, int64_t last_dim, cudaStream_t stream) {
   NVTE_API_CALL(nvte_compute_grouped_tensor_offsets);
   // Always write at least offsets[0]=0 (needed even for n_groups==0).
   compute_grouped_tensor_offsets_kernel<<<1, 1, 0, stream>>>(first_dims, offsets, n_groups,
-                                                              last_dim);
+                                                             last_dim);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }

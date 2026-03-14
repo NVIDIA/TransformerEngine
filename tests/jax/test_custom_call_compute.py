@@ -1964,7 +1964,7 @@ GROUPED_DENSE_MXFP8_V2_INPUT_SHAPES = [
     # (n_groups, m, n, k)
     # lhs total_rows = m * 128; rhs total_rows = n_groups * k
     (8, 8, 128, 128),  # lhs: 8*128=1024 (128-aligned); rhs: 8*128=1024 (128-aligned)
-    (4, 4, 64, 256),   # lhs: 4*128=512 (128-aligned); rhs: 4*256=1024 (128-aligned)
+    (4, 4, 64, 256),  # lhs: 4*128=512 (128-aligned); rhs: 4*256=1024 (128-aligned)
 ]
 
 
@@ -2119,9 +2119,9 @@ class TestGroupedDenseMXFP8KernelSelection:
             return jnp.sum(jnp.asarray(out)) / jnp.sqrt(x.size)
 
         ref_val, (ref_dx, ref_dk) = value_and_grad(_ref_sum, (0, 1))(lhs, rhs, group_sizes)
-        prim_val, (prim_dx, prim_dk) = jit(
-            value_and_grad(_prim_sum, (0, 1)), static_argnums=()
-        )(lhs, rhs, group_sizes)
+        prim_val, (prim_dx, prim_dk) = jit(value_and_grad(_prim_sum, (0, 1)), static_argnums=())(
+            lhs, rhs, group_sizes
+        )
 
         assert_allclose(prim_val, ref_val, dtype=fwd_dtype)
         assert_allclose(prim_dx, ref_dx, dtype=bwd_dtype)

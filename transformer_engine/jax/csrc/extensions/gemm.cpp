@@ -591,8 +591,7 @@ void JAXX_GroupedTensorWrapper::set_columnwise(Buffer_Type const &data,
         NVTEBasicTensor{reinterpret_cast<uint8_t *>(scale_inv->untyped_data()), scale_inv_dtype,
                         logical_scale_shape};
     nvte_set_grouped_tensor_param(m_grouped_tensor, kNVTEGroupedColumnwiseScaleInv,
-                                  &m_colwise_scale_inv_tensor,
-                                  sizeof(m_colwise_scale_inv_tensor));
+                                  &m_colwise_scale_inv_tensor, sizeof(m_colwise_scale_inv_tensor));
   }
 }
 
@@ -836,18 +835,20 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   const bool rhs_use_colwise = is_mxfp8 && !rhs_is_trans;
   const bool lhs_use_colwise = is_mxfp8 && lhs_is_trans;
 
-  auto rhs_tensor = is_mxfp8
-      ? make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, rhs_use_colwise,
-                            rhs_first_dims, rhs_last_dims, int64_base, int64_capacity,
-                            int64_offset, num_gemms, stream, rhs_axis_boundary)
-      : make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims, int64_base, int64_capacity,
-                            int64_offset, num_gemms, stream, rhs_axis_boundary);
-  auto lhs_tensor = is_mxfp8
-      ? make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, lhs_use_colwise,
-                            lhs_first_dims, lhs_last_dims, int64_base, int64_capacity,
-                            int64_offset, num_gemms, stream, lhs_axis_boundary)
-      : make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims, int64_base, int64_capacity,
-                            int64_offset, num_gemms, stream, lhs_axis_boundary);
+  auto rhs_tensor =
+      is_mxfp8
+          ? make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, rhs_use_colwise, rhs_first_dims,
+                                rhs_last_dims, int64_base, int64_capacity, int64_offset, num_gemms,
+                                stream, rhs_axis_boundary)
+          : make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims, int64_base, int64_capacity,
+                                int64_offset, num_gemms, stream, rhs_axis_boundary);
+  auto lhs_tensor =
+      is_mxfp8
+          ? make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, lhs_use_colwise, lhs_first_dims,
+                                lhs_last_dims, int64_base, int64_capacity, int64_offset, num_gemms,
+                                stream, lhs_axis_boundary)
+          : make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims, int64_base, int64_capacity,
+                                int64_offset, num_gemms, stream, lhs_axis_boundary);
   // Output stays NO_SCALING
   auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base,
                                         int64_capacity, int64_offset, num_gemms, stream);
