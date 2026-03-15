@@ -864,7 +864,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(weight, "overwrite_main_grad", False)
+                        if not getattr(origin_weight, "overwrite_main_grad", False)
                         else False
                     ),
                     "layout": "NT",
