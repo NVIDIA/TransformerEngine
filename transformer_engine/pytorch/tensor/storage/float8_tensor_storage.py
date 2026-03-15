@@ -14,7 +14,7 @@ from transformer_engine_torch import DType as TE_DType
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
@@ -35,6 +35,13 @@ class _FromFloat8Func(torch.autograd.Function):
         if tensor._data is not None:
             if tensor._data.numel() == 0:
                 return torch.empty_like(tensor._data, dtype=dtype)
+            if tensor._data.is_cpu:
+                # CPU fallback: reinterpret uint8 as FP8, cast to target dtype, scale
+                fp8_torch_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
+                return (
+                    tensor._data.view(fp8_torch_dtype).float()
+                    * tensor._scale_inv.to(tensor._data.device)
+                ).to(dtype)
             # Cast from FP8
             return tex.dequantize(tensor, te_dtype)
 
@@ -132,6 +139,11 @@ class Float8TensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "data_transpose": self._transpose,
             "quantizer": self._quantizer,
+            "device": (
+                self._data.device
+                if self._data is not None
+                else (self._transpose.device if self._transpose is not None else None)
+            ),
             "fake_dtype": self._dtype,
         }
 
