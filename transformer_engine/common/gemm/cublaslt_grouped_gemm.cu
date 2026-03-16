@@ -283,6 +283,7 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
              " requires Blackwell (SM100) or newer architecture.");
   NVTE_CHECK(transformer_engine::cuda::cublas_version() >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ",
+             transformer_engine::cuda::cublas_version());
 }
 
 inline transformer_engine::GroupedMatmulConfig parse_grouped_gemm_config(
