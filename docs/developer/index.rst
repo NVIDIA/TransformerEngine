@@ -19,9 +19,9 @@ How to Use This Guide
 ---------------------
 
 - **New contributors**: Start with :doc:`architecture_overview` for the big picture,
-  then read :doc:`linear_walkthrough` for an end-to-end trace through a concrete module.
-- **Working on quantization**: See :doc:`quantization/index` for the Quantizer/Storage/Tensor
-  design and :doc:`cpp_core/type_system` for the underlying C/C++ types.
+  then read :doc:`linear_walkthrough` for an end-to-end trace through a concrete PyTorch module.
+- **Working on new quantization recipe**: See :doc:`quantization/index` for the 
+  Quantizer/Storage/Tensor design and :doc:`cpp_core/type_system` for the underlying C/C++ types.
 - **Working on attention**: See :doc:`attention/index` for backend selection and kernel
   organization.
 - **Working on distributed**: See :doc:`distributed/index` for tensor/sequence parallelism

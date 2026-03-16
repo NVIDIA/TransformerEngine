@@ -8,8 +8,18 @@
 Type System
 ===========
 
-Transformer Engine maintains two parallel type systems for historical and ABI-stability
-reasons: a C type system for the public API and a C++ type system for internal use.
+Transformer Engine maintains two parallel type systems: a C type system for the public
+API and a C++ type system for internal use.
+
+The C++ core exposes a **C API** (not C++) for ABI stability. Framework bindings interact
+with opaque ``NVTETensor`` handles rather than C++ objects directly. The C++ ``Tensor``
+and ``SimpleTensor`` structs in ``common.h`` are internal implementation details —
+they are never exposed across the API boundary.
+
+This design means there are **two dtype enums** (``NVTEDType`` in C, ``DType`` in C++)
+and **two tensor abstractions** (``NVTEBasicTensor`` in C, ``SimpleTensor`` in C++). They
+mirror each other but are not implicitly convertible. The rest of this page documents both
+systems and the conversion patterns between them.
 
 C Types (Public API)
 --------------------

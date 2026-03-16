@@ -127,31 +127,47 @@ and once for the weight gradient (wgrad). The wgrad path uses *columnwise* quant
 to satisfy cuBLASLt's transposed layout requirements — see
 :doc:`quantization/rowwise_columnwise` for details.
 
-Key Design Decisions
---------------------
+Guiding Principles
+-------------------
 
-**C API boundary**
-   The C++ core exposes a C API (not C++) for ABI stability. This means framework bindings
-   interact with opaque ``NVTETensor`` handles rather than C++ objects directly. The C++
-   ``Tensor`` and ``SimpleTensor`` structs in ``common.h`` are internal implementation
-   details.
+These principles apply across the entire codebase and inform design decisions at every
+layer.
 
-**Dual type systems**
-   The C API uses ``NVTEDType`` (a plain C enum), while the C++ core uses
-   ``DType`` (a C++ ``enum class`` in the ``transformer_engine`` namespace). These are
-   related but not implicitly convertible — see :doc:`cpp_core/type_system` for conversion
-   patterns.
+**Three API surfaces, one core**
+   Transformer Engine exposes three distinct API surfaces — a C API
+   (``transformer_engine.h``), PyTorch ``nn.Module`` subclasses, and JAX XLA primitives —
+   all backed by the same framework-agnostic C++ core. CUDA kernels live in ``common/``
+   and know nothing about PyTorch or JAX; framework frontends are responsible for
+   converting their tensor types before calling into the C API.
 
-**Framework-agnostic kernels**
-   All CUDA kernels live in ``common/`` and know nothing about PyTorch or JAX. Framework
-   frontends are responsible for converting their tensor types to ``NVTETensor`` before
-   calling into the C API.
+**Feel native to each framework**
+   Each frontend should feel like a natural extension of its framework, not a foreign
+   library. PyTorch modules follow ``nn.Module`` conventions (autograd, ``state_dict``,
+   ``torch.compile``). JAX primitives register with XLA's custom-call and sharding
+   machinery. Users should be able to mix and match TE components with native framework
+   code freely — a ``te.Linear`` should be a drop-in replacement for ``torch.nn.Linear``.
 
-**Quantizer pattern**
-   Quantization is not a single function but a stateful builder (``Quantizer``) that
-   produces ``QuantizedTensorStorage`` (lightweight, no autograd) or ``QuantizedTensor``
-   (full torch.Tensor subclass). This separation keeps internal kernel code free from
-   autograd overhead — see :doc:`quantization/class_hierarchy`.
+**Leverage the ecosystem, don't reinvent it**
+   TE provides custom CUDA kernels where they deliver clear performance wins (fused
+   attention, quantized GEMM, fused normalization + cast). For everything else, we prefer
+   the framework's native capabilities — ``torch.compile`` for fusion, XLA for graph
+   optimization, cuBLASLt for matrix multiplication. A custom kernel must justify its
+   existence against the ecosystem alternative.
+
+**No memory allocation in the C++ layer**
+   The C++ core never allocates GPU memory directly. All memory is allocated by the
+   framework frontend and passed down to the C API as pointers within ``NVTETensor``
+   handles. This keeps memory management in the framework's control (important for
+   memory pools, garbage collection, and distributed training) and avoids hidden
+   allocation surprises.
+
+**Hide complexity, but stay extensible**
+   Low-precision training involves many moving parts (scaling modes, amax history, block
+   sizes, format selection). TE hides this complexity behind simple APIs — a user can
+   pass a recipe to ``fp8_autocast`` and get FP8 training without understanding the
+   internals. But we do not want to be a black box: the quantization system is designed
+   to be extensible (see :doc:`quantization/adding_new_type`), scaling recipes are
+   configurable, and advanced users can provide custom quantizers.
 
 Next Steps
 ----------
