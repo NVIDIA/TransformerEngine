@@ -347,6 +347,12 @@ def general_grouped_gemm_for_grouped_tensor(
         # Use-case: Single Grouped Parameter for Weight/ Weight Grads.
         grouped_gemm_impl = tex.te_general_grouped_gemm_for_grouped_tensor
 
+    if is_discrete_out and bias is not None:
+        raise ValueError(
+            "Bias is not supported when out is a list (discrete_out mode) yet. "
+            "Apply bias manually after the GEMM."
+        )
+
     num_tensors = B.num_tensors
     rowwise = B.rowwise_data
     device = rowwise.device if rowwise is not None else B.columnwise_data.device
