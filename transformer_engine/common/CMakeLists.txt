@@ -286,12 +286,13 @@ endif()
 
 option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
+
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp.so libcublasmp.so.0
                  PATHS ${CUBLASMP_DIR}
-                 PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu
+                 PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu lib/sbsa-linux-gnu lib/x86_64-linux-gnu
                  REQUIRED)
     find_library(NCCL_LIB
                  NAMES nccl libnccl
