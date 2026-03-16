@@ -101,19 +101,18 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
       # Define output file for logs
       LOG_FILE="${TEST_NAME}_gpu_${i}_${BACKEND}.log"
 
-      test_case_args=(
-
-        "--num-processes=$NUM_GPUS"
-        "--process-id=$i"
+      pytest_args=(
+        "-s"
+        "-c $TE_PATH/tests/jax/pytest.ini"
+        "-vs"
       )
       if [ "$BACKEND" == "cublasmp" ]; then
         pytest_args+=("--use-cublasmp")
       fi
 
-      pytest_args=(
-        "-s"
-        "-c $TE_PATH/tests/jax/pytest.ini"
-        "-vs"
+      test_case_args=(
+        "--num-processes=$NUM_GPUS"
+        "--process-id=$i"
       )
       if [ $i -eq 0 ]; then
         # For process 0: show live output AND save to log file using tee
