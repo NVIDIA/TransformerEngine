@@ -273,14 +273,33 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
   }
 }
 
+// Compile-time version macro for Hopper grouped GEMM support (mirrors cublaslt_grouped_gemm.cu)
+#define CUBLAS_GROUPED_GEMM_HOPPER_VERSION 130300
+
 void run_grouped_gemm_case(const TestParams& params) {
 #if CUBLAS_VERSION < 130200
   GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.2+, but compile-time cuBLAS version is "
                << CUBLAS_VERSION << ".";
 #else
-  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+  const int32_t cc = getDeviceComputeCapability();
+
+#if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
+  // Compiled with cuBLAS 13.3+: Hopper (SM90) and Blackwell+ are supported.
+  if (cc < hopperComputeCapability) {
+    GTEST_SKIP() << "Grouped GEMM requires Hopper (SM90) or newer with cuBLAS 13.3+, "
+                 << "but device compute capability is " << cc << ".";
+  }
+  // MXFP8 grouped GEMM is only supported on Blackwell+
+  if (cc < blackwellComputeCapability && params.input_case == InputCase::kMXFP8) {
+    GTEST_SKIP() << "MXFP8 grouped GEMM requires Blackwell (SM100) or newer, "
+                 << "but device compute capability is " << cc << ".";
+  }
+#else
+  // Compiled with cuBLAS 13.2: only Blackwell+ is supported.
+  if (cc < blackwellComputeCapability) {
     GTEST_SKIP() << "Grouped GEMM requires Blackwell (SM100) or newer.";
   }
+#endif  // CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
 
   const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
 
@@ -406,15 +425,15 @@ void run_grouped_gemm_case(const TestParams& params) {
   }
   GroupedBuffers grouped_D = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
 
-  // Per-matrix alpha/beta (all 1.0 and 0.0 respectively)
-  Tensor alpha_tensor("alpha", std::vector<size_t>{num_gemms}, DType::kFloat32);
-  Tensor beta_tensor("beta", std::vector<size_t>{num_gemms}, DType::kFloat32);
-  std::vector<float> alpha_vals(num_gemms, 1.f);
-  std::vector<float> beta_vals(num_gemms, 0.f);
+  const size_t alpha_beta_numel = cc < blackwellComputeCapability ? 1 : num_gemms;
+  Tensor alpha_tensor("alpha", std::vector<size_t>{alpha_beta_numel}, DType::kFloat32);
+  Tensor beta_tensor("beta", std::vector<size_t>{alpha_beta_numel}, DType::kFloat32);
+  std::vector<float> alpha_vals(alpha_beta_numel, 1.f);
+  std::vector<float> beta_vals(alpha_beta_numel, 0.f);
   NVTE_CHECK_CUDA(cudaMemcpy(alpha_tensor.rowwise_dptr(), alpha_vals.data(),
-                             num_gemms * sizeof(float), cudaMemcpyHostToDevice));
+                             alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
   NVTE_CHECK_CUDA(cudaMemcpy(beta_tensor.rowwise_dptr(), beta_vals.data(),
-                             num_gemms * sizeof(float), cudaMemcpyHostToDevice));
+                             alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
 
   const size_t setup_ws_bytes = grouped_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);

@@ -32,6 +32,9 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 // MXFP8 support for grouped GEMM requires cuBLAS 13.2+
 #define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130200
 
+// Hopper (SM90) support for grouped GEMM requires cuBLAS 13.3+
+#define CUBLAS_GROUPED_GEMM_HOPPER_VERSION 130300
+
 #if CUBLAS_VERSION >= 130200
 
 namespace {
@@ -210,21 +213,31 @@ struct GroupedGemmSetupWorkspace {
   }
 };
 
+// -----------------------------------------------------------------------------
+// Helper routines to keep nvte_grouped_gemm readable
+// -----------------------------------------------------------------------------
+inline bool grouped_gemm_supports_per_group_alpha_beta(int sm) { return sm >= 100; }
+
 inline size_t validate_grouped_gemm_inputs(
     size_t num_tensors, std::initializer_list<const transformer_engine::GroupedTensor *> inputs,
-    const transformer_engine::Tensor *alpha_tensor, const transformer_engine::Tensor *beta_tensor) {
+    const transformer_engine::Tensor *alpha_tensor, const transformer_engine::Tensor *beta_tensor,
+    bool supports_per_group_alpha_beta) {
   NVTE_CHECK(num_tensors >= 1, "Grouped GEMM: number of tensors must be at least 1");
   for (const auto *tensor : inputs) {
     NVTE_CHECK(tensor->num_tensors == num_tensors,
                "Grouped GEMM: inputs must have the same number of tensors");
   }
 
+  // Hopper currently requires a uniform alpha/beta scalar for the whole grouped GEMM,
+  // while Blackwell+ supports per-matrix alpha/beta.
   const size_t alpha_numel = alpha_tensor->data.numel();
   const size_t beta_numel = beta_tensor->data.numel();
-  NVTE_CHECK(alpha_numel == num_tensors, "Grouped GEMM: alpha must have num_tensors (", num_tensors,
-             ") elements, got ", alpha_numel);
-  NVTE_CHECK(beta_numel == num_tensors, "Grouped GEMM: beta must have num_tensors (", num_tensors,
-             ") elements, got ", beta_numel);
+  const size_t expected_alphabeta_numel = supports_per_group_alpha_beta ? num_tensors : 1;
+  const char *alphabeta_desc = supports_per_group_alpha_beta ? "num_tensors" : "1";
+  NVTE_CHECK(alpha_numel == expected_alphabeta_numel, "Grouped GEMM: alpha must have ",
+             alphabeta_desc, " element(s), got ", alpha_numel);
+  NVTE_CHECK(beta_numel == expected_alphabeta_numel, "Grouped GEMM: beta must have ",
+             alphabeta_desc, " element(s), got ", beta_numel);
 
   auto is_supported_input_dtype = [](transformer_engine::DType dtype) {
     return dtype == transformer_engine::DType::kFloat8E4M3 ||
@@ -641,7 +654,8 @@ inline void init_matrix_layouts(
 }
 
 inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOperation_t op_A,
-                             cublasOperation_t op_B, bool use_fp8, bool use_split_accumulator) {
+                             cublasOperation_t op_B, bool use_fp8, bool use_split_accumulator,
+                             bool use_per_group_alpha_beta) {
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescInit(&matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &op_A,
@@ -653,13 +667,15 @@ inline void init_matmul_desc(cublasLtMatmulDescOpaque_t &matmulDesc, cublasOpera
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc, CUBLASLT_MATMUL_DESC_POINTER_MODE,
                                                    &pointer_mode, sizeof(pointer_mode)));
 
-  int64_t alphabeta_batch_stride = 1;
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
-                                                   CUBLASLT_MATMUL_DESC_ALPHA_BATCH_STRIDE,
-                                                   &alphabeta_batch_stride, sizeof(int64_t)));
-  NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
-                                                   CUBLASLT_MATMUL_DESC_BETA_BATCH_STRIDE,
-                                                   &alphabeta_batch_stride, sizeof(int64_t)));
+  if (use_per_group_alpha_beta) {
+    int64_t alphabeta_batch_stride = 1;
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                     CUBLASLT_MATMUL_DESC_ALPHA_BATCH_STRIDE,
+                                                     &alphabeta_batch_stride, sizeof(int64_t)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                     CUBLASLT_MATMUL_DESC_BETA_BATCH_STRIDE,
+                                                     &alphabeta_batch_stride, sizeof(int64_t)));
+  }
 
   // Fast accumulation is only supported for FP8 (mirrors non-grouped GEMM logic).
   int8_t fastAccuMode = use_split_accumulator ? 0 : static_cast<int8_t>(use_fp8);
@@ -764,7 +780,8 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                                  transformer_engine::DType d_dtype, size_t num_tensors,
                                  bool use_split_accumulator, bool use_fp8, int64_t avg_m_val,
                                  int64_t avg_n_val, int64_t avg_k_val, void *cublas_workspace_ptr,
-                                 cudaStream_t stream) {
+                                 cudaStream_t stream, bool use_per_group_alpha_beta,
+                                 void *alpha_dptr, void *beta_dptr) {
   using cublasHandleManager =
       transformer_engine::detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
@@ -777,7 +794,8 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                       num_tensors);
 
   cublasLtMatmulDescOpaque_t matmulDesc;
-  init_matmul_desc(matmulDesc, op_A, op_B, use_fp8, use_split_accumulator);
+  init_matmul_desc(matmulDesc, op_A, op_B, use_fp8, use_split_accumulator,
+                   use_per_group_alpha_beta);
   if (transformer_engine::is_mxfp_scaling(A_sel.scaling_mode)) {
     set_mxfp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
                              setup_workspace.b_scale_inv_ptrs);
@@ -789,9 +807,16 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
   cublasLtMatmulAlgo_t algo = select_grouped_gemm_algo(handle, matmulDesc, descA, descB, descC,
                                                        descD, avg_m_val, avg_n_val, avg_k_val);
 
-  NVTE_CHECK_CUBLAS(cublasLtMatmul(handle, &matmulDesc, setup_workspace.alpha_ptrs,
+  // Hopper uses a single scalar alpha/beta for the whole grouped GEMM;
+  // Blackwell+ uses per-matrix alpha/beta arrays.
+  void *alpha_arg =
+      use_per_group_alpha_beta ? static_cast<void *>(setup_workspace.alpha_ptrs) : alpha_dptr;
+  void *beta_arg =
+      use_per_group_alpha_beta ? static_cast<void *>(setup_workspace.beta_ptrs) : beta_dptr;
+
+  NVTE_CHECK_CUBLAS(cublasLtMatmul(handle, &matmulDesc, alpha_arg,
                                    setup_workspace.A_ptrs, &descA, setup_workspace.B_ptrs, &descB,
-                                   setup_workspace.beta_ptrs, setup_workspace.C_ptrs, &descC,
+                                   beta_arg, setup_workspace.C_ptrs, &descC,
                                    setup_workspace.D_ptrs, &descD, &algo, cublas_workspace_ptr,
                                    kGroupedGemmCublasWorkspaceSize, stream));
 }
@@ -872,12 +897,15 @@ __global__ void setup_grouped_gemm_kernel(
     char *a_base, char *b_base, char *c_base, char *d_base, TensorShapeInfo A_meta,
     TensorShapeInfo B_meta, TensorShapeInfo C_meta, TensorShapeInfo D_meta, size_t a_elem_size,
     size_t b_elem_size, size_t c_elem_size, size_t d_elem_size, float *alpha_ptr, float *beta_ptr,
+    bool use_per_group_alpha_beta,
     // Scale inputs: for tensor scaling, pass float* and set mxfp8_base to nullptr
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
     float *a_scale_base, float *b_scale_base, NVTEScalingMode scaling_mode, size_t num_tensors,
     MultiTensorGroupGemmInputArgs a_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs c_multi_tensor_args,
-    MultiTensorGroupGemmOutputArgs d_multi_tensor_args) {
+    MultiTensorGroupGemmOutputArgs d_multi_tensor_args,
+    // NVFP4: per-group amax values and output buffer for computed alpha
+    float *a_amax, float *b_amax, float *computed_alpha) {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= num_tensors) return;
 
@@ -929,16 +957,23 @@ __global__ void setup_grouped_gemm_kernel(
     d_cols[idx] = static_cast<int>(d_first);
   }
 
-  // Fill alpha/beta pointers (per-matrix)
-  // For NVFP4 with amax: compute per-group alpha that includes global scale
-  if (a_amax && b_amax && computed_alpha) {
-    constexpr float factor_inv = 1.0f / (6.0f * 6.0f * 448.0f * 448.0f);
-    computed_alpha[idx] = alpha_ptr[idx] * a_amax[idx] * b_amax[idx] * factor_inv;
-    alpha_ptrs[idx] = &computed_alpha[idx];
+  // Fill alpha/beta pointers.
+  // Hopper uses one shared alpha/beta scalar for all groups; Blackwell+ uses per-matrix scalars.
+  // For NVFP4 on Blackwell+: compute per-group alpha that includes global scale (amax).
+  if (use_per_group_alpha_beta) {
+    if (a_amax && b_amax && computed_alpha) {
+      constexpr float factor_inv = 1.0f / (6.0f * 6.0f * 448.0f * 448.0f);
+      computed_alpha[idx] = alpha_ptr[idx] * a_amax[idx] * b_amax[idx] * factor_inv;
+      alpha_ptrs[idx] = &computed_alpha[idx];
+    } else {
+      alpha_ptrs[idx] = alpha_ptr + idx;
+    }
+    beta_ptrs[idx] = beta_ptr + idx;
   } else {
-    alpha_ptrs[idx] = alpha_ptr + idx;
+    // Hopper: use single scalar for the whole grouped GEMM
+    alpha_ptrs[idx] = alpha_ptr;
+    beta_ptrs[idx] = beta_ptr;
   }
-  beta_ptrs[idx] = beta_ptr + idx;
 
   // Fill scale pointers (per-matrix).
   // The interpretation of the scale buffers depends on the shared scaling recipe:
@@ -968,11 +1003,10 @@ __global__ void setup_grouped_gemm_kernel(
 inline void launch_grouped_gemm_setup(
     const GroupedGemmSetupWorkspace &ws, const GroupedOperandSelection &A_sel,
     const GroupedOperandSelection &B_sel,
-    const transformer_engine::GroupedTensor *inputA,
-    const transformer_engine::GroupedTensor *inputB,
     const transformer_engine::GroupedTensor *C,
     const transformer_engine::GroupedTensor *D, const transformer_engine::Tensor *alpha_tensor,
-    const transformer_engine::Tensor *beta_tensor, size_t num_tensors, cudaStream_t stream,
+    const transformer_engine::Tensor *beta_tensor, bool use_per_group_alpha_beta,
+    size_t num_tensors, cudaStream_t stream,
     const MultiTensorGroupGemmInputArgs &a_multi_tensor_args, const NVTETensor *C_list,
     const NVTETensor *D_list, char *a_base, transformer_engine::DType c_dtype,
     transformer_engine::DType d_dtype) {
@@ -1028,9 +1062,18 @@ inline void launch_grouped_gemm_setup(
       ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
       A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size,
       b_elem_size, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
-      static_cast<float *>(beta_tensor->data.dptr), reinterpret_cast<float *>(A_sel.scale_inv),
+      static_cast<float *>(beta_tensor->data.dptr), use_per_group_alpha_beta,
+      reinterpret_cast<float *>(A_sel.scale_inv),
       reinterpret_cast<float *>(B_sel.scale_inv), A_sel.scaling_mode, num_tensors,
-      a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args);
+      a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args,
+      // NVFP4: pass scale_inv as amax and computed_alpha buffer only for NVFP4
+      transformer_engine::is_nvfp_scaling(A_sel.scaling_mode)
+          ? reinterpret_cast<float *>(A_sel.scale_inv)
+          : nullptr,
+      transformer_engine::is_nvfp_scaling(B_sel.scaling_mode)
+          ? reinterpret_cast<float *>(B_sel.scale_inv)
+          : nullptr,
+      transformer_engine::is_nvfp_scaling(A_sel.scaling_mode) ? ws.computed_alpha : nullptr);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -1050,8 +1093,32 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.2+
-  check_grouped_gemm_requirements("nvte_grouped_gemm");
+  // Grouped GEMM requires Blackwell (SM100) or newer with cuBLAS 13.2+,
+  // or Hopper (SM90) with cuBLAS 13.3+.
+  const int current_device = transformer_engine::cuda::current_device();
+  const int cublas_ver = transformer_engine::cuda::cublas_version();
+  const int sm = transformer_engine::cuda::sm_arch(current_device);
+  const bool use_per_group_alpha_beta = grouped_gemm_supports_per_group_alpha_beta(sm);
+
+#if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
+  // Compiled with cuBLAS 13.3+: Hopper (SM90) and Blackwell+ are both supported at runtime.
+  NVTE_CHECK(sm >= 90,
+             "nvte_grouped_gemm requires Hopper (SM90) or newer architecture.");
+  NVTE_CHECK(cublas_ver >= 130200,
+             "nvte_grouped_gemm requires cuBLAS 13.2+, but run-time cuBLAS version is ", cublas_ver);
+  // Hopper (SM90-SM9x) additionally requires cuBLAS 13.3+ at runtime
+  if (sm < 100) {
+    NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION,
+               "nvte_grouped_gemm on Hopper (SM90) requires cuBLAS 13.3+, but run-time cuBLAS "
+               "version is ", cublas_ver);
+  }
+#else
+  // Compiled with cuBLAS 13.2: only Blackwell+ is supported.
+  NVTE_CHECK(sm >= 100,
+             "nvte_grouped_gemm requires Blackwell (SM100) or newer architecture.");
+  NVTE_CHECK(cublas_ver >= 130200,
+             "nvte_grouped_gemm requires cuBLAS 13.2+, but run-time cuBLAS version is ", cublas_ver);
+#endif  // CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
 
   // Convert to internal types
   const GroupedTensor *inputA = convertNVTEGroupedTensorCheck(A);
@@ -1068,7 +1135,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
 
   // Validate inputs and outputs.
   const size_t num_tensors = validate_grouped_gemm_inputs(inputA->num_tensors, {inputA, inputB},
-                                                          alpha_tensor, beta_tensor);
+                                                          alpha_tensor, beta_tensor,
+                                                          use_per_group_alpha_beta);
   validate_grouped_gemm_outputs(num_tensors, {inputC_raw, outputD});
 
   // NVFP4-specific output dtype restrictions (matching non-grouped GEMM)
@@ -1092,9 +1160,9 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
 
   MultiTensorGroupGemmInputArgs a_multi_tensor_args{};
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, inputC, outputD, alpha_tensor,
-                            beta_tensor, num_tensors, stream, a_multi_tensor_args,
-                            /*C_list=*/nullptr, /*D_list=*/nullptr, A_sel.dptr, inputC->dtype(),
-                            outputD->dtype());
+                            beta_tensor, use_per_group_alpha_beta, num_tensors, stream,
+                            a_multi_tensor_args, /*C_list=*/nullptr, /*D_list=*/nullptr,
+                            A_sel.dptr, inputC->dtype(), outputD->dtype());
 
   // Compute average dimensions for heuristics
   // K dimension: if transa, K is A's first dim; if not, K is A's last dim
@@ -1106,7 +1174,8 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   const bool use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        config_.use_split_accumulator, use_fp8, avg_m_val, avg_n_val, avg_k_val,
-                       workspace.cublas_workspace_ptr, stream);
+                       workspace.cublas_workspace_ptr, stream, use_per_group_alpha_beta,
+                       alpha_tensor->data.dptr, beta_tensor->data.dptr);
 }
 
 void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
@@ -1120,6 +1189,10 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
 
   // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.2+
   check_grouped_gemm_requirements("nvte_grouped_gemm_with_discrete_inputA");
+
+  const int current_device = transformer_engine::cuda::current_device();
+  const int sm = transformer_engine::cuda::sm_arch(current_device);
+  const bool use_per_group_alpha_beta = grouped_gemm_supports_per_group_alpha_beta(sm);
 
   NVTE_CHECK(A_list != nullptr, "Grouped GEMM: A_list is null.");
   NVTE_CHECK(num_a_tensors > 0, "Grouped GEMM: num_a_tensors must be > 0.");
@@ -1137,7 +1210,8 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
 
   // Validate inputs and outputs.
   const size_t num_tensors =
-      validate_grouped_gemm_inputs(num_a_tensors, {inputB}, alpha_tensor, beta_tensor);
+      validate_grouped_gemm_inputs(num_a_tensors, {inputB}, alpha_tensor, beta_tensor,
+                                   use_per_group_alpha_beta);
   validate_grouped_gemm_outputs(num_tensors, {inputC_raw, outputD});
 
   // If C is NULL, use D as C (valid when beta=0, cuBLAS won't read C data)
@@ -1211,9 +1285,9 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);
 
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, inputC, outputD, alpha_tensor,
-                            beta_tensor, num_tensors, stream, a_multi_tensor_args,
-                            /*C_list=*/nullptr, /*D_list=*/nullptr, nullptr, inputC->dtype(),
-                            outputD->dtype());
+                            beta_tensor, use_per_group_alpha_beta, num_tensors, stream,
+                            a_multi_tensor_args, /*C_list=*/nullptr, /*D_list=*/nullptr,
+                            nullptr, inputC->dtype(), outputD->dtype());
 
   // Compute average dimensions for heuristics
   int64_t avg_m_val = config_.avg_m.value_or(compute_avg_first_dim(outputD));
@@ -1224,7 +1298,8 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   const bool use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        config_.use_split_accumulator, use_fp8, avg_m_val, avg_n_val, avg_k_val,
-                       workspace.cublas_workspace_ptr, stream);
+                       workspace.cublas_workspace_ptr, stream, use_per_group_alpha_beta,
+                       alpha_tensor->data.dptr, beta_tensor->data.dptr);
 }
 
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
@@ -1239,6 +1314,10 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
 
   // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.2+
   check_grouped_gemm_requirements("nvte_grouped_gemm_with_discrete_out");
+
+  const int current_device = transformer_engine::cuda::current_device();
+  const int sm = transformer_engine::cuda::sm_arch(current_device);
+  const bool use_per_group_alpha_beta = grouped_gemm_supports_per_group_alpha_beta(sm);
 
   NVTE_CHECK(D_list != nullptr, "Grouped GEMM: D_list is null.");
   NVTE_CHECK(num_d_tensors > 0, "Grouped GEMM: num_d_tensors must be > 0.");
@@ -1257,7 +1336,8 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   const DType d_dtype = d0->dtype();
 
   const size_t num_tensors = validate_grouped_gemm_inputs(inputA->num_tensors, {inputA, inputB},
-                                                          alpha_tensor, beta_tensor);
+                                                          alpha_tensor, beta_tensor,
+                                                          use_per_group_alpha_beta);
   NVTE_CHECK(num_d_tensors == num_tensors, "Grouped GEMM: D_list must have num_tensors (",
              num_tensors, ") entries, got ", num_d_tensors);
   if (num_c_tensors > 0) {
@@ -1283,8 +1363,9 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
 
   MultiTensorGroupGemmInputArgs a_multi_tensor_args{};
   launch_grouped_gemm_setup(workspace.setup_workspace, A_sel, B_sel, /*C=*/nullptr, /*D=*/nullptr,
-                            alpha_tensor, beta_tensor, num_tensors, stream, a_multi_tensor_args,
-                            C_list, D_list, A_sel.dptr, d_dtype, d_dtype);
+                            alpha_tensor, beta_tensor, use_per_group_alpha_beta, num_tensors,
+                            stream, a_multi_tensor_args, C_list, D_list, A_sel.dptr, d_dtype,
+                            d_dtype);
 
   // Compute average dimensions for heuristics
   int64_t avg_m_val =
@@ -1296,7 +1377,8 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   const bool use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors,
                        config_.use_split_accumulator, use_fp8, avg_m_val, avg_n_val, avg_k_val,
-                       workspace.cublas_workspace_ptr, stream);
+                       workspace.cublas_workspace_ptr, stream, use_per_group_alpha_beta,
+                       alpha_tensor->data.dptr, beta_tensor->data.dptr);
 }
 
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
