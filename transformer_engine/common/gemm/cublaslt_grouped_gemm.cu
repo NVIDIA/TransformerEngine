@@ -10,6 +10,7 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -1305,8 +1306,8 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
   constexpr int kThreads = 256;
   const size_t total_elements = static_cast<size_t>(outputD->logical_shape.data[0]) *
                                 static_cast<size_t>(outputD->logical_shape.data[1]);
-  const size_t avg_elements = total_elements / outputD->num_tensors;
-  int blocks_per_tensor = static_cast<int>((avg_elements + kThreads - 1) / kThreads);
+  const size_t total_vec_count = (total_elements + kVec - 1) / kVec;
+  int blocks_per_tensor = static_cast<int>((total_vec_count + kThreads - 1) / kThreads);
   const dim3 grid(outputD->num_tensors, blocks_per_tensor);
   const dim3 block(kThreads);
 

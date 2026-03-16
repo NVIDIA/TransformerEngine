@@ -390,6 +390,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
 *  \param[in]  num_c_tensors    Number of tensors in C_list (Can be 0 if C is not provided).
 *  \param[out] D_list           List of D tensors (length = num_tensors).
 *  \param[in]  num_d_tensors    Number of tensors in D_list.
+*  \note  All tensors in C_list and D_list must share the same dtype.
 */
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
                                          const NVTEGroupedTensor B, int transb,
