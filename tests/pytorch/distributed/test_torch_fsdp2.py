@@ -134,9 +134,7 @@ def _run_allgather_test(sharding_dims, recipe):
 def test_fp8_fsdp2_allgather(sharding_dims, fp_recipe):
     """Verify FSDP2 FP8 all-gather matches a manual dequantize-then-gather reference."""
     if fp_recipe == "NVFP4BlockScaling":
-        pytest.xfail(
-            f"{fp_recipe}: NVFP4 FSDP2 all-gather hooks need to be implemented."
-        )
+        pytest.xfail(f"{fp_recipe}: NVFP4 FSDP2 all-gather hooks need to be implemented.")
 
     parallel_size = math.prod(x for x in sharding_dims if x != 0)
     if NUM_PROCS < parallel_size:
