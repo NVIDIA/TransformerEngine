@@ -1856,8 +1856,7 @@ class FusedAttention(torch.nn.Module):
         ), f"FusedAttention does not support qkv_layout = {qkv_layout}!"
         if score_mod is not None or score_mod_bprop is not None:
             assert (
-                fused_attention_backend
-                == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
             ), "score_mod and score_mod_bprop require the F16_arbitrary_seqlen fused backend."
 
         cp_size = 1

@@ -1509,7 +1509,9 @@ model_configs_score_mod = {
 }
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 7, 0), reason="cuDNN 9.7.0+ is required for score_mod.")
+@pytest.mark.skipif(
+    get_cudnn_version() < (9, 7, 0), reason="cuDNN 9.7.0+ is required for score_mod."
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("model_configs", [model_configs_score_mod])
 @pytest.mark.parametrize("model", model_configs_score_mod.keys())
@@ -1539,7 +1541,10 @@ def test_dpa_score_mod(dtype, model_configs, model):
     )
     _, fused_attn_supported, _ = available_backends
 
-    if not fused_attn_supported or FusedAttnBackend["F16_arbitrary_seqlen"] not in fused_attn_backends:
+    if (
+        not fused_attn_supported
+        or FusedAttnBackend["F16_arbitrary_seqlen"] not in fused_attn_backends
+    ):
         pytest.skip("F16_arbitrary_seqlen backend not available.")
 
     reset_rng_states()
@@ -1558,7 +1563,8 @@ def test_dpa_score_mod(dtype, model_configs, model):
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
     block = DotProductAttention(
-        h, d,
+        h,
+        d,
         attention_dropout=0.0,
         qkv_format=qkv_format,
         attn_mask_type=config.attn_mask_type,
@@ -1570,8 +1576,17 @@ def test_dpa_score_mod(dtype, model_configs, model):
     ).to(dtype=dtype, device="cuda")
 
     # Reference: run without score_mod (score_mod=None by default)
-    out_ref = block(q, k, v, qkv_format=qkv_format, cu_seqlens_q=cu_seqlens, cu_seqlens_kv=cu_seqlens,
-                    max_seqlen_q=sq, max_seqlen_kv=sq, attn_mask_type=config.attn_mask_type)
+    out_ref = block(
+        q,
+        k,
+        v,
+        qkv_format=qkv_format,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        max_seqlen_q=sq,
+        max_seqlen_kv=sq,
+        attn_mask_type=config.attn_mask_type,
+    )
     out_ref.backward(out_grad)
     dq_ref = q.grad.clone()
     dk_ref = k.grad.clone()
@@ -1589,9 +1604,19 @@ def test_dpa_score_mod(dtype, model_configs, model):
         return None
 
     # Run with score_mod identity callable
-    out_sm = block(q, k, v, qkv_format=qkv_format, cu_seqlens_q=cu_seqlens, cu_seqlens_kv=cu_seqlens,
-                   max_seqlen_q=sq, max_seqlen_kv=sq, attn_mask_type=config.attn_mask_type,
-                   score_mod=identity_score_mod, score_mod_bprop=identity_score_mod)
+    out_sm = block(
+        q,
+        k,
+        v,
+        qkv_format=qkv_format,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        max_seqlen_q=sq,
+        max_seqlen_kv=sq,
+        attn_mask_type=config.attn_mask_type,
+        score_mod=identity_score_mod,
+        score_mod_bprop=identity_score_mod,
+    )
     out_sm.backward(out_grad)
     dq_sm = q.grad.clone()
     dk_sm = k.grad.clone()
@@ -1608,7 +1633,9 @@ def test_dpa_score_mod(dtype, model_configs, model):
     torch.testing.assert_close(dv_sm, dv_ref, **tols)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 7, 0), reason="cuDNN 9.7.0+ is required for score_mod.")
+@pytest.mark.skipif(
+    get_cudnn_version() < (9, 7, 0), reason="cuDNN 9.7.0+ is required for score_mod."
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("model_configs", [model_configs_score_mod])
 @pytest.mark.parametrize("model", model_configs_score_mod.keys())
@@ -1634,7 +1661,10 @@ def test_dpa_score_mod_causal(dtype, model_configs, model):
     )
     _, fused_attn_supported, _ = available_backends
 
-    if not fused_attn_supported or FusedAttnBackend["F16_arbitrary_seqlen"] not in fused_attn_backends:
+    if (
+        not fused_attn_supported
+        or FusedAttnBackend["F16_arbitrary_seqlen"] not in fused_attn_backends
+    ):
         pytest.skip("F16_arbitrary_seqlen backend not available.")
 
     reset_rng_states()
@@ -1711,11 +1741,15 @@ def test_dpa_score_mod_causal(dtype, model_configs, model):
     torch.testing.assert_close(dv_sm, dv_ref, **tols)
 
 
-@pytest.mark.skipif(get_cudnn_version() < (9, 7, 0), reason="cuDNN 9.7.0+ is required for score_mod.")
+@pytest.mark.skipif(
+    get_cudnn_version() < (9, 7, 0), reason="cuDNN 9.7.0+ is required for score_mod."
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("model_configs", [model_configs_score_mod])
 @pytest.mark.parametrize("model", model_configs_score_mod.keys())
-@pytest.mark.parametrize("neg_inf_device", ["cuda", "cpu"], ids=["cuda_tensor", "cpu_by_value_tensor"])
+@pytest.mark.parametrize(
+    "neg_inf_device", ["cuda", "cpu"], ids=["cuda_tensor", "cpu_by_value_tensor"]
+)
 def test_dpa_score_mod_causal_external_neg_inf(dtype, model_configs, model, neg_inf_device):
     """Test DotProductAttention causal masking via score_mod with external variant-pack tensor."""
 
@@ -1738,7 +1772,10 @@ def test_dpa_score_mod_causal_external_neg_inf(dtype, model_configs, model, neg_
     )
     _, fused_attn_supported, _ = available_backends
 
-    if not fused_attn_supported or FusedAttnBackend["F16_arbitrary_seqlen"] not in fused_attn_backends:
+    if (
+        not fused_attn_supported
+        or FusedAttnBackend["F16_arbitrary_seqlen"] not in fused_attn_backends
+    ):
         pytest.skip("F16_arbitrary_seqlen backend not available.")
 
     reset_rng_states()

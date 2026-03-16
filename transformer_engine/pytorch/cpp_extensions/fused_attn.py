@@ -541,9 +541,10 @@ def fused_attn_bwd(
     if score_mod_bprop_tensors is not None:
         assert score_mod_bprop is not None, "score_mod_bprop_tensors requires score_mod_bprop."
     if score_mod is not None or score_mod_bprop is not None:
-        assert (
-            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-        ), "score_mod and score_mod_bprop are only supported by the cuDNN F16_arbitrary_seqlen backend."
+        assert fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"], (
+            "score_mod and score_mod_bprop are only supported by the cuDNN F16_arbitrary_seqlen"
+            " backend."
+        )
 
     if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
         if len(aux_ctx_tensors) < 1:

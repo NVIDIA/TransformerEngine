@@ -8,10 +8,9 @@
 #include <cuda_fp16.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
+#include <dlpack/dlpack.h>
 #include <pybind11/cast.h>
 #include <pybind11/pybind11.h>
-
-#include <dlpack/dlpack.h>
 
 #include <algorithm>
 #include <map>
@@ -182,39 +181,38 @@ DlpackTensorView make_dlpack_tensor_view(py::handle tensor_obj) {
   return DlpackTensorView(capsule.ptr(), managed);
 }
 
-TensorAttr create_tensor_attr_from_dlpack(const std::shared_ptr<cudnn_frontend::graph::Graph> &graph,
-                                          py::handle tensor_obj, const std::string &name) {
-  return with_dlpack_tensor(
-      tensor_obj, [&](const DLManagedTensor &managed) -> TensorAttr {
-        const auto device_type = managed.dl_tensor.device.device_type;
-        NVTE_CHECK(device_type == kDLCPU || device_type == kDLCUDAHost || device_type == kDLCUDA ||
-                       device_type == kDLCUDAManaged,
-                   "Invalid device type in score_mod_tensors entry.");
+TensorAttr create_tensor_attr_from_dlpack(
+    const std::shared_ptr<cudnn_frontend::graph::Graph> &graph, py::handle tensor_obj,
+    const std::string &name) {
+  return with_dlpack_tensor(tensor_obj, [&](const DLManagedTensor &managed) -> TensorAttr {
+    const auto device_type = managed.dl_tensor.device.device_type;
+    NVTE_CHECK(device_type == kDLCPU || device_type == kDLCUDAHost || device_type == kDLCUDA ||
+                   device_type == kDLCUDAManaged,
+               "Invalid device type in score_mod_tensors entry.");
 
-        const auto ndim = managed.dl_tensor.ndim;
-        std::vector<int64_t> dims(managed.dl_tensor.shape, managed.dl_tensor.shape + ndim);
-        const auto tensor_dtype = convert_dlpack_dtype(managed.dl_tensor.dtype);
-        NVTE_CHECK(tensor_dtype != cudnn_frontend::DataType_t::NOT_SET,
-                   "Unsupported DLPack dtype in score_mod_tensors entry.");
+    const auto ndim = managed.dl_tensor.ndim;
+    std::vector<int64_t> dims(managed.dl_tensor.shape, managed.dl_tensor.shape + ndim);
+    const auto tensor_dtype = convert_dlpack_dtype(managed.dl_tensor.dtype);
+    NVTE_CHECK(tensor_dtype != cudnn_frontend::DataType_t::NOT_SET,
+               "Unsupported DLPack dtype in score_mod_tensors entry.");
 
-        auto props = cudnn_frontend::graph::Tensor_attributes()
-                         .set_name(name)
-                         .set_data_type(tensor_dtype)
-                         .set_is_virtual(false)
-                         .set_is_pass_by_value(device_type == kDLCPU)
-                         .set_dim(dims);
+    auto props = cudnn_frontend::graph::Tensor_attributes()
+                     .set_name(name)
+                     .set_data_type(tensor_dtype)
+                     .set_is_virtual(false)
+                     .set_is_pass_by_value(device_type == kDLCPU)
+                     .set_dim(dims);
 
-        if (managed.dl_tensor.strides == nullptr) {
-          auto stride_order = cudnn_frontend::detail::generate_row_major_stride_order(ndim);
-          props.set_stride(cudnn_frontend::detail::generate_stride(dims, stride_order));
-        } else {
-          std::vector<int64_t> strides(managed.dl_tensor.strides,
-                                       managed.dl_tensor.strides + ndim);
-          props.set_stride(strides);
-        }
+    if (managed.dl_tensor.strides == nullptr) {
+      auto stride_order = cudnn_frontend::detail::generate_row_major_stride_order(ndim);
+      props.set_stride(cudnn_frontend::detail::generate_stride(dims, stride_order));
+    } else {
+      std::vector<int64_t> strides(managed.dl_tensor.strides, managed.dl_tensor.strides + ndim);
+      props.set_stride(strides);
+    }
 
-        return graph->tensor(props);
-      });
+    return graph->tensor(props);
+  });
 }
 
 template <typename T>
@@ -228,7 +226,8 @@ std::uint64_t get_extra_tensor_signature(void *extra_tensors_ptr) {
   }
 
   py::gil_scoped_acquire gil;
-  py::dict extra_tensors = py::reinterpret_borrow<py::dict>(reinterpret_cast<PyObject *>(extra_tensors_ptr));
+  py::dict extra_tensors =
+      py::reinterpret_borrow<py::dict>(reinterpret_cast<PyObject *>(extra_tensors_ptr));
   std::uint64_t signature = 0;
 
   for (const auto &name : get_sorted_extra_tensor_names(extra_tensors)) {
@@ -265,7 +264,8 @@ py::dict get_score_mod_tensor_attrs(const std::shared_ptr<cudnn_frontend::graph:
     return callback_tensors;
   }
 
-  py::dict extra_tensors = py::reinterpret_borrow<py::dict>(reinterpret_cast<PyObject *>(extra_tensors_ptr));
+  py::dict extra_tensors =
+      py::reinterpret_borrow<py::dict>(reinterpret_cast<PyObject *>(extra_tensors_ptr));
   for (const auto &name : get_sorted_extra_tensor_names(extra_tensors)) {
     py::handle tensor_obj = extra_tensors[py::str(name)];
     auto tensor_attr = create_tensor_attr_from_dlpack(graph, tensor_obj, name);
@@ -287,7 +287,8 @@ DlpackTensorViews extend_variant_pack_with_extra_tensors(
   }
 
   py::gil_scoped_acquire gil;
-  py::dict extra_tensors = py::reinterpret_borrow<py::dict>(reinterpret_cast<PyObject *>(extra_tensors_ptr));
+  py::dict extra_tensors =
+      py::reinterpret_borrow<py::dict>(reinterpret_cast<PyObject *>(extra_tensors_ptr));
   views.reserve(extra_tensor_attrs.size());
   for (const auto &[name, tensor_attr] : extra_tensor_attrs) {
     py::str key(name);
@@ -314,23 +315,22 @@ auto make_attention_score_modifier(void *callback_ptr, void *extra_tensors_ptr,
   return [callback, extra_tensors_ptr, extra_tensor_attrs](
              std::shared_ptr<cudnn_frontend::graph::Graph> graph,
              std::shared_ptr<cudnn_frontend::graph::Tensor_attributes> score_tensor) mutable {
-           py::gil_scoped_acquire gil;
-           py::module_::import("cudnn");
-           py::function callback_fn = py::reinterpret_borrow<py::function>(callback);
+    py::gil_scoped_acquire gil;
+    py::module_::import("cudnn");
+    py::function callback_fn = py::reinterpret_borrow<py::function>(callback);
 
-           auto py_graph =
-               std::make_shared<cudnn_frontend::python_bindings::PyGraph>(graph);
-           py::dict callback_tensors =
-               get_score_mod_tensor_attrs(graph, extra_tensors_ptr, extra_tensor_attrs);
+    auto py_graph = std::make_shared<cudnn_frontend::python_bindings::PyGraph>(graph);
+    py::dict callback_tensors =
+        get_score_mod_tensor_attrs(graph, extra_tensors_ptr, extra_tensor_attrs);
 
-           py::object result = callback_tensors.empty()
-                                   ? callback_fn(*py_graph, score_tensor)
-                                   : callback_fn(*py_graph, score_tensor, callback_tensors);
-           if (result.is_none()) {
-             return score_tensor;
-           }
-           return result.cast<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>>();
-         };
+    py::object result = callback_tensors.empty()
+                            ? callback_fn(*py_graph, score_tensor)
+                            : callback_fn(*py_graph, score_tensor, callback_tensors);
+    if (result.is_none()) {
+      return score_tensor;
+    }
+    return result.cast<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>>();
+  };
 }
 
 }  // namespace
@@ -346,10 +346,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     bool bottom_right_diagonal, void *score_mod, void *score_mod_tensors, void *devPtrQ,
     void *devPtrK, void *devPtrV, void *devPtrBias, void *devPtrSoftmaxOffset, void *devPtrS1,
     void *devPtrS2, void *devPtrO, void *devPtrDropoutSeed, void *devPtrDropoutOffset,
-    void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV, void *devPtrPageTableK,
-    void *devPtrPageTableV, void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV,
-    cudnn_frontend::DataType_t tensorType, void *workspace, size_t *workspace_size,
-    cudaStream_t stream, cudnnHandle_t handle) {
+    void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV, void *devPtrPageTableK, void *devPtrPageTableV,
+    void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV, cudnn_frontend::DataType_t tensorType,
+    void *workspace, size_t *workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -437,27 +436,27 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
         std::tuple<std::shared_ptr<fe::graph::Graph>,
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // Q
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // K
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // V
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // attn_scale
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // O
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // S1
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // S2
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // bias
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // softmax_offset
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // page_table_k
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // page_table_v
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_q
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_k
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_v
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_stats
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_offset
-                   ExtraTensorList>;                                // score_mod extra tensors
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // K
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // V
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // attn_scale
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // O
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // S1
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // S2
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // bias
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // softmax_offset
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_q
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_kv
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // page_table_k
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // page_table_v
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_q
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_k
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_v
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_o
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_stats
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // dropout_seed
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // dropout_offset
+                   ExtraTensorList>;                               // score_mod extra tensors
 
     using CacheType = std::map<FADescriptor_v1, graph_and_tensors>;
     static thread_local CacheType sdpa_f16_fprop_cache;
@@ -717,11 +716,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
 
-      auto return_tuple =
-          std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
-                         softmax_offset_tuple, padding_tuple, page_table_tuple, offset_qo_tuple,
-                         offset_kv_tuple, offset_s_tuple, dropout_tuple,
-                         std::make_tuple(score_mod_extra_tensors));
+      auto return_tuple = std::tuple_cat(
+          std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
+          softmax_offset_tuple, padding_tuple, page_table_tuple, offset_qo_tuple, offset_kv_tuple,
+          offset_s_tuple, dropout_tuple, std::make_tuple(score_mod_extra_tensors));
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
@@ -843,8 +841,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       variant_pack[softmax_offset] = devPtrSoftmaxOffset;
     }
 
-    auto score_mod_tensor_views =
-        extend_variant_pack_with_extra_tensors(score_mod_tensors, score_mod_extra_tensors, variant_pack);
+    auto score_mod_tensor_views = extend_variant_pack_with_extra_tensors(
+        score_mod_tensors, score_mod_extra_tensors, variant_pack);
 
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
   } catch (cudnn_frontend::cudnnException &e) {
@@ -859,10 +857,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     NVTE_QKV_Layout layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
     bool bottom_right_diagonal, bool deterministic, void *score_mod, void *score_mod_bprop,
-    void *score_mod_tensors, void *score_mod_bprop_tensors, void *devPtrQ,
-    void *devPtrKTranspose, void *devPtrVTranspose, void *devPtrO, void *devPtrSoftmaxStats,
-    void *devPtrBias, void *devPtrSoftmaxOffset, void *devPtrdQ, void *devPtrdK, void *devPtrdV,
-    void *devPtrdO, void *devPtrdBias, void *devPtrdSoftmaxOffset, void *devPtrDropoutSeed,
+    void *score_mod_tensors, void *score_mod_bprop_tensors, void *devPtrQ, void *devPtrKTranspose,
+    void *devPtrVTranspose, void *devPtrO, void *devPtrSoftmaxStats, void *devPtrBias,
+    void *devPtrSoftmaxOffset, void *devPtrdQ, void *devPtrdK, void *devPtrdV, void *devPtrdO,
+    void *devPtrdBias, void *devPtrdSoftmaxOffset, void *devPtrDropoutSeed,
     void *devPtrDropoutOffset, void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV,
     void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV, cudnn_frontend::DataType_t tensorType,
     void *workspace, size_t *workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
@@ -957,31 +955,31 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
         std::tuple<std::shared_ptr<fe::graph::Graph>,
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // q
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // k
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // v
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // o
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // dO
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // stats
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // attn_scale
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // dQ
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // dK
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // dV
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // bias
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // dBias
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // softmax_offset
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // d_softmax_offset
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_q
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_k
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_v
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_stats
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
-                   std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_offset
-                   ExtraTensorList,                                 // score_mod extra tensors
-                   ExtraTensorList>;                                // score_mod_bprop extra tensors
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // q
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // k
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // v
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // o
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // dO
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // stats
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // attn_scale
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // dQ
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // dK
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // dV
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // bias
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // dBias
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // softmax_offset
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // d_softmax_offset
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_q
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // seq_kv
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_q
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_k
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_v
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_o
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // offset_stats
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // dropout_seed
+                   std::shared_ptr<fe::graph::Tensor_attributes>,  // dropout_offset
+                   ExtraTensorList,                                // score_mod extra tensors
+                   ExtraTensorList>;                               // score_mod_bprop extra tensors
 
     using CacheType = std::map<FADescriptor_v1, graph_and_tensors>;
     static thread_local CacheType sdpa_f16_bprop_cache;
@@ -1103,8 +1101,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                   .set_causal_mask_bottom_right(is_bottom_right)
                                   .set_attn_scale(attn_scale);
       if (score_mod != nullptr) {
-        sdpa_backward_options.set_score_mod(make_attention_score_modifier(
-            score_mod, score_mod_tensors, &score_mod_extra_tensors));
+        sdpa_backward_options.set_score_mod(
+            make_attention_score_modifier(score_mod, score_mod_tensors, &score_mod_extra_tensors));
       }
       if (score_mod_bprop != nullptr) {
         sdpa_backward_options.set_score_mod_bprop(make_attention_score_modifier(
@@ -1246,11 +1244,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
 
-      auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple,
-                                         softmax_offset_tuple, padding_tuple, offset_qo_tuple,
-                                         offset_kv_tuple, offset_s_tuple, dropout_tuple,
-                                         std::make_tuple(score_mod_extra_tensors),
-                                         std::make_tuple(score_mod_bprop_extra_tensors));
+      auto return_tuple = std::tuple_cat(
+          std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple, softmax_offset_tuple,
+          padding_tuple, offset_qo_tuple, offset_kv_tuple, offset_s_tuple, dropout_tuple,
+          std::make_tuple(score_mod_extra_tensors), std::make_tuple(score_mod_bprop_extra_tensors));
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
@@ -1258,8 +1255,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
     auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV, bias, dBias, softmax_offset,
           d_softmax_offset, seq_q, seq_kv, offset_q, offset_o, offset_k, offset_v, offset_stats,
-          dropout_seed, dropout_offset, score_mod_extra_tensors,
-          score_mod_bprop_extra_tensors] = get_graph(sdpa_f16_bprop_cache, descriptor);
+          dropout_seed, dropout_offset, score_mod_extra_tensors, score_mod_bprop_extra_tensors] =
+        get_graph(sdpa_f16_bprop_cache, descriptor);
 
     // Exit to request upper level API to allocate memory if needed
     // n.b. Care should be taken to align each of the added worksapce tensors to their type.
@@ -1376,8 +1373,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       variant_pack[d_softmax_offset] = devPtrdSoftmaxOffset;
     }
 
-    auto score_mod_tensor_views =
-        extend_variant_pack_with_extra_tensors(score_mod_tensors, score_mod_extra_tensors, variant_pack);
+    auto score_mod_tensor_views = extend_variant_pack_with_extra_tensors(
+        score_mod_tensors, score_mod_extra_tensors, variant_pack);
     auto score_mod_bprop_tensor_views = extend_variant_pack_with_extra_tensors(
         score_mod_bprop_tensors, score_mod_bprop_extra_tensors, variant_pack);
 
@@ -1398,9 +1395,9 @@ void fused_attn_arbitrary_seqlen_fwd(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
     void *score_mod, void *score_mod_tensors, const Tensor *input_Q, const Tensor *input_K,
-    const Tensor *input_V, const Tensor *input_Bias, const Tensor *input_SoftmaxOffset, Tensor *output_O,
-    NVTETensorPack *Aux_CTX_Tensors,
-    const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
+    const Tensor *input_V, const Tensor *input_Bias, const Tensor *input_SoftmaxOffset,
+    Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q,
+    const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
     const Tensor *cu_seqlens_kv_padded, const Tensor *page_table_k, const Tensor *page_table_v,
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
@@ -1540,9 +1537,8 @@ void fused_attn_arbitrary_seqlen_fwd(
       softmax_type, window_size_left, window_size_right, bottom_right_diagonal, score_mod,
       score_mod_tensors, devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1,
       devPtrS2, devPtrO, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
-      devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ,
-      devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size,
-      stream, handle);
+      devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
+      get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size, stream, handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
