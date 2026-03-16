@@ -108,6 +108,8 @@
                                                                    pybind11::module_local())       \
       .def(py::init([]() { return new transformer_engine::CommOverlapCore(); }),                   \
            py::call_guard<py::gil_scoped_release>())                                               \
+      .def("get_tp_size", &transformer_engine::CommOverlapCore::get_tp_size,                       \
+           py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_atomic_gemm", &transformer_engine::CommOverlapCore::is_atomic_gemm,                 \
            py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_p2p_overlap", &transformer_engine::CommOverlapCore::is_p2p_overlap,                 \

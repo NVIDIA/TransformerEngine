@@ -310,7 +310,7 @@ def _main(opts):
     helper = (
         tex.CommOverlapHelper()
         if tex.ubuf_built_with_mpi()
-        else tex.CommOverlapHelper(bootstrap_pg)
+        else tex.CommOverlapHelper(bootstrap_pg, tp_group)
     )
 
     # Initialize userbuffers with (M, N) buffer
@@ -461,22 +461,22 @@ def _main(opts):
             # AG Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
             ker_g = torch.transpose(
                 te.distributed.gather_along_first_dim(kernel_t, tp_group)[0], 0, 1
-            ).to(dtype=torch.float32)
+            )
             # AG Input: (M/P, N) -> gather -> (M, N)
-            inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0].to(dtype=torch.float32)
+            inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
             if ub_obj2 is not None:
                 ker2_g = te.distributed.gather_along_first_dim(
                     torch.transpose(kernel2_t, 0, 1), tp_group
-                )[0].to(dtype=torch.float32)
+                )[0]
         else:
             # RS Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
             ker_g = te.distributed.gather_along_first_dim(
                 torch.transpose(kernel_t, 0, 1), tp_group
-            )[0].to(dtype=torch.float32)
+            )[0]
             # RS Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
             inp_g = torch.transpose(
                 te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1), tp_group)[0], 0, 1
-            ).to(dtype=torch.float32)
+            )
 
     if opts.bulk_overlap:
         if opts.comm_type == tex.CommOverlapType.AG:
@@ -488,10 +488,20 @@ def _main(opts):
             # Sum the list together for final global result
             ref_g = torch.stack(bulk_inp_list).sum(dim=0)
     else:
-        ref_g = torch.matmul(inp_g, ker_g)
+        ref_g, *_ = tex.general_gemm(
+            torch.transpose(ker_g, 0, 1),
+            inp_g,
+            out_dtype=torch.bfloat16,
+            use_split_accumulator=te.module.base._2X_ACC_FPROP,
+        )
         if ub_obj2 is not None:
             inp2_g = torch.nn.functional.gelu(ref_g)  # pylint: disable=not-callable
-            ref2_g = torch.matmul(inp2_g, ker2_g)
+            ref2_g = tex.general_gemm(
+                torch.transpose(ker2_g),
+                inp2_g,
+                out_dtype=torch.bfloat16,
+                use_split_accumulator=te.module.base._2X_ACC_FPROP,
+            )
 
     # Initialize quantizers
     with_quantized_compute = opts.quantization != "none"
@@ -612,7 +622,7 @@ def _main(opts):
                 tp_group,
             )
             gemm_inp = inp
-        else:
+        elif not opts.use_cublasmp:
             ag_out, _ = fill_userbuffers_buffer_for_all_gather(
                 ub_obj,
                 inp_fp8 if with_quantized_compute else inp,
@@ -620,6 +630,8 @@ def _main(opts):
                 tp_group,
             )
             gemm_inp = ag_out
+        else:
+            gemm_inp = inp_fp8 if with_quantized_compute else inp
         if ub_obj2 is not None:
             rs_out2 = torch.empty(
                 (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"

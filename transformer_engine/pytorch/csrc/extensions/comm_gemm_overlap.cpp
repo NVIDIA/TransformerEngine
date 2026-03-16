@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <nccl.h>
+
 #include "../extensions.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -28,20 +30,20 @@ CommOverlapHelper::CommOverlapHelper() {
 CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
                                      std::optional<c10d::ProcessGroup *> intra_domain_group) {
 #ifndef NVTE_UB_WITH_MPI
-  pgs.insert({"world", world_group});
-  myrank = pgs["world"]->getRank();
-  numranks = pgs["world"]->getSize();
-  c10d::ProcessGroup::BackendType backend = pgs["world"]->getBackendType();
+  torch_pgs.insert({"world", world_group});
+  myrank = torch_pgs["world"]->getRank();
+  numranks = torch_pgs["world"]->getSize();
+  c10d::ProcessGroup::BackendType backend = torch_pgs["world"]->getBackendType();
   backend_is_nccl = (backend == c10d::ProcessGroup::BackendType::NCCL);
 
   if (intra_domain_group.has_value()) {
     // Get local rank on node and number of local ranks
     NVTE_CHECK(intra_domain_group.value()->getBackendType() == backend,
                "Internal TE error: Intra-node group must be on the same backend (%s) as the world ",
-               "group!", pgs["world"]->getBackendName());
-    pgs.insert({"intra", intra_domain_group.value()});
-    mylocal = pgs["intra"]->getRank();
-    numlocal = pgs["intra"]->getSize();
+               "group!", torch_pgs["world"]->getBackendName());
+    torch_pgs.insert({"intra", intra_domain_group.value()});
+    mylocal = torch_pgs["intra"]->getRank();
+    numlocal = torch_pgs["intra"]->getSize();
 
     if (numlocal == numranks) {
       // Intra-node group is same as the world group so there can only be 1 node
@@ -60,13 +62,43 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
     // Intra-node group is not set so we assume there is only 1 node
     mylocal = myrank;
     numlocal = numranks;
-    pgs.insert({"intra", world_group});
+    torch_pgs.insert({"intra", world_group});
 
     mynode = 0;
     numnodes = 1;
   }
 
   initialized = true;
+
+#ifdef NVTE_WITH_CUBLASMP
+  ncclComm_t nccl_world;
+  NVTE_CHECK_NCCL(ncclCommInitAll(&nccl_world, numranks, nullptr));
+  nccl_comms.insert({"world", nccl_world});
+
+  if (intra_domain_group.has_value()) {
+    // Use the global rank of the local rank 0 process as the unique ID for the intra-node communicator
+    ncclUniqueId nccl_intra_id;
+    NVTE_CHECK_NCCL(ncclCommGetUniqueId(nccl_world, &nccl_intra_id));
+
+    // Broadcast the intra-node unique ID from the local root to all local ranks
+    auto nccl_intra_id_tensor = torch::from_blob(
+        reinterpret_cast<uint8_t *>(&nccl_intra_id), {sizeof(ncclUniqueId)},
+        at::device(torch::kCPU).dtype(torch::kUInt8));
+    nccl_intra_id_tensor = (backend_is_nccl) ? nccl_intra_id_tensor.cuda() : nccl_intra_id_tensor;
+    c10d::BroadcastOptions bcast_opts;
+    bcast_opts.rootRank = 0;
+    std::vector<at::Tensor> bcast_tensors = {nccl_intra_id_tensor};
+    auto work = torch_pgs["intra"]->broadcast(bcast_tensors, bcast_opts);
+    work->wait();
+    nccl_intra_id_tensor = (backend_is_nccl) ? nccl_intra_id_tensor.cpu() : nccl_intra_id_tensor;
+    nccl_intra_id = *reinterpret_cast<ncclUniqueId *>(nccl_intra_id_tensor.data_ptr());
+
+    // Initialize intra-node communicator
+    ncclComm_t nccl_intra;
+    NVTE_CHECK_NCCL(ncclCommInitRank(&nccl_intra, numlocal, nccl_intra_id, mylocal));
+    nccl_comms.insert({"intra", nccl_intra});
+  }
+#endif
 #else
   NVTE_ERROR("Internal TE error: CommOverlapHelper cannot be initialized with valid PyTorch ",
              "distributed process groups when TE is compiled with NVTE_UB_WITH_MPI=1!");
@@ -75,9 +107,18 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
 
 CommOverlapHelper::~CommOverlapHelper() {
 #ifndef NVTE_UB_WITH_MPI
-  for (auto &pg : pgs) pg.second = nullptr;
+  for (auto &pg : torch_pgs) {
+    pg.second = nullptr;
+  }
+  torch_pgs.clear();
   backend_is_nccl = false;
   initialized = false;
+#ifdef NVTE_WITH_CUBLASMP
+  for (auto &comm : nccl_comms) {
+    NVTE_CHECK_NCCL(ncclCommDestroy(comm.second));
+  }
+  nccl_comms.clear();
+#endif
 #endif
 }
 
@@ -96,9 +137,9 @@ void CommOverlapHelper::ub_allgather(void *globaldata, size_t globalbytes, void 
                        at::device(torch::kCPU).dtype(torch::kUInt8));
   auto globaltmp = (backend_is_nccl) ? globaltensor.cuda() : globaltensor;
 
-  std::vector<std::vector<torch::Tensor>> globalchunks = {globaltmp.chunk(pgs[group]->getSize())};
+  std::vector<std::vector<torch::Tensor>> globalchunks = {globaltmp.chunk(torch_pgs[group]->getSize())};
   std::vector<torch::Tensor> localchunk = {localtmp};
-  auto work = pgs[group]->allgather(globalchunks, localchunk);
+  auto work = torch_pgs[group]->allgather(globalchunks, localchunk);
   work->wait();
 
   if (backend_is_nccl) {
@@ -116,11 +157,27 @@ void CommOverlapHelper::ub_barrier(ExtComm group) {
 #ifndef NVTE_UB_WITH_MPI
   NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
              "with valid process groups!");
-  auto work = pgs[group]->barrier();
+  auto work = torch_pgs[group]->barrier();
   work->wait();
 #else
   NVTE_ERROR("Internal TE error: CommOverlapHelper::ub_barrier is a no-op when TE is compiled ",
              "with NVTE_UB_WITH_MPI=1!");
+#endif
+}
+
+ncclComm_t CommOverlapHelper::get_nccl_comm(std::string comm_name) {
+#ifdef NVTE_WITH_CUBLASMP
+  NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
+             "with valid process groups!");
+  NVTE_CHECK(backend_is_nccl,
+             "Internal TE error: tex.CommOverlapHelper() was not initialized with an NCCL backend, so no NCCL communicators are available!");
+  if (nccl_comms.find(comm_name) != nccl_comms.end()) {
+    return nccl_comms[comm_name];
+  } else {
+    NVTE_ERROR("Internal TE error: No NCCL communicator found with name ", comm_name, "!");
+  }
+#else
+  NVTE_ERROR("Internal TE error: CommOverlapHelper::get_nccl_comm() is an internal API that requires TE to be built with NVTE_WITH_CUBLASMP=1!");
 #endif
 }
 

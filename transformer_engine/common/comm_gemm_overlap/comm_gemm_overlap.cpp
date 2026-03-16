@@ -80,17 +80,13 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
 }
 
 // Constructor for cuBLASMp backend
-CommOverlapCore::CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm,
+CommOverlapCore::CommOverlapCore(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm,
                                  bool is_p2p, bool atomic_gemm) {
   NVTE_CHECK(
       nvte_built_with_cublasmp(),
       "Comm+GEMM overlap with cuBLASMp backend requires TE to be built with NVTE_WITH_CUBLASMP=1.");
   _with_cublasmp = true;
-
-  NVTE_WARN("Creating CommOverlapCore with cuBLASMp backend.");
-  _cublasmp_ctx =
-      nvte_comm_gemm_ctx_create(reinterpret_cast<ncclComm_t>(nccl_comm_ptr), tp_size, tp_rank);
-  NVTE_WARN("Created cuBLASMp CommGemm context: ", reinterpret_cast<int64_t>(_cublasmp_ctx));
+  _cublasmp_ctx = nvte_comm_gemm_ctx_create(nccl_comm_ptr, tp_size, tp_rank);
 
   _tp_id = tp_rank;
   _tp_size = tp_size;

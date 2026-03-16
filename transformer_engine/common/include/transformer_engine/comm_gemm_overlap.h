@@ -9,6 +9,7 @@
 
 #include <cuda.h>
 #include <cuda_fp8.h>
+#include <nccl.h>
 #include <transformer_engine/comm_gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -94,7 +95,7 @@ class CommOverlapCore {
                   bool atomic_gemm);
 
   // Constructor for cuBLASMp backend
-  CommOverlapCore(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm, bool is_p2p,
+  CommOverlapCore(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm, bool is_p2p,
                   bool atomic_gemm);
 
   virtual ~CommOverlapCore();
@@ -205,7 +206,7 @@ class CommOverlapBase : public CommOverlapCore {
                   bool rs_overlap_first_gemm = false);
 
   // Constructor for cuBLASMp backend
-  CommOverlapBase(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 16,
+  CommOverlapBase(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 16,
                   bool atomic_gemm = false)
       : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, false, atomic_gemm) {}
 
@@ -291,7 +292,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      bool atomic_gemm = false, bool aggregate = false);
 
   // Constructor for cuBLASMp backend
-  CommOverlapP2PBase(int64_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 1,
+  CommOverlapP2PBase(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 1,
                      bool atomic_gemm = false)
       : CommOverlapCore(nccl_comm_ptr, tp_rank, tp_size, num_comm_sm, true, atomic_gemm) {}
 
