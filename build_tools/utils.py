@@ -256,9 +256,7 @@ def cuda_archs() -> str:
     archs = os.getenv("NVTE_CUDA_ARCHS")
     if archs is None:
         version = cuda_version()
-        if version >= (13, 3):
-            archs = "75;80;89;90;100;120;107"
-        elif version >= (13, 0):
+        if version >= (13, 0):
             archs = "75;80;89;90;100;120"
         elif version >= (12, 8):
             archs = "70;80;89;90;100;120"
