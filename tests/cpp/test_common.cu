@@ -1311,6 +1311,61 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     const uint8_t swizzled = 1;
     nvte_set_grouped_tensor_param(h, kNVTEGroupedWithGEMMSwizzledScales, &swizzled,
                                   sizeof(swizzled));
+  } else if (scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
+    // FP8 block scaling: float32 scale_inv per block of 128 elements
+    // Gather scale_inv from individual tensors into a contiguous buffer
+    auto gather_block_scales = [&](
+        auto get_shape_fn,
+        auto get_cpu_ptr_fn) -> std::pair<CudaPtr<>, size_t> {
+      size_t total_scale_floats = 0;
+      std::vector<size_t> scale_offsets(num_tensors);
+      std::vector<size_t> numels(num_tensors);
+
+      for (size_t i = 0; i < num_tensors; ++i) {
+        scale_offsets[i] = total_scale_floats;
+        const NVTEShape sshape = get_shape_fn(tensors[i]);
+        size_t numel = 1;
+        for (size_t d = 0; d < sshape.ndim; ++d) {
+          numel *= sshape.data[d];
+        }
+        numels[i] = numel;
+        total_scale_floats += numel;
+      }
+
+      CudaPtr<> buffer = cuda_alloc(total_scale_floats * sizeof(float));
+      for (size_t i = 0; i < num_tensors; ++i) {
+        tensors[i]->to_cpu();
+        NVTE_CHECK_CUDA(cudaGetLastError());
+        void* dst = static_cast<char*>(buffer.get()) + scale_offsets[i] * sizeof(float);
+        const void* src = get_cpu_ptr_fn(tensors[i]);
+        NVTE_CHECK_CUDA(cudaMemcpy(dst, src, numels[i] * sizeof(float), cudaMemcpyHostToDevice));
+      }
+      return {std::move(buffer), total_scale_floats};
+    };
+
+    // Gather rowwise scale_inv if available
+    if (has_rowwise) {
+      auto [row_buffer, row_total] = gather_block_scales(
+          [](Tensor* t) { return t->rowwise_scale_inv_shape(); },
+          [](Tensor* t) -> const void* { return t->rowwise_cpu_scale_inv_ptr<float>(); });
+      grouped.scale_inv = std::move(row_buffer);
+
+      NVTEShape row_shape = nvte_make_shape(&row_total, 1);
+      NVTEBasicTensor row_tensor{grouped.scale_inv.get(), kNVTEFloat32, row_shape};
+      nvte_set_grouped_tensor_param(h, kNVTEGroupedRowwiseScaleInv, &row_tensor, sizeof(row_tensor));
+    }
+
+    // Gather columnwise scale_inv if available
+    if (has_columnwise) {
+      auto [col_buffer, col_total] = gather_block_scales(
+          [](Tensor* t) { return t->columnwise_scale_inv_shape(); },
+          [](Tensor* t) -> const void* { return t->columnwise_cpu_scale_inv_ptr<float>(); });
+      grouped.columnwise_scale_inv = std::move(col_buffer);
+
+      NVTEShape col_shape = nvte_make_shape(&col_total, 1);
+      NVTEBasicTensor col_tensor{grouped.columnwise_scale_inv.get(), kNVTEFloat32, col_shape};
+      nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &col_tensor, sizeof(col_tensor));
+    }
   } else if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
     // NVFP4: E4M3 scale_inv per block of 16 elements (swizzled for GEMM)
     // Scale layout: [roundup(rows, 128), roundup(cols/16, 4)] E4M3 bytes per tensor

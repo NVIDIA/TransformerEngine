@@ -35,6 +35,7 @@ enum class InputCase {
   kBF16,
   kMXFP8,
   kNVFP4,
+  kFP8BlockScaling,
 };
 
 enum class ShapeCase {
@@ -245,6 +246,41 @@ Tensor make_nvfp4_operand(const std::string& name, const std::vector<size_t>& sh
   return result;
 }
 
+// Creates an FP8 block-scaling operand.
+// FP8 block scaling on Hopper requires TN layout:
+//   A transposed     -> needs rowwise data
+//   A non-transposed -> needs columnwise data (will be flipped to T internally)
+//   B transposed     -> needs columnwise data (will be flipped to N internally)
+//   B non-transposed -> needs rowwise data
+Tensor make_fp8_block_scaling_operand(const std::string& name, const std::vector<size_t>& shape,
+                                      bool is_A, bool transposed) {
+  // Determine which data layout we need (TN-only on Hopper)
+  bool use_rowwise, use_colwise;
+  if (is_A) {
+    use_rowwise = transposed;
+    use_colwise = !transposed;
+  } else {
+    use_rowwise = !transposed;
+    use_colwise = transposed;
+  }
+
+  // Create BF16 input with random data
+  Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
+  fillUniform(&input_bf16);
+
+  // Create FP8 block scaling tensor (1D scaling)
+  Tensor fp8_bs(name, shape, TypeInfo<fp8e4m3>::dtype, use_rowwise, use_colwise,
+                NVTE_BLOCK_SCALING_1D);
+
+  // Quantize BF16 -> FP8 block scaling
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_force_pow_2_scales(true);
+  nvte_quantize_v2(input_bf16.data(), fp8_bs.data(), quant_config, 0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+
+  return fp8_bs;
+}
+
 struct TestParams {
   InputCase input_case;
   bool transa;
@@ -274,7 +310,7 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
 }
 
 // Compile-time version macro for Hopper grouped GEMM support (mirrors cublaslt_grouped_gemm.cu)
-#define CUBLAS_GROUPED_GEMM_HOPPER_VERSION 130300
+#define CUBLAS_GROUPED_GEMM_HOPPER_VERSION 130400
 
 void run_grouped_gemm_case(const TestParams& params) {
 #if CUBLAS_VERSION < 130200
@@ -284,9 +320,9 @@ void run_grouped_gemm_case(const TestParams& params) {
   const int32_t cc = getDeviceComputeCapability();
 
 #if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  // Compiled with cuBLAS 13.3+: Hopper (SM90) and Blackwell+ are supported.
+  // Compiled with cuBLAS 13.4+: Hopper (SM90) and Blackwell+ are supported.
   if (cc < hopperComputeCapability) {
-    GTEST_SKIP() << "Grouped GEMM requires Hopper (SM90) or newer with cuBLAS 13.3+, "
+    GTEST_SKIP() << "Grouped GEMM requires Hopper (SM90) or newer with cuBLAS 13.4+, "
                  << "but device compute capability is " << cc << ".";
   }
   // MXFP8 grouped GEMM is only supported on Blackwell+
@@ -294,10 +330,25 @@ void run_grouped_gemm_case(const TestParams& params) {
     GTEST_SKIP() << "MXFP8 grouped GEMM requires Blackwell (SM100) or newer, "
                  << "but device compute capability is " << cc << ".";
   }
+  // NVFP4 grouped GEMM is only supported on Blackwell+
+  if (cc < blackwellComputeCapability && params.input_case == InputCase::kNVFP4) {
+    GTEST_SKIP() << "NVFP4 grouped GEMM requires Blackwell (SM100) or newer, "
+                 << "but device compute capability is " << cc << ".";
+  }
+  // FP8 block scaling grouped GEMM is only supported on Hopper
+  if (cc >= blackwellComputeCapability && params.input_case == InputCase::kFP8BlockScaling) {
+    GTEST_SKIP() << "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), "
+                 << "but device compute capability is " << cc << ".";
+  }
 #else
   // Compiled with cuBLAS 13.2: only Blackwell+ is supported.
   if (cc < blackwellComputeCapability) {
     GTEST_SKIP() << "Grouped GEMM requires Blackwell (SM100) or newer.";
+  }
+  // FP8 block scaling grouped GEMM is only supported on Hopper
+  if (params.input_case == InputCase::kFP8BlockScaling) {
+    GTEST_SKIP() << "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), "
+                 << "but device compute capability is " << cc << ".";
   }
 #endif  // CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
 
@@ -343,6 +394,13 @@ void run_grouped_gemm_case(const TestParams& params) {
                                                   /*is_A=*/false, params.transb));
         break;
       }
+      case InputCase::kFP8BlockScaling: {
+        A_tensors.emplace_back(make_fp8_block_scaling_operand("A" + std::to_string(i), a_shape,
+                                                              /*is_A=*/true, params.transa));
+        B_tensors.emplace_back(make_fp8_block_scaling_operand("B" + std::to_string(i), b_shape,
+                                                              /*is_A=*/false, params.transb));
+        break;
+      }
     }
     D_multi.emplace_back(Tensor("D_multi" + std::to_string(i),
                                 std::vector<size_t>{M, N},
@@ -375,6 +433,9 @@ void run_grouped_gemm_case(const TestParams& params) {
     B_views.push_back(&B_tensors[i]);
   }
 
+  // FP8 block scaling requires split accumulator (no fast accumulation)
+  const bool use_split_accum = (params.input_case == InputCase::kFP8BlockScaling);
+
   nvte_multi_tensor_gemm(A_ptrs.data(),
                          B_ptrs.data(),
                          D_ptrs.data(),
@@ -386,7 +447,7 @@ void run_grouped_gemm_case(const TestParams& params) {
                          false,  // grad
                          workspace_ptrs.data(),
                          false,  // accumulate
-                         false,  // use_split_accumulator
+                         use_split_accum,
                          0,      // sm_count
                          0);
 
@@ -439,6 +500,12 @@ void run_grouped_gemm_case(const TestParams& params) {
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
 
+  // Create config for grouped GEMM (FP8 block scaling requires split accumulator)
+  GroupedMatmulConfigWrapper grouped_config;
+  if (use_split_accum) {
+    grouped_config.set_use_split_accumulator(true);
+  }
+
   nvte_grouped_gemm(grouped_A.get_handle(),
                     params.transa,
                     grouped_B.get_handle(),
@@ -449,7 +516,7 @@ void run_grouped_gemm_case(const TestParams& params) {
                     beta_tensor.data(),
                     setup_ws.data(),
                     cublas_ws.data(),
-                    nullptr,  // config (use defaults)
+                    grouped_config,
                     0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
@@ -484,7 +551,7 @@ TEST_P(GroupedGemmTest, CompareWithMultiTensorGemm) {
 }
 
 std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest::ParamType>& info) {
-  constexpr const char* kInputNames[] = {"FP8Current", "BF16", "MXFP8", "NVFP4"};
+  constexpr const char* kInputNames[] = {"FP8Current", "BF16", "MXFP8", "NVFP4", "FP8BlockScaling"};
   constexpr const char* kShapeNames[] = {"AllSame", "SameM", "SameN", "AllDiff"};
   const std::string layout = std::string("ta") + (info.param.transa ? "T" : "N") +
                              "tb" + (info.param.transb ? "T" : "N");
@@ -527,6 +594,15 @@ const std::vector<TestParams> kTestParams = {
     {InputCase::kNVFP4, false, false, ShapeCase::kAllDifferent, false},
     // NVFP4 with NULL C
     {InputCase::kNVFP4, true, false, ShapeCase::kAllSame, true},
+    // FP8 Block Scaling tests (TN layout on Hopper, block size 128)
+    {InputCase::kFP8BlockScaling, true, false, ShapeCase::kAllSame, false},
+    {InputCase::kFP8BlockScaling, true, false, ShapeCase::kAllDifferent, false},
+    {InputCase::kFP8BlockScaling, true, false, ShapeCase::kSameFirst, false},
+    {InputCase::kFP8BlockScaling, true, false, ShapeCase::kSameLast, false},
+    {InputCase::kFP8BlockScaling, false, true, ShapeCase::kAllSame, false},
+    {InputCase::kFP8BlockScaling, false, false, ShapeCase::kAllSame, false},
+    // FP8 Block Scaling with NULL C
+    {InputCase::kFP8BlockScaling, true, false, ShapeCase::kAllSame, true},
 };
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest,
