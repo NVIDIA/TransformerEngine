@@ -81,9 +81,9 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
     NVTE_CHECK_NCCL(ncclCommGetUniqueId(nccl_world, &nccl_intra_id));
 
     // Broadcast the intra-node unique ID from the local root to all local ranks
-    auto nccl_intra_id_tensor = torch::from_blob(
-        reinterpret_cast<uint8_t *>(&nccl_intra_id), {sizeof(ncclUniqueId)},
-        at::device(torch::kCPU).dtype(torch::kUInt8));
+    auto nccl_intra_id_tensor =
+        torch::from_blob(reinterpret_cast<uint8_t *>(&nccl_intra_id), {sizeof(ncclUniqueId)},
+                         at::device(torch::kCPU).dtype(torch::kUInt8));
     nccl_intra_id_tensor = (backend_is_nccl) ? nccl_intra_id_tensor.cuda() : nccl_intra_id_tensor;
     c10d::BroadcastOptions bcast_opts;
     bcast_opts.rootRank = 0;
@@ -137,7 +137,8 @@ void CommOverlapHelper::ub_allgather(void *globaldata, size_t globalbytes, void 
                        at::device(torch::kCPU).dtype(torch::kUInt8));
   auto globaltmp = (backend_is_nccl) ? globaltensor.cuda() : globaltensor;
 
-  std::vector<std::vector<torch::Tensor>> globalchunks = {globaltmp.chunk(torch_pgs[group]->getSize())};
+  std::vector<std::vector<torch::Tensor>> globalchunks = {
+      globaltmp.chunk(torch_pgs[group]->getSize())};
   std::vector<torch::Tensor> localchunk = {localtmp};
   auto work = torch_pgs[group]->allgather(globalchunks, localchunk);
   work->wait();
@@ -170,14 +171,17 @@ ncclComm_t CommOverlapHelper::get_nccl_comm(std::string comm_name) {
   NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
              "with valid process groups!");
   NVTE_CHECK(backend_is_nccl,
-             "Internal TE error: tex.CommOverlapHelper() was not initialized with an NCCL backend, so no NCCL communicators are available!");
+             "Internal TE error: tex.CommOverlapHelper() was not initialized with an NCCL backend, "
+             "so no NCCL communicators are available!");
   if (nccl_comms.find(comm_name) != nccl_comms.end()) {
     return nccl_comms[comm_name];
   } else {
     NVTE_ERROR("Internal TE error: No NCCL communicator found with name ", comm_name, "!");
   }
 #else
-  NVTE_ERROR("Internal TE error: CommOverlapHelper::get_nccl_comm() is an internal API that requires TE to be built with NVTE_WITH_CUBLASMP=1!");
+  NVTE_ERROR(
+      "Internal TE error: CommOverlapHelper::get_nccl_comm() is an internal API that requires TE "
+      "to be built with NVTE_WITH_CUBLASMP=1!");
 #endif
 }
 

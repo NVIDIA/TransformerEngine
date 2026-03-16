@@ -52,7 +52,7 @@ std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool tran
   // Check matrix dims
   NVTE_CHECK((transa ? A1 : A0) == (transb ? B0 : B1), "Invalid matrix dimensions for GEMM (A=(",
              A0, ",", A1, "), transa=", transa, ", B=(", B0, ",", B1, "), transb=", transb, ")");
-  
+
   // Construct output dims
   std::vector<size_t> ret;
   if (transb) {
@@ -73,7 +73,7 @@ std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool tran
   }
 
   // Correct output dims for comm+GEMM overlap if needed
-  if (tp_size > 1) { 
+  if (tp_size > 1) {
     if (tp_dim == 0) {
       // Outer dim is sharded, comm+GEMM overlap would need to do all-gather
       ret[0] *= tp_size;
@@ -179,8 +179,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
   const auto& B_shape = B_tensor.shape();
-  const auto& D_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb,
-                                                   tp_size, tp_dim);
+  const auto& D_shape =
+      detail::getGemmOutputShape(A_shape, transa, B_shape, transb, tp_size, tp_dim);
   NVTE_CHECK(A_shape.ndim >= 1, "Tensor A needs to have at least 1 dimension");
   NVTE_CHECK(B_shape.ndim >= 1, "Tensor B needs to have at least 1 dimension");
 

@@ -174,7 +174,8 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   hash_combine(plan_id, buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
                static_cast<int>(collective_op), comm_handler.tp_size, cgemm_config.num_max_streams,
                cgemm_config.gemm_priority, cgemm_config.comm_priority, cgemm_config.num_comm_sm,
-               cgemm_config.use_ce, cgemm_config.aggregate_ag, device_idx, cgemm_config.use_cublasmp);
+               cgemm_config.use_ce, cgemm_config.aggregate_ag, device_idx,
+               cgemm_config.use_cublasmp);
 
   auto it = plan_map.find(plan_id);
   if (it != plan_map.end()) {
