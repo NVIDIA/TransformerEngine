@@ -119,22 +119,30 @@ support and minimal overhead.
 .. code-block:: python
 
    class QuantizedTensorStorage:
-       @property
-       def data(self) -> torch.Tensor: ...         # Raw quantized data
-       @property
-       def scale_inv(self) -> torch.Tensor: ...     # Scale inverse for dequantization
-       @property
-       def dtype(self) -> torch.dtype: ...
-       @property
-       def scaling_mode(self) -> str: ...
+       # Key internal attributes (accessed directly, not via properties)
+       _data: torch.Tensor           # Raw quantized data
+       _scale_inv: torch.Tensor      # Scale inverse for dequantization
 
-       def dequantize(self) -> torch.Tensor: ...    # Convert back to high precision
+       # Public interface
+       def update_usage(self, *, rowwise_usage=None, columnwise_usage=None): ...
+       def get_usages(self) -> tuple[bool, bool]: ...
+       def prepare_for_saving(self) -> tuple: ...   # For autograd save_for_backward
+       def restore_from_saved(cls, saved) -> "QuantizedTensorStorage": ...
+       def quantize_(self, tensor, quantizer): ...  # In-place quantization
+       def copy_from_storage(self, other): ...
 
 Storage objects are used internally by:
 
 - C++ extension calls (converted to ``NVTETensor`` for kernel dispatch)
-- The GEMM pipeline (directly passes data + scale_inv)
+- The GEMM pipeline (directly passes internal data + scale tensors)
 - Op fusion internals (avoids autograd overhead in fused kernels)
+
+.. note::
+
+   ``_data`` and ``_scale_inv`` are internal attributes, not public properties. Subclasses
+   (e.g., ``Float8TensorStorage``) access them directly. External code should use the
+   ``get_data_tensors()`` method on ``QuantizedTensor`` or pass storage objects to GEMM
+   APIs that know how to extract the internal data.
 
 QuantizedTensor (Base: ``transformer_engine/pytorch/quantized_tensor.py``)
 ---------------------------------------------------------------------------
@@ -145,17 +153,22 @@ QuantizedTensor (Base: ``transformer_engine/pytorch/quantized_tensor.py``)
 .. code-block:: python
 
    class QuantizedTensor(torch.Tensor):
-       _storage: QuantizedTensorStorage
-
        # torch.Tensor subclass machinery
        def __torch_dispatch__(cls, func, types, args, kwargs): ...
 
-       # Access underlying storage
-       def get_storage(self) -> QuantizedTensorStorage: ...
+       # Data access
+       def get_data_tensors(self) -> dict: ...  # Extract raw data for kernel calls
+       def get_metadata(self) -> dict: ...      # Scaling metadata
 
        # Dequantize
        def dequantize(self) -> torch.Tensor: ...
        def float(self) -> torch.Tensor: ...
+       def bfloat16(self) -> torch.Tensor: ...
+       def half(self) -> torch.Tensor: ...
+
+       # Lifecycle
+       def quantize_(self, tensor, quantizer): ...
+       def clear(self): ...
 
 Key behaviors:
 
@@ -163,7 +176,7 @@ Key behaviors:
   via ``__torch_dispatch__``, so quantized tensors "just work" in standard PyTorch code
   (at the cost of a dequantize).
 - **GEMM fast path**: The GEMM implementation checks for ``QuantizedTensor`` inputs and
-  extracts the storage directly, avoiding dequantization.
+  uses ``get_data_tensors()`` to extract raw data directly, avoiding dequantization.
 - **Autograd compatible**: Can be saved in autograd's ``ctx.save_for_backward()``.
 
 Lifecycle
@@ -180,9 +193,9 @@ A typical quantization lifecycle:
    # 2. Quantize a tensor (returns QuantizedTensor for autograd)
    qinput = quantizer(input_tensor)
 
-   # 3. Inside GEMM, extract storage for kernel call
-   storage = qinput.get_storage()
-   # Pass storage.data and storage.scale_inv to C++ kernel
+   # 3. Inside GEMM, extract data tensors for kernel call
+   data_tensors = qinput.get_data_tensors()
+   # Pass raw data and scale_inv to C++ kernel
 
    # 4. Dequantize if needed for non-optimized ops
    fp32_data = qinput.dequantize()

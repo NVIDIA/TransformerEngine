@@ -55,16 +55,21 @@ Overview
      - Ampere
      - No
      - Tri Dao's FlashAttention; fast, memory-efficient
-   * - Fused (F16)
+   * - Fused F16 (max512)
      - BF16/FP16
      - Ampere
      - Yes
-     - cuDNN graph-based; supports all mask types
+     - cuDNN graph-based; sequence length ≤ 512
+   * - Fused F16 (arbitrary)
+     - BF16/FP16
+     - Ampere
+     - Yes
+     - cuDNN graph-based; arbitrary sequence length, supports all mask types
    * - Fused (FP8)
      - FP8
      - Hopper
      - Yes
-     - FP8 Q/K/V with cuDNN; best throughput for FP8 training
+     - FP8 Q/K/V with cuDNN; sequence length ≤ 512; best throughput for FP8 training
    * - Custom/THD
      - BF16/FP16
      - Hopper

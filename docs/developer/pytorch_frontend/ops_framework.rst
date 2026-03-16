@@ -206,7 +206,8 @@ Catalog of Basic Operations
    * - ``GELU``, ``SiLU``, ``ReLU``, ``QGELU``
      - ``basic/activation.py``
      - Element-wise activation functions.
-   * - ``GEGLU``, ``SwiGLU``, ``ReGLU``, ``SReGLU``, ``QGEGLU``, ``GLU``
+   * - ``GEGLU``, ``SwiGLU``, ``ReGLU``, ``SReGLU``, ``QGEGLU``, ``GLU``,
+       ``ClampedSwiGLU``, ``ScaledSwiGLU``
      - ``basic/activation.py``, ``basic/swiglu.py``
      - Gated activation functions (2× input split).
    * - ``Quantize``

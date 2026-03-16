@@ -32,16 +32,18 @@ Python Side
 
 **Location**: ``transformer_engine/pytorch/cpp_extensions/``
 
-Each kernel area has a corresponding Python wrapper module:
+Only a subset of C++ extensions have dedicated Python wrapper modules:
 
 - ``gemm.py`` — ``general_gemm()``, ``grouped_gemm()``
-- ``normalization.py`` — ``layernorm_fwd()``, ``rmsnorm_fwd()``, etc.
-- ``activation.py`` — ``gelu()``, ``silu()``, etc.
-- ``cast.py`` — ``quantize()``, ``dequantize()``
-- ``transpose.py`` — ``transpose()``, ``cast_transpose()``
-- ``attention.py`` — ``fused_attn_fwd()``, ``fused_attn_bwd()``
+- ``fused_attn.py`` — ``fused_attn_fwd()``, ``fused_attn_bwd()``
 
-These wrappers:
+Most other C++ extensions (normalization, activation, cast, transpose, etc.) are exposed
+**directly** through the compiled ``transformer_engine_torch`` pybind11 module (imported
+as ``tex``) and called without a Python wrapper layer. For example, normalization is
+called as ``tex.layernorm_fwd(...)`` rather than through a ``normalization.py`` wrapper.
+
+The Python wrappers that do exist serve as the translation layer between PyTorch's
+quantized tensor types and the C++ API:
 
 1. Extract raw data tensors and scales from ``QuantizedTensor`` / ``QuantizedTensorStorage``
    objects.
@@ -71,7 +73,7 @@ C++ Side (pybind11)
 
 **Location**: ``transformer_engine/pytorch/csrc/extensions/``
 
-The pybind11 module (``transformer_engine/pytorch/csrc/ts_fp8_op.cpp`` or similar)
+The pybind11 module (``transformer_engine/pytorch/csrc/extensions/pybind.cpp``)
 registers Python-callable functions that:
 
 1. Accept ``torch::Tensor`` and scalar arguments from Python.

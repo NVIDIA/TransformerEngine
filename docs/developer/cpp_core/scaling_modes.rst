@@ -183,3 +183,10 @@ enum comparison:
    if (tensor.scaling_mode == NVTE_MXFP8_1D_SCALING) { ... }
 
 This makes code resilient to future additions to the ``NVTEScalingMode`` enum.
+
+Invalid Scaling Sentinel
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+The enum includes a sentinel value ``NVTE_INVALID_SCALING = 100`` used to detect
+uninitialized or misconfigured scaling modes. Code that switches on scaling mode should
+handle this case explicitly (e.g., with an error or assertion).

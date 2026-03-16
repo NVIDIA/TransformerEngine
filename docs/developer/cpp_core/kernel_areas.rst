@@ -116,21 +116,73 @@ Fused operations over lists of tensors (e.g., multi-tensor scale for optimizer s
 
 - **Header**: ``include/transformer_engine/multi_tensor.h``
 
+Hadamard Transform (``hadamard_transform/``)
+--------------------------------------------
+
+Hadamard and group Hadamard transforms, with optional fused quantization.
+
+- **Header**: ``include/transformer_engine/hadamard_transform.h``
+- Variants: standard, group, fused with cast, graph-safe implementations.
+
+Recipe (``recipe/``)
+--------------------
+
+Scaling recipe kernels that compute quantization scales for each recipe type.
+
+- **Header**: ``include/transformer_engine/recipe.h``
+- Per-recipe files: ``current_scaling.cu``, ``delayed_scaling.cu``,
+  ``fp8_block_scaling.cu``, ``mxfp8_scaling.cu``, ``nvfp4.cu``.
+
+Dropout (``dropout/``)
+-----------------------
+
+Dropout kernel.
+
+- **Header**: ``include/transformer_engine/dropout.h``
+
+Swizzle (``swizzle/``)
+-----------------------
+
+Scale swizzling for GEMM-compatible layouts.
+
+- **Header**: ``include/transformer_engine/swizzle.h``
+- Includes block scaling variant (``swizzle_block_scaling.cu``).
+
+Permutation (``permutation/``)
+-------------------------------
+
+Token permutation/unpermutation for MoE expert routing.
+
+- **Header**: ``include/transformer_engine/permutation.h``
+
+Padding (``util/padding.cu``)
+------------------------------
+
+Utility kernel for padding tensors to alignment requirements.
+
+- **Header**: ``include/transformer_engine/padding.h``
+
 Architecture Dispatch
 ---------------------
 
-Many kernel areas provide architecture-specific implementations. The typical pattern:
+Many kernel areas provide architecture-specific implementations. Unlike some CUDA
+libraries that use separate source files per architecture (e.g., ``kernel_sm80.cu``,
+``kernel_sm90.cu``), TE uses **template specialization and compile-time dispatch** within
+shared source files:
 
 .. code-block:: text
 
    normalization/
-   ├── common.h           # Shared types and helpers
+   ├── common.h                    # Shared types and helpers
+   ├── common.cpp                  # KernelRegistry, runtime dispatch
    ├── layernorm/
-   │   ├── ln_api.cpp     # C API entry point, dispatches by arch
-   │   ├── ln_sm80.cu     # Ampere (SM80) kernel
-   │   ├── ln_sm90.cu     # Hopper (SM90) kernel
-   │   └── ln_sm100.cu    # Blackwell (SM100) kernel
+   │   ├── ln_fwd_cuda_kernel.cu   # Forward kernels (all archs)
+   │   ├── ln_bwd_semi_cuda_kernel.cu  # Backward kernels
+   │   ├── ln_fwd_kernels.cuh      # Templated kernel implementations
+   │   └── ln_bwd_kernels.cuh
 
-The C API function queries the GPU architecture at runtime and dispatches to the
-appropriate kernel. See :doc:`build_system` for how ``NVTE_CUDA_ARCHS`` controls which
-architectures are compiled.
+Kernels are heavily templated (data types, hidden sizes, warp configurations) and the
+appropriate specialization is selected at runtime via a ``KernelRegistry``. CMake compile
+flags (``NVTE_CUDA_ARCHS``) control which GPU architectures are compiled — this affects
+which template instantiations are generated, not which source files are included. See
+:doc:`build_system` for details.

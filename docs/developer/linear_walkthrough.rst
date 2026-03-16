@@ -124,7 +124,7 @@ that actually perform casts.
 Phase 2: _Linear.forward() — Input Quantization and Communication
 -------------------------------------------------------------------
 
-**File**: ``transformer_engine/pytorch/module/linear.py``, ``_Linear.forward()`` (line ~167)
+**File**: ``transformer_engine/pytorch/module/linear.py``, ``_Linear.forward()`` (line ~87)
 
 **Why this is the most complex phase**: Input preparation must solve a chicken-and-egg
 problem. The GEMM needs the *full* (ungathered) input, but communication is expensive.

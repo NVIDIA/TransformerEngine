@@ -94,6 +94,7 @@ TE provides fused softmax implementations for attention scores:
 - ``ScaledSoftmax`` — Standard scaled softmax
 - ``ScaledMaskedSoftmax`` — Softmax with arbitrary mask
 - ``ScaledUpperTriangMaskedSoftmax`` — Causal mask (upper triangular)
+- ``ScaledAlignedCausalMaskedSoftmax`` — Aligned causal mask variant
 
 These are used by the unfused attention backend. The fused backends (cuDNN, Flash)
 handle softmax internally.

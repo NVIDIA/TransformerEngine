@@ -119,13 +119,53 @@ Comparison with PyTorch Bridge
 Key Primitives
 --------------
 
-Major primitives registered in ``transformer_engine/jax/cpp_extensions/``:
+Major primitives registered in ``transformer_engine/jax/cpp_extensions/``, organized by
+functional area:
 
-- ``gemm`` — Matrix multiplication with FP8
-- ``layernorm_fwd`` / ``layernorm_bwd`` — Normalization
-- ``fused_attn_fwd`` / ``fused_attn_bwd`` — Fused attention
-- ``cast_fp8`` / ``cast_fp8_transpose`` — FP8 quantization
-- ``activation_fwd`` / ``activation_bwd`` — Activation functions
+**GEMM** (``gemm.py``):
+
+- ``te_gemm_v2_ffi`` — Matrix multiplication with FP8
+- ``te_grouped_gemm_ffi`` — Grouped GEMM for MoE
+- ``te_grouped_gemm_d2h_group_sizes_ffi`` — Device-to-host group size transfer
+
+**Quantization** (``quantization.py``):
+
+- ``te_dbias_quantize_ffi`` — Quantize with optional bias gradient
+- ``te_grouped_quantize_ffi`` — Grouped quantization
+
+Exported as: ``quantize``, ``quantize_dbias``, ``grouped_quantize``, ``grouped_dbias``.
+
+**Activation** (``activation.py``):
+
+- ``te_act_lu_ffi`` — Forward activation (GeLU, SiLU, etc.)
+- ``te_dact_dbias_quantize_ffi`` — Fused backward activation + bias gradient + quantize
+
+Exported as: ``act_lu``, ``dact_lu``, ``quantize_dact_dbias``.
+
+**Normalization** (``normalization.py``):
+
+- ``te_norm_forward_ffi`` — LayerNorm / RMSNorm forward
+- ``te_norm_backward_ffi`` — LayerNorm / RMSNorm backward
+
+**Attention** (``attention.py``):
+
+- ``te_fused_attn_forward_ffi`` — Fused attention forward
+- ``te_fused_attn_backward_ffi`` — Fused attention backward
+
+**Softmax** (``softmax.py``):
+
+- ``te_scaled_softmax_forward_ffi`` / ``te_scaled_softmax_backward_ffi``
+- ``te_scaled_masked_softmax_forward_ffi`` / ``te_scaled_masked_softmax_backward_ffi``
+- ``te_scaled_upper_triang_masked_softmax_forward_ffi`` / ``te_scaled_upper_triang_masked_softmax_backward_ffi``
+
+**Router / MoE** (``router.py``):
+
+- ``te_fused_topk_with_score_function_forward_ffi`` / ``te_fused_topk_with_score_function_backward_ffi``
+- ``te_fused_moe_aux_loss_forward_ffi`` / ``te_fused_moe_aux_loss_backward_ffi``
+
+**Amax** (``amax.py``):
+
+- ``te_rht_amax_ffi`` — Randomized Hadamard transform + amax calculation
 
 See Also
 --------

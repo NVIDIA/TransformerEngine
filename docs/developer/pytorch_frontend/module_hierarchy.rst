@@ -20,18 +20,20 @@ FP8 state management, quantizer lifecycle, and distributed training hooks.
 ..
    Diagram description for ``pytorch_module_hierarchy.svg``:
    Tree diagram with torch.nn.Module at the top.
-   Below it: TransformerEngineBaseModule.
-   Below that, branching to:
+   Below it, two branches:
+   Branch 1: TransformerEngineBaseModule, with children:
      ├── Linear
      ├── LayerNorm
      ├── RMSNorm
      ├── LayerNormLinear
      ├── LayerNormMLP
      ├── GroupedLinear
-     ├── DotProductAttention
-     └── MultiheadAttention
-   A separate branch from torch.nn.Module: TransformerLayer (composes the above modules
-   rather than inheriting from BaseModule).
+     └── DotProductAttention
+   Branch 2: Directly from torch.nn.Module:
+     ├── MultiheadAttention (composes DotProductAttention + Linear projections)
+     ├── TransformerLayer (composes the above modules)
+     ├── Fp8Padding
+     └── Fp8Unpadding
 
 TransformerEngineBaseModule
 ---------------------------
@@ -132,14 +134,30 @@ Composes QKV projection (Linear), DotProductAttention, and output projection (Li
 into a complete multi-head attention block. Handles the split into heads and optional
 key-value caching for inference.
 
+.. note::
+
+   ``MultiheadAttention`` extends ``torch.nn.Module`` directly, **not**
+   ``TransformerEngineBaseModule``. It delegates FP8 behavior to its child modules
+   (``Linear``, ``DotProductAttention``) rather than managing FP8 state itself.
+
+Fp8Padding / Fp8Unpadding
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+**Location**: ``transformer_engine/pytorch/module/fp8_padding.py``,
+``transformer_engine/pytorch/module/fp8_unpadding.py``
+
+Modules for padding/unpadding sequences to token-count multiples required by FP8 kernels.
+These extend ``torch.nn.Module`` directly (not ``TransformerEngineBaseModule``) and use
+custom autograd functions internally.
+
 TransformerLayer
 ^^^^^^^^^^^^^^^^
 
 **Location**: ``transformer_engine/pytorch/transformer.py``
 
-Composes a full Transformer block (see :doc:`transformer_layer`). Note that
-``TransformerLayer`` does **not** inherit from ``TransformerEngineBaseModule`` — it
-composes TE modules rather than being one.
+Composes a full Transformer block (see :doc:`transformer_layer`). Like
+``MultiheadAttention``, it extends ``torch.nn.Module`` directly and delegates FP8
+behavior to its child TE modules.
 
 Module Lifecycle
 ----------------

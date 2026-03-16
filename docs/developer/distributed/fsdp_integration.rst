@@ -9,73 +9,174 @@ FSDP Integration
 ================
 
 Transformer Engine integrates with PyTorch's Fully Sharded Data Parallelism (FSDP) to
-enable combined data and tensor parallelism with FP8 quantization.
+enable combined data and tensor parallelism with FP8 quantization. TE supports both
+**FSDP1** (the wrapper-based ``FullyShardedDataParallel``) and **FSDP2** (the composable
+``fully_shard`` API), using different mechanisms for each.
 
 Challenges
 ----------
 
 FSDP shards model parameters across data-parallel ranks and gathers them on-demand
-during forward/backward. This creates challenges for FP8:
+during forward/backward. This creates two challenges for quantized training:
 
-1. **FP8 weight storage**: Weights may be stored in FP8 for memory savings, but FSDP's
-   gather/scatter operates on raw tensors — it doesn't know about FP8 scales.
-2. **Amax synchronization**: Delayed scaling requires amax values to be consistent across
-   FSDP ranks (all ranks must agree on the scale).
-3. **Quantized gradients**: FSDP's gradient reduction must handle FP8 gradients correctly.
+1. **Quantized weight all-gather**: FSDP gathers weight shards into full parameters
+   before each forward/backward pass. When weights are stored in FP8, FSDP must gather
+   the quantized data *and* its associated scales, then reconstruct a valid quantized
+   tensor on the other side.
 
-Solution: FP8-Aware Hooks
---------------------------
+2. **Activation sharding**: Activations saved for backward consume memory proportional to
+   model size. Sharding them across FSDP ranks reduces per-rank memory, but requires
+   handling quantized tensor types during scatter/gather.
 
-TE registers FSDP hooks that handle FP8 tensor conversions:
+These two challenges are handled by separate mechanisms, described below.
 
-**Pre-gather hook**: Before FSDP gathers a parameter shard, convert FP8 storage to a
-format that can be gathered (e.g., pack data + scale into a single buffer).
+FSDP2: Quantized Weight All-Gather
+------------------------------------
 
-**Post-gather hook**: After FSDP gathers the full parameter, reconstruct the FP8 tensor
-with proper scales.
+**FSDP2** (``torch.distributed._composable.fsdp.fully_shard``) is the preferred approach.
+It uses PyTorch's **tensor subclass protocol** — FSDP2 automatically discovers and calls
+``fsdp_pre_all_gather()`` and ``fsdp_post_all_gather()`` methods on tensor subclasses
+during weight all-gather. No explicit setup or registration is needed.
 
-**Pre-scatter hook**: Before FSDP scatters gradients, ensure FP8 gradient data and scales
-are properly packed.
+**Location**: Methods on ``QuantizedTensor`` subclasses in ``transformer_engine/pytorch/tensor/``.
 
-Usage
------
+``fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy)``
+   Called **before** FSDP all-gathers a sharded weight parameter. Extracts the raw
+   quantized data (and optionally scale_inv tensors) into plain ``torch.Tensor`` objects
+   that FSDP can all-gather normally. Returns a tuple of tensors to gather and a metadata
+   tuple (dtype, usage flags, scales) that will be passed to ``fsdp_post_all_gather``.
+
+   The method determines which layouts to include based on training state: during the
+   forward pass it sends rowwise data; during backward it sends columnwise data (or both,
+   depending on the ``reshard_after_forward`` policy).
+
+``fsdp_post_all_gather(self, all_gather_outputs, metadata, param_dtype, *, out=None)``
+   Called **after** FSDP has gathered the full tensors. Reconstructs the ``QuantizedTensor``
+   subclass from the gathered data and the metadata. On the first call, creates a new
+   tensor; on subsequent calls, reuses the ``out`` tensor (passed by FSDP2) and updates
+   it in place.
+
+**Supported tensor types**:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Tensor Class
+     - Notes
+   * - ``Float8Tensor``
+     - Gathers uint8 data + scale_inv. Handles amax reduction for current scaling.
+   * - ``MXFP8Tensor``
+     - Gathers data + scale_inv with padding/unpadding for block-aligned scales.
+
+.. note::
+
+   FSDP2 also requires that certain ``torch.ops.aten`` operations preserve the tensor
+   subclass (e.g., ``slice``, ``view``, ``copy_``). ``Float8Tensor`` defines
+   ``_ops_to_preserve_subclass_in_fsdp2`` to list these operations.
+
+**Usage**:
 
 .. code-block:: python
 
-   import torch.distributed.fsdp as fsdp
+   from torch.distributed._composable.fsdp import fully_shard
    import transformer_engine.pytorch as te
 
    model = te.TransformerLayer(...)
 
-   # Wrap with FSDP — TE hooks are registered automatically
-   model = fsdp.FullyShardedDataParallel(
-       model,
-       auto_wrap_policy=...,
-   )
+   # FSDP2 automatically handles quantized weight all-gather
+   fully_shard(model)
 
-   # FP8 training works normally
+   with te.fp8_autocast(enabled=True):
+       output = model(input)  # Weights gathered/scattered automatically
+
+FSDP1: Activation Scatter/Gather
+-----------------------------------
+
+**FSDP1** uses a different mechanism for a different purpose: sharding *activations* (not
+weights) saved for backward. This is implemented via direct function calls within the
+``_Linear`` autograd function.
+
+**Location**: ``transformer_engine/pytorch/distributed.py``
+
+``_fsdp_scatter_tensors(fsdp_group, *tensors)``
+   Called in ``_Linear.forward()`` after the forward GEMM. Shards saved activations
+   (quantized input and optionally quantized weight) across FSDP ranks using
+   ``split_tensor_into_1d_equal_chunks()``. This reduces per-rank activation memory
+   proportionally to the FSDP world size. Returns the original shapes for reconstruction.
+
+``_fsdp_gather_tensors(fsdp_group, shapes, *tensors)``
+   Called in ``_Linear.backward()`` before the dgrad/wgrad GEMMs. Reconstructs full
+   activations from shards using ``gather_split_1d_tensor()`` and reshapes to original
+   dimensions.
+
+``prepare_te_modules_for_fsdp(fsdp_root)``
+   Must be called **after** wrapping with FSDP1. Injects the FSDP process group reference
+   into each TE module so that ``_fsdp_scatter_tensors`` / ``_fsdp_gather_tensors`` know
+   which group to communicate with.
+
+TE also provides a convenience wrapper:
+
+.. code-block:: python
+
+   # TE's FSDP1 wrapper calls prepare_te_modules_for_fsdp automatically
+   from transformer_engine.pytorch.distributed import FullyShardedDataParallel
+
+   model = FullyShardedDataParallel(te_model, ...)
+
+**Usage (explicit setup)**:
+
+.. code-block:: python
+
+   from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+   from transformer_engine.pytorch.distributed import prepare_te_modules_for_fsdp
+
+   model = FSDP(te_model, ...)
+   prepare_te_modules_for_fsdp(model)
+
    with te.fp8_autocast(enabled=True):
        output = model(input)
 
-FP8 Weight Storage with FSDP
------------------------------
+Summary: Which Mechanism Does What
+------------------------------------
 
-When FP8 weights are enabled, the parameter is stored in FP8 format even when sharded
-by FSDP. The lifecycle:
+.. list-table::
+   :header-rows: 1
+   :widths: 20 40 40
 
-1. **Initialization**: Weight is created in high precision, then optionally cast to FP8.
-2. **FSDP shard**: The FP8 data (and associated scale) is sharded across ranks.
-3. **FSDP gather**: Full FP8 weight is gathered; TE reconstructs the quantized tensor.
-4. **Forward/backward**: GEMM operates on the gathered FP8 weight.
-5. **FSDP scatter**: Updated FP8 weight shard is stored locally.
+   * - Aspect
+     - FSDP2 (composable)
+     - FSDP1 (wrapper)
+   * - What it handles
+     - Quantized **weight** all-gather
+     - **Activation** scatter/gather
+   * - Mechanism
+     - ``fsdp_pre_all_gather`` / ``fsdp_post_all_gather`` on tensor subclasses
+     - ``_fsdp_scatter_tensors`` / ``_fsdp_gather_tensors`` called from ``_Linear``
+   * - Setup required
+     - None (automatic discovery)
+     - ``prepare_te_modules_for_fsdp()``
+   * - Called by
+     - PyTorch's FSDP2 internals
+     - ``_Linear.forward()`` / ``_Linear.backward()``
+
+.. note::
+
+   The activation scatter/gather from FSDP1 (``_fsdp_scatter_tensors`` /
+   ``_fsdp_gather_tensors``) is also used in FSDP2 setups — it is called from
+   ``_Linear`` regardless of which FSDP version manages the weights. The two mechanisms
+   are complementary, not mutually exclusive.
 
 Limitations
 -----------
 
-- FSDP2 (``torch.distributed._composable.fsdp``) has better support than FSDP1.
+- FSDP sharding is not valid for models initialized with ``primary_weights_in_fp8=True``.
 - FP8 weight caching interacts with FSDP gather/scatter — weights may be re-quantized
   on each gather.
 - Mixed FSDP + TP configurations require careful process group setup.
+- ``fsdp_pre_all_gather`` / ``fsdp_post_all_gather`` are currently implemented only for
+  ``Float8Tensor`` and ``MXFP8Tensor``, not for ``Float8BlockwiseQTensor`` or
+  ``NVFP4Tensor``.
 
 See Also
 --------

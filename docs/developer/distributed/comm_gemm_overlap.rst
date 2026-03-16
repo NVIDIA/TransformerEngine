@@ -89,9 +89,16 @@ The ``CommOverlapAlgo`` enum defines the available overlap strategies:
      - Uses CUDA atomics with reduce-scatter for producer-consumer overlap
    * - ``ATOMIC_GEMM_AG_P2P``
      - Uses CUDA atomics with all-gather P2P
+   * - ``ATOMIC_GEMM_RS_P2P``
+     - Uses CUDA atomics with reduce-scatter P2P
+   * - ``EXTERNAL_BULK_OVERLAP_AG``
+     - All-gather with externally managed buffer overlap
 
 Enabling Overlap
 ----------------
+
+Overlap is enabled per-layer via constructor parameters on ``te.Linear`` or
+``te.TransformerLayer``:
 
 .. code-block:: python
 
@@ -100,15 +107,16 @@ Enabling Overlap
        ffn_hidden_size=16384,
        num_attention_heads=32,
        tp_group=tp_group,
-       ub_overlap_rs=True,    # Overlap reduce-scatter
-       ub_overlap_ag=True,    # Overlap all-gather
+       ub_overlap_rs=True,    # Overlap reduce-scatter in forward (row-parallel)
+       ub_overlap_ag=True,    # Overlap all-gather in forward (column-parallel)
    )
 
-Environment variables:
+At the ``_Linear`` autograd level, finer-grained control is available via parameters that
+specify overlap for each pass direction:
 
-- ``NVTE_UB_OVERLAP``: Enable/disable UserBuffers overlap
-- ``NVTE_UB_SPLIT_RS``: Enable split-pipelined reduce-scatter
-- ``NVTE_UB_SPLIT_AG``: Enable split-pipelined all-gather
+- ``ub_overlap_rs_fprop`` / ``ub_overlap_rs_dgrad`` — reduce-scatter in forward / dgrad
+- ``ub_overlap_ag_fprop`` / ``ub_overlap_ag_dgrad`` — all-gather in forward / dgrad
+- ``ub_bulk_dgrad`` / ``ub_bulk_wgrad`` — bulk overlap during backward
 
 Performance Considerations
 --------------------------
