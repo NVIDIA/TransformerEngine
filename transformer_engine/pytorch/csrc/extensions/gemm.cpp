@@ -679,7 +679,7 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   auto grouped_B = GroupedTensorFromPyTorchGroupedTensor(B);
   auto grouped_D = GroupedTensorFromPyTorchGroupedTensor(D);
 
-  const auto A_list = py::reinterpret_borrow<py::list>(A);
+  const auto A_list = py::cast<std::vector<py::object>>(A);
   const size_t num_tensors = grouped_B.num_tensors();
   NVTE_CHECK(num_tensors > 0, "Grouped GEMM requires non-empty inputs.");
   NVTE_CHECK(A_list.size() == num_tensors,
@@ -695,7 +695,7 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   te_A_wrappers.reserve(num_tensors);
   te_A_vector.reserve(num_tensors);
   const auto none = py::none();
-  for (py::handle tensor : A_list) {
+  for (const auto &tensor : A_list) {
     te_A_wrappers.emplace_back(makeTransformerEngineTensor(tensor, none));
     te_A_vector.emplace_back(te_A_wrappers.back().data());
   }
@@ -748,7 +748,7 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
   auto grouped_A = GroupedTensorFromPyTorchGroupedTensor(A);
   auto grouped_B = GroupedTensorFromPyTorchGroupedTensor(B);
 
-  const auto D_list = py::reinterpret_borrow<py::list>(D);
+  const auto D_list = py::cast<std::vector<py::object>>(D);
   const size_t num_tensors = grouped_A.num_tensors();
   NVTE_CHECK(num_tensors > 0, "Grouped GEMM requires non-empty inputs.");
   NVTE_CHECK(grouped_B.num_tensors() == num_tensors,
@@ -764,7 +764,7 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
   te_D_wrappers.reserve(num_tensors);
   te_D_vector.reserve(num_tensors);
   const auto none = py::none();
-  for (py::handle tensor : D_list) {
+  for (const auto &tensor : D_list) {
     te_D_wrappers.emplace_back(makeTransformerEngineTensor(tensor, none));
     te_D_vector.emplace_back(te_D_wrappers.back().data());
   }
