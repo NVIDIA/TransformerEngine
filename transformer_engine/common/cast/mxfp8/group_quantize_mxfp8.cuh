@@ -338,7 +338,7 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
 }
 
 template <typename IType, typename OType>
-__global__ void update_tma_descriptors(
+__global__ void __launch_bounds__(1) update_tma_descriptors(
     const __grid_constant__ CUtensorMap base_tensor_map_input,
     const __grid_constant__ CUtensorMap base_tensor_map_act_input,
     const __grid_constant__ CUtensorMap base_tensor_map_output_rowwise,
@@ -351,16 +351,19 @@ __global__ void update_tma_descriptors(
     const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, const bool rowwise, const bool colwise,
     const bool compute_dactivations) {
-  const bool leading_thread = (threadIdx.x == 0);
   const size_t tensor_id = blockIdx.x;
-
-  const size_t rows =
-      get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
+  const size_t rows = get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-
   const size_t offset_elts = offsets_ptr[tensor_id];
 
-  if (leading_thread && (tensor_id < num_tensors)) {
+  // Zero-sized groups: skip TMA descriptor update. The main kernel already returns
+  // early for rows==0 or cols==0, but creating a TMA descriptor with a zero dimension
+  // is invalid and causes CUDA_ERROR_ILLEGAL_ADDRESS.
+  if (rows == 0 || cols == 0) {
+    return;
+  }
+
+  if (tensor_id < num_tensors) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_input, &g_tensor_maps_input[tensor_id],
@@ -686,8 +689,8 @@ __device__ __forceinline__ float process_rowwise_stage(
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
-          float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
-          bool COLWISE_SCALING, bool WITH_GEMM_SWIZZLED_SCALES,
+          float (*OP)(float, const ParamOP &), typename IType, typename OType,
+          ScalingType SCALING_TYPE, bool WITH_GEMM_SWIZZLED_SCALES,
           ShapeRepresentation SHAPE_REP>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input_static,
@@ -710,6 +713,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       return;
     }
   }
+
+  constexpr bool ROWWISE_SCALING = (SCALING_TYPE == ScalingType::ROWWISE)
+                                   || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
+  constexpr bool COLWISE_SCALING = (SCALING_TYPE == ScalingType::COLWISE)
+                                   || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
 
   constexpr ShapeRepresentation shape_rep = SHAPE_REP;
   constexpr bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
@@ -1151,155 +1159,109 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     }
   }
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      input->dtype(), IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output->dtype(), OType,
-          TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input->dtype(), IType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output->dtype(), OType,
+      TRANSFORMER_ENGINE_SCALING_TYPE_SWITCH(scaling_type, SCALING_TYPE,
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
+          TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(shape_rep, SHAPE_REP,
+          {
+          alignas(64) CUtensorMap tensor_map_input{};
+          alignas(64) CUtensorMap tensor_map_act_input{};
+          alignas(64) CUtensorMap tensor_map_output_rowwise{};
+          alignas(64) CUtensorMap tensor_map_output_colwise{};
 
-              alignas(64) CUtensorMap tensor_map_input{};
-              alignas(64) CUtensorMap tensor_map_act_input{};
-              alignas(64) CUtensorMap tensor_map_output_rowwise{};
-              alignas(64) CUtensorMap tensor_map_output_colwise{};
+          constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
+          constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
 
-              constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
-              constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
+          create_2D_tensor_map(tensor_map_input, input->data, first_logical_dim,
+                              last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X, last_logical_dim, 0,
+                              input_type_bit_size);
 
-              create_2D_tensor_map(tensor_map_input, input->data, first_logical_dim,
-                                   last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X, last_logical_dim, 0,
-                                   input_type_bit_size);
+          if constexpr (IS_DACT) {
+            create_2D_tensor_map(tensor_map_act_input, activations->data, first_logical_dim,
+                                last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X, last_logical_dim, 0,
+                                input_type_bit_size);
+          }
 
-              if constexpr (IS_DACT) {
-                create_2D_tensor_map(tensor_map_act_input, activations->data, first_logical_dim,
-                                     last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X, last_logical_dim, 0,
-                                     input_type_bit_size);
-              }
+          if (use_rowwise_scaling) {
+            create_2D_tensor_map(tensor_map_output_rowwise, output->data, first_logical_dim,
+                                last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X, last_logical_dim, 0,
+                                output_type_bit_size);
+          }
 
-              if (use_rowwise_scaling) {
-                create_2D_tensor_map(tensor_map_output_rowwise, output->data, first_logical_dim,
-                                     last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X, last_logical_dim, 0,
-                                     output_type_bit_size);
-              }
+          if (use_colwise_scaling) {
+            create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data,
+                                first_logical_dim, last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X,
+                                last_logical_dim, 0, output_type_bit_size);
+          }
 
-              if (use_colwise_scaling) {
-                create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data,
-                                     first_logical_dim, last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X,
-                                     last_logical_dim, 0, output_type_bit_size);
-              }
+          constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
+          constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
+          constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
+          constexpr size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
+          constexpr size_t buff_size_aligned_in =
+              DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
+          constexpr size_t buff_size_aligned_out =
+              DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
 
-              constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
-              constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
-              constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
-              constexpr size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
-              constexpr size_t buff_size_aligned_in =
-                  DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
-              constexpr size_t buff_size_aligned_out =
-                  DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
+          constexpr size_t elt_input_mem = buff_size_aligned_in;
+          constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
+          constexpr size_t in_mem = elt_input_mem + act_input_mem;
 
-              constexpr size_t elt_input_mem = buff_size_aligned_in;
-              constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
-              constexpr size_t in_mem = elt_input_mem + act_input_mem;
+          const size_t out_rowwise_mem = (use_rowwise_scaling ? buff_size_aligned_out : 0);
+          const size_t out_colwise_mem = (use_colwise_scaling ? buff_size_aligned_out : 0);
+          const size_t out_mem = out_rowwise_mem + out_colwise_mem;
 
-              const size_t out_rowwise_mem = (use_rowwise_scaling ? buff_size_aligned_out : 0);
-              const size_t out_colwise_mem = (use_colwise_scaling ? buff_size_aligned_out : 0);
-              const size_t out_mem = out_rowwise_mem + out_colwise_mem;
+          const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
-              const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
+          // Update tensor descriptors before launching the kernel
+          if (!is_single_tensor) {
+            const IType *const input_dptr = reinterpret_cast<const IType *>(input->data.dptr);
 
-              auto kernel =
-                  group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                              true, true, WITH_GEMM_SWIZZLED_SCALES,
-                                              ShapeRepresentation::SAME_BOTH_DIMS>;
-              auto assign_kernel_for_shape = [&](auto rowwise_scaling, auto colwise_scaling) {
-                constexpr bool ROWWISE_SCALING_VALUE = decltype(rowwise_scaling)::value;
-                constexpr bool COLWISE_SCALING_VALUE = decltype(colwise_scaling)::value;
-                switch (shape_rep) {
-                  case ShapeRepresentation::SAME_BOTH_DIMS: {
-                    kernel = group_quantize_mxfp8_kernel<
-                        IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                        ROWWISE_SCALING_VALUE, COLWISE_SCALING_VALUE, WITH_GEMM_SWIZZLED_SCALES,
-                        ShapeRepresentation::SAME_BOTH_DIMS>;
-                    break;
-                  }
-                  case ShapeRepresentation::VARYING_FIRST_DIM: {
-                    kernel = group_quantize_mxfp8_kernel<
-                        IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                        ROWWISE_SCALING_VALUE, COLWISE_SCALING_VALUE, WITH_GEMM_SWIZZLED_SCALES,
-                        ShapeRepresentation::VARYING_FIRST_DIM>;
-                    break;
-                  }
-                  case ShapeRepresentation::VARYING_LAST_DIM: {
-                    kernel = group_quantize_mxfp8_kernel<
-                        IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                        ROWWISE_SCALING_VALUE, COLWISE_SCALING_VALUE, WITH_GEMM_SWIZZLED_SCALES,
-                        ShapeRepresentation::VARYING_LAST_DIM>;
-                    break;
-                  }
-                  case ShapeRepresentation::VARYING_BOTH_DIMS: {
-                    kernel = group_quantize_mxfp8_kernel<
-                        IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                        ROWWISE_SCALING_VALUE, COLWISE_SCALING_VALUE, WITH_GEMM_SWIZZLED_SCALES,
-                        ShapeRepresentation::VARYING_BOTH_DIMS>;
-                    break;
-                  }
-                }
-              };
-              switch (scaling_type) {
-                case ScalingType::ROWWISE: {
-                  assign_kernel_for_shape(std::true_type{}, std::false_type{});
-                  break;
-                }
-                case ScalingType::COLWISE: {
-                  assign_kernel_for_shape(std::false_type{}, std::true_type{});
-                  break;
-                }
-                case ScalingType::BIDIMENSIONAL: {
-                  assign_kernel_for_shape(std::true_type{}, std::true_type{});
-                  break;
-                }
-              }
+            const IType *const act_input_dptr =
+                IS_DACT ? reinterpret_cast<const IType *>(activations->data.dptr) : nullptr;
 
-              // Update tensor descriptors before launching the kernel
-              if (!is_single_tensor) {
-                const IType *const input_dptr = reinterpret_cast<const IType *>(input->data.dptr);
+            OType *const output_rowwise_dptr =
+                use_rowwise_scaling ? reinterpret_cast<OType *>(output->data.dptr) : nullptr;
 
-                const IType *const act_input_dptr =
-                    IS_DACT ? reinterpret_cast<const IType *>(activations->data.dptr) : nullptr;
+            OType *const output_colwise_dptr =
+                use_colwise_scaling ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
+                                    : nullptr;
+            update_tma_descriptors<IType, OType><<<num_tensors, 1, 0, stream>>>(
+                tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                tensor_map_output_colwise, input_dptr, act_input_dptr, output_rowwise_dptr,
+                output_colwise_dptr, shape_rep, num_tensors, first_logical_dim,
+                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr,
+                use_rowwise_scaling, use_colwise_scaling, IS_DACT);
+          }
 
-                OType *const output_rowwise_dptr =
-                    use_rowwise_scaling ? reinterpret_cast<OType *>(output->data.dptr) : nullptr;
+          auto kernel =
+              group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                          SCALING_TYPE, WITH_GEMM_SWIZZLED_SCALES, SHAPE_REP>;
 
-                OType *const output_colwise_dptr =
-                    use_colwise_scaling ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
-                                        : nullptr;
-                update_tma_descriptors<IType, OType><<<num_tensors, 32, 0, stream>>>(
-                    tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                    tensor_map_output_colwise, input_dptr, act_input_dptr, output_rowwise_dptr,
-                    output_colwise_dptr, shape_rep, num_tensors, first_logical_dim,
-                    last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr,
-                    use_rowwise_scaling, use_colwise_scaling, IS_DACT);
-              }
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+              kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+          kernel<<<grid, block_size, dshmem_size, stream>>>(
+              tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+              tensor_map_output_colwise, num_tensors, first_logical_dim, last_logical_dim,
+              offsets_ptr, first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
+              scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr, work_blocks_X,
+              work_blocks_Y);
 
-              kernel<<<grid, block_size, dshmem_size, stream>>>(
-                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                  tensor_map_output_colwise, num_tensors, first_logical_dim, last_logical_dim,
-                  offsets_ptr, first_dims_ptr, last_dims_ptr, scales_rowwise_ptr,
-                  scales_colwise_ptr, noop_ptr, workspace_ptr, amax_ptr, work_blocks_X,
-                  work_blocks_Y);
+          if constexpr (IS_DBIAS) {
+            common::grouped_reduce_dbias<IType>(
+                shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
+                first_dims_ptr, last_dims_ptr, dbias, workspace_ptr, CHUNK_DIM_Y, stream);
+          }
 
-              if constexpr (IS_DBIAS) {
-                common::grouped_reduce_dbias<IType>(
-                    shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
-                    first_dims_ptr, last_dims_ptr, dbias, workspace_ptr, CHUNK_DIM_Y, stream);
-              }
-
-              NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
-      );                                              // NOLINT(*)
-  );                                                  // NOLINT(*)
+          NVTE_CHECK_CUDA(cudaGetLastError());
+          }
+          );  // NOLINT(*)
+        );  // NOLINT(*)
+      );  // NOLINT(*)
+    );  // NOLINT(*)
+  );  // NOLINT(*)
 }
 
 }  // namespace mxfp8
