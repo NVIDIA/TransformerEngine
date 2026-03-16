@@ -1193,7 +1193,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   int64_t avg_n_val =
       config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
   int64_t avg_k_val =
-      config_.avg_k.value_or(static_cast<bool>(transa) ? avg_first_dim : avg_last_dim);
+      config_.avg_k.value_or(static_cast<bool>(transa) ? avg_last_dim : avg_first_dim);
   const bool use_fp8 = is_fp8_dtype(A_sel.dtype) || is_fp8_dtype(B_sel.dtype);
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        config_.use_split_accumulator, use_fp8, avg_m_val, avg_n_val, avg_k_val,
