@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="440" viewBox="0 0 820 440">
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+    </style>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#3171b0"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#d07020"/>
+    </marker>
+    <marker id="arrow-gray" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#888"/>
+    </marker>
+    <!-- Row pattern for rowwise -->
+    <pattern id="row-stripes" width="60" height="8" patternUnits="userSpaceOnUse">
+      <rect width="60" height="4" fill="#bbdefb"/>
+      <rect y="4" width="60" height="4" fill="#e3f2fd"/>
+    </pattern>
+    <!-- Column pattern for columnwise -->
+    <pattern id="col-stripes" width="8" height="60" patternUnits="userSpaceOnUse">
+      <rect width="4" height="60" fill="#c8e6c9"/>
+      <rect x="4" width="4" height="60" fill="#e8f5e9"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="820" height="440" fill="#fff" rx="4"/>
+
+  <!-- ===================== -->
+  <!-- FORWARD GEMM (Left)   -->
+  <!-- ===================== -->
+  <rect x="10" y="10" width="395" height="420" rx="10" fill="#f0f4ff" stroke="#b0c4de" stroke-width="1.2"/>
+  <rect x="10" y="10" width="395" height="32" rx="10" fill="#3171b0"/>
+  <rect x="10" y="28" width="395" height="14" fill="#3171b0"/>
+  <text x="207" y="31" text-anchor="middle" font-size="15" font-weight="bold" fill="#fff">Forward GEMM</text>
+
+  <!-- Matrix A: Activation (rowwise) -->
+  <rect x="35" y="70" width="100" height="80" rx="4" fill="url(#row-stripes)" stroke="#3171b0" stroke-width="1.8"/>
+  <!-- Row arrows inside A -->
+  <line x1="40" y1="82" x2="128" y2="82" stroke="#2196f3" stroke-width="1.2" marker-end="url(#arrow-blue)" opacity="0.5"/>
+  <line x1="40" y1="98" x2="128" y2="98" stroke="#2196f3" stroke-width="1.2" marker-end="url(#arrow-blue)" opacity="0.5"/>
+  <line x1="40" y1="114" x2="128" y2="114" stroke="#2196f3" stroke-width="1.2" marker-end="url(#arrow-blue)" opacity="0.5"/>
+  <line x1="40" y1="130" x2="128" y2="130" stroke="#2196f3" stroke-width="1.2" marker-end="url(#arrow-blue)" opacity="0.5"/>
+  <text x="85" y="63" text-anchor="middle" font-size="11" font-weight="bold" fill="#1565c0">A</text>
+  <text x="85" y="170" text-anchor="middle" font-size="10" fill="#333">Activation</text>
+  <text x="85" y="183" text-anchor="middle" font-size="9" fill="#1565c0" font-weight="bold">(rowwise, FP8)</text>
+  <text x="85" y="198" text-anchor="middle" font-size="8.5" fill="#666" font-style="italic">scale_inv per row</text>
+
+  <!-- Multiply sign -->
+  <text x="155" y="116" text-anchor="middle" font-size="22" fill="#555" font-weight="bold">&times;</text>
+
+  <!-- Matrix B: Weight (columnwise) -->
+  <rect x="175" y="70" width="80" height="80" rx="4" fill="url(#col-stripes)" stroke="#388e3c" stroke-width="1.8"/>
+  <!-- Column arrows inside B -->
+  <line x1="188" y1="75" x2="188" y2="143" stroke="#4caf50" stroke-width="1.2" marker-end="url(#arrow-gray)" opacity="0.5"/>
+  <line x1="204" y1="75" x2="204" y2="143" stroke="#4caf50" stroke-width="1.2" marker-end="url(#arrow-gray)" opacity="0.5"/>
+  <line x1="220" y1="75" x2="220" y2="143" stroke="#4caf50" stroke-width="1.2" marker-end="url(#arrow-gray)" opacity="0.5"/>
+  <line x1="236" y1="75" x2="236" y2="143" stroke="#4caf50" stroke-width="1.2" marker-end="url(#arrow-gray)" opacity="0.5"/>
+  <text x="215" y="63" text-anchor="middle" font-size="11" font-weight="bold" fill="#2e7d32">B</text>
+  <text x="215" y="170" text-anchor="middle" font-size="10" fill="#333">Weight</text>
+  <text x="215" y="183" text-anchor="middle" font-size="9" fill="#2e7d32" font-weight="bold">(columnwise, FP8)</text>
+  <text x="215" y="198" text-anchor="middle" font-size="8.5" fill="#666" font-style="italic">columnwise_scale_inv</text>
+  <text x="215" y="210" text-anchor="middle" font-size="8.5" fill="#666" font-style="italic">per column</text>
+
+  <!-- Equals sign -->
+  <text x="275" y="116" text-anchor="middle" font-size="22" fill="#555" font-weight="bold">=</text>
+
+  <!-- Output box -->
+  <rect x="295" y="80" width="90" height="60" rx="6" fill="#e8eaf6" stroke="#5c6bc0" stroke-width="1.8"/>
+  <text x="340" y="114" text-anchor="middle" font-size="11" font-weight="bold" fill="#283593">Output</text>
+  <text x="340" y="170" text-anchor="middle" font-size="10" fill="#333">Output</text>
+  <text x="340" y="183" text-anchor="middle" font-size="9" fill="#5c6bc0" font-weight="bold">(BF16)</text>
+
+  <!-- Formula text -->
+  <text x="207" y="240" text-anchor="middle" font-size="11" fill="#444" font-weight="bold">Y = A &times; B</text>
+  <text x="207" y="258" text-anchor="middle" font-size="9.5" fill="#666">Row-scaled activations &times; column-scaled weights</text>
+
+  <!-- ======================== -->
+  <!-- BACKWARD WGRAD (Right)   -->
+  <!-- ======================== -->
+  <rect x="415" y="10" width="395" height="420" rx="10" fill="#fff8f0" stroke="#ffcc80" stroke-width="1.2"/>
+  <rect x="415" y="10" width="395" height="32" rx="10" fill="#d07020"/>
+  <rect x="415" y="28" width="395" height="14" fill="#d07020"/>
+  <text x="612" y="31" text-anchor="middle" font-size="15" font-weight="bold" fill="#fff">Backward Wgrad GEMM</text>
+
+  <!-- Matrix A^T: Activation transposed (columnwise from fwd) -->
+  <rect x="440" y="70" width="80" height="80" rx="4" fill="url(#col-stripes)" stroke="#d07020" stroke-width="1.8"/>
+  <!-- Column arrows inside A^T -->
+  <line x1="453" y1="75" x2="453" y2="143" stroke="#ef6c00" stroke-width="1.2" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <line x1="469" y1="75" x2="469" y2="143" stroke="#ef6c00" stroke-width="1.2" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <line x1="485" y1="75" x2="485" y2="143" stroke="#ef6c00" stroke-width="1.2" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <line x1="501" y1="75" x2="501" y2="143" stroke="#ef6c00" stroke-width="1.2" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <text x="480" y="63" text-anchor="middle" font-size="11" font-weight="bold" fill="#bf360c">A&#x1d40;</text>
+  <text x="480" y="170" text-anchor="middle" font-size="10" fill="#333">Activation&#x1d40;</text>
+  <text x="480" y="183" text-anchor="middle" font-size="9" fill="#bf360c" font-weight="bold">(columnwise from fwd)</text>
+
+  <!-- Multiply sign -->
+  <text x="540" y="116" text-anchor="middle" font-size="22" fill="#555" font-weight="bold">&times;</text>
+
+  <!-- grad_output (rowwise) -->
+  <rect x="560" y="70" width="100" height="80" rx="4" fill="url(#row-stripes)" stroke="#d07020" stroke-width="1.8"/>
+  <!-- Row arrows inside grad_output -->
+  <line x1="565" y1="82" x2="653" y2="82" stroke="#ef6c00" stroke-width="1.2" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <line x1="565" y1="98" x2="653" y2="98" stroke="#ef6c00" stroke-width="1.2" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <line x1="565" y1="114" x2="653" y2="114" stroke="#ef6c00" stroke-width="1.2" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <line x1="565" y1="130" x2="653" y2="130" stroke="#ef6c00" stroke-width="1.2" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <text x="610" y="63" text-anchor="middle" font-size="11" font-weight="bold" fill="#bf360c">dY</text>
+  <text x="610" y="170" text-anchor="middle" font-size="10" fill="#333">grad_output</text>
+  <text x="610" y="183" text-anchor="middle" font-size="9" fill="#bf360c" font-weight="bold">(rowwise, FP8)</text>
+
+  <!-- Equals sign -->
+  <text x="680" y="116" text-anchor="middle" font-size="22" fill="#555" font-weight="bold">=</text>
+
+  <!-- Weight grad box -->
+  <rect x="700" y="80" width="90" height="60" rx="6" fill="#fbe9e7" stroke="#d84315" stroke-width="1.8"/>
+  <text x="745" y="108" text-anchor="middle" font-size="11" font-weight="bold" fill="#bf360c">Weight</text>
+  <text x="745" y="123" text-anchor="middle" font-size="11" font-weight="bold" fill="#bf360c">grad</text>
+
+  <!-- Formula text -->
+  <text x="612" y="240" text-anchor="middle" font-size="11" fill="#444" font-weight="bold">dW = A&#x1d40; &times; dY</text>
+  <text x="612" y="258" text-anchor="middle" font-size="9.5" fill="#666">Transposed activations reused from forward pass</text>
+
+  <!-- ======================================== -->
+  <!-- Arrow: "same data, different layout"     -->
+  <!-- ======================================== -->
+  <!-- Curved arrow from forward A to backward A^T -->
+  <path d="M 85 205 C 85 340 440 340 480 205"
+        stroke="#888" stroke-width="1.8" stroke-dasharray="6,3" fill="none" marker-end="url(#arrow-gray)"/>
+
+  <!-- Label on the arrow -->
+  <rect x="195" y="310" width="210" height="22" rx="4" fill="#fff" stroke="#bbb" stroke-width="0.8"/>
+  <text x="300" y="325" text-anchor="middle" font-size="10" fill="#555" font-style="italic">same data, different layout</text>
+
+  <!-- ======================== -->
+  <!-- Key insight box          -->
+  <!-- ======================== -->
+  <rect x="60" y="375" width="700" height="45" rx="8" fill="#fffde7" stroke="#fbc02d" stroke-width="1.2"/>
+  <text x="410" y="395" text-anchor="middle" font-size="11" font-weight="bold" fill="#f57f17">Key Insight</text>
+  <text x="410" y="411" text-anchor="middle" font-size="10" fill="#555">Forward pass quantizes activations rowwise (for fwd GEMM) and columnwise (saved for bwd wgrad GEMM).</text>
+</svg>

@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="280" viewBox="0 0 700 280">
+  <defs>
+    <style>
+      .header-row { fill: #4A90D9; }
+      .row-even { fill: #FFFFFF; }
+      .row-odd { fill: #F0F4F8; }
+      .header-cell-text { font-family: Arial, Helvetica, sans-serif; font-size: 13px; font-weight: bold; fill: #FFFFFF; }
+      .cell-text { font-family: Arial, Helvetica, sans-serif; font-size: 12px; fill: #2C3E50; }
+      .mode-text { font-family: Arial, Helvetica, sans-serif; font-size: 12px; font-weight: bold; fill: #2C3E50; }
+      .grid-line { stroke: #BDC3C7; stroke-width: 0.8; }
+      .outer-border { stroke: #2C3E50; stroke-width: 1.5; fill: none; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="700" height="280" fill="#FFFFFF" />
+
+  <!-- Title -->
+  <text x="350" y="25" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="bold" fill="#2C3E50">Scaling Modes Comparison</text>
+
+  <!-- Table dimensions -->
+  <!-- x positions: 15, 210, 380, 480, 685 -->
+  <!-- col widths: 195, 170, 100, 205 -->
+  <!-- row height: 38 -->
+  <!-- y start: 40 -->
+
+  <!-- Header row -->
+  <rect x="15" y="40" width="670" height="34" rx="3" ry="3" class="header-row" />
+  <!-- Square off bottom corners of header -->
+  <rect x="15" y="57" width="670" height="17" class="header-row" />
+
+  <!-- Data rows -->
+  <rect x="15" y="74" width="670" height="38" class="row-even" />
+  <rect x="15" y="112" width="670" height="38" class="row-odd" />
+  <rect x="15" y="150" width="670" height="38" class="row-even" />
+  <rect x="15" y="188" width="670" height="38" class="row-odd" />
+  <rect x="15" y="226" width="670" height="38" class="row-even" />
+
+  <!-- Outer border -->
+  <rect x="15" y="40" width="670" height="224" class="outer-border" rx="3" ry="3" />
+
+  <!-- Vertical grid lines -->
+  <line x1="210" y1="40" x2="210" y2="264" class="grid-line" />
+  <line x1="380" y1="40" x2="380" y2="264" class="grid-line" />
+  <line x1="480" y1="40" x2="480" y2="264" class="grid-line" />
+
+  <!-- Horizontal grid lines -->
+  <line x1="15" y1="74" x2="685" y2="74" stroke="#2C3E50" stroke-width="1.2" />
+  <line x1="15" y1="112" x2="685" y2="112" class="grid-line" />
+  <line x1="15" y1="150" x2="685" y2="150" class="grid-line" />
+  <line x1="15" y1="188" x2="685" y2="188" class="grid-line" />
+  <line x1="15" y1="226" x2="685" y2="226" class="grid-line" />
+
+  <!-- Header text -->
+  <text x="112" y="62" text-anchor="middle" class="header-cell-text">Mode Name</text>
+  <text x="295" y="62" text-anchor="middle" class="header-cell-text">Scale Granularity</text>
+  <text x="430" y="62" text-anchor="middle" class="header-cell-text">Block Size</text>
+  <text x="582" y="62" text-anchor="middle" class="header-cell-text">Data Type</text>
+
+  <!-- Row 1: Delayed Tensor Scaling -->
+  <text x="26" y="98" class="mode-text">Delayed Tensor Scaling</text>
+  <text x="295" y="98" text-anchor="middle" class="cell-text">1 per tensor</text>
+  <text x="430" y="98" text-anchor="middle" class="cell-text">N/A</text>
+  <text x="582" y="98" text-anchor="middle" class="cell-text">FP8 E4M3 / E5M2</text>
+
+  <!-- Row 2: MXFP8 1D Scaling -->
+  <text x="26" y="136" class="mode-text">MXFP8 1D Scaling</text>
+  <text x="295" y="136" text-anchor="middle" class="cell-text">1 per 32 elements</text>
+  <text x="430" y="136" text-anchor="middle" class="cell-text">32</text>
+  <text x="582" y="136" text-anchor="middle" class="cell-text">FP8 + E8M0 scales</text>
+
+  <!-- Row 3: Block Scaling 1D -->
+  <text x="26" y="174" class="mode-text">Block Scaling 1D</text>
+  <text x="295" y="174" text-anchor="middle" class="cell-text">1 per 1xN block</text>
+  <text x="430" y="174" text-anchor="middle" class="cell-text">configurable</text>
+  <text x="582" y="174" text-anchor="middle" class="cell-text">FP8 E4M3 / E5M2</text>
+
+  <!-- Row 4: Block Scaling 2D -->
+  <text x="26" y="212" class="mode-text">Block Scaling 2D</text>
+  <text x="295" y="212" text-anchor="middle" class="cell-text">1 per NxN block</text>
+  <text x="430" y="212" text-anchor="middle" class="cell-text">configurable</text>
+  <text x="582" y="212" text-anchor="middle" class="cell-text">FP8 E4M3 / E5M2</text>
+
+  <!-- Row 5: NVFP4 1D Scaling -->
+  <text x="26" y="250" class="mode-text">NVFP4 1D Scaling</text>
+  <text x="295" y="250" text-anchor="middle" class="cell-text">1 per 16 elements</text>
+  <text x="430" y="250" text-anchor="middle" class="cell-text">16</text>
+  <text x="582" y="250" text-anchor="middle" class="cell-text">FP4 E2M1 + E8M0</text>
+</svg>

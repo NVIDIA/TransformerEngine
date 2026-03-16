@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="420" viewBox="0 0 800 420">
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+      .title { font-size: 16px; font-weight: bold; fill: #1a1a2e; }
+      .label { font-size: 13px; fill: #1a1a2e; }
+      .label-sm { font-size: 11px; fill: #444; }
+      .label-white { font-size: 13px; fill: #fff; font-weight: bold; }
+      .label-white-sm { font-size: 11px; fill: #fff; }
+      .note { font-size: 11px; fill: #555; font-style: italic; }
+      .arrow { stroke: #555; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+      .gpu0 { fill: #1565C0; }
+      .gpu1 { fill: #1E88E5; }
+      .gpu2 { fill: #42A5F5; }
+      .gpu3 { fill: #64B5F6; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#555"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="420" fill="#fff" rx="4"/>
+
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" class="title">Row-Parallel Linear</text>
+
+  <!-- Input X split into 4 rows -->
+  <text x="60" y="60" text-anchor="middle" class="label" font-weight="bold">Input X</text>
+  <text x="60" y="75" text-anchor="middle" class="label-sm">(partitioned)</text>
+
+  <rect x="15" y="85" width="90" height="52" rx="5" class="gpu0"/>
+  <text x="60" y="115" text-anchor="middle" class="label-white-sm">X₀ (GPU 0)</text>
+
+  <rect x="15" y="145" width="90" height="52" rx="5" class="gpu1"/>
+  <text x="60" y="175" text-anchor="middle" class="label-white-sm">X₁ (GPU 1)</text>
+
+  <rect x="15" y="205" width="90" height="52" rx="5" class="gpu2"/>
+  <text x="60" y="235" text-anchor="middle" class="label-white-sm">X₂ (GPU 2)</text>
+
+  <rect x="15" y="265" width="90" height="52" rx="5" class="gpu3"/>
+  <text x="60" y="295" text-anchor="middle" class="label-white-sm">X₃ (GPU 3)</text>
+
+  <!-- Arrows X to W -->
+  <line x1="110" y1="111" x2="145" y2="111" class="arrow"/>
+  <line x1="110" y1="171" x2="145" y2="171" class="arrow"/>
+  <line x1="110" y1="231" x2="145" y2="231" class="arrow"/>
+  <line x1="110" y1="291" x2="145" y2="291" class="arrow"/>
+
+  <!-- Weight matrix W split into 4 rows -->
+  <text x="200" y="60" text-anchor="middle" class="label" font-weight="bold">Weight W</text>
+  <text x="200" y="75" text-anchor="middle" class="label-sm">(split along input dim)</text>
+
+  <rect x="150" y="85" width="100" height="52" rx="5" class="gpu0"/>
+  <text x="200" y="115" text-anchor="middle" class="label-white-sm">W₀ (GPU 0)</text>
+
+  <rect x="150" y="145" width="100" height="52" rx="5" class="gpu1"/>
+  <text x="200" y="175" text-anchor="middle" class="label-white-sm">W₁ (GPU 1)</text>
+
+  <rect x="150" y="205" width="100" height="52" rx="5" class="gpu2"/>
+  <text x="200" y="235" text-anchor="middle" class="label-white-sm">W₂ (GPU 2)</text>
+
+  <rect x="150" y="265" width="100" height="52" rx="5" class="gpu3"/>
+  <text x="200" y="295" text-anchor="middle" class="label-white-sm">W₃ (GPU 3)</text>
+
+  <!-- @ symbols -->
+  <text x="130" y="115" text-anchor="middle" class="label-sm">@</text>
+  <text x="130" y="175" text-anchor="middle" class="label-sm">@</text>
+  <text x="130" y="235" text-anchor="middle" class="label-sm">@</text>
+  <text x="130" y="295" text-anchor="middle" class="label-sm">@</text>
+
+  <!-- Arrows to partial results -->
+  <line x1="255" y1="111" x2="300" y2="111" class="arrow"/>
+  <line x1="255" y1="171" x2="300" y2="171" class="arrow"/>
+  <line x1="255" y1="231" x2="300" y2="231" class="arrow"/>
+  <line x1="255" y1="291" x2="300" y2="291" class="arrow"/>
+
+  <!-- Partial Y boxes -->
+  <text x="365" y="60" text-anchor="middle" class="label" font-weight="bold">Partial results</text>
+
+  <rect x="305" y="85" width="120" height="52" rx="5" fill="#E3F2FD" stroke="#1565C0" stroke-width="1.2"/>
+  <text x="365" y="108" text-anchor="middle" class="label-sm" font-weight="bold">GPU 0</text>
+  <text x="365" y="125" text-anchor="middle" class="label-sm">Y₀ = X₀ @ W₀ᵀ</text>
+
+  <rect x="305" y="145" width="120" height="52" rx="5" fill="#E3F2FD" stroke="#1E88E5" stroke-width="1.2"/>
+  <text x="365" y="168" text-anchor="middle" class="label-sm" font-weight="bold">GPU 1</text>
+  <text x="365" y="185" text-anchor="middle" class="label-sm">Y₁ = X₁ @ W₁ᵀ</text>
+
+  <rect x="305" y="205" width="120" height="52" rx="5" fill="#E3F2FD" stroke="#42A5F5" stroke-width="1.2"/>
+  <text x="365" y="228" text-anchor="middle" class="label-sm" font-weight="bold">GPU 2</text>
+  <text x="365" y="245" text-anchor="middle" class="label-sm">Y₂ = X₂ @ W₂ᵀ</text>
+
+  <rect x="305" y="265" width="120" height="52" rx="5" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="365" y="288" text-anchor="middle" class="label-sm" font-weight="bold">GPU 3</text>
+  <text x="365" y="305" text-anchor="middle" class="label-sm">Y₃ = X₃ @ W₃ᵀ</text>
+
+  <!-- Arrows converging to reduction -->
+  <line x1="430" y1="111" x2="500" y2="185" class="arrow"/>
+  <line x1="430" y1="171" x2="500" y2="193" class="arrow"/>
+  <line x1="430" y1="231" x2="500" y2="207" class="arrow"/>
+  <line x1="430" y1="291" x2="500" y2="215" class="arrow"/>
+
+  <!-- All-reduce / Reduce-scatter box -->
+  <rect x="505" y="160" width="140" height="80" rx="8" fill="#FFF3E0" stroke="#E65100" stroke-width="1.8"/>
+  <text x="575" y="192" text-anchor="middle" class="label" font-weight="bold" fill="#E65100">All-reduce /</text>
+  <text x="575" y="210" text-anchor="middle" class="label" font-weight="bold" fill="#E65100">Reduce-scatter</text>
+  <text x="575" y="228" text-anchor="middle" class="label-sm" fill="#E65100">Y = ΣYᵢ</text>
+
+  <!-- Arrow to output -->
+  <line x1="650" y1="200" x2="680" y2="200" class="arrow"/>
+
+  <!-- Output Y -->
+  <rect x="685" y="130" width="95" height="140" rx="6" fill="#E8F5E9" stroke="#2E7D32" stroke-width="1.8"/>
+  <text x="732" y="195" text-anchor="middle" class="label" font-weight="bold" fill="#2E7D32">Output Y</text>
+  <text x="732" y="215" text-anchor="middle" class="label-sm" fill="#2E7D32">(complete)</text>
+
+  <!-- Bottom note -->
+  <rect x="120" y="375" width="560" height="30" rx="6" fill="#F5F5F5" stroke="#CCC" stroke-width="0.8"/>
+  <text x="400" y="395" text-anchor="middle" class="note">Input partitioned across GPUs; output requires reduction (all-reduce or reduce-scatter)</text>
+</svg>

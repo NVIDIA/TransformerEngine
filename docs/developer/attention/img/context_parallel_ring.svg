@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="520" viewBox="0 0 700 520">
+  <defs>
+    <filter id="shadow" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="2" stdDeviation="2.5" flood-opacity="0.15"/>
+    </filter>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <path d="M0,0 L10,3.5 L0,7 Z" fill="#2e7d32"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="700" height="520" fill="#ffffff" rx="4"/>
+
+  <!-- Title -->
+  <text x="350" y="32" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#1a237e">Context Parallelism: Ring Attention</text>
+  <line x1="150" y1="42" x2="550" y2="42" stroke="#c5cae9" stroke-width="1.5"/>
+
+  <!-- ==================== GPU 0 (top-left) ==================== -->
+  <rect x="80" y="80" width="190" height="120" rx="10" fill="#e3f2fd" stroke="#1565c0" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="80" y="80" width="190" height="30" rx="10" fill="#1565c0"/>
+  <rect x="80" y="100" width="190" height="10" fill="#1565c0"/>
+  <text x="175" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#ffffff">GPU 0</text>
+  <text x="175" y="132" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#1a237e" font-weight="bold">seq[0 : L/4]</text>
+  <text x="175" y="155" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#1565c0">Q</text>
+  <rect x="120" y="161" width="24" height="16" rx="3" fill="#bbdefb" stroke="#64b5f6" stroke-width="0.8"/>
+  <text x="132" y="173" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#1565c0">Q</text>
+  <rect x="150" y="161" width="24" height="16" rx="3" fill="#c8e6c9" stroke="#66bb6a" stroke-width="0.8"/>
+  <text x="162" y="173" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32">K</text>
+  <rect x="180" y="161" width="24" height="16" rx="3" fill="#fff9c4" stroke="#fdd835" stroke-width="0.8"/>
+  <text x="192" y="173" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#f57f17">V</text>
+
+  <!-- ==================== GPU 1 (top-right) ==================== -->
+  <rect x="430" y="80" width="190" height="120" rx="10" fill="#e3f2fd" stroke="#1565c0" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="430" y="80" width="190" height="30" rx="10" fill="#1565c0"/>
+  <rect x="430" y="100" width="190" height="10" fill="#1565c0"/>
+  <text x="525" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#ffffff">GPU 1</text>
+  <text x="525" y="132" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#1a237e" font-weight="bold">seq[L/4 : L/2]</text>
+  <rect x="470" y="161" width="24" height="16" rx="3" fill="#bbdefb" stroke="#64b5f6" stroke-width="0.8"/>
+  <text x="482" y="173" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#1565c0">Q</text>
+  <rect x="500" y="161" width="24" height="16" rx="3" fill="#c8e6c9" stroke="#66bb6a" stroke-width="0.8"/>
+  <text x="512" y="173" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32">K</text>
+  <rect x="530" y="161" width="24" height="16" rx="3" fill="#fff9c4" stroke="#fdd835" stroke-width="0.8"/>
+  <text x="542" y="173" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#f57f17">V</text>
+
+  <!-- ==================== GPU 2 (bottom-right) ==================== -->
+  <rect x="430" y="320" width="190" height="120" rx="10" fill="#e3f2fd" stroke="#1565c0" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="430" y="320" width="190" height="30" rx="10" fill="#1565c0"/>
+  <rect x="430" y="340" width="190" height="10" fill="#1565c0"/>
+  <text x="525" y="340" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#ffffff">GPU 2</text>
+  <text x="525" y="372" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#1a237e" font-weight="bold">seq[L/2 : 3L/4]</text>
+  <rect x="470" y="401" width="24" height="16" rx="3" fill="#bbdefb" stroke="#64b5f6" stroke-width="0.8"/>
+  <text x="482" y="413" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#1565c0">Q</text>
+  <rect x="500" y="401" width="24" height="16" rx="3" fill="#c8e6c9" stroke="#66bb6a" stroke-width="0.8"/>
+  <text x="512" y="413" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32">K</text>
+  <rect x="530" y="401" width="24" height="16" rx="3" fill="#fff9c4" stroke="#fdd835" stroke-width="0.8"/>
+  <text x="542" y="413" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#f57f17">V</text>
+
+  <!-- ==================== GPU 3 (bottom-left) ==================== -->
+  <rect x="80" y="320" width="190" height="120" rx="10" fill="#e3f2fd" stroke="#1565c0" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="80" y="320" width="190" height="30" rx="10" fill="#1565c0"/>
+  <rect x="80" y="340" width="190" height="10" fill="#1565c0"/>
+  <text x="175" y="340" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#ffffff">GPU 3</text>
+  <text x="175" y="372" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#1a237e" font-weight="bold">seq[3L/4 : L]</text>
+  <rect x="120" y="401" width="24" height="16" rx="3" fill="#bbdefb" stroke="#64b5f6" stroke-width="0.8"/>
+  <text x="132" y="413" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#1565c0">Q</text>
+  <rect x="150" y="401" width="24" height="16" rx="3" fill="#c8e6c9" stroke="#66bb6a" stroke-width="0.8"/>
+  <text x="162" y="413" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32">K</text>
+  <rect x="180" y="401" width="24" height="16" rx="3" fill="#fff9c4" stroke="#fdd835" stroke-width="0.8"/>
+  <text x="192" y="413" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#f57f17">V</text>
+
+  <!-- ==================== Ring arrows ==================== -->
+
+  <!-- GPU 0 -> GPU 1 (top, left to right) -->
+  <path d="M 270,120 C 320,65 380,65 430,120" fill="none" stroke="#2e7d32" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+  <rect x="315" y="62" width="70" height="20" rx="4" fill="#ffffff" stroke="#a5d6a7" stroke-width="0.8"/>
+  <text x="350" y="76" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#2e7d32" font-weight="bold">KV chunk</text>
+
+  <!-- GPU 1 -> GPU 2 (right, top to bottom) -->
+  <path d="M 620,200 C 675,250 675,310 620,320" fill="none" stroke="#2e7d32" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+  <rect x="645" y="245" width="50" height="34" rx="4" fill="#ffffff" stroke="#a5d6a7" stroke-width="0.8"/>
+  <text x="670" y="259" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32" font-weight="bold">KV</text>
+  <text x="670" y="273" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32" font-weight="bold">chunk</text>
+
+  <!-- GPU 2 -> GPU 3 (bottom, right to left) -->
+  <path d="M 430,400 C 380,455 320,455 270,400" fill="none" stroke="#2e7d32" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+  <rect x="315" y="440" width="70" height="20" rx="4" fill="#ffffff" stroke="#a5d6a7" stroke-width="0.8"/>
+  <text x="350" y="454" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#2e7d32" font-weight="bold">KV chunk</text>
+
+  <!-- GPU 3 -> GPU 0 (left, bottom to top) -->
+  <path d="M 80,320 C 25,270 25,210 80,200" fill="none" stroke="#2e7d32" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+  <rect x="5" y="245" width="50" height="34" rx="4" fill="#ffffff" stroke="#a5d6a7" stroke-width="0.8"/>
+  <text x="30" y="259" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32" font-weight="bold">KV</text>
+  <text x="30" y="273" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#2e7d32" font-weight="bold">chunk</text>
+
+  <!-- ==================== Center text ==================== -->
+  <rect x="215" y="240" width="270" height="44" rx="8" fill="#f3e5f5" stroke="#ce93d8" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="350" y="258" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#4a148c">Ring Attention</text>
+  <text x="350" y="275" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#6a1b9a">Each GPU computes local Q x all KV</text>
+
+  <!-- Footer note -->
+  <text x="350" y="498" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#78909c">KV chunks rotate through the ring until every GPU has seen all KV pairs.</text>
+</svg>

@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="420" viewBox="0 0 800 420">
+  <defs>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; }
+      .title { font-size: 16px; font-weight: bold; fill: #1a1a2e; }
+      .label { font-size: 13px; fill: #1a1a2e; }
+      .label-sm { font-size: 11px; fill: #444; }
+      .label-white { font-size: 13px; fill: #fff; font-weight: bold; }
+      .label-white-sm { font-size: 11px; fill: #fff; }
+      .note { font-size: 11px; fill: #555; font-style: italic; }
+      .arrow { stroke: #555; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+      .gpu0 { fill: #1565C0; }
+      .gpu1 { fill: #1E88E5; }
+      .gpu2 { fill: #42A5F5; }
+      .gpu3 { fill: #64B5F6; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#555"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="420" fill="#fff" rx="4"/>
+
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" class="title">Column-Parallel Linear</text>
+
+  <!-- Input X -->
+  <rect x="30" y="80" width="90" height="240" rx="6" fill="#E8EAF6" stroke="#3949AB" stroke-width="1.5"/>
+  <text x="75" y="200" text-anchor="middle" class="label" font-weight="bold">Input X</text>
+  <text x="75" y="340" text-anchor="middle" class="label-sm">(same on all GPUs)</text>
+
+  <!-- Arrow from X to W -->
+  <line x1="130" y1="200" x2="175" y2="200" class="arrow"/>
+  <text x="153" y="193" text-anchor="middle" class="label-sm">@</text>
+
+  <!-- Weight matrix W split into 4 columns -->
+  <text x="280" y="68" text-anchor="middle" class="label" font-weight="bold">Weight W (split along output dim)</text>
+
+  <!-- W0 -->
+  <rect x="185" y="80" width="47" height="240" rx="4" class="gpu0"/>
+  <text x="208" y="200" text-anchor="middle" class="label-white-sm" transform="rotate(-90 208 200)">W₀ (GPU 0)</text>
+
+  <!-- W1 -->
+  <rect x="234" y="80" width="47" height="240" rx="4" class="gpu1"/>
+  <text x="257" y="200" text-anchor="middle" class="label-white-sm" transform="rotate(-90 257 200)">W₁ (GPU 1)</text>
+
+  <!-- W2 -->
+  <rect x="283" y="80" width="47" height="240" rx="4" class="gpu2"/>
+  <text x="306" y="200" text-anchor="middle" class="label-white-sm" transform="rotate(-90 306 200)">W₂ (GPU 2)</text>
+
+  <!-- W3 -->
+  <rect x="332" y="80" width="47" height="240" rx="4" class="gpu3"/>
+  <text x="355" y="200" text-anchor="middle" class="label-white-sm" transform="rotate(-90 355 200)">W₃ (GPU 3)</text>
+
+  <!-- Arrow from W to computation -->
+  <line x1="389" y1="200" x2="430" y2="200" class="arrow"/>
+
+  <!-- Computation labels -->
+  <text x="490" y="68" text-anchor="middle" class="label" font-weight="bold">Per-GPU compute</text>
+
+  <!-- GPU 0 compute -->
+  <rect x="435" y="80" width="120" height="52" rx="5" class="gpu0"/>
+  <text x="495" y="103" text-anchor="middle" class="label-white" font-size="12">GPU 0</text>
+  <text x="495" y="121" text-anchor="middle" class="label-white-sm">Y₀ = X @ W₀ᵀ</text>
+
+  <!-- GPU 1 compute -->
+  <rect x="435" y="142" width="120" height="52" rx="5" class="gpu1"/>
+  <text x="495" y="165" text-anchor="middle" class="label-white" font-size="12">GPU 1</text>
+  <text x="495" y="183" text-anchor="middle" class="label-white-sm">Y₁ = X @ W₁ᵀ</text>
+
+  <!-- GPU 2 compute -->
+  <rect x="435" y="204" width="120" height="52" rx="5" class="gpu2"/>
+  <text x="495" y="227" text-anchor="middle" class="label-white" font-size="12">GPU 2</text>
+  <text x="495" y="245" text-anchor="middle" class="label-white-sm">Y₂ = X @ W₂ᵀ</text>
+
+  <!-- GPU 3 compute -->
+  <rect x="435" y="266" width="120" height="52" rx="5" class="gpu3"/>
+  <text x="495" y="289" text-anchor="middle" class="label-white" font-size="12">GPU 3</text>
+  <text x="495" y="307" text-anchor="middle" class="label-white-sm">Y₃ = X @ W₃ᵀ</text>
+
+  <!-- Arrows to outputs -->
+  <line x1="560" y1="106" x2="620" y2="106" class="arrow"/>
+  <line x1="560" y1="168" x2="620" y2="168" class="arrow"/>
+  <line x1="560" y1="230" x2="620" y2="230" class="arrow"/>
+  <line x1="560" y1="292" x2="620" y2="292" class="arrow"/>
+
+  <!-- Output boxes -->
+  <text x="700" y="68" text-anchor="middle" class="label" font-weight="bold">Partial outputs</text>
+
+  <rect x="625" y="80" width="150" height="52" rx="5" fill="#E3F2FD" stroke="#1565C0" stroke-width="1.2"/>
+  <text x="700" y="110" text-anchor="middle" class="label">Y₀</text>
+
+  <rect x="625" y="142" width="150" height="52" rx="5" fill="#E3F2FD" stroke="#1E88E5" stroke-width="1.2"/>
+  <text x="700" y="172" text-anchor="middle" class="label">Y₁</text>
+
+  <rect x="625" y="204" width="150" height="52" rx="5" fill="#E3F2FD" stroke="#42A5F5" stroke-width="1.2"/>
+  <text x="700" y="234" text-anchor="middle" class="label">Y₂</text>
+
+  <rect x="625" y="266" width="150" height="52" rx="5" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="700" y="296" text-anchor="middle" class="label">Y₃</text>
+
+  <!-- Bracket label for outputs -->
+  <text x="700" y="340" text-anchor="middle" class="label-sm">(split along hidden dim)</text>
+
+  <!-- Bottom note -->
+  <rect x="120" y="375" width="560" height="30" rx="6" fill="#F5F5F5" stroke="#CCC" stroke-width="0.8"/>
+  <text x="400" y="395" text-anchor="middle" class="note">All-gather input if sequence parallel; output stays partitioned across GPUs</text>
+</svg>
