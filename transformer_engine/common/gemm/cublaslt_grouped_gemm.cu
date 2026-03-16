@@ -1369,7 +1369,7 @@ size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors) {
   NVTE_ERROR(
       "nvte_get_grouped_gemm_setup_workspace_size requires cuBLAS 13.3+, but compile-time cuBLAS "
       "version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.2 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
   return 0;
 }
 
