@@ -36,6 +36,9 @@ void reset_tensor_data(transformer_engine::TensorWrapper &tensor, bool rowwise, 
 }
 
 bool is_empty_grouped_tensor_param(const NVTEBasicTensor &t) {
+  if (t.data_ptr == nullptr) {
+    return true;
+  }
   return t.shape.ndim == 1 && t.shape.data[0] == 0;
 }
 
@@ -351,9 +354,12 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
   if (!has_rowwise_scales && !has_columnwise_scales) {
     return std::nullopt;
   }
-  if (!is_empty_grouped_tensor_param(input.get_first_dims()) ||
-      !is_empty_grouped_tensor_param(input.get_last_dims())) {
-    NVTE_ERROR("Grouped GEMM swizzle requires uniform shapes.");
+  const auto first_dims = input.get_first_dims();
+  const auto last_dims = input.get_last_dims();
+  if (first_dims.data_ptr != nullptr || last_dims.data_ptr != nullptr) {
+    NVTE_ERROR(
+        "Grouped GEMM swizzle requires uniform shapes for now (first_dims/last_dims must be "
+        "absent).");
   }
 
   std::optional<at::Tensor> rowwise_scales_pyt;
@@ -369,15 +375,6 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
   if (columnwise_data.data_ptr != nullptr) {
     output.set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
                                columnwise_data.shape);
-  }
-  const auto first_dims = input.get_first_dims();
-  if (first_dims.data_ptr != nullptr) {
-    output.set_first_dims(first_dims.data_ptr, static_cast<DType>(first_dims.dtype),
-                          first_dims.shape);
-  }
-  const auto last_dims = input.get_last_dims();
-  if (last_dims.data_ptr != nullptr) {
-    output.set_last_dims(last_dims.data_ptr, static_cast<DType>(last_dims.dtype), last_dims.shape);
   }
   const auto tensor_offsets = input.get_tensor_offsets();
   if (tensor_offsets.data_ptr != nullptr) {
