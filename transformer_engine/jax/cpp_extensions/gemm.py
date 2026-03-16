@@ -1001,9 +1001,9 @@ class GemmPrimitive(BasePrimitive):
         lhs_scale_specs = rhs_scale_specs = (None,)
         if scaling_mode.is_1d_block_scaling():
             rhs_scale_specs = rhs_specs
-            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM does not handle
-            # scale collecting yet
-            if collective_op.is_all_gather:
+            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM w/ Userbuffers
+            # backend does not handle scale collecting yet (cuBLASMp backend does)
+            if collective_op.is_all_gather and not is_collective_gemm_with_cublasmp():
                 lhs_scale_specs = tuple(
                     None if i == sequence_dim else s for i, s in enumerate(lhs_specs)
                 )

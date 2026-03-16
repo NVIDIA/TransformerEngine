@@ -153,6 +153,11 @@ void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_proc
   handler.init(num_total_devices, num_devices_per_process, process_id, tp_size);
 }
 
+bool IsCollectiveGemmWithCublasmp() {
+  auto &config = CgemmConfig::get();
+  return config.use_cublasmp;
+}
+
 int GetCgemmNumMaxStreams() {
   auto &config = CgemmConfig::get();
   return config.num_max_streams;
@@ -193,7 +198,7 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   }
 
   std::unique_ptr<CommOverlapCore> executor;
-  if (cgemm_helper.use_cublasmp) {
+  if (cgemm_config.use_cublasmp) {
     executor = std::make_unique<CommOverlapP2PBase>(
         comm_handler.get_comm_for_current_device(), comm_handler.get_tp_domain_id(),
         comm_handler.tp_size, cgemm_config.num_comm_sm, false /*atomic_gemm*/);
