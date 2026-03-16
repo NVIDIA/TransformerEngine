@@ -14,9 +14,11 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-#if CUDA_VERSION >= 12080
+#include "common/common.h"
+
+#if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
-#endif  // CUDA_VERSION >= 12080
+#endif  // FP4_TYPE_SUPPORTED
 
 #include "common/utils.cuh"
 

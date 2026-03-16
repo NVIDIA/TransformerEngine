@@ -71,6 +71,7 @@ class GroupedTensorStorage:
         columnwise_scale_inv_offsets: Optional[List[int]] = None,
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
+        with_gemm_swizzled_scales: bool = False,
     ) -> None:
         """
         Initialize a GroupedTensor.
@@ -144,6 +145,7 @@ class GroupedTensorStorage:
         # Hold a reference to the quantized tensors that occupy same storage as the GroupedTensor.
         # Used as a convenience.
         instance.quantized_tensors = None
+        instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
     def __new__(
         cls,
@@ -168,6 +170,7 @@ class GroupedTensorStorage:
         columnwise_scale_inv_offsets: Optional[List[int]] = None,
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
+        with_gemm_swizzled_scales: bool = False,
     ):
         instance = object.__new__(cls)
         cls._initialize_storage_fields(
@@ -192,6 +195,7 @@ class GroupedTensorStorage:
             columnwise_scale_inv_offsets=columnwise_scale_inv_offsets,
             requires_grad=requires_grad,
             stride=stride,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         )
         return instance
 
@@ -645,6 +649,9 @@ class GroupedTensorStorage:
             offsets=offsets,
             scale_inv_offsets=scale_inv_offsets,
             columnwise_scale_inv_offsets=columnwise_scale_inv_offsets,
+            with_gemm_swizzled_scales=(
+                quantizer.optimize_for_gemm if quantizer is not None else False
+            ),
         )
 
         grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()

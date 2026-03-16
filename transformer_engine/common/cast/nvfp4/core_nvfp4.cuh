@@ -47,7 +47,8 @@ __device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const f
   // However, this is part of the emulation code to ensure exact match.
   using namespace detail;
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
-  const float S_dec_b = block_amax / fp4_max * S_enc;
+  constexpr float fp4_max_inv = 1.0f / fp4_max;
+  const float S_dec_b = block_amax * (S_enc * fp4_max_inv);
   return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
 }
 #endif  // FP4_TYPE_SUPPORTED
@@ -59,11 +60,12 @@ namespace quantization_SF {
 // Compute per-block E4M3 encoding/decoding scaling factor
 __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
                                                                    const float S_enc) {
-  constexpr float rcp_6f = 1.0f / 6.0f;
+  using namespace detail;
+  constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;  // 1 / 6.0f
   // const float S_dec_b = block_amax * rcp_6f;
   // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
   // return S_dec_b_fp8;
-  return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
+  return static_cast<fp8e4m3>(block_amax * (S_enc * fp4_max_inv));
 }
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantization_SF
