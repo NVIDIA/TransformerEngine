@@ -318,7 +318,7 @@ def general_grouped_gemm_for_grouped_tensor(
     grad: bool = False,
     alpha: Optional[torch.Tensor] = None,
     beta: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+) -> Union[torch.Tensor, List[torch.Tensor]]:
     """
     Grouped GEMM using GroupedTensor inputs.
 
