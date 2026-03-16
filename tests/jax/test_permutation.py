@@ -753,6 +753,8 @@ class TestHighLevelPermutationAPI:
         """Test sort_chunks_by_index forward and backward pass against reference"""
         key = jax.random.PRNGKey(42)
 
+        print("TEDDY: TESTING USER PERMISSION")
+
         # Generate random split sizes
         key, size_key = jax.random.split(key)
         split_sizes = jax.random.randint(size_key, (num_splits,), 10, total_tokens // num_splits)
