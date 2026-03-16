@@ -92,7 +92,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
 
   # Clear PIDs array for this test case
   PIDS=()
-  
+
   BACKENDS=("userbuffers", "cublasmp")
   for BACKEND in "${BACKENDS[@]}"; do
     echo "Setting backend to $BACKEND for test $TEST_NAME"
@@ -102,7 +102,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
       LOG_FILE="${TEST_NAME}_gpu_${i}_${BACKEND}.log"
 
       test_case_args=(
-        
+
         "--num-processes=$NUM_GPUS"
         "--process-id=$i"
       )
@@ -149,7 +149,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
       echo "... $TEST_CASE INVALID"
       HAS_FAILURE=1
     fi
-    
+
 
     # Remove the log files after processing them
     wait
