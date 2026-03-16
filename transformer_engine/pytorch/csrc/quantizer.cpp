@@ -73,11 +73,15 @@ std::optional<at::Tensor> build_grouped_tensor_offsets(const size_t num_tensors,
              "first_dims must have length ", num_tensors, ".");
 
   const int64_t logical_last_dim_i64 = static_cast<int64_t>(logical_last_dim);
-  auto scaled_first_dims = (first_dims_tensor * logical_last_dim_i64).contiguous();
-  // Single kernel needed for these ops.
-  auto cumsum = at::cumsum(scaled_first_dims, 0);
-  auto zero = at::zeros({1}, cumsum.options());
-  return at::cat({zero, cumsum});
+  const auto first_dims_contiguous = first_dims_tensor.contiguous();
+  auto tensor_offsets =
+      at::empty({static_cast<int64_t>(num_tensors) + 1}, first_dims_contiguous.options());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_splits_to_offsets(static_cast<const int64_t*>(first_dims_contiguous.data_ptr()),
+                           static_cast<int64_t*>(tensor_offsets.data_ptr()), num_tensors,
+                           logical_last_dim_i64, at::cuda::getCurrentCUDAStream());
+  });
+  return tensor_offsets;
 }
 
 at::TensorOptions grouped_tensor_data_options(const DType dtype) {
@@ -198,6 +202,7 @@ std::pair<GroupedTensorWrapper, py::object> NoneQuantizer::create_grouped_tensor
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -285,6 +290,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
                                      args.ptr(), kwargs.ptr());
@@ -407,6 +413,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -603,6 +610,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["data_transpose"] = transpose_py;
     kwargs["quantizer"] = this->quantizer;
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8TensorStoragePythonClass),
@@ -728,6 +736,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -975,6 +984,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
     PyObject* result =
@@ -1089,6 +1099,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8BlockQuantizer::create_grouped
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -1379,6 +1390,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorStoragePythonClass),
                                      args.ptr(), kwargs.ptr());
@@ -1508,6 +1520,7 @@ std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tenso
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -1788,6 +1801,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     kwargs["fp4_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
 
@@ -1939,6 +1953,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -2184,7 +2199,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // Compute amax.
   if (this->with_rht) {
     if (input.dtype() != DType::kBFloat16) {
-      NVTE_CHECK(false, "RHT is only supported for bfloat16 input");
+      NVTE_ERROR("RHT is only supported for bfloat16 input, got dtype enum value ",
+                 static_cast<int>(input.dtype()));
     }
     if (this->with_post_rht_amax) {
       // We need:
@@ -2196,7 +2212,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       });
     } else {
       // raise error since it's not supported yet
-      NVTE_CHECK(false, "Pre-RHT amax is not supported yet");
+      NVTE_ERROR(
+          "Pre-RHT amax is not supported yet. "
+          "Use with_post_rht_amax=true instead.");
     }
   } else {  // Without RHT
     if (compute_amax) {

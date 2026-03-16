@@ -516,7 +516,8 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
         const size_t rng_sequence
           = thread_idx + k_tile * 256 + linear_tile_idx * K_TILE_MAX * 256;
 
-        transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+        transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>
+            rng;
         rng.init(rng_seed, rng_sequence, rng_offset);
         uint4 random_uint4 = uint4{0, 0, 0, 0};
 

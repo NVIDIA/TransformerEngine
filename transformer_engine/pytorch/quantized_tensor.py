@@ -37,6 +37,7 @@ class QuantizedTensorStorage:
     XTensor should only implement the functionality needed
     to behave like regular torch.Tensor (like __torch_dispatch__)."""
 
+    _dtype: torch.dtype
     _quantizer: Optional[Quantizer]
 
     def update_usage(
@@ -367,10 +368,13 @@ class QuantizedTensor(torch.Tensor):
         shape: Iterable[int],
         dtype: torch.dtype,
         *,
+        fake_dtype: Optional[torch.dtype] = None,
         requires_grad: bool = False,
         device: Optional[torch.device] = None,
         stride: Optional[Iterable[int]] = None,
     ):
+        if fake_dtype is not None and fake_dtype != dtype:
+            raise ValueError(f"fake_dtype ({fake_dtype}) does not match dtype ({dtype})")
         # For stride, We are assuming only contiguous tensors
         # Calculate stride from shape if not provided. When creating this object from
         # C++ code, we provide the stride computed from shape in C++ to avoid the
@@ -485,7 +489,7 @@ class QuantizedTensor(torch.Tensor):
         )
 
     def __repr__(self, *, tensor_contents=None) -> str:
-        return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
+        return f"{self.__class__.__name__}(data={self.dequantize()})"
 
     def float(self) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -548,13 +552,37 @@ class QuantizedTensor(torch.Tensor):
                 dst.quantize_(src)
             else:
                 if isinstance(src, QuantizedTensor):
-                    src = src.dequantize()
+                    dtype = dst.dtype
+                    if dtype not in (torch.float32, torch.float16, torch.bfloat16):
+                        dtype = torch.float32
+                    src = src.dequantize(dtype=dtype)
                 dst.copy_(src)
             return None
 
         # View op
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
+
+        # New empty op (used by DCP async staging to create CPU copies)
+        if func == torch.ops.aten.new_empty.default:
+            tensor = args[0]
+            size = args[1]
+            dtype = kwargs.get("dtype", tensor.dtype)
+            device = kwargs.get("device", tensor.device)
+            pin_memory = kwargs.get("pin_memory", False)
+            if tensor._quantizer is None:
+                raise RuntimeError(
+                    f"{type(tensor).__name__} does not have a quantizer; "
+                    "cannot create new_empty QuantizedTensor"
+                )
+            out = tensor._quantizer.make_empty(
+                shape=torch.Size(size),
+                dtype=dtype,
+                device=device,
+                requires_grad=tensor.requires_grad,
+                pin_memory=pin_memory,
+            )
+            return out
 
         # Empty like op
         if func == torch.ops.aten.empty_like.default:
@@ -588,7 +616,7 @@ class QuantizedTensor(torch.Tensor):
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
-                return arg.dequantize(dtype=arg.dtype)
+                return arg.dequantize()
             return arg
 
         def maybe_update_inplace(arg, new_arg, schema_arg):
@@ -671,6 +699,7 @@ class QuantizedTensor(torch.Tensor):
         shape = shape if shape is not None else tensor.shape
         dtype = dtype if dtype is not None else tensor.dtype
         kwargs = tensor.get_metadata()
+        kwargs["fake_dtype"] = dtype
         return cls(shape=shape, dtype=dtype, requires_grad=requires_grad, **kwargs)
 
     def to_dtype(self, dtype: torch.dtype) -> QuantizedTensor:
