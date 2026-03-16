@@ -497,8 +497,9 @@ def _token_combine_bwd_rule(
                 hidden_size,
             )
             # The backward kernel only writes to positions that tokens map to.
-            # Padded positions may contain uninitialized (NaN) values - replace with zeros.
-            inp_grad = jnp.where(jnp.isnan(inp_grad), 0.0, inp_grad)
+            # Padded positions may contain uninitialized values (NaN, inf, or garbage).
+            # Replace any non-finite values with zeros.
+            inp_grad = jnp.where(jnp.isfinite(inp_grad), inp_grad, 0.0)
         else:
             inp_grad, merging_probs_grad = unpermute_bwd_with_merging_probs(
                 output_grad,
@@ -527,8 +528,9 @@ def _token_combine_bwd_rule(
                 align_size=128,  # Default, sizes already computed in forward
             )
             # The permute kernel only writes to positions that tokens map to.
-            # Padded positions may contain uninitialized (NaN) values - replace with zeros.
-            inp_grad = jnp.where(jnp.isnan(inp_grad), 0.0, inp_grad)
+            # Padded positions may contain uninitialized values (NaN, inf, or garbage).
+            # Replace any non-finite values with zeros.
+            inp_grad = jnp.where(jnp.isfinite(inp_grad), inp_grad, 0.0)
         else:
             inp_grad, _ = permute_with_mask_map(
                 output_grad,
