@@ -5,6 +5,7 @@
 """Python interface for GEMM extensions"""
 
 from typing import Iterable, Optional, Tuple, Union, List
+import ctypes
 import os
 import functools
 import torch
@@ -22,6 +23,7 @@ from ...debug.pytorch.debug_quantization import DebugQuantizer
 __all__ = [
     "general_gemm",
     "general_grouped_gemm",
+    "general_grouped_gemm_for_grouped_tensor",
 ]
 
 
@@ -284,3 +286,113 @@ def general_grouped_gemm(
     )
 
     return out, bias, gelu_input
+
+
+@functools.lru_cache(maxsize=None)
+def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
+    """Return workspace size for grouped GEMM pointer setup.
+    Must match GroupedGemmSetupWorkspace::required_setup_size in cublaslt_grouped_gemm.cu.
+    """
+    ptr_bytes = ctypes.sizeof(ctypes.c_void_p)
+    int_bytes = ctypes.sizeof(ctypes.c_int)
+    ptr_size = num_tensors * ptr_bytes
+    int_size = num_tensors * int_bytes
+    k_ptr_alignment = 16
+    # Each pointer array is placed at a 16-byte-aligned offset (matching kPtrAlignment in C++).
+    # aligned_ptr_size = round_up(num_tensors * ptr_bytes, 16)
+    aligned_ptr_size = ((ptr_size + k_ptr_alignment - 1) // k_ptr_alignment) * k_ptr_alignment
+    size = 8 * aligned_ptr_size + 6 * int_size
+    alignment = 256
+    return ((size + alignment - 1) // alignment) * alignment
+
+
+def general_grouped_gemm_for_grouped_tensor(
+    A,
+    B,
+    out,
+    *,
+    layout: str = "TN",
+    accumulate: bool = False,
+    use_split_accumulator: bool = False,
+    bias=None,
+    grad: bool = False,
+    alpha: Optional[torch.Tensor] = None,
+    beta: Optional[torch.Tensor] = None,
+) -> Union[torch.Tensor, List[torch.Tensor]]:
+    """
+    Grouped GEMM using GroupedTensor inputs.
+
+    This uses nvte_grouped_gemm and supports different per-matrix shapes.
+
+    The caller must ensure that GroupedTensor metadata is already compatible with the
+    underlying GEMM implementation (e.g., aligned offsets and output metadata layout).
+    """
+    assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+    if grad:
+        raise NotImplementedError("grad is not supported for grouped_tensor GEMM yet.")
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    is_discrete_out = isinstance(out, list)
+    is_discrete_in = isinstance(A, list)
+    if is_discrete_in and is_discrete_out:
+        raise ValueError("Both A and out are discrete. This is not supported yet.")
+
+    if is_discrete_out:
+        # wgrad case.
+        grouped_gemm_impl = tex.te_general_grouped_gemm_for_discrete_out
+    elif is_discrete_in:
+        # Use-case: forward pass with list of weights.
+        grouped_gemm_impl = tex.te_general_grouped_gemm_for_discrete_in
+    else:
+        # Use-case: Single Grouped Parameter for Weight/ Weight Grads.
+        grouped_gemm_impl = tex.te_general_grouped_gemm_for_grouped_tensor
+
+    if is_discrete_out and bias is not None:
+        raise ValueError(
+            "Bias is not supported when out is a list (discrete_out mode) yet. "
+            "Apply bias manually after the GEMM."
+        )
+
+    num_tensors = B.num_tensors
+    rowwise = B.rowwise_data
+    device = rowwise.device if rowwise is not None else B.columnwise_data.device
+
+    if alpha is None:
+        alpha = torch.ones(num_tensors, dtype=torch.float32, device=device)
+    if beta is None:
+        if accumulate:
+            beta = torch.ones(num_tensors, dtype=torch.float32, device=device)
+        else:
+            beta = torch.zeros(num_tensors, dtype=torch.float32, device=device)
+
+    if not alpha.is_cuda or not beta.is_cuda:
+        raise ValueError("alpha and beta must be CUDA tensors.")
+
+    workspace_setup = torch.empty(
+        get_grouped_gemm_setup_workspace_size(num_tensors),
+        dtype=torch.uint8,
+        device=device,
+    )
+    workspace_cublas = torch.empty(
+        get_cublas_workspace_size_bytes(),
+        dtype=torch.uint8,
+        device=device,
+    )
+
+    sm_count = get_sm_count()
+    sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
+
+    return grouped_gemm_impl(
+        A,
+        transa,
+        B,
+        transb,
+        out,
+        bias,
+        alpha,
+        beta,
+        workspace_setup,
+        workspace_cublas,
+        use_split_accumulator,
+        sm_count,
+    )
