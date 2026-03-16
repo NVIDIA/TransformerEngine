@@ -695,7 +695,7 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   te_A_wrappers.reserve(num_tensors);
   te_A_vector.reserve(num_tensors);
   const auto none = py::none();
-  for (const auto &tensor : A_list) {
+  for (const auto& tensor : A_list) {
     te_A_wrappers.emplace_back(makeTransformerEngineTensor(tensor, none));
     te_A_vector.emplace_back(te_A_wrappers.back().data());
   }
@@ -764,7 +764,7 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
   te_D_wrappers.reserve(num_tensors);
   te_D_vector.reserve(num_tensors);
   const auto none = py::none();
-  for (const auto &tensor : D_list) {
+  for (const auto& tensor : D_list) {
     te_D_wrappers.emplace_back(makeTransformerEngineTensor(tensor, none));
     te_D_vector.emplace_back(te_D_wrappers.back().data());
   }
