@@ -815,7 +815,7 @@ class GroupedLinear(BasicOperation):
 
         if self.single_grouped_parameter:
             grad_weight = None
-            # TODO:ksivaman change workflow to avoid stack.
+            # Unfused path single param: Can be optimized to remove stack.
             if ctx.weight_requires_grad:
                 grad_weight = torch.stack(grad_weights, dim=0)
             # Parameter registration order with single_grouped_parameter=True is:

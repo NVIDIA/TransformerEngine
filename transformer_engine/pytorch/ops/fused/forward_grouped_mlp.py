@@ -6,14 +6,13 @@
 
 from __future__ import annotations
 from collections.abc import Callable, Iterable
-import os
 import functools
 from typing import Any, Optional
 
 import torch
+from cuda.bindings import driver as cuda
 
 import transformer_engine_torch as tex
-from cuda.bindings import driver as cuda
 from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
 from ...module._common import noop_cat
 from ...quantization import Recipe
@@ -315,7 +314,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         alpha_tensor, norm_const_tensor = self._get_kernel_constants(
             num_groups=num_groups, dtype=dtype, device=device
         )
-        current_stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+        current_stream = cuda.CUstream(  # pylint: disable=c-extension-no-member
+            torch.cuda.current_stream().cuda_stream
+        )
 
         # Fused kernel for FC1 + SwiGLU + post-scale
         fc1_kernel_out = self.grouped_gemm_swiglu_kernel()(

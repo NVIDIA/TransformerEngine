@@ -6,30 +6,26 @@
 
 from __future__ import annotations
 from collections.abc import Callable
-import os
 import functools
 import math
-from pickle import TRUE
 from typing import Optional
 
 import torch
+from cuda.bindings import driver as cuda
 
 import transformer_engine_torch as tex
-from cuda.bindings import driver as cuda
 from ...cpp_extensions import (
     general_grouped_gemm_for_grouped_tensor,
 )
 from ...module._common import noop_cat
 from ...module.base import get_dummy_wgrad
 from ...quantization import Recipe
-from ...tensor import Quantizer
 from ...tensor.grouped_tensor import GroupedTensor
 from ...utils import clear_tensor_data, get_device_compute_capability
 from ..basic import GroupedLinear, ScaledSwiGLU
 from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
-    is_quantized_tensor,
     make_grouped_tensor_from_buffers,
     maybe_dequantize,
 )
@@ -289,7 +285,9 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         alpha_tensor, norm_const_tensor = self._get_kernel_constants(
             num_groups=num_groups, dtype=dtype, device=device
         )
-        current_stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+        current_stream = cuda.CUstream(  # pylint: disable=c-extension-no-member
+            torch.cuda.current_stream().cuda_stream
+        )
 
         # Fused kernel for FC2 dgrad + dSwiGLU + grad scale
         fc2_dgrad_kernel_out = self.grouped_gemm_dswiglu_kernel()(
@@ -401,7 +399,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                         )
 
                 if grouped_fc2_wgrad is None:
-                    # TODO:ksivaman: This is not CUDA Graph safe.
                     grouped_fc2_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
                         num_tensors=num_groups,
                         shapes=[fc2_weight_shape] * num_groups,
@@ -544,7 +541,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                         )
 
                 if grouped_fc1_wgrad is None:
-                    # TODO:ksivaman: This is not CUDA Graph safe.
                     grouped_fc1_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
                         num_tensors=num_groups,
                         shapes=[fc1_weight_shape] * num_groups,

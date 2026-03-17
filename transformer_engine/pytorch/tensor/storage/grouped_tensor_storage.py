@@ -201,8 +201,6 @@ class GroupedTensorStorage:
         )
         return instance
 
-        self.with_gemm_swizzled_scales = with_gemm_swizzled_scales
-
     def has_data(self) -> bool:
         """
         Check if the tensor has row-wise data.
@@ -452,6 +450,7 @@ class GroupedTensorStorage:
 
     @staticmethod
     def make_tensor_offsets(first_dims: torch.Tensor, logical_last_dim: int) -> torch.Tensor:
+        """Calculate GPU offsets from first dim splits."""
         return torch.cat(
             [
                 torch.zeros(1, device=first_dims.device, dtype=first_dims.dtype),
