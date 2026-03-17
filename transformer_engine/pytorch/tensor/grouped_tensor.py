@@ -89,9 +89,9 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         offsets: Optional[List[int]] = None,
         scale_inv_offsets: Optional[List[int]] = None,
         columnwise_scale_inv_offsets: Optional[List[int]] = None,
+        with_gemm_swizzled_scales: bool = False,
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
-        with_gemm_swizzled_scales: bool = False,
     ):
         if (
             shapes is not None
@@ -186,6 +186,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             dst.columnwise_scale_inv_offsets = src.columnwise_scale_inv_offsets
             dst.logical_shape = src.logical_shape
             dst.quantized_tensors = src.quantized_tensors
+            dst.with_gemm_swizzled_scales = src.with_gemm_swizzled_scales
 
         def make_wrapper_like(src: GroupedTensor, requires_grad: bool) -> GroupedTensor:
             """Create a wrapper of the same type and tensor metadata as src."""

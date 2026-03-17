@@ -285,6 +285,9 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
   bool with_gemm_swizzled = false;
   if (py::hasattr(tensor, "_with_gemm_swizzled_scales")) {
     with_gemm_swizzled = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
+  } else if (py::hasattr(tensor, "with_gemm_swizzled_scales") &&
+             !tensor.attr("with_gemm_swizzled_scales").is_none()) {
+    with_gemm_swizzled = tensor.attr("with_gemm_swizzled_scales").cast<bool>();
   }
   ret.set_with_gemm_swizzled_scales(with_gemm_swizzled);
 

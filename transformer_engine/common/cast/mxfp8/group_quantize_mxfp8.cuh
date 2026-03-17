@@ -810,8 +810,8 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
   }
 
-  // Treat a grouped tensor with const last dims as a single tensor
-  const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
+  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
+  const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS) || (shape_rep == VARYING_FIRST_DIM);
 
   NVTE_CHECK(input->num_tensors == output->num_tensors,
              "Number of input and output tensors must be same.");
@@ -847,8 +847,6 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   }
   const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = THREADS_PER_CHUNK;
-
-  const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
 
   // Logical shape of a tensor with varying all dims is [1, M*K]
   if (shape_rep != ShapeRepresentation::VARYING_BOTH_DIMS) {

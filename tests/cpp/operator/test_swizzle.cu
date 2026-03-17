@@ -110,6 +110,76 @@ void performTestSwizzle1D(const int num_tiles_M, const int num_tiles_K, bool row
   }
 }
 
+void performTestGroupedSwizzleMXFP8(const int num_tensors, const size_t M, const size_t K) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  std::vector<std::unique_ptr<Tensor>> input_tensors;
+  std::vector<std::unique_ptr<Tensor>> output_tensors;
+  std::vector<Tensor*> input_ptrs;
+  std::vector<Tensor*> output_ptrs;
+  input_tensors.reserve(num_tensors);
+  output_tensors.reserve(num_tensors);
+  input_ptrs.reserve(num_tensors);
+  output_ptrs.reserve(num_tensors);
+
+  const std::vector<size_t> shape{M, K};
+  for (int i = 0; i < num_tensors; ++i) {
+    auto input = std::make_unique<Tensor>("input_" + std::to_string(i), shape,
+                                          DType::kFloat8E4M3, true, true,
+                                          NVTE_MXFP8_1D_SCALING);
+    auto output = std::make_unique<Tensor>("output_" + std::to_string(i), shape,
+                                           DType::kFloat8E4M3, true, true,
+                                           NVTE_MXFP8_1D_SCALING);
+    fillUniform(input.get());
+    fillUniform(output.get());
+    input_ptrs.push_back(input.get());
+    output_ptrs.push_back(output.get());
+    input_tensors.emplace_back(std::move(input));
+    output_tensors.emplace_back(std::move(output));
+  }
+
+  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING);
+  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING);
+  nvte_set_grouped_tensor_swizzled_scales(grouped_input.get_handle(), 0);
+  nvte_set_grouped_tensor_swizzled_scales(grouped_output.get_handle(), 1);
+
+  const NVTEShape row_shape = input_tensors[0]->rowwise_scale_inv_shape();
+  const NVTEShape col_shape = input_tensors[0]->columnwise_scale_inv_shape();
+  const size_t row_numel = row_shape.data[0] * row_shape.data[1];
+  const size_t col_numel = col_shape.data[0] * col_shape.data[1];
+
+  NVTE_CHECK_CUDA(cudaMemset(grouped_output.scale_inv.get(), 0, num_tensors * row_numel));
+  NVTE_CHECK_CUDA(cudaMemset(grouped_output.columnwise_scale_inv.get(), 0, num_tensors * col_numel));
+
+  nvte_swizzle_grouped_scaling_factors(grouped_input.get_handle(),
+                                       grouped_output.get_handle(), 0);
+
+  std::vector<uint8_t> output_row(num_tensors * row_numel);
+  std::vector<uint8_t> output_col(num_tensors * col_numel);
+  NVTE_CHECK_CUDA(cudaMemcpy(output_row.data(), grouped_output.scale_inv.get(),
+                             output_row.size(), cudaMemcpyDeviceToHost));
+  NVTE_CHECK_CUDA(cudaMemcpy(output_col.data(), grouped_output.columnwise_scale_inv.get(),
+                             output_col.size(), cudaMemcpyDeviceToHost));
+
+  std::vector<uint8_t> ref_row(num_tensors * row_numel);
+  std::vector<uint8_t> ref_col(num_tensors * col_numel);
+  for (int i = 0; i < num_tensors; ++i) {
+    compute_ref_swizzle<128, 4, true>(input_tensors[i]->rowwise_cpu_scale_inv_ptr<uint8_t>(),
+                                      ref_row.data() + i * row_numel,
+                                      row_shape.data[0], row_shape.data[1]);
+    compute_ref_swizzle<128, 4, false>(
+        input_tensors[i]->columnwise_cpu_scale_inv_ptr<uint8_t>(),
+        ref_col.data() + i * col_numel,
+        col_shape.data[1], col_shape.data[0]);
+  }
+
+  compareResults("grouped_swizzle_rowwise", output_row.data(), ref_row.data(),
+                 num_tensors * row_numel);
+  compareResults("grouped_swizzle_colwise", output_col.data(), ref_col.data(),
+                 num_tensors * col_numel);
+}
+
 class SwizzleTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool>> {};
 
 
@@ -124,6 +194,10 @@ TEST_P(SwizzleTestSuite, TestSwizzle) {
   performTestSwizzle1D(num_tiles.first, num_tiles.second,
                        scaling_mode.first, scaling_mode.second,
                        transa);
+}
+
+TEST(SwizzleGroupedTestSuite, TestGroupedSwizzleMXFP8) {
+  performTestGroupedSwizzleMXFP8(3, 256, 256);
 }
 
 namespace {

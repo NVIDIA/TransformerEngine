@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import functools
+import gc
 import io
 import math
 import random
@@ -18,6 +19,7 @@ import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
+
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
     BackwardAddRMSNorm,
@@ -3236,6 +3238,8 @@ class TestSequentialModules:
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("single_grouped_parameter", (False, True))
+    @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     def test_grouped_mlp(
         self,
@@ -3245,6 +3249,8 @@ class TestSequentialModules:
         hidden_size: int = 256,
         dtype: torch.dtype,
         quantization: Optional[str],
+        single_grouped_parameter: bool,
+        accumulate_into_main_grad: bool,
         device: torch.device = "cuda",
         split_alignment: int = 256,
         glu_interleave_size: Optional[int],
@@ -3252,7 +3258,7 @@ class TestSequentialModules:
         """GroupedLinear + ScaledSwiGLU + GroupedLinear"""
 
         # Split sizes
-        split_sizes = [split_alignment * i for i in range(group_size)]
+        split_sizes = [split_alignment * (i) for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int, device=device)
 
@@ -3263,6 +3269,8 @@ class TestSequentialModules:
         # Skip invalid configurations
         with_quantization = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        if single_grouped_parameter and quantization != "mxfp8":
+            pytest.skip("single_grouped_parameter is only supported for MXFP8 quantization")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
 
@@ -3370,6 +3378,8 @@ class TestSequentialModules:
                 bias=bias,
                 device=device,
                 dtype=dtype,
+                single_grouped_parameter=single_grouped_parameter,
+                accumulate_into_main_grad=accumulate_into_main_grad,
             )
             fc2 = te_ops.GroupedLinear(
                 group_size,
@@ -3378,6 +3388,8 @@ class TestSequentialModules:
                 bias=bias,
                 device=device,
                 dtype=dtype,
+                single_grouped_parameter=single_grouped_parameter,
+                accumulate_into_main_grad=accumulate_into_main_grad,
             )
             module = te_ops.Sequential(
                 fc1,
@@ -3387,18 +3399,79 @@ class TestSequentialModules:
 
         # Copy weights
         with torch.no_grad():
+            if single_grouped_parameter:
+                fc1_weights = fc1.weight.quantized_tensors
+                if fc1_weights is None:
+                    fc1_weights = fc1.weight.split_into_quantized_tensors()
+                fc2_weights = fc2.weight.quantized_tensors
+                if fc2_weights is None:
+                    fc2_weights = fc2.weight.split_into_quantized_tensors()
             for group_idx in range(group_size):
-                getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_test[group_idx])
-                getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_test[group_idx])
+                if single_grouped_parameter:
+                    fc1_weights[group_idx].copy_(fc1_ws_test[group_idx])
+                    fc2_weights[group_idx].copy_(fc2_ws_test[group_idx])
+                else:
+                    getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_test[group_idx])
+                    getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_test[group_idx])
                 if bias:
                     getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_test[group_idx])
                     getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_test[group_idx])
+            if accumulate_into_main_grad:
+                if single_grouped_parameter:
+                    fc1.weight.main_grad = torch.full(
+                        fc1.weight.size(),
+                        0.5,
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    fc2.weight.main_grad = torch.full(
+                        fc2.weight.size(),
+                        0.5,
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                else:
+                    for group_idx in range(group_size):
+                        getattr(fc1, f"weight{group_idx}").main_grad = torch.full(
+                            getattr(fc1, f"weight{group_idx}").size(),
+                            0.5,
+                            device=device,
+                            dtype=torch.float32,
+                        )
+                        getattr(fc2, f"weight{group_idx}").main_grad = torch.full(
+                            getattr(fc2, f"weight{group_idx}").size(),
+                            0.5,
+                            device=device,
+                            dtype=torch.float32,
+                        )
         del fc1_ws_test, fc1_bs_test, fc2_ws_test, fc2_bs_test
 
         # Fuse ops and perform forward and backward pass
         with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = module(x_test, split_sizes, probs_test, split_sizes)
         y_test.backward(dy_test)
+
+        # Check for expected fusions
+        if (
+            quantization == "mxfp8"
+            and dtype in (torch.bfloat16, torch.float16)
+            and not bias
+            and glu_interleave_size == 32
+        ):
+            assert te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported()
+            assert te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported()
+            forward_ops = module._module_groups[0]._forward_ops
+            backward_ops = module._module_groups[0]._backward_ops
+            assert len(forward_ops) == 1
+            assert isinstance(
+                forward_ops[0][0],
+                te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+            )
+            assert len(backward_ops) == 1
+            assert isinstance(
+                backward_ops[0][0],
+                te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
+            )
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
@@ -3410,10 +3483,280 @@ class TestSequentialModules:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(probs_test, probs_ref, **tols)
         for group_idx in range(group_size):
-            assert_close_grads(getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols)
             assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
-            assert_close_grads(getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols)
             assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
+            if not single_grouped_parameter and not accumulate_into_main_grad:
+                assert_close_grads(
+                    getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols
+                )
+                assert_close_grads(
+                    getattr(fc1, f"weight{group_idx}"), fc1_ws_ref[group_idx], **tols
+                )
+        fc1_w_ref_grad = torch.stack([w.grad for w in fc1_ws_ref], dim=0)
+        fc2_w_ref_grad = torch.stack([w.grad for w in fc2_ws_ref], dim=0)
+        if accumulate_into_main_grad:
+            if single_grouped_parameter:
+                fc1_w_test_grad = fc1.weight.main_grad.to(dtype=torch.float64, device="cpu") - 0.5
+                fc2_w_test_grad = fc2.weight.main_grad.to(dtype=torch.float64, device="cpu") - 0.5
+            else:
+                fc1_w_test_grad = torch.stack(
+                    [
+                        getattr(fc1, f"weight{group_idx}").main_grad.to(
+                            dtype=torch.float64, device="cpu"
+                        )
+                        - 0.5
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+                fc2_w_test_grad = torch.stack(
+                    [
+                        getattr(fc2, f"weight{group_idx}").main_grad.to(
+                            dtype=torch.float64, device="cpu"
+                        )
+                        - 0.5
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+            assert_close(fc1_w_test_grad, fc1_w_ref_grad, **tols)
+            assert_close(fc2_w_test_grad, fc2_w_ref_grad, **tols)
+        elif single_grouped_parameter:
+            assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
+            assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
+
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("single_grouped_parameter", (False, True))
+    @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_grouped_mlp_cuda_graph_safe_mxfp8(
+        self,
+        *,
+        dtype: torch.dtype,
+        single_grouped_parameter: bool,
+        accumulate_into_main_grad: bool,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+        glu_interleave_size: int = 32,
+    ) -> None:
+        """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
+
+        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+        if dtype not in (torch.bfloat16, torch.float16):
+            pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
+
+        split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
+        in_shape = (split_sizes.sum().item(), hidden_size)
+
+        recipe = make_recipe("mxfp8")
+        with te.quantized_model_init(enabled=True, recipe=recipe):
+            fc1 = te_ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                2 * hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                single_grouped_parameter=single_grouped_parameter,
+                accumulate_into_main_grad=accumulate_into_main_grad,
+            )
+            fc2 = te_ops.GroupedLinear(
+                group_size,
+                hidden_size,
+                hidden_size,
+                bias=False,
+                device=device,
+                dtype=dtype,
+                single_grouped_parameter=single_grouped_parameter,
+                accumulate_into_main_grad=accumulate_into_main_grad,
+            )
+            module = te_ops.Sequential(
+                fc1,
+                te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size),
+                fc2,
+            )
+
+        def _init_main_grads(value: float = 0.0) -> None:
+            if not accumulate_into_main_grad:
+                return
+            with torch.no_grad():
+                if single_grouped_parameter:
+                    if getattr(fc1.weight, "main_grad", None) is None:
+                        fc1.weight.main_grad = torch.empty(
+                            fc1.weight.size(),
+                            device=device,
+                            dtype=torch.float32,
+                        )
+                    if getattr(fc2.weight, "main_grad", None) is None:
+                        fc2.weight.main_grad = torch.empty(
+                            fc2.weight.size(),
+                            device=device,
+                            dtype=torch.float32,
+                        )
+                    fc1.weight.main_grad.fill_(value)
+                    fc2.weight.main_grad.fill_(value)
+                else:
+                    for group_idx in range(group_size):
+                        fc1_weight = getattr(fc1, f"weight{group_idx}")
+                        fc2_weight = getattr(fc2, f"weight{group_idx}")
+                        if getattr(fc1_weight, "main_grad", None) is None:
+                            fc1_weight.main_grad = torch.empty(
+                                fc1_weight.size(),
+                                device=device,
+                                dtype=torch.float32,
+                            )
+                        if getattr(fc2_weight, "main_grad", None) is None:
+                            fc2_weight.main_grad = torch.empty(
+                                fc2_weight.size(),
+                                device=device,
+                                dtype=torch.float32,
+                            )
+                        fc1_weight.main_grad.fill_(value)
+                        fc2_weight.main_grad.fill_(value)
+
+        def _collect_main_grads() -> tuple[torch.Tensor, torch.Tensor]:
+            if single_grouped_parameter:
+                fc1_main_grad = fc1.weight.main_grad.detach().clone()
+                fc2_main_grad = fc2.weight.main_grad.detach().clone()
+            else:
+                fc1_main_grad = torch.stack(
+                    [
+                        getattr(fc1, f"weight{group_idx}").main_grad.detach().clone()
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+                fc2_main_grad = torch.stack(
+                    [
+                        getattr(fc2, f"weight{group_idx}").main_grad.detach().clone()
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+            return fc1_main_grad, fc2_main_grad
+
+        static_split_sizes = split_sizes.clone()
+
+        def train_step(
+            x: torch.Tensor,
+            probs: torch.Tensor,
+            dy: torch.Tensor,
+            out_buf: torch.Tensor,
+            *,
+            use_graphed: bool,
+        ) -> torch.Tensor:
+            with te.autocast(enabled=True, recipe=recipe):
+                out = (
+                    graphed_module(x, static_split_sizes, probs, static_split_sizes)
+                    if use_graphed
+                    else module(x, static_split_sizes, probs, static_split_sizes)
+                )
+            out.backward(dy)
+            out_buf.copy_(out)
+            return out_buf
+
+        # Warmup to initialize kernels and allocator state.
+        _init_main_grads(0.0)
+        warmup_x = torch.randn(in_shape, device=device, dtype=dtype, requires_grad=True)
+        warmup_probs = torch.randn((in_shape[0],), device=device, dtype=dtype, requires_grad=True)
+        warmup_dy = torch.randn(in_shape, device=device, dtype=dtype)
+        warmup_out = torch.empty((in_shape[0], hidden_size), device=device, dtype=dtype)
+        # Single forward+backward to initialize MXFP8 grad cache.
+        train_step(warmup_x, warmup_probs, warmup_dy, warmup_out, use_graphed=False)
+        # Clear warmup graph references before capture.
+        del warmup_out, warmup_x, warmup_probs, warmup_dy
+        gc.collect()
+        torch.cuda.synchronize()
+
+        static_x = torch.randn(in_shape, device=device, dtype=dtype, requires_grad=True)
+        static_probs = torch.randn((in_shape[0],), device=device, dtype=dtype, requires_grad=True)
+        static_dy = torch.randn(in_shape, device=device, dtype=dtype)
+        static_out_buf = torch.empty((in_shape[0], hidden_size), device=device, dtype=dtype)
+
+        forward_ops = module._module_groups[0]._forward_ops
+        backward_ops = module._module_groups[0]._backward_ops
+        assert len(forward_ops) == 1
+        assert isinstance(
+            forward_ops[0][0],
+            te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+        )
+        assert len(backward_ops) == 1
+        assert isinstance(
+            backward_ops[0][0],
+            te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
+        )
+
+        graphed_module = te.make_graphed_callables(
+            module,
+            (static_x, static_split_sizes, static_probs, static_split_sizes),
+            num_warmup_iters=3,
+            enabled=True,
+            recipe=recipe,
+        )
+
+        fresh_x = torch.randn_like(static_x)
+        fresh_probs = torch.randn_like(static_probs)
+        fresh_dy = torch.randn_like(static_dy)
+        with torch.no_grad():
+            static_x.copy_(fresh_x)
+            static_probs.copy_(fresh_probs)
+            static_dy.copy_(fresh_dy)
+
+        for param in module.parameters():
+            param.grad = torch.zeros_like(param)
+        _init_main_grads(0.5)
+        if static_x.grad is not None:
+            static_x.grad.zero_()
+        if static_probs.grad is not None:
+            static_probs.grad.zero_()
+
+        graph_out = (
+            train_step(static_x, static_probs, static_dy, static_out_buf, use_graphed=True)
+            .detach()
+            .clone()
+        )
+        torch.cuda.synchronize()
+        graph_dx = static_x.grad.detach().clone()
+        graph_dprobs = static_probs.grad.detach().clone()
+        if accumulate_into_main_grad:
+            graph_fc1_main_grad, graph_fc2_main_grad = _collect_main_grads()
+        else:
+            graph_param_grads = [param.grad.detach().clone() for param in module.parameters()]
+
+        for param in module.parameters():
+            param.grad.zero_()
+        _init_main_grads(0.5)
+        static_x.grad.zero_()
+        static_probs.grad.zero_()
+
+        expected_x = fresh_x.detach().clone().requires_grad_(True)
+        expected_probs = fresh_probs.detach().clone().requires_grad_(True)
+        expected_dy = fresh_dy.detach().clone()
+        with te.autocast(enabled=True, recipe=recipe):
+            expected_out = module(
+                expected_x,
+                static_split_sizes,
+                expected_probs,
+                static_split_sizes,
+            )
+        expected_out.backward(expected_dy)
+
+        tols = dtype_tols(dtype)
+        assert_close(graph_out, expected_out, **tols)
+        assert_close(graph_dx, expected_x.grad, **tols)
+        assert_close(graph_dprobs, expected_probs.grad, **tols)
+        if accumulate_into_main_grad:
+            expected_fc1_main_grad, expected_fc2_main_grad = _collect_main_grads()
+            assert_close(graph_fc1_main_grad, expected_fc1_main_grad, **tols)
+            assert_close(graph_fc2_main_grad, expected_fc2_main_grad, **tols)
+        else:
+            for graph_grad, param in zip(graph_param_grads, module.parameters()):
+                assert_close(graph_grad, param.grad, **tols)
 
 
 class TestCustomOps:

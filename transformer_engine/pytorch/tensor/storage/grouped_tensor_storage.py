@@ -69,9 +69,9 @@ class GroupedTensorStorage:
         offsets: Optional[List[int]] = None,
         scale_inv_offsets: Optional[List[int]] = None,
         columnwise_scale_inv_offsets: Optional[List[int]] = None,
+        with_gemm_swizzled_scales: bool = False,
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
-        with_gemm_swizzled_scales: bool = False,
     ) -> None:
         """
         Initialize a GroupedTensor.
@@ -147,6 +147,8 @@ class GroupedTensorStorage:
         instance.quantized_tensors = None
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
+        instance.with_gemm_swizzled_scales = with_gemm_swizzled_scales
+
     def __new__(
         cls,
         shape: Tuple[int, int],
@@ -168,9 +170,9 @@ class GroupedTensorStorage:
         offsets: Optional[List[int]] = None,
         scale_inv_offsets: Optional[List[int]] = None,
         columnwise_scale_inv_offsets: Optional[List[int]] = None,
+        with_gemm_swizzled_scales: bool = False,
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
-        with_gemm_swizzled_scales: bool = False,
     ):
         instance = object.__new__(cls)
         cls._initialize_storage_fields(
@@ -193,11 +195,13 @@ class GroupedTensorStorage:
             offsets=offsets,
             scale_inv_offsets=scale_inv_offsets,
             columnwise_scale_inv_offsets=columnwise_scale_inv_offsets,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
             requires_grad=requires_grad,
             stride=stride,
-            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         )
         return instance
+
+        self.with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
     def has_data(self) -> bool:
         """
@@ -384,6 +388,78 @@ class GroupedTensorStorage:
         )
 
     @staticmethod
+    def make_grouped_tensor_from_rowwise_data(
+        *,
+        num_tensors: int,
+        tensor_shape: Tuple[int, int],
+        rowwise_data: torch.Tensor,
+        dtype: Optional[torch.dtype] = None,
+        internal: bool = False,
+    ) -> GroupedTensorStorage:
+        """Wrap pre-existing contiguous rowwise data as a grouped tensor.
+
+        This helper does not allocate storage. It creates grouped metadata over
+        `rowwise_data`, which is expected to contain `num_tensors` matrices of
+        shape `tensor_shape` in packed contiguous layout.
+        """
+        if num_tensors <= 0:
+            raise ValueError(f"num_tensors must be positive, got {num_tensors}")
+        if rowwise_data is None:
+            raise ValueError("rowwise_data must not be None")
+        if not rowwise_data.is_contiguous():
+            rowwise_data = rowwise_data.contiguous()
+
+        rows, cols = tensor_shape
+        expected_numel = num_tensors * rows * cols
+        if rowwise_data.numel() != expected_numel:
+            raise ValueError(
+                "Grouped rowwise buffer size mismatch: expected "
+                f"{expected_numel} elements for {num_tensors}x{tensor_shape}, "
+                f"but got {rowwise_data.numel()}"
+            )
+        if dtype is None:
+            dtype = rowwise_data.dtype
+
+        logical_shape = (num_tensors * rows, cols)
+        grouped_tensor_class = GroupedTensorStorage
+        if not internal:
+            from ..grouped_tensor import GroupedTensor
+
+            grouped_tensor_class = GroupedTensor
+
+        return grouped_tensor_class(
+            shape=logical_shape,
+            dtype=dtype,
+            num_tensors=num_tensors,
+            shapes=[tensor_shape] * num_tensors,
+            quantizer=None,
+            data=rowwise_data.view(-1),
+            columnwise_data=None,
+            scale_inv=None,
+            columnwise_scale_inv=None,
+            amax=None,
+            columnwise_amax=None,
+            scale=None,
+            first_dims=None,
+            last_dims=None,
+            tensor_offsets=None,
+            offsets=None,
+            scale_inv_offsets=None,
+            columnwise_scale_inv_offsets=None,
+            with_gemm_swizzled_scales=False,
+            requires_grad=False,
+        )
+
+    @staticmethod
+    def make_tensor_offsets(first_dims: torch.Tensor, logical_last_dim: int) -> torch.Tensor:
+        return torch.cat(
+            [
+                torch.zeros(1, device=first_dims.device, dtype=first_dims.dtype),
+                torch.cumsum(first_dims * logical_last_dim, dim=0),
+            ]
+        )
+
+    @staticmethod
     def make_grouped_tensor(
         num_tensors: int,
         first_dims: Optional[torch.Tensor],
@@ -439,16 +515,20 @@ class GroupedTensorStorage:
             # Kernels need to calculate precise pointers based on size of elements.
 
             # TODO(ksivaman): Single kernel + remove the host offset calculation.
-            tensor_offsets = torch.cat(
-                [
-                    torch.zeros(1, device=first_dims.device, dtype=first_dims.dtype),
-                    torch.cumsum(first_dims * logical_last_dim, dim=0),
-                ]
-            )
-            offsets = tensor_offsets.tolist()
-            first_dims_list = first_dims.tolist()
-            for i in range(num_tensors):
-                shape.append((first_dims_list[i], logical_last_dim))
+            tensor_offsets = GroupedTensorStorage.make_tensor_offsets(first_dims, logical_last_dim)
+            if (
+                first_dims.device.type == "cuda"
+                and torch.cuda.is_available()
+                and torch.cuda.is_current_stream_capturing()
+            ):
+                # Avoid host sync during CUDA graph capture.
+                offsets = None
+                shape = None
+            else:
+                offsets = tensor_offsets.tolist()
+                first_dims_list = first_dims.tolist()
+                for i in range(num_tensors):
+                    shape.append((first_dims_list[i], logical_last_dim))
         else:
             offsets = [
                 i * logical_first_dim * logical_last_dim // num_tensors
@@ -464,7 +544,7 @@ class GroupedTensorStorage:
 
         rowwise_usage = quantizer.rowwise_usage if not no_quantization else True
         columnwise_usage = quantizer.columnwise_usage if not no_quantization else False
-
+        with_gemm_swizzled_scales = quantizer.optimize_for_gemm if not no_quantization else False
         # Calculate total elements across all tensors
         total_elements = logical_first_dim * logical_last_dim
 
@@ -477,6 +557,11 @@ class GroupedTensorStorage:
         scale = None
         scale_inv_offsets = None
         columnwise_scale_inv_offsets = None
+        if shape is None and not no_quantization:
+            raise RuntimeError(
+                "Cannot materialize quantized GroupedTensor with varying first dims "
+                "during CUDA graph capture."
+            )
         if no_quantization:
             assert dtype is not None, "dtype must be provided for unquantized GroupedTensor"
             if rowwise_usage:
@@ -508,7 +593,7 @@ class GroupedTensorStorage:
                 total_columnwise_scale_elements = 0
                 columnwise_scale_inv_offsets = [0]
                 for i, s in enumerate(shape):
-                    scale_inv_shape = quantizer.get_scale_shape(s, False)
+                    scale_inv_shape = quantizer.get_scale_shape(s, True)
                     columnwise_scale_elements = math.prod(scale_inv_shape)
                     total_columnwise_scale_elements += columnwise_scale_elements
                     columnwise_scale_inv_offsets.append(total_columnwise_scale_elements)
@@ -649,12 +734,11 @@ class GroupedTensorStorage:
             offsets=offsets,
             scale_inv_offsets=scale_inv_offsets,
             columnwise_scale_inv_offsets=columnwise_scale_inv_offsets,
-            with_gemm_swizzled_scales=(
-                quantizer.optimize_for_gemm if quantizer is not None else False
-            ),
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         )
 
-        grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()
+        if grouped_tensor.shape is not None:
+            grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()
         return grouped_tensor
 
     def split_into_quantized_tensors(
@@ -674,7 +758,6 @@ class GroupedTensorStorage:
         TODO(ksivaman): Block cases where any dims are varying. This is needed only
         to expose the weights as separate parameters.
         """
-
         result = []
 
         no_quantization = self.quantizer is None
