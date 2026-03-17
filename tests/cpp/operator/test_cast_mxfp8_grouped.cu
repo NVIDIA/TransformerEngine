@@ -58,7 +58,8 @@ void compute_ref(const ProcessingMethod processing_method,
                  const size_t rows,
                  const size_t cols,
                  const size_t scales_stride_rowwise,
-                 const size_t scales_stride_colwise)
+                 const size_t scales_stride_colwise,
+                 const bool use_fast_math)
 {
     const size_t tile_size_Y = 32;
     const size_t tile_size_X = 32;
@@ -129,7 +130,10 @@ void compute_ref(const ProcessingMethod processing_method,
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
                     const size_t scale_idx = i * scales_stride_rowwise + tile_X;
                     output_scales_rowwise[scale_idx] = biased_exponent;
-                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
+                    float scale_reciprocal = exp2f_rcp(biased_exponent);
+                    if (use_fast_math) {
+                        scale_reciprocal = static_cast<float>(static_cast<InputType>(scale_reciprocal));
+                    }
 
                     for (size_t j = j_min; j < j_max; ++j) {
                         const size_t idx = i * cols + j;
@@ -150,7 +154,10 @@ void compute_ref(const ProcessingMethod processing_method,
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
                     const size_t scale_idx = tile_Y * scales_stride_colwise + j;
                     output_scales_colwise[scale_idx] = biased_exponent;
-                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
+                    float scale_reciprocal = exp2f_rcp(biased_exponent);
+                    if (use_fast_math) {
+                        scale_reciprocal = static_cast<float>(static_cast<InputType>(scale_reciprocal));
+                    }
 
                     for (size_t i = i_min; i < i_max; ++i) {
                         const size_t idx = i * cols + j;
@@ -497,7 +504,8 @@ void performTest(const ProcessingMethod processing_method,
             out_scales_rowwise_ptr, out_scales_colwise_ptr,
             ref_output_dbias_ptr, M, K,
             scales_stride_rowwise,
-            scales_stride_colwise);
+            scales_stride_colwise,
+            use_fast_math);
     }
 
     QuantizationConfigWrapper quant_config;
