@@ -10,7 +10,11 @@ from typing import Any, Dict, Optional
 import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from .quantized_tensor import QuantizedTensorStorage
+from .quantized_tensor import (
+    QuantizedTensorStorage,
+    prepare_for_saving,
+    restore_from_saved,
+)
 from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]
@@ -44,6 +48,15 @@ def is_cpu_offload_enabled() -> bool:
     """Check if CPU offloading is currently enabled."""
     return CPUOffloadEnabled
 
+def mark_not_offload(*tensors: torch.Tensor):
+    """Marks tensors to prevent them from being offloaded."""
+    tensors, tensor_obj = prepare_for_saving(*tensors)
+
+    for tensor in tensors:
+        if tensor is not None:
+            setattr(tensor, "_TE_do_not_offload", True)
+
+    restore_from_saved(tensor_obj, tensors)
 
 def is_current_layer_offloaded() -> bool:
     """Check if current layers is being offloaded."""
