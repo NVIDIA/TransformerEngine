@@ -2861,10 +2861,13 @@ def _make_grouped_tensor_uniform(
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
 def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> None:
+    if torch.cuda.get_device_capability() >= (9, 0) and torch.cuda.get_device_capability() < (10, 0):
+        if tex.get_cublasLt_version() < 130400:
+            pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
+    elif torch.cuda.get_device_capability() < (9, 0):
+        pytest.skip("Grouped GEMM requires Hopper (SM90) or newer.")
     if tex.get_cublasLt_version() < 130200:
         pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
-    if torch.cuda.get_device_capability() < (10, 0):
-        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 

@@ -558,7 +558,6 @@ NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor)
  */
 NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
 
-
 #ifdef __cplusplus
 }  // extern "C"
 

@@ -274,6 +274,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
         "Split and multi-tensor quantize", py::arg("tensor"), py::arg("split_sections"),
         py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false);
+  m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size,
+        "Required workspace size for grouped GEMM setup");
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
   m.def("te_general_grouped_gemm_for_grouped_tensor",

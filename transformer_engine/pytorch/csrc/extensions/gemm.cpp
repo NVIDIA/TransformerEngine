@@ -90,10 +90,14 @@ GroupedGemmConfig prepare_grouped_gemm_config(at::Tensor alpha, at::Tensor beta,
                                               at::Tensor workspace_setup,
                                               at::Tensor workspace_cublas, size_t num_tensors,
                                               int math_sm_count, bool use_split_accumulator) {
-  NVTE_CHECK(alpha.numel() == static_cast<int64_t>(num_tensors),
-             "Grouped GEMM expects alpha to have num_tensors elements.");
-  NVTE_CHECK(beta.numel() == static_cast<int64_t>(num_tensors),
-             "Grouped GEMM expects beta to have num_tensors elements.");
+  const bool per_group = (alpha.numel() == static_cast<int64_t>(num_tensors));
+  const bool scalar = (alpha.numel() == 1);
+  NVTE_CHECK(per_group || scalar,
+             "Grouped GEMM expects alpha to have 1 or num_tensors (", num_tensors,
+             ") elements, got ", alpha.numel());
+  NVTE_CHECK(beta.numel() == alpha.numel(),
+             "Grouped GEMM expects beta to have the same number of elements as alpha (",
+             alpha.numel(), "), got ", beta.numel());
 
   GroupedGemmConfig grouped_gemm_config{
       makeTransformerEngineTensor(alpha),
