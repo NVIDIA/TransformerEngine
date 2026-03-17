@@ -93,7 +93,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
   # Clear PIDs array for this test case
   PIDS=()
 
-  BACKENDS=("userbuffers", "cublasmp")
+  BACKENDS=("cublasmp" "userbuffers")
   for BACKEND in "${BACKENDS[@]}"; do
     echo "Setting backend to $BACKEND for test $TEST_NAME"
 
@@ -101,33 +101,28 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
       # Define output file for logs
       LOG_FILE="${TEST_NAME}_gpu_${i}_${BACKEND}.log"
 
-      pytest_args=(
-        "-s"
-        "-c $TE_PATH/tests/jax/pytest.ini"
-        "-vs"
-      )
-      if [ "$BACKEND" == "cublasmp" ]; then
-        pytest_args+=("--use-cublasmp")
-      fi
-
-      test_case_args=(
+      test_args=(
         "--num-processes=$NUM_GPUS"
         "--process-id=$i"
       )
+      if [ "$BACKEND" == "cublasmp" ]; then
+        test_args+=("--use-cublasmp")
+      fi
+
       if [ $i -eq 0 ]; then
         # For process 0: show live output AND save to log file using tee
         echo "=== Live output from process 0 ==="
-        pytest_args+=("--junitxml=${XML_LOG_DIR}/${TEST_NAME}_gpu_${i}_${BACKEND}.xml")
-        pytest "${pytest_args[@]}" \
-          "$TE_PATH/examples/jax/collective_gemm/$TEST_CASE" \
-          "${test_case_args[@]}" 2>&1 | tee "$LOG_FILE" &
+        pytest -s -c "${TE_PATH}/tests/jax/pytest.ini" -vs \
+          "--junitxml=${XML_LOG_DIR}/${TEST_NAME}_gpu_${i}_${BACKEND}.xml" \
+          "${TE_PATH}/examples/jax/collective_gemm/${TEST_CASE}" \
+          "${test_args[@]}" 2>&1 | tee "$LOG_FILE" &
         PID=$!
         PIDS+=($PID)
       else
         # For other processes: redirect to log files only
-        pytest "${pytest_args[@]}" \
-          "$TE_PATH/examples/jax/collective_gemm/$TEST_CASE" \
-          "${test_case_args[@]}" > "$LOG_FILE" 2>&1 &
+        pytest -s -c "${TE_PATH}/tests/jax/pytest.ini" -vs \
+          "${TE_PATH}/examples/jax/collective_gemm/${TEST_CASE}" \
+          "${test_args[@]}" > "$LOG_FILE" 2>&1 &
         PID=$!
         PIDS+=($PID)
       fi
