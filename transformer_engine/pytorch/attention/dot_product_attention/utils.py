@@ -1093,7 +1093,7 @@ def get_attention_backend(
         if (
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and is_training
-            and cudnn_version >= (9, 7)
+            and cudnn_version >= (9, 7, 0)
             and cudnn_version < (9, 18, 1)
             and device_compute_capability >= (10, 0)
         ):
