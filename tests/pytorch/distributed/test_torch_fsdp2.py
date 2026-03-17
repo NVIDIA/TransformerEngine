@@ -41,7 +41,7 @@ _FP8_RECIPE_CONFIGS = [
 
 
 def _parametrize_fp8_recipes():
-    """Generate pytest.param objects with xfail marks for unsupported FP8 recipes."""
+    """Generate pytest.param objects with skip marks for unsupported FP8 recipes."""
     params = []
     for name, check_fn in _FP8_RECIPE_CONFIGS:
         supported, reason = check_fn()
@@ -49,7 +49,7 @@ def _parametrize_fp8_recipes():
             pytest.param(
                 name,
                 id=name,
-                marks=pytest.mark.xfail(condition=not supported, reason=reason),
+                marks=pytest.mark.skipif(not supported, reason=reason),
             )
         )
     return params
@@ -115,13 +115,32 @@ def _run_fused_adam_test(test_name, recipe="delayed_scaling"):
 
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
 def test_fsdp2_fused_adam_fp8_master_weights(fp_recipe):
-    """FusedAdam(master_weights=True) + FSDP2 + quantized_model_init."""
-    if fp_recipe in ("Float8BlockScaling", "MXFP8BlockScaling", "NVFP4BlockScaling"):
+    """FusedAdam(master_weights=True) + FSDP2 + quantized_model_init (meta device init)."""
+    if fp_recipe in ("NVFP4BlockScaling",):
         pytest.xfail(
             f"{fp_recipe}: quantized_model_init and FSDP2 is not currently supported, since the "
             "block tensor is dequantized before we flatten it for FSDP2."
         )
     _run_fused_adam_test("fused_adam_fp8_master_weights", fp_recipe)
+
+
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
+def test_fsdp2_fused_adam_fp8_master_weights_no_meta(fp_recipe):
+    """FusedAdam(master_weights=True) + FSDP2 + quantized_model_init (CUDA init, no meta device).
+
+    Block-scaling QuantizedTensors (MXFP8, Float8Blockwise, NVFP4) are wrapper
+    subclasses with data_ptr() == 0.  Without meta-device init, FSDP2's
+    reset_sharded_param() crashes with 'invalid python storage'.
+    Per-tensor FP8 (DelayedScaling, Float8CurrentScaling) works because
+    Float8Tensor's storage is accessible.
+    """
+    if fp_recipe in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
+        pytest.xfail(
+            f"{fp_recipe}: FSDP2 without meta-device init crashes on block-scaling "
+            "QuantizedTensor wrapper subclasses (data_ptr() == 0). "
+            "Use device='meta' + reset_parameters() after sharding."
+        )
+    _run_fused_adam_test("fused_adam_fp8_master_weights_no_meta", fp_recipe)
 
 
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
@@ -133,10 +152,10 @@ def test_fsdp2_fused_adam_bf16(fp_recipe):
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
 def test_fsdp2_fused_adam_fp8_no_master(fp_recipe):
     """FusedAdam(master_weights=False) + FSDP2 + FP8 params."""
-    if fp_recipe == "MXFP8BlockScaling":
+    if fp_recipe in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
         pytest.xfail(
-            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access"
+            f"{fp_recipe}: FusedAdam without master_weights does not support "
+            "block-scaling quantized tensors. Use master_weights=True."
         )
     _run_fused_adam_test("fused_adam_fp8_no_master", fp_recipe)
 
@@ -156,6 +175,12 @@ def test_fsdp2_dcp_output_parity(fp_recipe):
             "MXFP8 quantized tensors, causing illegal memory access"
         )
 
+    if fp_recipe == "NVFP4BlockScaling":
+        pytest.xfail(
+            "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
+            "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
+        )
+
     if fp_recipe == "Float8BlockScaling" and torch.cuda.get_device_capability()[0] == 12:
         pytest.xfail(
             "Float8BlockScaling is failing on SM120 with RuntimeError: "
@@ -171,16 +196,6 @@ def test_fsdp2_dcp_output_parity(fp_recipe):
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
 def test_fsdp2_dcp_output_parity_async(fp_recipe):
     """DCP save/load round-trip into a fresh model produces identical outputs."""
-    if fp_recipe in ("DelayedScaling", "Float8CurrentScaling"):
-        pytest.xfail(
-            f"async DCP save/load with {fp_recipe} uses StateDictStager._offload_tensor() which "
-            "tries to deep-copy the tensor's underlying storage. Float8Tensor is a wrapper subclass"
-            "(_make_wrapper_subclass) with data_ptr() == 0 (empty storage). The staging code at "
-            "line 215 skips the storage copy for wrapper subclasses, creating a plain tensor with "
-            "uninitialized garbage data. The actual FP8 data (in _data, _scale_inv attributes) is "
-            "deep-copied but ignored by DCP when writing."
-        )
-
     if fp_recipe == "MXFP8BlockScaling":
         pytest.xfail(
             "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
@@ -189,13 +204,18 @@ def test_fsdp2_dcp_output_parity_async(fp_recipe):
             "multi_tensor_apply: CUDA Error: an illegal memory access was encountered"
         )
 
-    if fp_recipe == "Float8BlockScaling" and torch.cuda.get_device_capability()[0] == 12:
+    if fp_recipe == "NVFP4BlockScaling":
         pytest.xfail(
-            "Float8BlockScaling is failing on SM120 with RuntimeError: "
-            "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu:534 "
-            "in function quantize_transpose_vector_blockwise: Assertion failed: pow2_scale. On "
-            "Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8, which "
-            "requires using power of two scaling factors."
+            "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
+            "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
+        )
+
+    if fp_recipe == "Float8BlockScaling":
+        pytest.xfail(
+            "Float8BlockScaling: async DCP save/load round-trip produces different model "
+            "outputs — quantization metadata (scales) is not correctly persisted through "
+            "async distributed checkpointing. On SM120, additionally fails with pow2_scale "
+            "assertion in quantize_transpose_vector_blockwise."
         )
 
     _run_fused_adam_test("dcp_output_parity_async", fp_recipe)

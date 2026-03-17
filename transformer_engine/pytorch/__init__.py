@@ -54,7 +54,11 @@ from transformer_engine.pytorch.utils import is_bf16_available
 from transformer_engine.pytorch.graph import make_graphed_callables
 from transformer_engine.pytorch.distributed import checkpoint
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context
+from transformer_engine.pytorch.cpu_offload import (
+    get_cpu_offload_context,
+    mark_not_offload,
+    ManualOffloadSynchronizer,
+)
 from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
