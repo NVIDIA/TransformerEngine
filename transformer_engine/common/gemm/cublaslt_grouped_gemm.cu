@@ -938,16 +938,13 @@ __global__ void setup_grouped_gemm_kernel(
   int64_t d_offset = compute_grouped_tensor_offset(D_meta, idx);
 
   // Compute data pointers
-  A_ptrs[idx] = has_a_multi_tensor
-                    ? a_multi_tensor_args.data_ptrs[idx]
-                    : (a_base ? (a_base + a_offset * a_elem_size) : nullptr);
+  A_ptrs[idx] = has_a_multi_tensor ? a_multi_tensor_args.data_ptrs[idx]
+                                   : (a_base ? (a_base + a_offset * a_elem_size) : nullptr);
   B_ptrs[idx] = b_base ? (b_base + b_offset * b_elem_size) : nullptr;
-  C_ptrs[idx] = has_c_multi_tensor
-                    ? c_multi_tensor_args.data_ptrs[idx]
-                    : (c_base ? (c_base + c_offset * c_elem_size) : nullptr);
-  D_ptrs[idx] = has_d_multi_tensor
-                    ? d_multi_tensor_args.data_ptrs[idx]
-                    : (d_base ? (d_base + d_offset * d_elem_size) : nullptr);
+  C_ptrs[idx] = has_c_multi_tensor ? c_multi_tensor_args.data_ptrs[idx]
+                                   : (c_base ? (c_base + c_offset * c_elem_size) : nullptr);
+  D_ptrs[idx] = has_d_multi_tensor ? d_multi_tensor_args.data_ptrs[idx]
+                                   : (d_base ? (d_base + d_offset * d_elem_size) : nullptr);
 
   // Compute storage dimensions for cuBLAS matrix layouts.
   // For INPUTS (A, B): Row-wise storage is seen as transposed column-major by cuBLAS,
