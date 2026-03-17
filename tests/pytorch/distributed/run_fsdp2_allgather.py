@@ -32,9 +32,9 @@ LOCAL_RANK = None
 
 # Fixed model dimensions — this test focuses on allgather correctness, not model flexibility.
 _NUM_HEADS = 8
-_HEAD_DIM = 64
-_HIDDEN_SIZE = _NUM_HEADS * _HEAD_DIM  # 512
-_FFN_SIZE = _HIDDEN_SIZE * 4  # 2048
+_HEAD_DIM = 128
+_HIDDEN_SIZE = _NUM_HEADS * _HEAD_DIM
+_FFN_SIZE = _HIDDEN_SIZE * 4
 _NUM_LAYERS = 2
 _BATCH_SIZE = 4
 _SEQ_LEN = 32

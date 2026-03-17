@@ -126,7 +126,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._amax_rowwise = amax_rowwise
         instance._amax_columnwise = amax_columnwise
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
-        instance._default_storage = torch.UntypedStorage(1)
+        instance._default_storage = torch.UntypedStorage(1, device=torch.cuda.current_device())
 
         return instance
 
