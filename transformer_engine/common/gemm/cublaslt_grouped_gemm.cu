@@ -30,10 +30,10 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 }  // namespace
 
 // MXFP8 support for grouped GEMM requires cuBLAS 13.3+
-#define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130300
+#define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130200
 // BF16 support for grouped GEMM requires cuBLAS 13.3+
 // cuBLAS 13.2 is mostly functional but contains a bug for wgrad when a group has k=0, the weight gradient will be uninitialized random data instead of zeros.
-#define CUBLAS_GROUPED_GEMM_VERSION 130300
+#define CUBLAS_GROUPED_GEMM_VERSION 130200
 
 #if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_VERSION
 
