@@ -657,32 +657,61 @@ __device__ __forceinline__ float process_rowwise_stage(
     scales_rowwise[scale_idx] = biased_exponent;
   }
 
-  const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-  const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
+  // const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+  const bf16 multiplier = static_cast<bf16>(ptx::exp2f_rcp(biased_exponent));
+  // const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
-#pragma unroll
+  #pragma unroll
   for (int w = 0; w < WAVES; ++w) {
-    Vec<OType2, PACK_SIZE / 2> out;
-#pragma unroll
-    for (int e = 0; e < PACK_SIZE / 2; ++e) {
-      IType2 in;
-      OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
-      if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-        in = in_IType[w].data.elt[e];
-      } else if constexpr (IS_CACHED_ACT_OP) {
-        in.x = in_cached[w].data.elt[2 * e];
-        in.y = in_cached[w].data.elt[2 * e + 1];
-      } else {
-        const int j = w * PACK_SIZE + 2 * e;
-        in.x = in_compute_rowwise[j];
-        in.y = in_compute_rowwise[j + 1];
-      }
-      ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
-    }
+    uint32_t out = 0;
+    asm volatile(
+    "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.bf16 y0, x0, %2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, %2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y2, x2, %2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y3, x3, %2, 0f00000000; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z01, y1, y0; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z23, y3, y2; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+    "}\n"
+    : "=r"(out)
+    : "l"(reinterpret_cast<const uint64_t &>(in_IType[w].data.elt[0])),
+      "h"(reinterpret_cast<const uint16_t &>(multiplier)));
+
     const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
     const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
     const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
-    out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
+    // out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
+
+    const uint32_t dst_smem_ptr = __cvta_generic_to_shared(&out_rowwise_data_sh[shmem_offset_rowwise]);
+    asm volatile("st.shared.b32 [%0], %1;" : : "r"(dst_smem_ptr), "r"(out));
+
+
+    // Vec<OType2, PACK_SIZE / 2> out;
+    // #pragma unroll
+    // for (int e = 0; e < PACK_SIZE / 2; ++e) {
+    //   IType2 in;
+    //   OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
+    //   if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+    //     in = in_IType[w].data.elt[e];
+    //   } else if constexpr (IS_CACHED_ACT_OP) {
+    //     in.x = in_cached[w].data.elt[2 * e];
+    //     in.y = in_cached[w].data.elt[2 * e + 1];
+    //   } else {
+    //     const int j = w * PACK_SIZE + 2 * e;
+    //     in.x = in_compute_rowwise[j];
+    //     in.y = in_compute_rowwise[j + 1];
+    //   }
+    //   ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
+    // }
+    // const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+    // const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+    // const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
+    // out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
   }
 
   return thread_amax;
