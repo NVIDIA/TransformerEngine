@@ -577,6 +577,11 @@ void nvte_fused_attn_fwd(
   nvte_convert_qkv_format(q_format, input_Q->data.shape, q_format, tmp_shape, &b, &h_q, &s_q, &d_qk, &t_q);
   nvte_convert_qkv_format(kv_format, input_K->data.shape, kv_format, tmp_shape, &b, &h_kv, &s_kv, &d_qk, &t_kv);
   nvte_convert_qkv_format(kv_format, input_V->data.shape, kv_format, tmp_shape, &b, &h_kv, &s_kv, &d_v, &t_kv);
+  if (q_format == NVTE_QKV_Format::NVTE_THD) {
+    b = input_cu_seqlens_q->data.shape[0] -1;
+  } else if (kv_format == NVTE_QKV_Format::NVTE_THD) {
+    b = input_cu_seqlens_kv->data.shape[0] -1;
+  }
 
   int64_t num_pages_k = 0;
   int64_t num_pages_v = 0;
@@ -696,6 +701,11 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   nvte_convert_qkv_format(q_format, input_Q->data.shape, q_format, tmp_shape, &b, &h_q, &s_q, &d_qk, &t_q);
   nvte_convert_qkv_format(kv_format, input_K->data.shape, kv_format, tmp_shape, &b, &h_kv, &s_kv, &d_qk, &t_kv);
   nvte_convert_qkv_format(kv_format, input_V->data.shape, kv_format, tmp_shape, &b, &h_kv, &s_kv, &d_v, &t_kv);
+  if (q_format == NVTE_QKV_Format::NVTE_THD) {
+    b = input_cu_seqlens_q->data.shape[0] -1;
+  } else if (kv_format == NVTE_QKV_Format::NVTE_THD) {
+    b = input_cu_seqlens_kv->data.shape[0] -1;
+  }
 
   auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);

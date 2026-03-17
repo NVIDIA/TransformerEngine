@@ -154,8 +154,12 @@ std::vector<py::object> fused_attn_fwd(
   o_shape_tmp[o_shape_tmp.size() - 1] = v_shape[v_shape.size() - 1];
   auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
   size_t b = 0, h = 0, s = 0, d = 0, t = 0;
-  nvte_convert_qkv_format(nvte_get_q_format(qkv_layout), o_shape_tmp, o_format, o_shape, &b, &h, &s,
+  NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
+  nvte_convert_qkv_format(q_format, o_shape_tmp, o_format, o_shape, &b, &h, &s,
                           &d, &t);
+  if (q_format == NVTE_QKV_Format::NVTE_THD) {
+    b = cu_seqlens_q.size(0) - 1;
+  }
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   std::tie(te_O, py_O) = quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
@@ -365,14 +369,23 @@ std::vector<py::object> fused_attn_bwd(
   std::vector<size_t> v_shape = convertShape(te_V.shape());
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   size_t b = 0, h_q = 0, h_kv = 0, s_q = 0, s_kv = 0, d_qk = 0, d_v = 0, t_q = 0, t_kv = 0;
-  std::vector<size_t> dQ_shape(4), dK_shape(4), dV_shape(4);
-  nvte_convert_qkv_format(nvte_get_q_format(qkv_layout), q_shape, nvte_get_q_format(dqkv_layout),
+  size_t ndim = q_shape.size();
+  std::vector<size_t> dQ_shape(ndim), dK_shape(ndim), dV_shape(ndim);
+  NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
+  NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+  NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
+  NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
+  nvte_convert_qkv_format(q_format, q_shape, dq_format,
                           dQ_shape, &b, &h_q, &s_q, &d_qk, &t_q);
-  nvte_convert_qkv_format(nvte_get_kv_format(qkv_layout), k_shape, nvte_get_kv_format(dqkv_layout),
+  nvte_convert_qkv_format(kv_format, k_shape, dkv_format,
                           dK_shape, &b, &h_kv, &s_kv, &d_qk, &t_kv);
-  nvte_convert_qkv_format(nvte_get_kv_format(qkv_layout), v_shape, nvte_get_kv_format(dqkv_layout),
+  nvte_convert_qkv_format(kv_format, v_shape, dkv_format,
                           dV_shape, &b, &h_kv, &s_kv, &d_v, &t_kv);
-
+  if (dq_format == NVTE_QKV_Format::NVTE_THD) {
+    b = cu_seqlens_q.size(0) - 1;
+  } else if (dkv_format == NVTE_QKV_Format::NVTE_THD) {
+    b = cu_seqlens_kv.size(0) - 1;
+  }
   at::Tensor dQ, dK, dV, dQKV, dKV;
   DType dqkv_type = fake_dtype_te;
   if (!dqkv_quantizer.is_none()) {
@@ -388,7 +401,6 @@ std::vector<py::object> fused_attn_bwd(
   }
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(dqkv_layout);
   std::vector<int64_t> tmp_shape;
-
   switch (layout_group) {
     case NVTE_QKV_Layout_Group::NVTE_3HD:
       tmp_shape = std::vector<int64_t>{dQ_shape.begin(), dQ_shape.end()};
@@ -462,9 +474,9 @@ std::vector<py::object> fused_attn_bwd(
       NVTE_ERROR("QKV layout not supported!");
   }
 
-  std::tie(te_dQ, py_dQ) = quantizer_helper(dqkv_quantizer, q_shape, fake_dtype_te, true, dQ);
-  std::tie(te_dK, py_dK) = quantizer_helper(dqkv_quantizer, k_shape, fake_dtype_te, true, dK);
-  std::tie(te_dV, py_dV) = quantizer_helper(dqkv_quantizer, v_shape, fake_dtype_te, true, dV);
+  std::tie(te_dQ, py_dQ) = quantizer_helper(dqkv_quantizer, dQ_shape, fake_dtype_te, true, dQ);
+  std::tie(te_dK, py_dK) = quantizer_helper(dqkv_quantizer, dK_shape, fake_dtype_te, true, dK);
+  std::tie(te_dV, py_dV) = quantizer_helper(dqkv_quantizer, dV_shape, fake_dtype_te, true, dV);
 
   // construct NVTE tensors
   if (dqkv_type == DType::kFloat8E4M3 || dqkv_type == DType::kFloat8E5M2) {
