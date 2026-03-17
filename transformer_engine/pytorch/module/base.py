@@ -77,6 +77,7 @@ class UserBufferQuantizationMode(Enum):
     NONE = "none"
     FP8 = "fp8"
 
+
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
     """Returns a dummy tensor of given shape."""
 
@@ -92,6 +93,7 @@ def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor
     if zero:
         _dummy_wgrads[key].fill_(0)
     return _dummy_wgrads[key].detach()
+
 
 def initialize_ub(
     shape: list,
