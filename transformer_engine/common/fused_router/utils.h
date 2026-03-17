@@ -210,8 +210,56 @@ __device__ inline void apply_softmax_on_float(float *scores, int data_size, int 
   __syncwarp();
 }
 
-__device__ inline void naive_topk_and_mask(CompType *scores, int data_size, int topk,
-                                           int *topk_indices, CompType *topk_scores, int lane_id) {
+template <int K>
+__device__ inline void naive_topk_and_mask_smallk(CompType *scores, int data_size, int *topk_indices,
+                                                  CompType *topk_scores, int lane_id) {
+  static_assert(K > 0 && K <= 8, "K must be in [1, 8]");
+  int selected[K];
+#pragma unroll
+  for (int i = 0; i < K; ++i) {
+    selected[i] = -1;
+  }
+
+#pragma unroll
+  for (int k = 0; k < K; ++k) {
+    CompType val = -std::numeric_limits<CompType>::infinity();
+    int index = (lane_id < data_size) ? lane_id : 0;
+    for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
+      bool masked = false;
+#pragma unroll
+      for (int j = 0; j < k; ++j) {
+        masked |= (selected[j] == i);
+      }
+      if (masked) continue;
+      CompType cur_val = scores[i];
+      if (cur_val > val) {
+        val = cur_val;
+        index = i;
+      }
+    }
+    for (int s = kThreadsPerWarp / 2; s > 0; s /= 2) {
+      auto shuffled_val = __shfl_xor_sync(0xffffffff, val, s);
+      auto shuffled_index = __shfl_xor_sync(0xffffffff, index, s);
+      if (shuffled_val > val) {
+        val = shuffled_val;
+        index = shuffled_index;
+      }
+    }
+
+    CompType chosen_val = __shfl_sync(0xffffffff, val, 0);
+    int chosen_index = __shfl_sync(0xffffffff, index, 0);
+    if (lane_id == 0) {
+      topk_indices[k] = chosen_index;
+      topk_scores[k] = chosen_val;
+    }
+    selected[k] = chosen_index;
+    __syncwarp();
+  }
+}
+
+__device__ inline void naive_topk_and_mask_generic(CompType *scores, int data_size, int topk,
+                                                   int *topk_indices, CompType *topk_scores,
+                                                   int lane_id) {
   // Check if the index is masked by the later iteration
   auto is_masked = [&topk_indices](int k, int index) {
     if (k == 0) return false;
@@ -253,6 +301,39 @@ __device__ inline void naive_topk_and_mask(CompType *scores, int data_size, int 
       topk_scores[k] = val;
     }
     __syncwarp();
+  }
+}
+
+__device__ inline void naive_topk_and_mask(CompType *scores, int data_size, int topk,
+                                           int *topk_indices, CompType *topk_scores, int lane_id) {
+  switch (topk) {
+    case 1:
+      naive_topk_and_mask_smallk<1>(scores, data_size, topk_indices, topk_scores, lane_id);
+      break;
+    case 2:
+      naive_topk_and_mask_smallk<2>(scores, data_size, topk_indices, topk_scores, lane_id);
+      break;
+    case 3:
+      naive_topk_and_mask_smallk<3>(scores, data_size, topk_indices, topk_scores, lane_id);
+      break;
+    case 4:
+      naive_topk_and_mask_smallk<4>(scores, data_size, topk_indices, topk_scores, lane_id);
+      break;
+    case 5:
+      naive_topk_and_mask_smallk<5>(scores, data_size, topk_indices, topk_scores, lane_id);
+      break;
+    case 6:
+      naive_topk_and_mask_smallk<6>(scores, data_size, topk_indices, topk_scores, lane_id);
+      break;
+    case 7:
+      naive_topk_and_mask_smallk<7>(scores, data_size, topk_indices, topk_scores, lane_id);
+      break;
+    case 8:
+      naive_topk_and_mask_smallk<8>(scores, data_size, topk_indices, topk_scores, lane_id);
+      break;
+    default:
+      naive_topk_and_mask_generic(scores, data_size, topk, topk_indices, topk_scores, lane_id);
+      break;
   }
 }
 
