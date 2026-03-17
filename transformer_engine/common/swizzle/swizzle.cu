@@ -1238,6 +1238,40 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
   const int num_tiles_m = m / SF_TILE_DIM_M;
   const int num_tiles_k = k / SF_TILE_DIM_K;
 
+  auto launch_unswizzle_scaling = [&](int vec_load_size, const dim3& num_blocks, int slm_size,
+                                      void *input_scale_inv_ptr, void *output_scale_inv_ptr,
+                                      bool rowwise) {
+    switch (vec_load_size) {
+      case 4:
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
+            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
+                                                           output_scale_inv_ptr, m, k, rowwise);
+        break;
+      case 2:
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
+            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
+                                                           output_scale_inv_ptr, m, k, rowwise);
+        break;
+      case 1:
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
+            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
+                                                           output_scale_inv_ptr, m, k, rowwise);
+        break;
+      default:
+        NVTE_ERROR("Not valid vec_load_size.");
+    }
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  };
+
   if (rowwise_unswizzle) {
     int vec_load_size = (num_tiles_k - 1) % 4 + 1;
     if (vec_load_size == 3) vec_load_size = 1;
@@ -1276,36 +1310,8 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
         NVTE_ERROR("Invalid scaling mode");
     }
 
-    switch (vec_load_size) {
-      case 4:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-        unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
-                                                           output_scale_inv_ptr, m, k, true);
-        break;
-      case 2:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-        unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
-                                                           output_scale_inv_ptr, m, k, true);
-        break;
-      case 1:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-        unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
-                                                           output_scale_inv_ptr, m, k, true);
-        break;
-      default:
-        NVTE_ERROR("Not valid vec_load_size.");
-        break;
-    }
-    NVTE_CHECK_CUDA(cudaGetLastError());
+    launch_unswizzle_scaling(vec_load_size, num_blocks, slm_size, input_scale_inv_ptr,
+                             output_scale_inv_ptr, true);
   }
 
   if (columnwise_unswizzle) {
@@ -1319,36 +1325,8 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
                " column-wise scaling factors, but got shape=", output->columnwise_scale_inv.shape,
                ".");
 
-    switch (vec_load_size) {
-      case 4:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-        unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(
-                input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr, m, k, false);
-        break;
-      case 2:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-        unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(
-                input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr, m, k, false);
-        break;
-      case 1:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-        unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(
-                input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr, m, k, false);
-        break;
-      default:
-        NVTE_ERROR("Not valid vec_load_size.");
-        break;
-    }
-    NVTE_CHECK_CUDA(cudaGetLastError());
+    launch_unswizzle_scaling(vec_load_size, num_blocks, slm_size, input->columnwise_scale_inv.dptr,
+                             output->columnwise_scale_inv.dptr, false);
   }
 }
 
