@@ -216,7 +216,7 @@ def test_fsdp2_dcp_output_parity(fp_recipe):
 
     if fp_recipe == "NVFP4BlockScaling":
         pytest.xfail(
-            "NVFP4BlockScaling: Failing parity tests with DCP. Snippet: \n"
+            "NVFP4BlockScaling: Failing parity tests with DCP. Snippet: "
             "Fresh model loaded from DCP checkpoint produces different output."
         )
 
@@ -245,7 +245,7 @@ def test_fsdp2_dcp_output_parity_async(fp_recipe):
 
     if fp_recipe == "NVFP4BlockScaling":
         pytest.xfail(
-            "NVFP4BlockScaling: Failing parity tests with DCP. Snippet: \n"
+            "NVFP4BlockScaling: Failing parity tests with DCP. Snippet: "
             "Fresh model loaded from DCP checkpoint produces different output."
         )
 
