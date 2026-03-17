@@ -38,6 +38,13 @@ enum ReduceFuncType {
   MAX,
 };
 
+__device__ inline float warp_reduce_sum_float(float val) {
+  for (int offset = kThreadsPerWarp / 2; offset > 0; offset /= 2) {
+    val += __shfl_down_sync(0xffffffff, val, offset);
+  }
+  return __shfl_sync(0xffffffff, val, 0);
+}
+
 template <typename T>
 __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, ReduceFuncType type,
                                          int lane_id) {
