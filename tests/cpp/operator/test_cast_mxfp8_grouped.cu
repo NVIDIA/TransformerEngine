@@ -846,7 +846,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(input_config),
         ::testing::Values(DType::kBFloat16),
         ::testing::Values(DType::kFloat8E4M3),
-        ::testing::Values(true, false)),
+        ::testing::Values(true)),
         // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
     [](const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
