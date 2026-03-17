@@ -638,7 +638,12 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             or alpha_tensor.dtype != dtype
             or alpha_tensor.device != device
         ):
-            if global_alpha_tensor is None:
+            if (
+                global_alpha_tensor is None
+                or global_alpha_tensor.numel() != num_groups
+                or global_alpha_tensor.dtype != dtype
+                or global_alpha_tensor.device != device
+            ):
                 global_alpha_tensor = torch.ones(num_groups, dtype=dtype, device=device)
             alpha_tensor = global_alpha_tensor
             norm_const_tensor = alpha_tensor[:1]
