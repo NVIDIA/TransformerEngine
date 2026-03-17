@@ -904,6 +904,25 @@ struct TypeInfo {
     { __VA_ARGS__ }                                               \
   }
 
+#define TRANSFORMER_ENGINE_SCALING_TYPE_SWITCH(SCALING_TYPE, SCALING_T, ...)  \
+  switch (SCALING_TYPE) {                                                     \
+    case ScalingType::ROWWISE: {                                              \
+      constexpr ScalingType SCALING_T = ScalingType::ROWWISE;                 \
+      { __VA_ARGS__ }                                                         \
+    } break;                                                                  \
+    case ScalingType::COLWISE: {                                              \
+      constexpr ScalingType SCALING_T = ScalingType::COLWISE;                 \
+      { __VA_ARGS__ }                                                         \
+    } break;                                                                  \
+    case ScalingType::BIDIMENSIONAL: {                                        \
+      constexpr ScalingType SCALING_T = ScalingType::BIDIMENSIONAL;           \
+      { __VA_ARGS__ }                                                         \
+    } break;                                                                  \
+    default: {                                                                \
+      NVTE_ERROR("Unsupported scaling type.");                                \
+    }                                                                         \
+  }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int log2_ceil(int value) {

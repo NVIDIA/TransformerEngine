@@ -30,6 +30,30 @@ enum ShapeRepresentation {
   VARYING_BOTH_DIMS = 3
 };
 
+
+#define TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(SHAPE_REP, SHAPE, ...)  \
+  switch (SHAPE_REP) {                                                                      \
+    case ShapeRepresentation::SAME_BOTH_DIMS: {                                             \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::SAME_BOTH_DIMS;            \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    case ShapeRepresentation::VARYING_FIRST_DIM: {                                          \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_FIRST_DIM;         \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    case ShapeRepresentation::VARYING_LAST_DIM: {                                           \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_LAST_DIM;          \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    case ShapeRepresentation::VARYING_BOTH_DIMS: {                                          \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_BOTH_DIMS;         \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    default: {                                                                              \
+      NVTE_ERROR("Unsupported grouped tensor shape representation.");                       \
+    }                                                                                       \
+  }
+
 inline bool full_tile_1D_tensor(const Tensor *const t, const size_t elems_per_block) {
   const size_t N = product(t->data.shape);
   const bool isFullTile = (N % elems_per_block == 0);
