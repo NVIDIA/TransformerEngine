@@ -1173,22 +1173,22 @@ __device__ __forceinline__ fp16 get_amax(fp16 a, fp16 b) {
 __device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const bf16x4 &in, const bf16 scale) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
-  "{\n\t"
-    ".reg.b16 x0,x1,x2,x3; \n\t"
-    "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
-    ".reg.f32 y0,y1,y2,y3; \n\t"
-    "fma.rn.f32.bf16 y0, x0, %2, 0f00000000; \n\t"
-    "fma.rn.f32.bf16 y1, x1, %2, 0f00000000; \n\t"
-    "fma.rn.f32.bf16 y2, x2, %2, 0f00000000; \n\t"
-    "fma.rn.f32.bf16 y3, x3, %2, 0f00000000; \n\t"
-    ".reg.b16 z01, z23; \n\t"
-    "cvt.rn.satfinite.e4m3x2.f32 z01, y1, y0; \n\t"
-    "cvt.rn.satfinite.e4m3x2.f32 z23, y3, y2; \n\t"
-    "mov.b32 %0, {z01, z23}; \n"
-  "}\n"
-  : "=r"(reinterpret_cast<uint32_t &>(out))
-  : "l"(reinterpret_cast<const uint64_t &>(in)),
-    "h"(reinterpret_cast<const uint16_t &>(scale)));
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.bf16 y0, x0, %2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, %2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y2, x2, %2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y3, x3, %2, 0f00000000; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z01, y1, y0; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z23, y3, y2; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "h"(reinterpret_cast<const uint16_t &>(scale)));
 #else
   NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -1197,22 +1197,22 @@ __device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const bf16x4 &in, con
 __device__ __forceinline__ void mul_cvt_4x(fp8e5m2x4 &out, const bf16x4 &in, const bf16 scale) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
-  "{\n\t"
-    ".reg.b16 x0,x1,x2,x3; \n\t"
-    "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
-    ".reg.f32 y0,y1,y2,y3; \n\t"
-    "fma.rn.f32.bf16 y0, x0, %2, 0f00000000; \n\t"
-    "fma.rn.f32.bf16 y1, x1, %2, 0f00000000; \n\t"
-    "fma.rn.f32.bf16 y2, x2, %2, 0f00000000; \n\t"
-    "fma.rn.f32.bf16 y3, x3, %2, 0f00000000; \n\t"
-    ".reg.b16 z01, z23; \n\t"
-    "cvt.rn.satfinite.e5m2x2.f32 z01, y1, y0; \n\t"
-    "cvt.rn.satfinite.e5m2x2.f32 z23, y3, y2; \n\t"
-    "mov.b32 %0, {z01, z23}; \n"
-  "}\n"
-  : "=r"(reinterpret_cast<uint32_t &>(out))
-  : "l"(reinterpret_cast<const uint64_t &>(in)),
-    "h"(reinterpret_cast<const uint16_t &>(scale)));
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.bf16 y0, x0, %2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, %2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y2, x2, %2, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y3, x3, %2, 0f00000000; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z01, y1, y0; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z23, y3, y2; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "h"(reinterpret_cast<const uint16_t &>(scale)));
 #else
   NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -1221,22 +1221,22 @@ __device__ __forceinline__ void mul_cvt_4x(fp8e5m2x4 &out, const bf16x4 &in, con
 __device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const fp16x4 &in, const fp16 scale) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
-  "{\n\t"
-    ".reg.b16 x0,x1,x2,x3; \n\t"
-    "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
-    ".reg.f32 y0,y1,y2,y3; \n\t"
-    "fma.rn.f32.f16 y0, x0, %2, 0f00000000; \n\t"
-    "fma.rn.f32.f16 y1, x1, %2, 0f00000000; \n\t"
-    "fma.rn.f32.f16 y2, x2, %2, 0f00000000; \n\t"
-    "fma.rn.f32.f16 y3, x3, %2, 0f00000000; \n\t"
-    ".reg.b16 z01, z23; \n\t"
-    "cvt.rn.satfinite.e4m3x2.f32 z01, y1, y0; \n\t"
-    "cvt.rn.satfinite.e4m3x2.f32 z23, y3, y2; \n\t"
-    "mov.b32 %0, {z01, z23}; \n"
-  "}\n"
-  : "=r"(reinterpret_cast<uint32_t &>(out))
-  : "l"(reinterpret_cast<const uint64_t &>(in)),
-    "h"(reinterpret_cast<const uint16_t &>(scale)));
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.f16 y0, x0, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y1, x1, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y2, x2, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y3, x3, %2, 0f00000000; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z01, y1, y0; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z23, y3, y2; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "h"(reinterpret_cast<const uint16_t &>(scale)));
 #else
   NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -1245,22 +1245,22 @@ __device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const fp16x4 &in, con
 __device__ __forceinline__ void mul_cvt_4x(fp8e5m2x4 &out, const fp16x4 &in, const fp16 scale) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   asm volatile(
-  "{\n\t"
-    ".reg.b16 x0,x1,x2,x3; \n\t"
-    "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
-    ".reg.f32 y0,y1,y2,y3; \n\t"
-    "fma.rn.f32.f16 y0, x0, %2, 0f00000000; \n\t"
-    "fma.rn.f32.f16 y1, x1, %2, 0f00000000; \n\t"
-    "fma.rn.f32.f16 y2, x2, %2, 0f00000000; \n\t"
-    "fma.rn.f32.f16 y3, x3, %2, 0f00000000; \n\t"
-    ".reg.b16 z01, z23; \n\t"
-    "cvt.rn.satfinite.e5m2x2.f32 z01, y1, y0; \n\t"
-    "cvt.rn.satfinite.e5m2x2.f32 z23, y3, y2; \n\t"
-    "mov.b32 %0, {z01, z23}; \n"
-  "}\n"
-  : "=r"(reinterpret_cast<uint32_t &>(out))
-  : "l"(reinterpret_cast<const uint64_t &>(in)),
-    "h"(reinterpret_cast<const uint16_t &>(scale)));
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.f16 y0, x0, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y1, x1, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y2, x2, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y3, x3, %2, 0f00000000; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z01, y1, y0; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z23, y3, y2; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "h"(reinterpret_cast<const uint16_t &>(scale)));
 #else
   NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
