@@ -1097,10 +1097,11 @@ def get_attention_backend(
             and cudnn_version < (9, 18, 1)
             and device_compute_capability >= (10, 0)
         ):
-            logger.debug("Determinism not supported on Blackwell for BF16 with 9.7 <= cuDNN < 9.18.1")
+            logger.debug(
+                "Determinism not supported on Blackwell for BF16 with 9.7 <= cuDNN < 9.18.1"
+            )
             use_fused_attention = False
             fused_attention_backend = None
-
 
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
