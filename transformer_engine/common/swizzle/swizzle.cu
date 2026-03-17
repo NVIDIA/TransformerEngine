@@ -1137,15 +1137,18 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 }
 
 void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
-  const auto& scaling_mode = input->scaling_mode;
+  const auto& scaling_mode = output->scaling_mode;
   NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING,
-             "Input tensor has invalid scaling mode (", to_string(input->scaling_mode), ").");
+             "Output tensor has invalid scaling mode (", to_string(output->scaling_mode), ").");
 
   CheckInputTensor(*input, "scaling_factor_input");
   CheckInputTensor(*output, "scaling_factor_output");
   NVTE_CHECK(input->with_gemm_swizzled_scales, "Expected input tensor with swizzled scales.");
   NVTE_CHECK(!output->with_gemm_swizzled_scales,
              "Expected output tensor in row-major compact format.");
+  NVTE_CHECK(input->scaling_mode == scaling_mode,
+             "Input and output tensors must have matching scaling modes, but got ",
+             to_string(input->scaling_mode), " and ", to_string(output->scaling_mode), ".");
 
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING:
@@ -1160,10 +1163,10 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
       NVTE_ERROR("Invalid scaling mode");
   }
 
-  const bool has_rowwise_scale_inv = input->scale_inv.has_data();
-  const bool has_columnwise_scale_inv = input->columnwise_scale_inv.has_data();
+  const bool has_rowwise_scale_inv = output->scale_inv.has_data();
+  const bool has_columnwise_scale_inv = output->columnwise_scale_inv.has_data();
   NVTE_CHECK(!has_rowwise_scale_inv || !has_columnwise_scale_inv,
-             "Input tensor has both row-wise and column-wise scaling factors");
+             "Output tensor has both row-wise and column-wise scaling factors");
   if (!has_rowwise_scale_inv && !has_columnwise_scale_inv) {
     return;
   }
@@ -1172,31 +1175,31 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
       if (has_rowwise_scale_inv) {
-        NVTE_CHECK(input->scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->scale_inv.shape, ".");
-        m = input->scale_inv.shape[0];
-        k = input->scale_inv.shape[1];
+        NVTE_CHECK(output->scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
+        m = output->scale_inv.shape[0];
+        k = output->scale_inv.shape[1];
       } else if (has_columnwise_scale_inv) {
-        NVTE_CHECK(input->columnwise_scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->columnwise_scale_inv.shape,
+        NVTE_CHECK(output->columnwise_scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->columnwise_scale_inv.shape,
                    ".");
-        m = input->columnwise_scale_inv.shape[1];
-        k = input->columnwise_scale_inv.shape[0];
+        m = output->columnwise_scale_inv.shape[1];
+        k = output->columnwise_scale_inv.shape[0];
       }
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
       if (has_rowwise_scale_inv) {
-        NVTE_CHECK(input->scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->scale_inv.shape, ".");
-        m = input->scale_inv.shape[0];
-        k = input->scale_inv.shape[1];
+        NVTE_CHECK(output->scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
+        m = output->scale_inv.shape[0];
+        k = output->scale_inv.shape[1];
       } else if (has_columnwise_scale_inv) {
-        NVTE_CHECK(input->columnwise_scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", input->columnwise_scale_inv.shape,
+        NVTE_CHECK(output->columnwise_scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->columnwise_scale_inv.shape,
                    ".");
-        m = input->columnwise_scale_inv.shape[0];
-        k = input->columnwise_scale_inv.shape[1];
+        m = output->columnwise_scale_inv.shape[0];
+        k = output->columnwise_scale_inv.shape[1];
       }
       break;
     }
@@ -1206,16 +1209,17 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
 
   constexpr int SF_TILE_DIM_M = 128;
   constexpr int SF_TILE_DIM_K = 4;
-  NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Input should be padded in M/N dimension!");
-  NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Input should be padded in K dimension!");
+  NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Output should be padded in M/N dimension!");
+  NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Output should be padded in K dimension!");
 
   if (has_rowwise_scale_inv) {
-    NVTE_CHECK(output->scale_inv.has_data(),
-               "Output tensor does not have row-wise scaling factors.");
-  }
-  if (has_columnwise_scale_inv) {
-    NVTE_CHECK(output->columnwise_scale_inv.has_data(),
-               "Output tensor does not have column-wise scaling factors.");
+    NVTE_CHECK(input->scale_inv.has_data(),
+               "Output tensor requests row-wise scaling factors, but input tensor does not "
+               "provide them.");
+  } else if (has_columnwise_scale_inv) {
+    NVTE_CHECK(input->columnwise_scale_inv.has_data(),
+                   "Output tensor requests column-wise scaling factors, but input tensor does not "
+                   "provide them.");
   }
 
   bool rowwise_unswizzle{false}, columnwise_unswizzle{false};
