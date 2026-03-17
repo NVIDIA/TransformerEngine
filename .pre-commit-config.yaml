@@ -43,4 +43,5 @@ repos:
     rev: c75aca72f4e85c6e47252139e8695f1c8b5f9ae3
     hooks:
       - id: vermin
+        language_version: python3.13
         args: ['-t=3.10-', '--violations']
