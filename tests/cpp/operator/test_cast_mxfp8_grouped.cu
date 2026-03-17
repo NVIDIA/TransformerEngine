@@ -241,7 +241,8 @@ void performTest(const ProcessingMethod processing_method,
                  const std::vector<size_t>& last_dims_h,
                  const std::vector<size_t>& offsets_h,
                  const bool rowwise,
-                 const bool colwise) {
+                 const bool colwise,
+                 const bool use_fast_math) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -499,11 +500,14 @@ void performTest(const ProcessingMethod processing_method,
             scales_stride_colwise);
     }
 
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_use_fast_math(use_fast_math);
+
     // GPU
     Tensor workspace;
     switch (processing_method) {
         case ProcessingMethod::CAST_ONLY: {
-            nvte_group_quantize(in_group_tensor, out_group_tensor, 0);
+            nvte_group_quantize_v2(in_group_tensor, out_group_tensor, quant_config, 0);
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
@@ -675,7 +679,8 @@ class GroupedFusedCastMXFP8TestSuite : public ::testing::TestWithParam
                 ScalingDirection,
                 std::vector<size_t>,        // Config
                 transformer_engine::DType,  // InputType
-                transformer_engine::DType   // OutputType
+                transformer_engine::DType,  // OutputType
+                bool
                 >> {};
 
 TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
@@ -693,6 +698,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     const std::vector<size_t> input_config = std::get<3>(GetParam());
     const DType input_type = std::get<4>(GetParam());
     const DType output_type = std::get<5>(GetParam());
+    const bool use_fast_math = std::get<6>(GetParam());
 
     const ShapeRepresentation shape_rep = static_cast<ShapeRepresentation>(input_config[0]);
     const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS) || (shape_rep == VARYING_FIRST_DIM);
@@ -756,6 +762,10 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
         || processing_method == ProcessingMethod::CAST_ACT) && (activation == ActivationKind::Identity)) {
         GTEST_SKIP();
     }
+    // Skip fused tests in fast math is enabled.
+    if ((processing_method != ProcessingMethod::CAST_ONLY) && use_fast_math) {
+        GTEST_SKIP();
+    }
 
     bool rowwise = false;
     bool colwise = false;
@@ -790,7 +800,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
             performTest<InputType, OutputType>(processing_method, OP, shape_rep, num_tensors,
                                                logical_shape, first_dims, last_dims, offsets,
-                                               rowwise, colwise);
+                                               rowwise, colwise, use_fast_math);
         );
     );
 }
@@ -827,7 +837,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(scaling_directions),
         ::testing::ValuesIn(input_config),
         ::testing::Values(DType::kBFloat16),
-        ::testing::Values(DType::kFloat8E4M3)),
+        ::testing::Values(DType::kFloat8E4M3),
+        ::testing::Values(true, false)),
         // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
     [](const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
@@ -858,5 +869,9 @@ INSTANTIATE_TEST_SUITE_P(
 
         name += "_" + test::typeName(std::get<4>(info.param)) +
                 "_" + test::typeName(std::get<5>(info.param));
+
+        if (std::get<6>(info.param)) {
+            name += "_FASTMATH";
+        }
         return name;
     });

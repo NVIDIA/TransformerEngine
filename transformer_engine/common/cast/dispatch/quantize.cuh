@@ -411,7 +411,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
       // mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
       mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, false, ParamOP, nullptr>(
           input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, stream);
+          workspace_tensor, &quant_config_cpp, stream);
       break;
     }
     default:
@@ -452,7 +452,7 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
   //   case NVTE_MXFP8_1D_SCALING: {
   //     mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
   //         grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-  //         stream);
+  //         &quant_config_cpp, stream);
   //     break;
   //   }
   //   default:
