@@ -1093,10 +1093,8 @@ def get_attention_backend(
         if (
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and deterministic
-            and (
-                cudnn_version >= (9, 7)
-                and cudnn_version < (9, 18, 1)
-            )
+            and cudnn_version >= (9, 7)
+            and cudnn_version < (9, 18, 1)
             and device_compute_capability >= (10, 0)
         ):
             logger.debug("Determinism not supported on Blackwell for BF16 with 9.7 <= cuDNN < 9.18.1")
