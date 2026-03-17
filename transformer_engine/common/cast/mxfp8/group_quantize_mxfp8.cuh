@@ -480,19 +480,90 @@ __device__ __forceinline__ float process_colwise_stage(
     const size_t scale_stride_colwise, const size_t tensor_base_for_scales, const size_t rows,
     const size_t cols, IType *in_sh, IType *act_in_sh, IType *cached_act_sh,
     OType *out_colwise_data_sh, e8m0_t *scales_colwise, float &partial_dbias_colwise) {
+  using IType2 = typename ptx::FPx2<IType>;
   using IType4 = typename ptx::FPx4<IType>;
   using OType4 = typename ptx::FPx4<OType>;
+
+  constexpr uint32_t IN_SHMEM_STRIDE = static_cast<uint32_t>(BUFF_DIM_X * sizeof(IType));
+  constexpr uint32_t OUT_SHMEM_STRIDE = static_cast<uint32_t>(BUFF_DIM_X * sizeof(OType));
 
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING;
+  constexpr bool NON_FP32_CAST_ONLY = NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>);
 
   const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
   float thread_amax = 0.0f;
   float in_compute_colwise[BUFF_DIM_Y];
   IType in_colwise_IType[BUFF_DIM_Y];
 
-  if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+  if constexpr (USE_FAST_MATH && NON_FP32_CAST_ONLY) {
+    IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+    #pragma unroll
+    for (int i = 0; i < BUFF_DIM_Y; i += 4) {
+      IType4& in = *reinterpret_cast<IType4*>(&in_colwise_IType[i]);
+
+      const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+      const uint32_t src_smem_ptr = __cvta_generic_to_shared(&in_sh[shmem_offset_colwise]);
+
+      // Load 4x elts S2R and find amax
+      if constexpr (std::is_same_v<IType, bf16>) {
+        asm volatile(
+          "{\n"
+          ".reg.u32 base_offset, stride; \n\t"
+          "mov.u32 base_offset, %2; \n\t"
+          "mov.u32 stride, %3; \n\t"
+          ".reg.u32 ptr0,ptr1,ptr2,ptr3; \n\t"
+          "mad.lo.u32 ptr0, 0, stride, base_offset; \n\t"
+          "mad.lo.u32 ptr1, 1, stride, base_offset; \n\t"
+          "mad.lo.u32 ptr2, 2, stride, base_offset; \n\t"
+          "mad.lo.u32 ptr3, 3, stride, base_offset; \n\t"
+          ".reg.b16 x0,x1,x2,x3; \n\t"
+          "ld.shared.b16 x0, [ptr0]; \n\t"
+          "ld.shared.b16 x1, [ptr1]; \n\t"
+          "ld.shared.b16 x2, [ptr2]; \n\t"
+          "ld.shared.b16 x3, [ptr3]; \n\t"
+          "mov.b64 %0, {x0,x1,x2,x3}; \n\t"
+          ".reg.b32 x01,x23; \n\t"
+          "mov.b32 x01, {x0,x1}; \n\t"
+          "mov.b32 x23, {x2,x3}; \n\t"
+          "max.xorsign.abs.bf16x2 x01, x01, x23; \n\t"
+          "max.xorsign.abs.bf16x2 %1, %1, x01; \n"
+          "}\n"
+          : "=l"(reinterpret_cast<uint64_t&>(in)), "+r"(reinterpret_cast<uint32_t&>(thread_amax_2x))
+          : "r"(src_smem_ptr), "r"(IN_SHMEM_STRIDE)
+        );
+      } else {
+        asm volatile(
+          "{\n"
+          ".reg.u32 base_offset, stride; \n\t"
+          "mov.u32 base_offset, %2; \n\t"
+          "mov.u32 stride, %3; \n\t"
+          ".reg.u32 ptr0,ptr1,ptr2,ptr3; \n\t"
+          "mad.lo.u32 ptr0, 0, stride, base_offset; \n\t"
+          "mad.lo.u32 ptr1, 1, stride, base_offset; \n\t"
+          "mad.lo.u32 ptr2, 2, stride, base_offset; \n\t"
+          "mad.lo.u32 ptr3, 3, stride, base_offset; \n\t"
+          ".reg.b16 x0,x1,x2,x3; \n\t"
+          "ld.shared.b16 x0, [ptr0]; \n\t"
+          "ld.shared.b16 x1, [ptr1]; \n\t"
+          "ld.shared.b16 x2, [ptr2]; \n\t"
+          "ld.shared.b16 x3, [ptr3]; \n\t"
+          "mov.b64 %0, {x0,x1,x2,x3}; \n\t"
+          ".reg.b32 x01,x23; \n\t"
+          "mov.b32 x01, {x0,x1}; \n\t"
+          "mov.b32 x23, {x2,x3}; \n\t"
+          "max.xorsign.abs.f16x2 x01, x01, x23; \n\t"
+          "max.xorsign.abs.f16x2 %1, %1, x01; \n"
+          "}\n"
+          : "=l"(reinterpret_cast<uint64_t&>(in)), "+r"(reinterpret_cast<uint32_t&>(thread_amax_2x))
+          : "r"(src_smem_ptr), "r"(IN_SHMEM_STRIDE)
+        );
+      }
+    }
+    thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+
+  } else if constexpr (NON_FP32_CAST_ONLY) {
     IType thread_amax_f16 = static_cast<IType>(0.0f);
 #pragma unroll
     for (int i = 0; i < BUFF_DIM_Y; ++i) {
@@ -552,7 +623,7 @@ __device__ __forceinline__ float process_colwise_stage(
   const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
   const IType block_scale_inverse_f16 = static_cast<IType>(block_scale_inverse);
 
-  if constexpr (USE_FAST_MATH && NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+  if constexpr (USE_FAST_MATH && NON_FP32_CAST_ONLY) {
     #pragma unroll
     for (int i = 0; i < SCALE_DIM_Y; i += 4) {
       OType4 out;
@@ -578,18 +649,16 @@ __device__ __forceinline__ float process_colwise_stage(
         "st.shared.b8 [ptr0], x0; \n\t"
         "st.shared.b8 [ptr1], x1; \n\t"
         "st.shared.b8 [ptr2], x2; \n\t"
-        "st.shared.b8 [ptr3], x3; \n\t"
+        "st.shared.b8 [ptr3], x3; \n"
         "}\n"
-        :: "r"(dst_smem_ptr),
-           "r"(static_cast<uint32_t>(BUFF_DIM_X * sizeof(OType))),
-           "r"(reinterpret_cast<const uint32_t&>(out))
+        :: "r"(dst_smem_ptr), "r"(OUT_SHMEM_STRIDE), "r"(reinterpret_cast<const uint32_t&>(out))
       );
     }
   } else {
     #pragma unroll
     for (int i = 0; i < SCALE_DIM_Y; ++i) {
       float in;
-      if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+      if constexpr (NON_FP32_CAST_ONLY) {
         in = static_cast<float>(in_colwise_IType[i]);
       } else {
         in = in_compute_colwise[i];
@@ -620,6 +689,7 @@ __device__ __forceinline__ float process_rowwise_stage(
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && COLWISE_SCALING;
+  constexpr bool NON_FP32_CAST_ONLY = NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>);
 
   const size_t shmem_offset_base_rowwise = buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
   float thread_amax = 0.0f;
@@ -627,7 +697,7 @@ __device__ __forceinline__ float process_rowwise_stage(
   Vec<IType, PACK_SIZE> in_cached[WAVES];
   Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
 
-  if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+  if constexpr (NON_FP32_CAST_ONLY) {
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
     for (int w = 0; w < WAVES; ++w) {
@@ -730,7 +800,7 @@ __device__ __forceinline__ float process_rowwise_stage(
     const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
     const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
 
-    if constexpr (USE_FAST_MATH && NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType,float>)) {
+    if constexpr (USE_FAST_MATH && NON_FP32_CAST_ONLY) {
       uint32_t out_4x = 0;
       OType4& out = *reinterpret_cast<OType4*>(&out_4x);
       const IType4& in = *reinterpret_cast<IType4*>(&in_IType[w].data.elt[0]);
@@ -745,7 +815,7 @@ __device__ __forceinline__ float process_rowwise_stage(
       for (int e = 0; e < PACK_SIZE / 2; ++e) {
         IType2 in;
         OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
-        if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+        if constexpr (NON_FP32_CAST_ONLY) {
           in = in_IType[w].data.elt[e];
         } else if constexpr (IS_CACHED_ACT_OP) {
           in.x = in_cached[w].data.elt[2 * e];
