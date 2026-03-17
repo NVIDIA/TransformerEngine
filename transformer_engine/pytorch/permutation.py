@@ -44,9 +44,15 @@ def moe_permute_index_map_forward(
     if not inp.numel():
         return inp.clone(), torch.tensor([], device=inp.device)
 
-    assert inp.is_cuda, "TransformerEngine needs CUDA."
-    assert index.is_cuda, "TransformerEngine needs CUDA."
-    assert inp.size(0) == index.size(0), "Permute not possible"
+    if not inp.is_cuda:
+        raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+    if not index.is_cuda:
+        raise ValueError(f"index must be a CUDA tensor, but got tensor on {index.device}.")
+    if inp.size(0) != index.size(0):
+        raise ValueError(
+            f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
+            f"index.size(0) ({index.size(0)})."
+        )
     if index.dtype != torch.int32:
         warnings.warn(
             f"The data type of the input `index` of Permute is {index.dtype}! "
@@ -279,16 +285,29 @@ def moe_permute_mask_map_forward(
     if not inp.numel():
         return inp.clone(), torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
 
-    assert inp.is_cuda, "TransformerEngine needs CUDA."
-    assert routing_map.is_cuda, "TransformerEngine needs CUDA."
+    if not inp.is_cuda:
+        raise ValueError(f"inp must be a CUDA tensor, but got tensor on {inp.device}.")
+    if not routing_map.is_cuda:
+        raise ValueError(
+            f"routing_map must be a CUDA tensor, but got tensor on {routing_map.device}."
+        )
     if probs is not None:
-        assert probs.is_cuda, "TransformerEngine needs CUDA."
+        if not probs.is_cuda:
+            raise ValueError(f"probs must be a CUDA tensor, but got tensor on {probs.device}.")
     if pad_offsets is not None:
-        assert pad_offsets.is_cuda, "TransformerEngine needs CUDA."
-    assert inp.size(0) == routing_map.size(0), "Permute not possible"
-
+        if not pad_offsets.is_cuda:
+            raise ValueError(
+                f"pad_offsets must be a CUDA tensor, but got tensor on {pad_offsets.device}."
+            )
+    if inp.size(0) != routing_map.size(0):
+        raise ValueError(
+            f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
+            f"routing_map.size(0) ({routing_map.size(0)})."
+        )
     num_tokens, hidden_size = inp.size()
     num_experts = routing_map.size(1)
+    if num_out_tokens is None:
+        raise ValueError("num_out_tokens must be provided to the fused permute function.")
 
     row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
 
@@ -301,17 +320,33 @@ def moe_permute_mask_map_forward(
     if fp8:
         fp8_dtype = inp._fp8_dtype
         fake_dtype = inp.dtype
+        # blockwise scaling
         if blockwise_recipe:
             fp8_scale = inp._rowwise_scale_inv.T.contiguous()
             scale_hidden_dim = fp8_scale.shape[1]
-            assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+            if num_tokens != fp8_scale.shape[0]:
+                raise ValueError(
+                    f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
+                    f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                    f"Input shape: ({num_tokens}, {hidden_size}), "
+                    f"scale shape: {tuple(fp8_scale.shape)}."
+                )
             inp = inp._rowwise_data
+        # mxfp8 scaling
         elif mxfp8_recipe:
             fp8_scale = inp._rowwise_scale_inv.contiguous()
             scale_hidden_dim = fp8_scale.shape[1]
-            assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+            if num_tokens != fp8_scale.shape[0]:
+                raise ValueError(
+                    f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
+                    f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                    f"Input shape: ({num_tokens}, {hidden_size}), "
+                    f"scale shape: {tuple(fp8_scale.shape)}."
+                )
             inp = inp._rowwise_data
+        # per-tensor scaling
         elif per_tensor_recipe:
+            # Kernel does not need scale in per-tensor scaling
             fp8_scale = None
             scale_hidden_dim = None
             fp8_scale_inv = inp._scale_inv
@@ -636,16 +671,28 @@ def moe_unpermute_mask_map_backward_no_probs(
             scale_hidden_dim = None
             fp8_scale_inv = unpermuted_act_grad._scale_inv
             unpermuted_act_grad = unpermuted_act_grad._data
+        # blockwise scaling
         elif blockwise_recipe:
             fp8_scale = unpermuted_act_grad._rowwise_scale_inv.T.contiguous()
             unpermuted_act_grad = unpermuted_act_grad._rowwise_data
             scale_hidden_dim = fp8_scale.shape[1]
-            assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+            if num_tokens != fp8_scale.shape[0]:
+                raise ValueError(
+                    f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
+                    f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                    f"Scale shape: {tuple(fp8_scale.shape)}."
+                )
+        # mxfp8 scaling
         elif mxfp8_recipe:
             fp8_scale = unpermuted_act_grad._rowwise_scale_inv.contiguous()
             unpermuted_act_grad = unpermuted_act_grad._rowwise_data
             scale_hidden_dim = fp8_scale.shape[1]
-            assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+            if num_tokens != fp8_scale.shape[0]:
+                raise ValueError(
+                    f"Scale and input shape mismatch: num_tokens ({num_tokens}) != "
+                    f"fp8_scale.shape[0] ({fp8_scale.shape[0]}). "
+                    f"Scale shape: {tuple(fp8_scale.shape)}."
+                )
         else:
             raise ValueError("Unsupported FP8 recipe")
     else:
@@ -925,10 +972,12 @@ def moe_permute_and_pad_with_probs(
             "moe_permute_and_pad_with_probs with quantized (FP8) input is not supported under "
             "torch.compile. Please move quantization outside the compiled region."
         )
-    assert (
-        tokens_per_expert is not None
-    ), "tokens_per_expert must be provided to the fused permute padding function."
-    assert align_size > 0, f"align_size must be positive, got {align_size}"
+    if tokens_per_expert is None:
+        raise ValueError(
+            "tokens_per_expert must be provided to the fused permute padding function."
+        )
+    if align_size <= 0:
+        raise ValueError(f"align_size must be positive, got {align_size}.")
 
     # Ensure tokens_per_expert is on the same device as input to avoid device transfers
     if tokens_per_expert.device != inp.device:

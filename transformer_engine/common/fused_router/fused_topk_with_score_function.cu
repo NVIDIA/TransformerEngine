@@ -328,10 +328,6 @@ __global__ void fused_topk_with_score_function_backward_kernel(
          * - Load the dgrad/output_from_fwd to shmem
          */
     int pos_offset = token_offset_cur_warp * num_experts;
-    // Clear the logits_grad in global mem
-    for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-      grad_logits[pos_offset + i] = 0.0f;
-    }
     // Load the dgrad/output_from_fwd to shmem
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
       local_grad[i] = grad_probs[pos_offset + i];

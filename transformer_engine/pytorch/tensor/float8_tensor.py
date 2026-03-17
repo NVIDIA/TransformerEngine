@@ -152,6 +152,7 @@ class Float8Quantizer(Quantizer):
             requires_grad=requires_grad,
             data_transpose=data_transpose,
             quantizer=self,
+            device=device,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -182,6 +183,7 @@ class Float8Quantizer(Quantizer):
                 data=data,
                 fp8_scale_inv=1 / self.scale,
                 fp8_dtype=self.dtype,
+                fake_dtype=fake_dtype,
                 requires_grad=requires_grad,
                 data_transpose=None,
                 quantizer=self,
@@ -378,6 +380,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             requires_grad=requires_grad,
             data_transpose=data_transpose,
             quantizer=self,
+            device=device,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -407,6 +410,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 data=data,
                 fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=data.device),
                 fp8_dtype=self.dtype,
+                fake_dtype=fake_dtype,
                 requires_grad=requires_grad,
                 data_transpose=None,
                 quantizer=self,
@@ -498,7 +502,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             "Float8Tensor("
             f"fp8_dtype={self._fp8_dtype}, "
             f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize(dtype=self.dtype)}"
+            f"data={self.dequantize()}"
             ")"
         )
 
@@ -951,6 +955,15 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             return self._transpose.is_cuda
         raise RuntimeError("Both data and transpose are None")
 
+    @property
+    def is_cpu(self):
+        """Return whether the tensor is on CPU."""
+        if self._data is not None:
+            return self._data.is_cpu
+        if self._transpose is not None:
+            return self._transpose.is_cpu
+        raise RuntimeError("Both data and transpose are None")
+
     @classmethod
     def _make_in_reduce_ex(
         cls,
@@ -975,7 +988,16 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
-        """Custom pickling to remove references to FP8 metadata objects"""
+        """Custom pickling to remove references to FP8 metadata objects
+
+        CPU Float8Tensors are serialized as dequantized plain tensors
+        for compatibility with torch.load(weights_only=True), which is
+        used by DCP async save staging.
+        """
+        data_is_cpu = self._data is not None and self._data.is_cpu
+        transpose_is_cpu = self._transpose is not None and self._transpose.is_cpu
+        if data_is_cpu or transpose_is_cpu:
+            return self.dequantize(dtype=self.dtype).__reduce_ex__(protocol)
         return (
             Float8Tensor._make_in_reduce_ex,
             (self._data, self._fp8_dtype, self._scale_inv, self.dtype, self.shape),

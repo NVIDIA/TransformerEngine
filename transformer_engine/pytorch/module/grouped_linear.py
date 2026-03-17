@@ -646,9 +646,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_name = ub_name
         self.save_original_input = save_original_input
         self.single_grouped_parameter = single_grouped_parameter
-        assert (
-            not ub_overlap_rs and not ub_overlap_ag
-        ), "GroupedLinear doesn't support Userbuffer overlap."
+        if ub_overlap_rs or ub_overlap_ag:
+            raise ValueError("GroupedLinear doesn't support Userbuffer overlap.")
         self.init_method = init_method
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
@@ -683,9 +682,11 @@ class GroupedLinear(TransformerEngineBaseModule):
             )
 
         self.parallel_mode = parallel_mode
-        assert (
-            self.parallel_mode in GemmParallelModes
-        ), f"parallel_mode {parallel_mode} not supported"
+        if self.parallel_mode not in GemmParallelModes:
+            raise ValueError(
+                f"parallel_mode {parallel_mode!r} not supported."
+                f" Supported modes: {GemmParallelModes}"
+            )
 
         if self.parallel_mode == "column":
             self.out_features = divide(self.out_features, self.tp_size)
@@ -788,9 +789,11 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         # Re-register as a single grouped weight parameter.
         # Re-register as a single grouped weight parameter.
-        assert isinstance(grouped_weights, torch.Tensor) and (
-            weight_quantizers[0] is None or not weight_quantizers[0].internal
-        ), "Found internal quantizer with `single_grouped_parameter=True`."
+        if not (
+            isinstance(grouped_weights, torch.Tensor)
+            and (weight_quantizers[0] is None or not weight_quantizers[0].internal)
+        ):
+            raise RuntimeError("Found internal quantizer with `single_grouped_parameter=True`.")
         self.register_parameter(
             "weight",
             torch.nn.Parameter(grouped_weights),
@@ -843,6 +846,77 @@ class GroupedLinear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, f"bias{i}"), True, 0, 1)
 
+    def _remap_grouped_weight_state_dict_keys(self, state_dict, prefix: str) -> None:
+        """Remap weight keys between single and per-GEMM checkpoint formats."""
+        grouped_weight_key = f"{prefix}weight"
+        per_gemm_weight_keys = [f"{prefix}weight{i}" for i in range(self.num_gemms)]
+        has_grouped_weight = grouped_weight_key in state_dict
+        has_per_gemm_weights = all(key in state_dict for key in per_gemm_weight_keys)
+
+        if self.single_grouped_parameter:
+            # Backward compatibility: checkpoints saved without single_grouped_parameter
+            # store one weight tensor per GEMM (weight0..weightN). Convert them into a
+            # single stacked grouped weight expected by this module configuration.
+            if not has_grouped_weight and has_per_gemm_weights:
+                per_gemm_weights = [state_dict.pop(key) for key in per_gemm_weight_keys]
+                per_gemm_weights = [
+                    weight.dequantize() if isinstance(weight, QuantizedTensorStorage) else weight
+                    for weight in per_gemm_weights
+                ]
+                state_dict[grouped_weight_key] = torch.stack(per_gemm_weights, dim=0)
+            elif has_grouped_weight:
+                # Drop any redundant per-GEMM keys to avoid strict-load unexpected-key errors.
+                for key in per_gemm_weight_keys:
+                    state_dict.pop(key, None)
+        else:
+            # Forward compatibility: checkpoints saved with single_grouped_parameter
+            # store one grouped `weight`. Convert it back to weight0..weightN.
+            if not has_per_gemm_weights and has_grouped_weight:
+                grouped_weight = state_dict.pop(grouped_weight_key)
+                if hasattr(grouped_weight, "split_into_quantized_tensors"):
+                    grouped_members = grouped_weight.quantized_tensors
+                    if grouped_members is None:
+                        grouped_members = grouped_weight.split_into_quantized_tensors()
+                    per_gemm_weights = [
+                        (
+                            weight.dequantize()
+                            if isinstance(weight, QuantizedTensorStorage)
+                            else weight
+                        )
+                        for weight in grouped_members
+                    ]
+                else:
+                    grouped_weight = (
+                        grouped_weight.dequantize()
+                        if isinstance(grouped_weight, QuantizedTensorStorage)
+                        else grouped_weight
+                    )
+                    per_gemm_weights = list(grouped_weight.unbind(dim=0))
+                for i, weight in enumerate(per_gemm_weights):
+                    state_dict[f"{prefix}weight{i}"] = weight
+            elif has_per_gemm_weights:
+                # Drop any redundant grouped key to avoid strict-load unexpected-key errors.
+                state_dict.pop(grouped_weight_key, None)
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        """Load state dict with grouped-weight format compatibility."""
+        state_dict_copy = state_dict.copy()
+        metadata = getattr(state_dict, "_metadata", None)
+        if metadata is not None:
+            state_dict_copy._metadata = metadata
+        self._remap_grouped_weight_state_dict_keys(state_dict_copy, prefix="")
+        return super().load_state_dict(state_dict_copy, strict=strict, assign=assign)
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        """Load state, including compatibility across grouped-weight checkpoint formats."""
+        self._remap_grouped_weight_state_dict_keys(state_dict, prefix)
+
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
     @no_torch_dynamo()
     def forward(
         self,
@@ -875,10 +949,13 @@ class GroupedLinear(TransformerEngineBaseModule):
         """
         debug = self.is_debug_iter()
 
-        assert not isinstance(
-            inp, QuantizedTensorStorage
-        ), "GroupedLinear doesn't support input tensor in FP8."
-        assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
+        if isinstance(inp, QuantizedTensorStorage):
+            raise TypeError("GroupedLinear doesn't support input tensor in FP8.")
+        if len(m_splits) != self.num_gemms:
+            raise ValueError(
+                f"Number of splits ({len(m_splits)}) should match number of"
+                f" GEMMs ({self.num_gemms})."
+            )
 
         is_grad_enabled = torch.is_grad_enabled()
 
@@ -969,10 +1046,11 @@ class GroupedLinear(TransformerEngineBaseModule):
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""
 
-        assert not self.tp_size > 1, (
-            "GroupedLinear doesn't support TP > 1 with Float8 current scaling. "
-            "Because the TP communication is handled outside of this module."
-        )
+        if self.tp_size > 1:
+            raise ValueError(
+                "GroupedLinear doesn't support TP > 1 with Float8 current scaling. "
+                "Because the TP communication is handled outside of this module."
+            )
 
         if fwd:
             for i in range(self.num_gemms):
@@ -1077,12 +1155,13 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def _get_debug_quantizers(self):
         original_quantizers = self._get_quantizers()
-        assert TEDebugState.debug_enabled
+        if not TEDebugState.debug_enabled:
+            raise RuntimeError("TEDebugState.debug_enabled must be True to get debug quantizers")
 
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
         return tuple(
             [
-                DebugQuantizer(self.name + f".gemm_{q_id}", name, q, self.tp_group)
+                DebugQuantizer(self.name + f".gemm_{q_id}", name, q, self.tp_group, self.tp_size)
                 for q_id, q in enumerate(qs)
             ]
             for name, qs in zip(names, original_quantizers)
