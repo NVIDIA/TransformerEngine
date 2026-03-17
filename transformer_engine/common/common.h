@@ -41,7 +41,34 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 
 namespace transformer_engine {
 
-std::string to_string(const DType type);
+inline std::string to_string(const DType type) {
+  switch (type) {
+    case DType::kByte:
+      return "Byte";
+    case DType::kBFloat16:
+      return "BFloat16";
+    case DType::kFloat16:
+      return "Float16";
+    case DType::kFloat32:
+      return "Float32";
+    case DType::kFloat8E4M3:
+      return "Float8E4M3";
+    case DType::kFloat8E5M2:
+      return "Float8E5M2";
+    case DType::kFloat8E8M0:
+      return "Float8E8M0";
+    case DType::kFloat4E2M1:
+      return "Float4E2M1";
+    case DType::kInt16:
+      return "Int16";
+    case DType::kInt32:
+      return "Int32";
+    case DType::kInt64:
+      return "Int64";
+    default:
+      return std::string("Invalid type ") + std::to_string(static_cast<int>(type));
+  }
+}
 std::string to_string(const NVTEScalingMode &mode);
 
 inline std::string to_string_like(const DType &val) { return to_string(val); }

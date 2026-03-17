@@ -35,7 +35,11 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 // Hopper (SM90) support for grouped GEMM requires cuBLAS 13.4+
 #define CUBLAS_GROUPED_GEMM_HOPPER_VERSION 130400
 
-#if CUBLAS_VERSION >= 130200
+// BF16 support for grouped GEMM requires cuBLAS 13.3+
+// cuBLAS 13.2 is mostly functional but contains a bug for wgrad when a group has k=0, the weight gradient will be uninitialized random data instead of zeros.
+#define CUBLAS_GROUPED_GEMM_VERSION 130300
+
+#if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_VERSION
 
 namespace {
 
@@ -302,8 +306,8 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
   const int current_device = transformer_engine::cuda::current_device();
   NVTE_CHECK(transformer_engine::cuda::sm_arch(current_device) >= 100, api_name,
              " requires Blackwell (SM100) or newer architecture.");
-  NVTE_CHECK(transformer_engine::cuda::cublas_version() >= 130200, api_name,
-             " requires cuBLAS 13.2+, but run-time cuBLAS version is ",
+  NVTE_CHECK(transformer_engine::cuda::cublas_version() >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
+             " requires cuBLAS 13.3+, but run-time cuBLAS version is ",
              transformer_engine::cuda::cublas_version());
 }
 
@@ -1574,15 +1578,15 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-#else  // CUBLAS_VERSION < 130200
+#else  // CUBLAS_VERSION < CUBLAS_GROUPED_GEMM_VERSION
 
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
                        const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
                        const NVTETensor beta, NVTETensor workspace_setup,
                        NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
                        cudaStream_t stream) {
-  NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.2+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+  NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.3+, but compile-time cuBLAS version is ",
+             CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
 }
 
 void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
@@ -1592,9 +1596,9 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
                                             NVTETensor workspace_setup, NVTETensor workspace_cublas,
                                             NVTEGroupedMatmulConfig config, cudaStream_t stream) {
   NVTE_ERROR(
-      "nvte_grouped_gemm_with_discrete_inputA requires cuBLAS 13.2+, but compile-time "
+      "nvte_grouped_gemm_with_discrete_inputA requires cuBLAS 13.3+, but compile-time "
       "cuBLAS version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
 }
 
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
@@ -1605,26 +1609,26 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
                                          NVTETensor workspace_setup, NVTETensor workspace_cublas,
                                          NVTEGroupedMatmulConfig config, cudaStream_t stream) {
   NVTE_ERROR(
-      "nvte_grouped_gemm_with_discrete_out requires cuBLAS 13.2+, but compile-time "
+      "nvte_grouped_gemm_with_discrete_out requires cuBLAS 13.3+, but compile-time "
       "cuBLAS version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
 }
 
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
                            cudaStream_t stream) {
-  NVTE_ERROR("nvte_grouped_bias_add requires cuBLAS 13.2+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+  NVTE_ERROR("nvte_grouped_bias_add requires cuBLAS 13.3+, but compile-time cuBLAS version is ",
+             CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
 }
 
 size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors) {
   NVTE_ERROR(
-      "nvte_get_grouped_gemm_setup_workspace_size requires cuBLAS 13.2+, but compile-time cuBLAS "
+      "nvte_get_grouped_gemm_setup_workspace_size requires cuBLAS 13.3+, but compile-time cuBLAS "
       "version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.1 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
   return 0;
 }
 
-#endif  // CUBLAS_VERSION >= 130200
+#endif  // CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_VERSION
 
 namespace {
 

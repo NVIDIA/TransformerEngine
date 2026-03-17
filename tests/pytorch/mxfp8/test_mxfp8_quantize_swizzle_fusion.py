@@ -39,7 +39,7 @@ def check_mxfp8_quantize_swizzle_fusion(
     x_dtype: torch.dtype,
     M: int,
     N: int,
-    return_identity: bool,
+    return_rowwise: bool,
     return_transpose: bool,
 ) -> None:
 
@@ -57,7 +57,7 @@ def check_mxfp8_quantize_swizzle_fusion(
     # Quantize
     quantizer = MXFP8Quantizer(
         fp8_dtype=te_dtype,
-        rowwise=return_identity,
+        rowwise=return_rowwise,
         columnwise=return_transpose,
     )
 
@@ -69,7 +69,7 @@ def check_mxfp8_quantize_swizzle_fusion(
     )
     x_qx_ref, x_sx_ref, x_qx_t_ref, x_sx_t_ref = unpack_quantized_tensor(quantizer(x))
 
-    if return_identity:
+    if return_rowwise:
         torch.testing.assert_close(x_qx_swf, x_qx_ref, atol=0.0, rtol=0.0)
         valid_scale_shape = get_mxfp8_scale_shape_no_padding(x.shape, False)
         assert valid_scale_shape == x_sx_swf.shape, (
@@ -103,9 +103,7 @@ def check_mxfp8_quantize_swizzle_fusion(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 def test_mxfp8_quantize_swizzle_fusion(
     x_dtype: torch.dtype,
     M: int,
@@ -113,14 +111,14 @@ def test_mxfp8_quantize_swizzle_fusion(
     quantize_mode: str,
 ) -> None:
 
-    if quantize_mode == "quantize":
-        return_identity = True
+    if quantize_mode == "rowwise_only":
+        return_rowwise = True
         return_transpose = False
-    elif quantize_mode == "quantize_transpose":
-        return_identity = True
+    elif quantize_mode == "both_directions":
+        return_rowwise = True
         return_transpose = True
-    elif quantize_mode == "quantize_colwise_only":
-        return_identity = False
+    elif quantize_mode == "columnwise_only":
+        return_rowwise = False
         return_transpose = True
     else:
         raise ValueError(f"Invalid quantize mode: {quantize_mode}")
@@ -129,6 +127,6 @@ def test_mxfp8_quantize_swizzle_fusion(
         x_dtype=x_dtype,
         M=M,
         N=N,
-        return_identity=return_identity,
+        return_rowwise=return_rowwise,
         return_transpose=return_transpose,
     )
