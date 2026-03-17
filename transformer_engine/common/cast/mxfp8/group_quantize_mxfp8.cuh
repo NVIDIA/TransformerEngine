@@ -496,13 +496,12 @@ __device__ __forceinline__ float process_colwise_stage(
   float thread_amax = 0.0f;
   float in_compute_colwise[BUFF_DIM_Y];
   IType in_colwise_IType[BUFF_DIM_Y];
+  IType4 in_colwise_IType4[BUFF_DIM_Y/4];
 
   if constexpr (USE_FAST_MATH && NON_FP32_CAST_ONLY) {
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
     #pragma unroll
     for (int i = 0; i < BUFF_DIM_Y; i += 4) {
-      IType4& in = *reinterpret_cast<IType4*>(&in_colwise_IType[i]);
-
       const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
       const uint32_t src_smem_ptr = __cvta_generic_to_shared(&in_sh[shmem_offset_colwise]);
 
@@ -530,7 +529,8 @@ __device__ __forceinline__ float process_colwise_stage(
           "max.xorsign.abs.bf16x2 x01, x01, x23; \n\t"
           "max.xorsign.abs.bf16x2 %1, %1, x01; \n"
           "}\n"
-          : "=l"(reinterpret_cast<uint64_t&>(in)), "+r"(reinterpret_cast<uint32_t&>(thread_amax_2x))
+          : "=l"(reinterpret_cast<uint64_t&>(in_colwise_IType4[i/4])),
+            "+r"(reinterpret_cast<uint32_t&>(thread_amax_2x))
           : "r"(src_smem_ptr), "r"(IN_SHMEM_STRIDE)
         );
       } else {
@@ -556,7 +556,8 @@ __device__ __forceinline__ float process_colwise_stage(
           "max.xorsign.abs.f16x2 x01, x01, x23; \n\t"
           "max.xorsign.abs.f16x2 %1, %1, x01; \n"
           "}\n"
-          : "=l"(reinterpret_cast<uint64_t&>(in)), "+r"(reinterpret_cast<uint32_t&>(thread_amax_2x))
+          : "=l"(reinterpret_cast<uint64_t&>(in_colwise_IType4[i/4])),
+            "+r"(reinterpret_cast<uint32_t&>(thread_amax_2x))
           : "r"(src_smem_ptr), "r"(IN_SHMEM_STRIDE)
         );
       }
@@ -627,9 +628,7 @@ __device__ __forceinline__ float process_colwise_stage(
     #pragma unroll
     for (int i = 0; i < SCALE_DIM_Y; i += 4) {
       OType4 out;
-      const IType4& in = *reinterpret_cast<IType4*>(&in_colwise_IType[i]);
-
-      ptx::mul_cvt_4x(out, in, block_scale_inverse_f16);
+      ptx::mul_cvt_4x(out, in_colwise_IType4[i/4], block_scale_inverse_f16);
 
       const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
       const uint32_t dst_smem_ptr = __cvta_generic_to_shared(&out_colwise_data_sh[shmem_offset_elt]);
@@ -696,18 +695,36 @@ __device__ __forceinline__ float process_rowwise_stage(
   float in_compute_rowwise[SCALE_DIM_X];
   Vec<IType, PACK_SIZE> in_cached[WAVES];
   Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
+  IType4 in_IType4[WAVES];
 
   if constexpr (NON_FP32_CAST_ONLY) {
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#pragma unroll
+    #pragma unroll
     for (int w = 0; w < WAVES; ++w) {
       const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
       const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
       const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-      in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
-#pragma unroll
-      for (int e = 0; e < PACK_SIZE / 2; ++e) {
-        ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
+      if constexpr (USE_FAST_MATH) {
+        const uint32_t src_smem_ptr = __cvta_generic_to_shared(&in_sh[shmem_offset_rowwise]);
+        // Load 4x elts S2R and find amax
+        asm volatile(
+          "{\n"
+          "ld.shared.b64 %0, [%2]; \n\t"
+          ".reg.b32 x01,x23; \n\t"
+          "mov.b64 {x01, x23}, %0; \n\t"
+          "max.xorsign.abs.bf16x2 x01, x01, x23; \n\t"
+          "max.xorsign.abs.bf16x2 %1, %1, x01; \n"
+          "}\n"
+          : "+l"(reinterpret_cast<uint64_t&>(in_IType4[w])),
+            "+r"(reinterpret_cast<uint32_t&>(thread_amax_2x))
+          : "r"(src_smem_ptr)
+        );
+      } else {
+        in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
+        #pragma unroll
+        for (int e = 0; e < PACK_SIZE / 2; ++e) {
+          ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
+        }
       }
     }
     thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
@@ -803,9 +820,7 @@ __device__ __forceinline__ float process_rowwise_stage(
     if constexpr (USE_FAST_MATH && NON_FP32_CAST_ONLY) {
       uint32_t out_4x = 0;
       OType4& out = *reinterpret_cast<OType4*>(&out_4x);
-      const IType4& in = *reinterpret_cast<IType4*>(&in_IType[w].data.elt[0]);
-
-      ptx::mul_cvt_4x(out, in, block_scale_inverse_f16);
+      ptx::mul_cvt_4x(out, in_IType4[w], block_scale_inverse_f16);
 
       const uint32_t dst_smem_ptr = __cvta_generic_to_shared(&out_rowwise_data_sh[shmem_offset_rowwise]);
       asm volatile("st.shared.b32 [%0], %1;" : : "r"(dst_smem_ptr), "r"(out_4x));
