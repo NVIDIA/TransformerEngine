@@ -538,10 +538,29 @@ __device__ __forceinline__ float process_colwise_stage(
       ptx::mul_cvt_4x(out, in, block_scale_inverse_f16);
 
       const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-      out_colwise_data_sh[shmem_offset_elt + 0 * BUFF_DIM_X] = out.x1;
-      out_colwise_data_sh[shmem_offset_elt + 1 * BUFF_DIM_X] = out.x2;
-      out_colwise_data_sh[shmem_offset_elt + 2 * BUFF_DIM_X] = out.x3;
-      out_colwise_data_sh[shmem_offset_elt + 3 * BUFF_DIM_X] = out.x4;
+      const uint32_t dst_smem_ptr = __cvta_generic_to_shared(&out_colwise_data_sh[shmem_offset_elt]);
+
+      asm volatile(
+        "{\n"
+        ".reg.u32 base_offset, stride; \n\t"
+        "mov.u32 base_offset, %0; \n\t"
+        "mov.u32 stride, %1; \n\t"
+        ".reg.u32 ptr0,ptr1,ptr2,ptr3; \n\t"
+        "mad.lo.u32 ptr0, 0, stride, base_offset; \n\t"
+        "mad.lo.u32 ptr1, 1, stride, base_offset; \n\t"
+        "mad.lo.u32 ptr2, 2, stride, base_offset; \n\t"
+        "mad.lo.u32 ptr3, 3, stride, base_offset; \n\t"
+        ".reg.b8 x0,x1,x2,x3; \n\t"
+        "mov.b32 {x0,x1,x2,x3}, %2; \n\t"
+        "st.shared.b8 [ptr0], x0; \n\t"
+        "st.shared.b8 [ptr1], x1; \n\t"
+        "st.shared.b8 [ptr2], x2; \n\t"
+        "st.shared.b8 [ptr3], x3; \n\t"
+        "}\n"
+        :: "r"(dst_smem_ptr),
+           "r"(static_cast<uint32_t>(BUFF_DIM_X * sizeof(OType))),
+           "r"(reinterpret_cast<const uint32_t&>(out))
+      );
     }
   } else {
     #pragma unroll
