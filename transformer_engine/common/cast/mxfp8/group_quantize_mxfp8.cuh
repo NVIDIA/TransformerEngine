@@ -457,6 +457,9 @@ __device__ __forceinline__ float process_colwise_stage(
     const size_t scale_stride_colwise, const size_t tensor_base_for_scales, const size_t rows,
     const size_t cols, IType *in_sh, IType *act_in_sh, IType *cached_act_sh,
     OType *out_colwise_data_sh, e8m0_t *scales_colwise, float &partial_dbias_colwise) {
+  using IType4 = typename ptx::FPx4<IType>;
+  using OType4 = typename ptx::FPx4<OType>;
+
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING;
@@ -524,21 +527,37 @@ __device__ __forceinline__ float process_colwise_stage(
   scales_colwise[scale_idx] = biased_exponent;
 
   const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+  const IType block_scale_inverse_f16 = static_cast<IType>(block_scale_inverse);
 
-#pragma unroll
-  for (int i = 0; i < SCALE_DIM_Y; ++i) {
-    float in;
-    if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-      in = static_cast<float>(in_colwise_IType[i]);
-    } else {
-      in = in_compute_colwise[i];
+  if constexpr (USE_FAST_MATH && NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+    #pragma unroll
+    for (int i = 0; i < SCALE_DIM_Y; i += 4) {
+      OType4 out;
+      const IType4& in = *reinterpret_cast<IType4*>(&in_colwise_IType[i]);
+
+      ptx::mul_cvt_4x(out, in, block_scale_inverse_f16);
+
+      const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
+      out_colwise_data_sh[shmem_offset_elt + 0 * BUFF_DIM_X] = out.x1;
+      out_colwise_data_sh[shmem_offset_elt + 1 * BUFF_DIM_X] = out.x2;
+      out_colwise_data_sh[shmem_offset_elt + 2 * BUFF_DIM_X] = out.x3;
+      out_colwise_data_sh[shmem_offset_elt + 3 * BUFF_DIM_X] = out.x4;
     }
-    const float scaled_out = in * block_scale_inverse;
-
-    const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-    out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
+  } else {
+    #pragma unroll
+    for (int i = 0; i < SCALE_DIM_Y; ++i) {
+      float in;
+      if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+        in = static_cast<float>(in_colwise_IType[i]);
+      } else {
+        in = in_compute_colwise[i];
+      }
+      const float scaled_out = in * block_scale_inverse;
+  
+      const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
+      out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
+    }
   }
-
   return thread_amax;
 }
 
@@ -553,7 +572,9 @@ __device__ __forceinline__ float process_rowwise_stage(
     IType *in_sh, IType *act_in_sh, IType *cached_act_sh, OType *out_rowwise_data_sh,
     e8m0_t *scales_rowwise, float *thread_dbias_rowwise) {
   using IType2 = typename ptx::FPx2<IType>;
+  using IType4 = typename ptx::FPx4<IType>;
   using OType2 = typename ptx::FPx2<OType>;
+  using OType4 = typename ptx::FPx4<OType>;
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && COLWISE_SCALING;
@@ -657,61 +678,45 @@ __device__ __forceinline__ float process_rowwise_stage(
     scales_rowwise[scale_idx] = biased_exponent;
   }
 
-  // const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-  const bf16 multiplier = static_cast<bf16>(ptx::exp2f_rcp(biased_exponent));
-  // const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
+  const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+  const IType block_scale_inverse_f16 = static_cast<IType>(block_scale_inverse);
+  const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
   #pragma unroll
   for (int w = 0; w < WAVES; ++w) {
-    uint32_t out = 0;
-    asm volatile(
-    "{\n\t"
-      ".reg.b16 x0,x1,x2,x3; \n\t"
-      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
-      ".reg.f32 y0,y1,y2,y3; \n\t"
-      "fma.rn.f32.bf16 y0, x0, %2, 0f00000000; \n\t"
-      "fma.rn.f32.bf16 y1, x1, %2, 0f00000000; \n\t"
-      "fma.rn.f32.bf16 y2, x2, %2, 0f00000000; \n\t"
-      "fma.rn.f32.bf16 y3, x3, %2, 0f00000000; \n\t"
-      ".reg.b16 z01, z23; \n\t"
-      "cvt.rn.satfinite.e4m3x2.f32 z01, y1, y0; \n\t"
-      "cvt.rn.satfinite.e4m3x2.f32 z23, y3, y2; \n\t"
-      "mov.b32 %0, {z01, z23}; \n"
-    "}\n"
-    : "=r"(out)
-    : "l"(reinterpret_cast<const uint64_t &>(in_IType[w].data.elt[0])),
-      "h"(reinterpret_cast<const uint16_t &>(multiplier)));
-
     const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
     const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
     const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
-    // out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
 
-    const uint32_t dst_smem_ptr = __cvta_generic_to_shared(&out_rowwise_data_sh[shmem_offset_rowwise]);
-    asm volatile("st.shared.b32 [%0], %1;" : : "r"(dst_smem_ptr), "r"(out));
+    if constexpr (USE_FAST_MATH && NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType,float>)) {
+      uint32_t out_4x = 0;
+      OType4& out = *reinterpret_cast<OType4*>(&out_4x);
+      const IType4& in = *reinterpret_cast<IType4*>(&in_IType[w].data.elt[0]);
 
+      ptx::mul_cvt_4x(out, in, block_scale_inverse_f16);
 
-    // Vec<OType2, PACK_SIZE / 2> out;
-    // #pragma unroll
-    // for (int e = 0; e < PACK_SIZE / 2; ++e) {
-    //   IType2 in;
-    //   OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
-    //   if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-    //     in = in_IType[w].data.elt[e];
-    //   } else if constexpr (IS_CACHED_ACT_OP) {
-    //     in.x = in_cached[w].data.elt[2 * e];
-    //     in.y = in_cached[w].data.elt[2 * e + 1];
-    //   } else {
-    //     const int j = w * PACK_SIZE + 2 * e;
-    //     in.x = in_compute_rowwise[j];
-    //     in.y = in_compute_rowwise[j + 1];
-    //   }
-    //   ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
-    // }
-    // const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-    // const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-    // const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
-    // out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
+      const uint32_t dst_smem_ptr = __cvta_generic_to_shared(&out_rowwise_data_sh[shmem_offset_rowwise]);
+      asm volatile("st.shared.b32 [%0], %1;" : : "r"(dst_smem_ptr), "r"(out_4x));
+    } else {
+      Vec<OType2, PACK_SIZE / 2> out;
+      #pragma unroll
+      for (int e = 0; e < PACK_SIZE / 2; ++e) {
+        IType2 in;
+        OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
+        if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+          in = in_IType[w].data.elt[e];
+        } else if constexpr (IS_CACHED_ACT_OP) {
+          in.x = in_cached[w].data.elt[2 * e];
+          in.y = in_cached[w].data.elt[2 * e + 1];
+        } else {
+          const int j = w * PACK_SIZE + 2 * e;
+          in.x = in_compute_rowwise[j];
+          in.y = in_compute_rowwise[j + 1];
+        }
+        ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
+      }
+      out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
+    }
   }
 
   return thread_amax;
@@ -1071,6 +1076,12 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   using namespace group_quantize_kernel;
 
   const bool use_fast_math = quant_config ? quant_config->use_fast_math : false;
+  if (use_fast_math) {
+    NVTE_CHECK(input->dtype() == DType::kBFloat16 || input->dtype() == DType::kFloat16,
+               "Fast math supports only BF16 and FP16 input types.");
+    NVTE_CHECK(!IS_DBIAS && !IS_DACT && !IS_ACT,
+               "Fast math does not support fused casts.");
+  }
 
   checkCuDriverContext(stream);
   CheckNoopTensor(*noop, "cast_noop");
