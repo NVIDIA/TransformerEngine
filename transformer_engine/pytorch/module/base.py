@@ -77,11 +77,9 @@ class UserBufferQuantizationMode(Enum):
     NONE = "none"
     FP8 = "fp8"
 
-
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
     """Returns a dummy tensor of given shape."""
-    if len(shape) != 2:
-        raise ValueError(f"Expected 2D shape, got {len(shape)}D: {shape}")
+
     key = (*shape, dtype)
     global _dummy_wgrads
     if key not in _dummy_wgrads:
@@ -94,7 +92,6 @@ def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor
     if zero:
         _dummy_wgrads[key].fill_(0)
     return _dummy_wgrads[key].detach()
-
 
 def initialize_ub(
     shape: list,
