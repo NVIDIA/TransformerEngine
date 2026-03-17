@@ -255,9 +255,12 @@ __device__ __forceinline__ JobDescriptor decode_job(
 template <ShapeRepresentation SHAPE_REP>
 __device__ __forceinline__ bool is_job_valid(const JobDescriptor &job, const size_t total_work_blocks,
                                              const int64_t *const __restrict__ offsets_ptr) {
-  bool is_valid = (job.block_id < total_work_blocks) && (job.rows != 0) && (job.cols != 0);
+  const bool is_valid = (job.block_id < total_work_blocks);
   if (!is_valid) {
-    return is_valid;
+    return false;
+  }
+  if (job.rows == 0 || job.cols == 0) {
+    return true;
   }
   if constexpr (SHAPE_REP == SAME_BOTH_DIMS) {
     return true;
@@ -277,6 +280,26 @@ __device__ __forceinline__ bool is_job_valid(const JobDescriptor &job, const siz
   }
 
   return true;
+}
+
+__device__ __forceinline__ bool job_has_work(const JobDescriptor &job) {
+  return job.rows != 0 && job.cols != 0;
+}
+
+__device__ __forceinline__ void advance_to_next_job(
+    bool &job_finished, int32_t &ctaid_X, int32_t &ctaid_Y, size_t &static_next_block_id,
+    const size_t static_block_stride, const size_t total_work_blocks, const size_t work_blocks_X) {
+  if constexpr (PERSISTENT) {
+    if (static_next_block_id < total_work_blocks) {
+      ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
+      ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
+      static_next_block_id += static_block_stride;
+    } else {
+      job_finished = true;
+    }
+  } else {
+    job_finished = true;
+  }
 }
 
 template <ShapeRepresentation SHAPE_REP>
@@ -863,6 +886,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     if (!current_job_is_valid) {
       break;
     }
+    if (!job_has_work(current_job)) {
+      // Zero-sized tensors are valid grouped-tensor entries; skip them and keep scheduling work.
+      advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id,
+                          static_block_stride, total_work_blocks, work_blocks_X);
+      continue;
+    }
 
     const size_t tensor_id = current_job.tensor_id;
     const size_t rows = current_job.rows;
@@ -1053,17 +1082,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
     }
 
-    if constexpr (PERSISTENT) {
-      if (static_next_block_id < total_work_blocks) {
-        ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
-        ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
-        static_next_block_id += static_block_stride;
-      } else {
-        job_finished = true;
-      }
-    } else {
-      job_finished = true;
-    }
+    advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id,
+                        static_block_stride, total_work_blocks, work_blocks_X);
   }
 
   if (amax_ptr != nullptr) {
