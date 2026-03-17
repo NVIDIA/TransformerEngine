@@ -552,13 +552,37 @@ class QuantizedTensor(torch.Tensor):
                 dst.quantize_(src)
             else:
                 if isinstance(src, QuantizedTensor):
-                    src = src.dequantize()
+                    dtype = dst.dtype
+                    if dtype not in (torch.float32, torch.float16, torch.bfloat16):
+                        dtype = torch.float32
+                    src = src.dequantize(dtype=dtype)
                 dst.copy_(src)
             return None
 
         # View op
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
+
+        # New empty op (used by DCP async staging to create CPU copies)
+        if func == torch.ops.aten.new_empty.default:
+            tensor = args[0]
+            size = args[1]
+            dtype = kwargs.get("dtype", tensor.dtype)
+            device = kwargs.get("device", tensor.device)
+            pin_memory = kwargs.get("pin_memory", False)
+            if tensor._quantizer is None:
+                raise RuntimeError(
+                    f"{type(tensor).__name__} does not have a quantizer; "
+                    "cannot create new_empty QuantizedTensor"
+                )
+            out = tensor._quantizer.make_empty(
+                shape=torch.Size(size),
+                dtype=dtype,
+                device=device,
+                requires_grad=tensor.requires_grad,
+                pin_memory=pin_memory,
+            )
+            return out
 
         # Empty like op
         if func == torch.ops.aten.empty_like.default:
