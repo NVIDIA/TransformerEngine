@@ -130,11 +130,13 @@ void multi_tensor_apply(int64_t block_size, int64_t chunk_size,
   }
 }
 
-template <auto Kernel, typename... ArgTypes>
+template <auto Kernel, int TileRows = MXFP8_TILE, int TileCols = MXFP8_TILE,
+          int BlockThreads = MXFP8_BLOCK_THREADS, typename... ArgTypes>
 void multi_tensor_apply_mxfp8(int64_t chunk_size, const transformer_engine::Tensor &noop_flag,
                               std::vector<std::vector<transformer_engine::Tensor *>> tensor_lists,
                               uint8_t fp8_dtype, cudaStream_t stream, ArgTypes... args) {
   constexpr size_t kNumTensorLists = 8;
+  constexpr int TileElems = TileRows * TileCols;
   NVTE_CHECK(tensor_lists.size() == kNumTensorLists,
              "Expected 8 tensor lists for MXFP8, but found ", tensor_lists.size());
 
@@ -146,6 +148,9 @@ void multi_tensor_apply_mxfp8(int64_t chunk_size, const transformer_engine::Tens
     NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list, "Tensor list ", i,
                " has size=", tensor_lists[i].size(), ", but expected size=", num_tensors_per_list);
   }
+
+  const int tiles_per_block =
+      std::max(1, static_cast<int>(chunk_size / TileElems));
 
   MXFP8TensorListMetadata tl;
   tl.start_tensor_this_launch = 0;
@@ -167,25 +172,28 @@ void multi_tensor_apply_mxfp8(int64_t chunk_size, const transformer_engine::Tens
     }
     loc_tensor_info++;
 
-    const int tiles_y = (rows_val + MXFP8_TILE - 1) / MXFP8_TILE;
-    const int tiles_x = (cols_val + MXFP8_TILE - 1) / MXFP8_TILE;
+    const int tiles_y = (rows_val + TileRows - 1) / TileRows;
+    const int tiles_x = (cols_val + TileCols - 1) / TileCols;
     const int tiles_this_tensor = tiles_y * tiles_x;
+    const int blocks_this_tensor =
+        (tiles_this_tensor + tiles_per_block - 1) / tiles_per_block;
 
-    for (int tile = 0; tile < tiles_this_tensor; ++tile) {
+    for (int block = 0; block < blocks_this_tensor; ++block) {
       tl.block_to_tensor[loc_block_info] = loc_tensor_info - 1;
-      tl.block_to_tile[loc_block_info] = tile;
+      tl.block_to_tile[loc_block_info] = block * tiles_per_block;
       loc_block_info++;
 
       const bool blocks_full = (loc_block_info == MXFP8_MAX_BLOCKS);
       const bool tensors_full =
-          (loc_tensor_info == MXFP8_MAX_TENSORS && tile == tiles_this_tensor - 1);
-      const bool last_tile = (t == num_tensors_per_list - 1 && tile == tiles_this_tensor - 1);
-      if (blocks_full || tensors_full || last_tile) {
-        Kernel<<<loc_block_info, MXFP8_BLOCK_THREADS, 0, stream>>>(
+          (loc_tensor_info == MXFP8_MAX_TENSORS && block == blocks_this_tensor - 1);
+      const bool last_block =
+          (t == num_tensors_per_list - 1 && block == blocks_this_tensor - 1);
+      if (blocks_full || tensors_full || last_block) {
+        Kernel<<<loc_block_info, BlockThreads, 0, stream>>>(
             chunk_size, reinterpret_cast<int *>(noop_flag.data.dptr), tl, args...);
         NVTE_CHECK_CUDA(cudaGetLastError());
         loc_block_info = 0;
-        if (tile == tiles_this_tensor - 1) {
+        if (block == blocks_this_tensor - 1) {
           loc_tensor_info = 0;
           tl.start_tensor_this_launch = t + 1;
         } else {

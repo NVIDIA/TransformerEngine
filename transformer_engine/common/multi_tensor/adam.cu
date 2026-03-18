@@ -601,19 +601,15 @@ __device__ __forceinline__ float fp8_max_norm_rcp(uint8_t fp8_dtype) {
 
 template <typename PARAM_T, typename GRAD_T, typename MOMENT_T, typename index_t>
 __global__ void adam_mxfp8_fused_kernel(int64_t chunk_size, volatile int *noop_gmem,
-                                        MXFP8TensorListMetadata tl, float beta1, float beta2,
-                                        float beta1_correction, float beta2_correction,
-                                        float epsilon, float lr, int mode, float weight_decay) {
-  // Stage 0: optional early-exit if a noop flag is set.
+                        MXFP8TensorListMetadata tl, float beta1, float beta2,
+                        float beta1_correction, float beta2_correction,
+                        float epsilon, float lr, int mode, float weight_decay) {
   if (noop_gmem != nullptr && *noop_gmem == 1) {
     return;
   }
-  (void)chunk_size;
 
-  // Stage 1: map this block to a specific tensor tile.
-  const int block_idx = blockIdx.x;
-  const int tensor_idx = tl.block_to_tensor[block_idx];
-  const int tile_idx = tl.block_to_tile[block_idx];
+  const int tensor_idx = tl.block_to_tensor[blockIdx.x];
+  const int start_tile = tl.block_to_tile[blockIdx.x];
   const int64_t rows_val = tl.rows[tensor_idx];
   const int64_t cols_val = tl.cols[tensor_idx];
   if (rows_val == 0 || cols_val == 0) {
@@ -621,12 +617,11 @@ __global__ void adam_mxfp8_fused_kernel(int64_t chunk_size, volatile int *noop_g
   }
 
   const int64_t tiles_per_row = (cols_val + MXFP8_TILE - 1) / MXFP8_TILE;
-  const int64_t tile_row = tile_idx / tiles_per_row;
-  const int64_t tile_col = tile_idx % tiles_per_row;
-  const int64_t row_base = tile_row * MXFP8_TILE;
-  const int64_t col_base = tile_col * MXFP8_TILE;
+  const int tiles_y = static_cast<int>((rows_val + MXFP8_TILE - 1) / MXFP8_TILE);
+  const int total_tiles = tiles_y * static_cast<int>(tiles_per_row);
+  const int tiles_per_block = max(1, static_cast<int>(chunk_size / MXFP8_TILE_ELEMS));
+  const int end_tile = min(start_tile + tiles_per_block, total_tiles);
 
-  // Stage 2: load pointers for grads/params/moments and MXFP8 outputs/scales.
   GRAD_T *g = reinterpret_cast<GRAD_T *>(tl.addresses[0][tensor_idx]);
   PARAM_T *p = reinterpret_cast<PARAM_T *>(tl.addresses[1][tensor_idx]);
   MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_idx]);
@@ -637,120 +632,134 @@ __global__ void adam_mxfp8_fused_kernel(int64_t chunk_size, volatile int *noop_g
   auto *rowwise_scale_inv = reinterpret_cast<uint8_t *>(tl.addresses[6][tensor_idx]);
   auto *colwise_scale_inv = reinterpret_cast<uint8_t *>(tl.addresses[7][tensor_idx]);
 
-  const int64_t unpadded_scales_X_rowwise = (cols_val + MXFP8_TILE - 1) / MXFP8_TILE;
   constexpr int64_t kRowwiseScaleAlign = 4;
-  const int64_t row_stride = DIVUP_TO_MULTIPLE(unpadded_scales_X_rowwise, kRowwiseScaleAlign);
+  const int64_t row_stride = DIVUP_TO_MULTIPLE(tiles_per_row, kRowwiseScaleAlign);
   constexpr int64_t kColwiseScaleAlign = 128;
   const int64_t col_stride = DIVUP_TO_MULTIPLE(cols_val, kColwiseScaleAlign);
   const uint8_t dtype = tl.fp8_dtype[tensor_idx];
   const auto adam_mode = static_cast<transformer_engine::multi_tensor_adam::adamMode_t>(mode);
-
-  // Stage 3: initialize shared amax accumulators per row/col within the tile.
-  __shared__ float row_max_vals[MXFP8_TILE];
-  __shared__ float col_max_vals[MXFP8_TILE];
-  if (threadIdx.x < MXFP8_TILE) {
-    row_max_vals[threadIdx.x] = 0.0f;
-    col_max_vals[threadIdx.x] = 0.0f;
-  }
-  __syncthreads();
-
-  for (int t = threadIdx.x; t < MXFP8_TILE_ELEMS; t += blockDim.x) {
-    const int local_r = t / MXFP8_TILE;
-    const int local_c = t % MXFP8_TILE;
-    const int64_t r = row_base + local_r;
-    const int64_t c = col_base + local_c;
-    if (r >= rows_val || c >= cols_val) {
-      continue;
-    }
-    const index_t idx = static_cast<index_t>(r * cols_val + c);
-
-    float r_g = static_cast<float>(g[idx]);
-    float r_p = static_cast<float>(p[idx]);
-    float r_m = static_cast<float>(m[idx]);
-    float r_v = static_cast<float>(v[idx]);
-
-    // Stage 4: apply Adam update in FP32 and write back updated p/m/v.
-    transformer_engine::multi_tensor_adam::adam_update(r_g, r_p, r_m, r_v, beta1, beta2,
-                                                       beta1_correction, beta2_correction, epsilon,
-                                                       lr, adam_mode, weight_decay);
-
-    p[idx] = static_cast<PARAM_T>(r_p);
-    m[idx] = static_cast<MOMENT_T>(r_m);
-    v[idx] = static_cast<MOMENT_T>(r_v);
-
-    // Stage 5: accumulate per-row/col absmax for MXFP8 scaling.
-    const float abs_p = fabsf(r_p);
-    transformer_engine::atomicMaxFloat(&row_max_vals[local_r], abs_p);
-    transformer_engine::atomicMaxFloat(&col_max_vals[local_c], abs_p);
-  }
-
-  __syncthreads();
-
-  // Stage 6: write rowwise/colwise scale-inverse exponents for the tile.
   const float max_norm_rcp = fp8_max_norm_rcp(dtype);
 
-  for (int r = threadIdx.x; r < MXFP8_TILE; r += blockDim.x) {
-    const int64_t row = row_base + r;
-    if (row >= rows_val) {
-      continue;
-    }
-    const float amax = row_max_vals[r];
-    const ::transformer_engine::e8m0_t biased_exponent =
-        transformer_engine::ptx::float_to_e8m0(amax * max_norm_rcp);
-    const size_t scale_idx = static_cast<size_t>(row * row_stride + tile_col);
-    rowwise_scale_inv[scale_idx] = reinterpret_cast<const uint8_t &>(biased_exponent);
-  }
+  constexpr int NUM_WARPS = MXFP8_BLOCK_THREADS / THREADS_PER_WARP;
+  const int warp_id = threadIdx.x / THREADS_PER_WARP;
+  const int lane_id = threadIdx.x % THREADS_PER_WARP;
 
-  for (int c = threadIdx.x; c < MXFP8_TILE; c += blockDim.x) {
-    const int64_t col = col_base + c;
-    if (col >= cols_val) {
-      continue;
-    }
-    const float amax = col_max_vals[c];
-    const ::transformer_engine::e8m0_t biased_exponent =
-        transformer_engine::ptx::float_to_e8m0(amax * max_norm_rcp);
-    const size_t scale_idx = static_cast<size_t>(tile_row * col_stride + col);
-    colwise_scale_inv[scale_idx] = reinterpret_cast<const uint8_t &>(biased_exponent);
-  }
+  __shared__ float col_partial[NUM_WARPS][MXFP8_TILE];
 
-  __syncthreads();
+  for (int tile_idx = start_tile; tile_idx < end_tile; ++tile_idx) {
+    const int64_t tile_row = tile_idx / tiles_per_row;
+    const int64_t tile_col = tile_idx % tiles_per_row;
+    const int64_t row_base = tile_row * MXFP8_TILE;
+    const int64_t col_base = tile_col * MXFP8_TILE;
 
-  // Stage 7: quantize updated params to MXFP8 using rowwise and colwise scales.
-  for (int t = threadIdx.x; t < MXFP8_TILE_ELEMS; t += blockDim.x) {
-    const int local_r = t / MXFP8_TILE;
-    const int local_c = t % MXFP8_TILE;
-    const int64_t r = row_base + local_r;
-    const int64_t c = col_base + local_c;
-    if (r >= rows_val || c >= cols_val) {
-      continue;
-    }
-    const index_t idx = static_cast<index_t>(r * cols_val + c);
-    const float r_p = static_cast<float>(p[idx]);
-
-    const size_t row_scale_idx = static_cast<size_t>(r * row_stride + tile_col);
-    const uint8_t row_raw = rowwise_scale_inv[row_scale_idx];
-    const ::transformer_engine::e8m0_t row_biased =
-        reinterpret_cast<const ::transformer_engine::e8m0_t &>(row_raw);
-    const float row_scale_inv = transformer_engine::ptx::exp2f_rcp(row_biased);
-    if (dtype == static_cast<uint8_t>(transformer_engine::DType::kFloat8E4M3)) {
-      auto *out = reinterpret_cast<fp8e4m3 *>(rowwise_data);
-      out[idx] = cast_to_fp8<fp8e4m3>(r_p * row_scale_inv);
-    } else {
-      auto *out = reinterpret_cast<fp8e5m2 *>(rowwise_data);
-      out[idx] = cast_to_fp8<fp8e5m2>(r_p * row_scale_inv);
+    // ── Adam update: keep r_p in registers, write only m/v ───────────
+    float r_p[ILP];
+    float abs_p[ILP];
+    index_t idx[ILP];
+    bool valid[ILP];
+#pragma unroll
+    for (int ii = 0; ii < ILP; ii++) {
+      const int t = threadIdx.x + ii * blockDim.x;
+      const int local_r = t / MXFP8_TILE;
+      const int local_c = t % MXFP8_TILE;
+      const int64_t r = row_base + local_r;
+      const int64_t c = col_base + local_c;
+      valid[ii] = (t < MXFP8_TILE_ELEMS && r < rows_val && c < cols_val);
+      if (valid[ii]) {
+        idx[ii] = static_cast<index_t>(r * cols_val + c);
+        float r_g = static_cast<float>(g[idx[ii]]);
+        r_p[ii] = static_cast<float>(p[idx[ii]]);
+        float r_m = static_cast<float>(m[idx[ii]]);
+        float r_v = static_cast<float>(v[idx[ii]]);
+        transformer_engine::multi_tensor_adam::adam_update(
+            r_g, r_p[ii], r_m, r_v, beta1, beta2, beta1_correction,
+            beta2_correction, epsilon, lr, adam_mode, weight_decay);
+        m[idx[ii]] = static_cast<MOMENT_T>(r_m);
+        v[idx[ii]] = static_cast<MOMENT_T>(r_v);
+        abs_p[ii] = fabsf(r_p[ii]);
+      } else {
+        r_p[ii] = 0.0f;
+        abs_p[ii] = 0.0f;
+      }
     }
 
-    const size_t col_scale_idx = static_cast<size_t>(tile_row * col_stride + c);
-    const uint8_t col_raw = colwise_scale_inv[col_scale_idx];
-    const ::transformer_engine::e8m0_t col_biased =
-        reinterpret_cast<const ::transformer_engine::e8m0_t &>(col_raw);
-    const float col_scale_inv = transformer_engine::ptx::exp2f_rcp(col_biased);
-    if (dtype == static_cast<uint8_t>(transformer_engine::DType::kFloat8E4M3)) {
-      auto *out = reinterpret_cast<fp8e4m3 *>(colwise_data);
-      out[idx] = cast_to_fp8<fp8e4m3>(r_p * col_scale_inv);
-    } else {
-      auto *out = reinterpret_cast<fp8e5m2 *>(colwise_data);
-      out[idx] = cast_to_fp8<fp8e5m2>(r_p * col_scale_inv);
+    // ── Row amax via warp shuffles (no sync needed) ──────────────────
+    float row_amax[ILP];
+#pragma unroll
+    for (int ii = 0; ii < ILP; ii++) {
+      row_amax[ii] = abs_p[ii];
+      for (int mask = 16; mask >= 1; mask >>= 1) {
+        row_amax[ii] = fmaxf(row_amax[ii],
+                              __shfl_xor_sync(0xFFFFFFFF, row_amax[ii], mask));
+      }
+    }
+
+    // ── Col amax via cross-warp shared memory reduction ──────────────
+    float col_local = fmaxf(fmaxf(abs_p[0], abs_p[1]),
+                            fmaxf(abs_p[2], abs_p[3]));
+    col_partial[warp_id][lane_id] = col_local;
+    __syncthreads();
+
+    float col_amax;
+    if (warp_id == 0) {
+      col_amax = col_partial[0][lane_id];
+#pragma unroll
+      for (int w = 1; w < NUM_WARPS; w++) {
+        col_amax = fmaxf(col_amax, col_partial[w][lane_id]);
+      }
+      col_partial[0][lane_id] = col_amax;
+    }
+    __syncthreads();
+    col_amax = col_partial[0][lane_id];
+
+    // ── Compute scales from registers (no global read) ───────────────
+    ::transformer_engine::e8m0_t row_biased[ILP];
+    float rsi[ILP];
+#pragma unroll
+    for (int ii = 0; ii < ILP; ii++) {
+      row_biased[ii] = transformer_engine::ptx::float_to_e8m0(row_amax[ii] * max_norm_rcp);
+      rsi[ii] = transformer_engine::ptx::exp2f_rcp(row_biased[ii]);
+    }
+    const ::transformer_engine::e8m0_t col_biased_e8m0 =
+        transformer_engine::ptx::float_to_e8m0(col_amax * max_norm_rcp);
+    const float csi = transformer_engine::ptx::exp2f_rcp(col_biased_e8m0);
+
+    // ── Write scale_inv to global (for forward pass) ─────────────────
+    if (lane_id == 0) {
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        const int64_t row = row_base + warp_id + ii * NUM_WARPS;
+        if (row < rows_val) {
+          rowwise_scale_inv[static_cast<size_t>(row * row_stride + tile_col)] =
+              reinterpret_cast<const uint8_t &>(row_biased[ii]);
+        }
+      }
+    }
+    if (warp_id == 0) {
+      const int64_t col = col_base + lane_id;
+      if (col < cols_val) {
+        colwise_scale_inv[static_cast<size_t>(tile_row * col_stride + col)] =
+            reinterpret_cast<const uint8_t &>(col_biased_e8m0);
+      }
+    }
+
+    // ── Write p + quantize to MXFP8 (r_p still in registers) ────────
+#pragma unroll
+    for (int ii = 0; ii < ILP; ii++) {
+      if (valid[ii]) {
+        p[idx[ii]] = static_cast<PARAM_T>(r_p[ii]);
+        if (dtype == static_cast<uint8_t>(transformer_engine::DType::kFloat8E4M3)) {
+          reinterpret_cast<fp8e4m3 *>(rowwise_data)[idx[ii]] =
+              cast_to_fp8<fp8e4m3>(r_p[ii] * rsi[ii]);
+          reinterpret_cast<fp8e4m3 *>(colwise_data)[idx[ii]] =
+              cast_to_fp8<fp8e4m3>(r_p[ii] * csi);
+        } else {
+          reinterpret_cast<fp8e5m2 *>(rowwise_data)[idx[ii]] =
+              cast_to_fp8<fp8e5m2>(r_p[ii] * rsi[ii]);
+          reinterpret_cast<fp8e5m2 *>(colwise_data)[idx[ii]] =
+              cast_to_fp8<fp8e5m2>(r_p[ii] * csi);
+        }
+      }
     }
   }
 }
