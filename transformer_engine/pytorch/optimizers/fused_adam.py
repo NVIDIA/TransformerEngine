@@ -646,8 +646,12 @@ class FusedAdam(torch.optim.Optimizer):
                         raise RuntimeError(
                             "FusedAdam does not support MXFP8 model weights with capturable=True."
                         )
-                    if self.master_weights:
-                        p_main_of_mxfp8_model.append(unscaled_state["master_param"].data)
+                    if not self.master_weights:
+                        raise RuntimeError(
+                            "FusedAdam without master_weights does not support "
+                            "MXFP8 model weights. Use master_weights=True."
+                        )
+                    p_main_of_mxfp8_model.append(unscaled_state["master_param"].data)
                     g_of_mxfp8_model.append(p_grad.data)
                     m_of_mxfp8_model.append(unscaled_state["exp_avg"])
                     v_of_mxfp8_model.append(unscaled_state["exp_avg_sq"])
