@@ -157,7 +157,9 @@ def _make_router_logits(
 ) -> torch.Tensor:
     if score_function == "sigmoid":
         offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
-        logits = torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
+        logits = (
+            torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
+        )
         return logits.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
 
     logits = (
@@ -179,9 +181,7 @@ def _make_router_bias(num_experts: int) -> torch.Tensor:
 
 def _print_perf_result(case_name: str, torch_ms: float, fused_ms: float) -> None:
     speedup = torch_ms / fused_ms
-    print(
-        f"{case_name}: torch={torch_ms:.6f} ms, fused={fused_ms:.6f} ms, speedup={speedup:.4f}x"
-    )
+    print(f"{case_name}: torch={torch_ms:.6f} ms, fused={fused_ms:.6f} ms, speedup={speedup:.4f}x")
 
 
 def _perf_assert_message(case_name: str, torch_ms: float, fused_ms: float) -> str:
