@@ -43,7 +43,6 @@ constexpr int MXFP8_MAX_BLOCKS = 320;
 
 struct MXFP8TensorListMetadata {
   void *addresses[8][MXFP8_MAX_TENSORS];
-  int sizes[MXFP8_MAX_TENSORS];
   int rows[MXFP8_MAX_TENSORS];
   int cols[MXFP8_MAX_TENSORS];
   uint8_t fp8_dtype[MXFP8_MAX_TENSORS];
@@ -154,14 +153,11 @@ void multi_tensor_apply_mxfp8(int64_t chunk_size, const transformer_engine::Tens
   int loc_tensor_info = 0;
 
   for (size_t t = 0; t < num_tensors_per_list; ++t) {
-    const auto &g = tensor_lists[0][t];
     const auto &rowwise_data = tensor_lists[4][t];
-    const auto &colwise_data = tensor_lists[5][t];
 
     const int rows_val = static_cast<int>(rowwise_data->data.shape[0]);
     const int cols_val = static_cast<int>(rowwise_data->data.shape[1]);
 
-    tl.sizes[loc_tensor_info] = g->numel();
     tl.rows[loc_tensor_info] = rows_val;
     tl.cols[loc_tensor_info] = cols_val;
     tl.fp8_dtype[loc_tensor_info] = fp8_dtype;
