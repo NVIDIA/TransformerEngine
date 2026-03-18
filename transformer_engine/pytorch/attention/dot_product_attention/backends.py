@@ -154,7 +154,9 @@ else:
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
-
+_run_shadow_f16_fwd = os.getenv("NVTE_RUN_SHADOW_F16_FWD", "0") == "1"
+_replace_out_with_shadow = os.getenv("NVTE_REPLACE_OUT_WITH_SHADOW", "0") == "1"
+_replace_aux_with_shadow = os.getenv("NVTE_REPLACE_AUX_WITH_SHADOW", "0") == "1"
 
 class FP8EmulationFunc(torch.autograd.Function):
     """
@@ -1271,6 +1273,8 @@ class FusedAttnFunc(torch.autograd.Function):
         out_nominal_dtype = q.dtype
 
         max_logit = None
+        orig_q, orig_k, orig_v = q, k, v
+        orig_qkv_layout = qkv_layout
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
 
@@ -1334,6 +1338,51 @@ class FusedAttnFunc(torch.autograd.Function):
                 softmax_offset,
                 cuda_graph=is_graph_capturing(),
             )
+
+            if _run_shadow_f16_fwd:
+                # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
+                assert all(x.dtype in [torch.float16, torch.bfloat16] for x in [q, k, v]), "q, k, v must be torch.float16 or torch.bfloat16"
+                out_f16_, aux_ctx_tensors_f16, *_ = fused_attn_fwd(
+                    is_training,
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    cu_seqlens_q,
+                    cu_seqlens_kv,
+                    orig_q,
+                    orig_k,
+                    orig_v,
+                    out_nominal_dtype,
+                    FusedAttnBackend["F16_arbitrary_seqlen"],
+                    attn_bias,
+                    cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded,
+                    page_table_k,
+                    page_table_v,
+                    None,  # s_quantizer
+                    None,  # o_quantizer
+                    attn_scale,
+                    dropout_p,
+                    fast_zero_fill,
+                    orig_qkv_layout,
+                    o_format,
+                    attn_bias_type,
+                    attn_mask_type,
+                    softmax_type,
+                    window_size,
+                    bottom_right_diagonal,
+                    rng_gen,
+                    softmax_offset,
+                    return_max_logit,
+                    is_graph_capturing(),
+                )
+                if torch.cuda.current_device() == 0:
+                    print(f"L{layer_number}: real/shadow out   min: {out_.min():.4f}/{out_f16_.min():.4f}, max: {out_.max():.4f}/{out_f16_.max():.4f}")
+                    print(f"L{layer_number}: real/shadow stats min: {aux_ctx_tensors[0].min():.4f}/{aux_ctx_tensors_f16[0].min():.4f}, max: {aux_ctx_tensors[0].max():.4f}/{aux_ctx_tensors_f16[0].max():.4f}")
+                if _replace_out_with_shadow:
+                    out_ = out_f16_
+                if _replace_aux_with_shadow:
+                    aux_ctx_tensors[0] = aux_ctx_tensors_f16[0]
+
             # out_fp8: Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16
             #                        fp8_dtype = tex.DType.kFloat8E4M3
             # out:     torch.Tensor; dtype = torch.float16 or torch.bfloat16
