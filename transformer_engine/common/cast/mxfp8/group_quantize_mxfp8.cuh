@@ -198,7 +198,6 @@ __global__ void update_tma_descriptors(
 
   const size_t offset_elts = offsets_ptr[tensor_id];
 
-
   if (leading_thread && (tensor_id < num_tensors)) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
