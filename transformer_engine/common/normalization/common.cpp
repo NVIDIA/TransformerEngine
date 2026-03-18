@@ -404,7 +404,7 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
                                .set_name("add")
                                .set_dim({batch_dim, hidden_dim, 1, 1})
                                .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
-                               .set_data_type(get_cudnn_fe_dtype(itype)));
+                               .set_data_type(get_cudnn_fe_dtype(wtype)));
       auto add_options = fe::graph::Pointwise_attributes()
                              .set_mode(fe::PointwiseMode_t::ADD)
                              .set_compute_data_type(get_cudnn_fe_dtype(ctype));
