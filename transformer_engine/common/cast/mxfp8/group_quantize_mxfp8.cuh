@@ -711,17 +711,31 @@ __device__ __forceinline__ float process_rowwise_stage(
       if constexpr (USE_FAST_MATH) {
         const uint32_t src_smem_ptr = __cvta_generic_to_shared(&in_sh[shmem_offset_rowwise]);
         // Load 4x elts S2R and find amax
-        asm volatile(
-            "{\n"
-            "ld.shared.b64 %0, [%2]; \n\t"
-            ".reg.b32 x01,x23; \n\t"
-            "mov.b64 {x01, x23}, %0; \n\t"
-            "max.xorsign.abs.bf16x2 x01, x01, x23; \n\t"
-            "max.xorsign.abs.bf16x2 %1, %1, x01; \n"
-            "}\n"
-            : "+l"(reinterpret_cast<uint64_t &>(in_IType4[w])),
-              "+r"(reinterpret_cast<uint32_t &>(thread_amax_2x))
-            : "r"(src_smem_ptr));
+        if constexpr (std::is_same_v<IType, bf16>) {
+          asm volatile(
+              "{\n"
+              "ld.shared.b64 %0, [%2]; \n\t"
+              ".reg.b32 x01,x23; \n\t"
+              "mov.b64 {x01, x23}, %0; \n\t"
+              "max.xorsign.abs.bf16x2 x01, x01, x23; \n\t"
+              "max.xorsign.abs.bf16x2 %1, %1, x01; \n"
+              "}\n"
+              : "+l"(reinterpret_cast<uint64_t &>(in_IType4[w])),
+                "+r"(reinterpret_cast<uint32_t &>(thread_amax_2x))
+              : "r"(src_smem_ptr));
+        else {
+          asm volatile(
+              "{\n"
+              "ld.shared.b64 %0, [%2]; \n\t"
+              ".reg.b32 x01,x23; \n\t"
+              "mov.b64 {x01, x23}, %0; \n\t"
+              "max.xorsign.abs.f16x2 x01, x01, x23; \n\t"
+              "max.xorsign.abs.f16x2 %1, %1, x01; \n"
+              "}\n"
+              : "+l"(reinterpret_cast<uint64_t &>(in_IType4[w])),
+                "+r"(reinterpret_cast<uint32_t &>(thread_amax_2x))
+              : "r"(src_smem_ptr));
+        }
       } else {
         in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
 #pragma unroll
