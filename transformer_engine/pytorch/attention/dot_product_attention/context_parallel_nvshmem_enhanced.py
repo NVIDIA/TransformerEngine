@@ -14,19 +14,6 @@ from cuda.core.experimental import Stream
 import numpy as np
 import cupy as cp
 import torch.cuda.nvtx as nvtx
-
-import threading
-import time
-import sys
-
-timeout_flag = False
-
-def timer_thread(seconds):
-    global timeout_flag
-    time.sleep(seconds)
-    print("⏰ Timeout reached!")
-    timeout_flag = True
-
 from transformer_engine.pytorch.utils import (
     combine_tensors,
     get_cudnn_version,
@@ -897,528 +884,42 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         out = None
         for i in range(cp_size + 1):
             # print(f"Rank {rank} entering step {i}")
-            # print("adsfasgasgasgsdga2ww")
             # print(f"Rank {rank} count array: {count_array[:]}")
             
             if i < cp_size:
-                    with torch.cuda.stream(flash_attn_streams[i % 2]):
-                        # wait until KV is received
-                        nvshmem.quiet(communicate_stream) 
-                        
+                with torch.cuda.stream(flash_attn_streams[i % 2]):
+                    # wait until KV is received
+                    nvshmem.quiet(communicate_stream) 
+                    
 
-                        if i < (cp_size - 1):
-                            # p2p_comm_buffers[i + 1] = nvshmem.tensor(list(p2p_comm_buffers[i].shape), dtype=p2p_comm_buffers[i].dtype)   
-                            # if nvshmem_kv is not None:
-                            # Use NVSHMEM get: compute owner of the (i+1)-th step KV block
-                            owner_idx = (rank - (i + 1)) % cp_size
-                            # Map owner idx to global rank (accounting for a2a groups)
-                            owner_global = cp_global_ranks[owner_idx * cp_size_a2a + rank_a2a]
-                            # nvshmem_get: dst (local buffer), src (symmetric address), peer=owner_global
-                            nvshmem_get_on_stream(p2p_comm_buffers[i + 1], nvshmem_kv, owner_global, stream=communicate_stream)
+                    if i < (cp_size - 1):
+                        # p2p_comm_buffers[i + 1] = nvshmem.tensor(list(p2p_comm_buffers[i].shape), dtype=p2p_comm_buffers[i].dtype)   
+                        # if nvshmem_kv is not None:
+                        # Use NVSHMEM get: compute owner of the (i+1)-th step KV block
+                        owner_idx = (rank - (i + 1)) % cp_size
+                        # Map owner idx to global rank (accounting for a2a groups)
+                        owner_global = cp_global_ranks[owner_idx * cp_size_a2a + rank_a2a]
+                        # nvshmem_get: dst (local buffer), src (symmetric address), peer=owner_global
+                        nvshmem_get_on_stream(p2p_comm_buffers[i + 1], nvshmem_kv, owner_global, stream=communicate_stream)
 
 
-                        if not fp8 or is_input_fp8 or int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
-                            kv_inputs[i % 2] = p2p_comm_buffers[i]
-                        else:
-                            # KV exchange is in BF16/FP16, cast received KV in each step
-                            kv_inputs[i % 2] = QKV_quantizer(p2p_comm_buffers[i])._data
-                        if enable_mla:
-                            # If MLA, k and v are flattened, so split them after receiving.
-                            k_part = kv_inputs[i % 2][:k_numel].view(*k_shape)
-                            v_part = kv_inputs[i % 2][k_numel:].view(*v_shape)    
-                        if causal:                            
-                            if i == 0:
-                                if pad_between_seqs:
-                                    cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
-                                        cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
-                                    )
-                                    cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
-                                        cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, rank, True, True
-                                    )
-                                elif qkv_format == "thd":
-                                    cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
-                                    cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
-                                else:
-                                    cu_seqlens_q_per_step[i] = cu_seqlens_q
-                                    cu_seqlens_kv_per_step[i] = cu_seqlens_kv
-                                if qkv_format == "bshd":
-                                    # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
-                                    q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
-                                    if enable_mla:
-                                        # [b, 2, sk//2, np, hn] -> [b, sk, np, hn]
-                                        k_part = k_part.view(k_part.shape[0], -1, *k_part.shape[-2:])
-                                        v_part = v_part.view(v_part.shape[0], -1, *v_part.shape[-2:])
-                                    else:
-                                        # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
-                                        kv_inputs[i % 2] = kv_inputs[i % 2].view(
-                                            k.shape[0], -1, 2, *k.shape[-2:]
-                                        )
-                                elif qkv_format == "sbhd":
-                                    # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
-                                    q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
-                                    if enable_mla:
-                                        # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
-                                        k_part = k_part.view(-1, *k_part.shape[2:])
-                                        v_part = v_part.view(-1, *v_part.shape[2:])
-                                    else:
-                                        # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                                        kv_inputs[i % 2] = kv_inputs[i % 2].view(
-                                            -1, k.shape[2], 2, *k.shape[-2:]
-                                        )
-                                elif qkv_format == "thd":
-                                    q_inputs[i % 2] = q
-                                if use_fused_attention:
-                                    if attn_bias is not None:
-                                        idx = (rank - i) % cp_size
-                                        attn_bias_inputs[i % 2] = torch.cat(
-                                            (
-                                                attn_bias[..., idx, :],
-                                                attn_bias[..., (2 * cp_size - idx - 1), :],
-                                            ),
-                                            dim=-1,
-                                        ).contiguous()
-
-                                    q_part = q_inputs[i % 2]
-                                    if not enable_mla:
-                                        # If MHA, then split the KV into k_part and v_part.
-                                        # Otherwise (MHA), k_part and v_part have already been split.
-                                        k_part = (
-                                            kv_inputs[i % 2][..., 0, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][0]
-                                        )
-                                        v_part = (
-                                            kv_inputs[i % 2][..., 1, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][1]
-                                        )
-                                    fp8_meta_kwargs = {}
-                                    if fp8:
-                                        q_part = QKV_quantizer.create_tensor_from_data(
-                                            q_part, fake_dtype=qkv_dtype, internal=True
-                                        )
-                                        k_part = QKV_quantizer.create_tensor_from_data(
-                                            k_part, fake_dtype=qkv_dtype, internal=True
-                                        )
-                                        v_part = QKV_quantizer.create_tensor_from_data(
-                                            v_part, fake_dtype=qkv_dtype, internal=True
-                                        )
-                                        fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
-                                        fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
-
-                                    out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
-                                        is_training,
-                                        max_seqlen_q,
-                                        max_seqlen_kv,
-                                        cu_seqlens_q_per_step[i],
-                                        cu_seqlens_kv_per_step[i],
-                                        q_part,
-                                        k_part,
-                                        v_part,
-                                        fake_dtype=qkv_dtype,
-                                        fused_attention_backend=fused_attn_backend,
-                                        attn_scale=softmax_scale,
-                                        dropout=dropout_p,
-                                        qkv_layout=qkv_layout,
-                                        attn_mask_type=attn_mask_type,
-                                        attn_bias_type=attn_bias_type,
-                                        attn_bias=attn_bias_inputs[i % 2],
-                                        cu_seqlens_q_padded=cu_seqlens_q_padded,
-                                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                                        **fp8_meta_kwargs,
-                                    )
-                                    if fp8:
-                                        softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
-                                    else:
-                                        softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
-                                        attn_biases[i] = rest[0] if len(rest) > 0 else None
-                                else:
-                                    fa_forward_args_thd = get_fa_args(
-                                        True,
-                                        use_flash_attn_3,
-                                        qkv_format,
-                                        cu_seqlens_q=cu_seqlens_q_per_step[i],
-                                        cu_seqlens_kv=cu_seqlens_kv_per_step[i],
-                                        max_seqlen_q=max_seqlen_q,
-                                        max_seqlen_kv=max_seqlen_kv,
-                                    )
-                                    # Need to add MLA support once Flash Attention supports MLA
-                                    fa_outputs = flash_attn_fwd(
-                                        q_inputs[i % 2],
-                                        (
-                                            kv_inputs[i % 2][..., 0, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][0]
-                                        ),
-                                        (
-                                            kv_inputs[i % 2][..., 1, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][1]
-                                        ),
-                                        *fa_forward_args_thd,
-                                        causal=True,
-                                        **fa_forward_kwargs,
-                                    )
-                                    if not fa_utils.v2_7_0_plus:
-                                        out_per_step[i] = fa_outputs[4]
-                                        softmax_lse_per_step[i] = fa_outputs[5]
-                                        if not use_flash_attn_3:
-                                            rng_states[i] = fa_outputs[7]
-                                    else:
-                                        out_per_step[i] = fa_outputs[0]
-                                        softmax_lse_per_step[i] = fa_outputs[1]
-                                        if not use_flash_attn_3:
-                                            rng_states[i] = fa_outputs[3]
-
-                                # Store flash-attn outputs in NVSHMEM heap for CP communication (causal & flash-attn)
-                                nvshmem_fa_out, out_for_slow, nvshmem_fa_softmax_lse, softmax_lse_for_slow = _store_fa_nvshmem(out_per_step[i], softmax_lse_per_step[i])
-                                # count_array[i] = 1  # Mark that this step has completed
-                                # total_count_array[0] = np.sum(count_array)
-
-                            elif i <= rank:
-                                # if count_array[i] == 1:
-                                #     continue  # This step has been computed
-                                if pad_between_seqs:
-                                    cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
-                                        cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
-                                    )
-                                    cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
-                                        cu_seqlens_kv,
-                                        cu_seqlens_kv_padded,
-                                        cp_size,
-                                        (rank - i) % cp_size,
-                                        True,
-                                        False,
-                                    )
-                                elif qkv_format == "thd":
-                                    cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
-                                    cu_seqlens_kv_per_step[i] = cu_seqlens_kv // (cp_size * 2)
-                                else:
-                                    cu_seqlens_q_per_step[i] = cu_seqlens_q
-                                    cu_seqlens_kv_per_step[i] = cu_seqlens_kv_half
-                                if qkv_format == "bshd":
-                                    # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
-                                    q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
-                                    if enable_mla:
-                                        # [b, 2, sk//2, np, hn] -> [b, sk//2, np, hn]
-                                        k_part = k_part[:, 0, ...]
-                                        v_part = v_part[:, 0, ...]
-                                    else:
-                                        # [b, 2, sk//2, 2, np, hn] -> [b, sk//2, 2, np, hn]
-                                        kv_inputs[i % 2] = kv_inputs[i % 2][:, 0, ...]
-                                elif qkv_format == "sbhd":
-                                    # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
-                                    q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
-                                    if enable_mla:
-                                        # [2, sk//2, b, np, hn] -> [sk//2, b, np, hn]
-                                        k_part = k_part[0]
-                                        v_part = v_part[0]
-                                    else:
-                                        # [2, sk//2, b, 2, np, hn] -> [sk//2, b, 2, np, hn]
-                                        kv_inputs[i % 2] = kv_inputs[i % 2][0]
-                                elif qkv_format == "thd":
-                                    q_inputs[i % 2] = q
-                                    if enable_mla:
-                                        # [t, np, hn] -> [t/2, np, hn]
-                                        k_part = tex.thd_read_half_tensor(
-                                            k_part, cu_seqlens_kv_padded, 0
-                                        )
-                                        v_part = tex.thd_read_half_tensor(
-                                            v_part, cu_seqlens_kv_padded, 0
-                                        )
-                                    else:
-                                        # [2, t, np, hn] -> [2, t/2, np, hn]
-                                        kv_inputs[i % 2] = tex.thd_read_half_tensor(
-                                            kv_inputs[i % 2], cu_seqlens_kv_padded, 0
-                                        )
-                                if use_fused_attention:
-                                    if enable_mla:
-                                        k_part = k_part.contiguous()
-                                        v_part = v_part.contiguous()
-                                    else:
-                                        kv_inputs[i % 2] = kv_inputs[i % 2].contiguous()
-                                    if attn_bias is not None:
-                                        idx = (rank - i) % cp_size
-                                        attn_bias_inputs[i % 2] = attn_bias[..., idx, :].contiguous()
-
-                                    q_part = q_inputs[i % 2]
-                                    if not enable_mla:
-                                        k_part = (
-                                            kv_inputs[i % 2][..., 0, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][0]
-                                        )
-                                        v_part = (
-                                            kv_inputs[i % 2][..., 1, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][1]
-                                        )
-                                    fp8_meta_kwargs = {}
-                                    if fp8:
-                                        q_part = QKV_quantizer.create_tensor_from_data(
-                                            q_part, fake_dtype=qkv_dtype, internal=True
-                                        )
-                                        k_part = QKV_quantizer.create_tensor_from_data(
-                                            k_part, fake_dtype=qkv_dtype, internal=True
-                                        )
-                                        v_part = QKV_quantizer.create_tensor_from_data(
-                                            v_part, fake_dtype=qkv_dtype, internal=True
-                                        )
-                                        fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
-                                        fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
-                                    out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
-                                        is_training,
-                                        max_seqlen_q,
-                                        max_seqlen_kv // 2,
-                                        cu_seqlens_q_per_step[i],
-                                        cu_seqlens_kv_per_step[i],
-                                        q_part,
-                                        k_part,
-                                        v_part,
-                                        qkv_dtype,
-                                        fused_attn_backend,
-                                        attn_scale=softmax_scale,
-                                        dropout=dropout_p,
-                                        qkv_layout=qkv_layout,
-                                        attn_mask_type="padding" if padding else "no_mask",
-                                        attn_bias_type=attn_bias_type,
-                                        attn_bias=attn_bias_inputs[i % 2],
-                                        cu_seqlens_q_padded=cu_seqlens_q_padded,
-                                        cu_seqlens_kv_padded=(
-                                            None
-                                            if cu_seqlens_kv_padded is None
-                                            else cu_seqlens_kv_padded // 2
-                                        ),
-                                        **fp8_meta_kwargs,
-                                    )
-                                    if fp8:
-                                        softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
-                                    else:
-                                        softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
-                                        attn_biases[i] = rest[0] if len(rest) > 0 else None
-                                else:
-                                    fa_forward_args_thd = get_fa_args(
-                                        True,
-                                        use_flash_attn_3,
-                                        qkv_format,
-                                        cu_seqlens_q=cu_seqlens_q_per_step[i],
-                                        cu_seqlens_kv=cu_seqlens_kv_per_step[i],
-                                        max_seqlen_q=max_seqlen_q,
-                                        max_seqlen_kv=max_seqlen_kv // 2,
-                                    )
-                                    if use_flash_attn_3 or (
-                                        fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-                                    ):
-                                        fa_forward_kwargs["window_size"] = (-1, -1)
-                                    elif fa_utils.v2_7_0_plus:
-                                        fa_forward_kwargs["window_size_left"] = -1
-                                        fa_forward_kwargs["window_size_right"] = -1
-                                    # Need to add MLA support once Flash Attention supports MLA
-                                    fa_outputs = flash_attn_fwd(
-                                        q_inputs[i % 2],
-                                        (
-                                            kv_inputs[i % 2][..., 0, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][0]
-                                        ),
-                                        (
-                                            kv_inputs[i % 2][..., 1, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][1]
-                                        ),
-                                        *fa_forward_args_thd,
-                                        causal=False,
-                                        **fa_forward_kwargs,
-                                    )
-                                    if not fa_utils.v2_7_0_plus:
-                                        out_per_step[i] = fa_outputs[4]
-                                        softmax_lse_per_step[i] = fa_outputs[5]
-                                        if not use_flash_attn_3:
-                                            rng_states[i] = fa_outputs[7]
-                                    else:
-                                        out_per_step[i] = fa_outputs[0]
-                                        softmax_lse_per_step[i] = fa_outputs[1]
-                                        if not use_flash_attn_3:
-                                            rng_states[i] = fa_outputs[3]
-
-                                # count_array[i] = 1  # Mark that this step has been completed
-                                # total_count_array[0] = np.sum(count_array)
-                            else:
-                                if pad_between_seqs:
-                                    cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
-                                        cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, False, True
-                                    )
-                                    cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
-                                        cu_seqlens_kv,
-                                        cu_seqlens_kv_padded,
-                                        cp_size,
-                                        (rank - i) % cp_size,
-                                        True,
-                                        True,
-                                    )
-                                elif qkv_format == "thd":
-                                    cu_seqlens_q_per_step[i] = cu_seqlens_q // (cp_size * 2)
-                                    cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
-                                else:
-                                    cu_seqlens_q_per_step[i] = cu_seqlens_q_half
-                                    cu_seqlens_kv_per_step[i] = cu_seqlens_kv
-                                if qkv_format == "bshd":
-                                    # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
-                                    q_inputs[i % 2] = q[:, 1, ...]
-                                    if enable_mla:
-                                        # [b, 2, sk//2, np, hn] -> [b, sk, np, hn]
-                                        k_part = k_part.view(k_part.shape[0], -1, *k_part.shape[-2:])
-                                        v_part = v_part.view(v_part.shape[0], -1, *v_part.shape[-2:])
-                                    else:
-                                        # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
-                                        kv_inputs[i % 2] = kv_inputs[i % 2].view(
-                                            k.shape[0], -1, 2, *k.shape[-2:]
-                                        )
-                                elif qkv_format == "sbhd":
-                                    # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
-                                    q_inputs[i % 2] = q[1]
-                                    if enable_mla:
-                                        # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
-                                        k_part = k_part.view(-1, *k_part.shape[2:])
-                                        v_part = v_part.view(-1, *v_part.shape[2:])
-                                    else:
-                                        # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
-                                        kv_inputs[i % 2] = kv_inputs[i % 2].view(
-                                            -1, k.shape[2], 2, *k.shape[-2:]
-                                        )
-                                elif qkv_format == "thd":
-                                    # nvshmem.quiet(communicate_stream)
-                                    # torch.cuda.synchronize()
-                                    # [t, np, hn] -> [t/2, np, hn]
-                                    q_inputs[i % 2] = tex.thd_read_half_tensor(
-                                        q, cu_seqlens_q_padded, 1
-                                    )
-                                    print("finished tex.thd_read_half_tensor for q")
-                                if use_fused_attention:
-                                    q_inputs[i % 2] = q_inputs[i % 2].contiguous()
-                                    if attn_bias is not None:
-                                        idx = (rank - i) % cp_size
-                                        attn_bias_inputs[i % 2] = torch.cat(
-                                            (
-                                                attn_bias_[..., 1, :, idx, :],
-                                                attn_bias_[..., 1, :, (2 * cp_size - idx - 1), :],
-                                            ),
-                                            dim=-1,
-                                        ).contiguous()
-
-                                    q_part = q_inputs[i % 2]
-                                    if not enable_mla:
-                                        k_part = (
-                                            kv_inputs[i % 2][..., 0, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][0]
-                                        )
-                                        v_part = (
-                                            kv_inputs[i % 2][..., 1, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][1]
-                                        )
-                                    fp8_meta_kwargs = {}
-                                    if fp8:
-                                        q_part = QKV_quantizer.create_tensor_from_data(
-                                            q_part, fake_dtype=qkv_dtype, internal=True
-                                        )
-                                        k_part = QKV_quantizer.create_tensor_from_data(
-                                            k_part, fake_dtype=qkv_dtype, internal=True
-                                        )
-                                        v_part = QKV_quantizer.create_tensor_from_data(
-                                            v_part, fake_dtype=qkv_dtype, internal=True
-                                        )
-                                        fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
-                                        fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
-                                    out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
-                                        is_training,
-                                        max_seqlen_q // 2,
-                                        max_seqlen_kv,
-                                        cu_seqlens_q_per_step[i],
-                                        cu_seqlens_kv_per_step[i],
-                                        q_part,
-                                        k_part,
-                                        v_part,
-                                        qkv_dtype,
-                                        fused_attn_backend,
-                                        attn_scale=softmax_scale,
-                                        dropout=dropout_p,
-                                        qkv_layout=qkv_layout,
-                                        attn_mask_type="padding" if padding else "no_mask",
-                                        attn_bias_type=attn_bias_type,
-                                        attn_bias=attn_bias_inputs[i % 2],
-                                        cu_seqlens_q_padded=(
-                                            None
-                                            if cu_seqlens_q_padded is None
-                                            else cu_seqlens_q_padded // 2
-                                        ),
-                                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-                                        **fp8_meta_kwargs,
-                                    )
-                                    if fp8:
-                                        softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
-                                    else:
-                                        softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
-                                        attn_biases[i] = rest[0] if len(rest) > 0 else None
-                                else:
-                                    fa_forward_args_thd = get_fa_args(
-                                        True,
-                                        use_flash_attn_3,
-                                        qkv_format,
-                                        cu_seqlens_q=cu_seqlens_q_per_step[i],
-                                        cu_seqlens_kv=cu_seqlens_kv_per_step[i],
-                                        max_seqlen_q=max_seqlen_q // 2,
-                                        max_seqlen_kv=max_seqlen_kv,
-                                    )
-                                    if use_flash_attn_3 or (
-                                        fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-                                    ):
-                                        fa_forward_kwargs["window_size"] = (-1, -1)
-                                    elif fa_utils.v2_7_0_plus:
-                                        fa_forward_kwargs["window_size_left"] = -1
-                                        fa_forward_kwargs["window_size_right"] = -1
-                                    # Need to add MLA support once Flash Attention supports MLA
-                                    fa_outputs = flash_attn_fwd(
-                                        q_inputs[i % 2],
-                                        (
-                                            kv_inputs[i % 2][..., 0, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][0]
-                                        ),
-                                        (
-                                            kv_inputs[i % 2][..., 1, :, :]
-                                            if qkv_format in ["bshd", "sbhd"]
-                                            else kv_inputs[i % 2][1]
-                                        ),
-                                        *fa_forward_args_thd,
-                                        causal=False,
-                                        **fa_forward_kwargs,
-                                    )
-                                    if not fa_utils.v2_7_0_plus:
-                                        out_per_step[i] = fa_outputs[4]
-                                        softmax_lse_per_step[i] = fa_outputs[5]
-                                        if not use_flash_attn_3:
-                                            rng_states[i] = fa_outputs[7]
-                                    else:
-                                        out_per_step[i] = fa_outputs[0]
-                                        softmax_lse_per_step[i] = fa_outputs[1]
-                                        if not use_flash_attn_3:
-                                            rng_states[i] = fa_outputs[3]
-                                # count_array[i] = 1  # Mark that this step has completed
-                                # total_count_array[0] = np.sum(count_array)
-                        else:
+                    if not fp8 or is_input_fp8 or int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                        kv_inputs[i % 2] = p2p_comm_buffers[i]
+                    else:
+                        # KV exchange is in BF16/FP16, cast received KV in each step
+                        kv_inputs[i % 2] = QKV_quantizer(p2p_comm_buffers[i])._data
+                    if enable_mla:
+                        # If MLA, k and v are flattened, so split them after receiving.
+                        k_part = kv_inputs[i % 2][:k_numel].view(*k_shape)
+                        v_part = kv_inputs[i % 2][k_numel:].view(*v_shape)    
+                    if causal:                            
+                        if i == 0:
                             if pad_between_seqs:
                                 cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
                                     cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
                                 )
                                 cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
-                                    cu_seqlens_kv,
-                                    cu_seqlens_kv_padded,
-                                    cp_size,
-                                    (rank - i) % cp_size,
-                                    True,
-                                    True,
+                                    cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, rank, True, True
                                 )
                             elif qkv_format == "thd":
                                 cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
@@ -1426,6 +927,32 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             else:
                                 cu_seqlens_q_per_step[i] = cu_seqlens_q
                                 cu_seqlens_kv_per_step[i] = cu_seqlens_kv
+                            if qkv_format == "bshd":
+                                # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
+                                q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
+                                if enable_mla:
+                                    # [b, 2, sk//2, np, hn] -> [b, sk, np, hn]
+                                    k_part = k_part.view(k_part.shape[0], -1, *k_part.shape[-2:])
+                                    v_part = v_part.view(v_part.shape[0], -1, *v_part.shape[-2:])
+                                else:
+                                    # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(
+                                        k.shape[0], -1, 2, *k.shape[-2:]
+                                    )
+                            elif qkv_format == "sbhd":
+                                # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
+                                q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
+                                if enable_mla:
+                                    # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
+                                    k_part = k_part.view(-1, *k_part.shape[2:])
+                                    v_part = v_part.view(-1, *v_part.shape[2:])
+                                else:
+                                    # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(
+                                        -1, k.shape[2], 2, *k.shape[-2:]
+                                    )
+                            elif qkv_format == "thd":
+                                q_inputs[i % 2] = q
                             if use_fused_attention:
                                 if attn_bias is not None:
                                     idx = (rank - i) % cp_size
@@ -1437,8 +964,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                         dim=-1,
                                     ).contiguous()
 
-                                q_part = q
+                                q_part = q_inputs[i % 2]
                                 if not enable_mla:
+                                    # If MHA, then split the KV into k_part and v_part.
+                                    # Otherwise (MHA), k_part and v_part have already been split.
                                     k_part = (
                                         kv_inputs[i % 2][..., 0, :, :]
                                         if qkv_format in ["bshd", "sbhd"]
@@ -1462,6 +991,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     )
                                     fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
                                     fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
+
                                 out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
                                     is_training,
                                     max_seqlen_q,
@@ -1471,8 +1001,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     q_part,
                                     k_part,
                                     v_part,
-                                    qkv_dtype,
-                                    fused_attn_backend,
+                                    fake_dtype=qkv_dtype,
+                                    fused_attention_backend=fused_attn_backend,
                                     attn_scale=softmax_scale,
                                     dropout=dropout_p,
                                     qkv_layout=qkv_layout,
@@ -1500,7 +1030,178 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 )
                                 # Need to add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
-                                    q,
+                                    q_inputs[i % 2],
+                                    (
+                                        kv_inputs[i % 2][..., 0, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][0]
+                                    ),
+                                    (
+                                        kv_inputs[i % 2][..., 1, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][1]
+                                    ),
+                                    *fa_forward_args_thd,
+                                    causal=True,
+                                    **fa_forward_kwargs,
+                                )
+                                if not fa_utils.v2_7_0_plus:
+                                    out_per_step[i] = fa_outputs[4]
+                                    softmax_lse_per_step[i] = fa_outputs[5]
+                                    if not use_flash_attn_3:
+                                        rng_states[i] = fa_outputs[7]
+                                else:
+                                    out_per_step[i] = fa_outputs[0]
+                                    softmax_lse_per_step[i] = fa_outputs[1]
+                                    if not use_flash_attn_3:
+                                        rng_states[i] = fa_outputs[3]
+
+                            # Store flash-attn outputs in NVSHMEM heap for CP communication (causal & flash-attn)
+                            nvshmem_fa_out, out_for_slow, nvshmem_fa_softmax_lse, softmax_lse_for_slow = _store_fa_nvshmem(out_per_step[i], softmax_lse_per_step[i])
+                            # count_array[i] = 1  # Mark that this step has completed
+                            # total_count_array[0] = np.sum(count_array)
+
+                        elif i <= rank:
+                            # if count_array[i] == 1:
+                            #     continue  # This step has been computed
+                            if pad_between_seqs:
+                                cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
+                                    cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
+                                )
+                                cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
+                                    cu_seqlens_kv,
+                                    cu_seqlens_kv_padded,
+                                    cp_size,
+                                    (rank - i) % cp_size,
+                                    True,
+                                    False,
+                                )
+                            elif qkv_format == "thd":
+                                cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
+                                cu_seqlens_kv_per_step[i] = cu_seqlens_kv // (cp_size * 2)
+                            else:
+                                cu_seqlens_q_per_step[i] = cu_seqlens_q
+                                cu_seqlens_kv_per_step[i] = cu_seqlens_kv_half
+                            if qkv_format == "bshd":
+                                # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
+                                q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
+                                if enable_mla:
+                                    # [b, 2, sk//2, np, hn] -> [b, sk//2, np, hn]
+                                    k_part = k_part[:, 0, ...]
+                                    v_part = v_part[:, 0, ...]
+                                else:
+                                    # [b, 2, sk//2, 2, np, hn] -> [b, sk//2, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2][:, 0, ...]
+                            elif qkv_format == "sbhd":
+                                # [2, sq//2, b, np, hn] -> [sq, b, np, hn]
+                                q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
+                                if enable_mla:
+                                    # [2, sk//2, b, np, hn] -> [sk//2, b, np, hn]
+                                    k_part = k_part[0]
+                                    v_part = v_part[0]
+                                else:
+                                    # [2, sk//2, b, 2, np, hn] -> [sk//2, b, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2][0]
+                            elif qkv_format == "thd":
+                                q_inputs[i % 2] = q
+                                if enable_mla:
+                                    # [t, np, hn] -> [t/2, np, hn]
+                                    k_part = tex.thd_read_half_tensor(
+                                        k_part, cu_seqlens_kv_padded, 0
+                                    )
+                                    v_part = tex.thd_read_half_tensor(
+                                        v_part, cu_seqlens_kv_padded, 0
+                                    )
+                                else:
+                                    # [2, t, np, hn] -> [2, t/2, np, hn]
+                                    kv_inputs[i % 2] = tex.thd_read_half_tensor(
+                                        kv_inputs[i % 2], cu_seqlens_kv_padded, 0
+                                    )
+                            if use_fused_attention:
+                                if enable_mla:
+                                    k_part = k_part.contiguous()
+                                    v_part = v_part.contiguous()
+                                else:
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].contiguous()
+                                if attn_bias is not None:
+                                    idx = (rank - i) % cp_size
+                                    attn_bias_inputs[i % 2] = attn_bias[..., idx, :].contiguous()
+
+                                q_part = q_inputs[i % 2]
+                                if not enable_mla:
+                                    k_part = (
+                                        kv_inputs[i % 2][..., 0, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][0]
+                                    )
+                                    v_part = (
+                                        kv_inputs[i % 2][..., 1, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][1]
+                                    )
+                                fp8_meta_kwargs = {}
+                                if fp8:
+                                    q_part = QKV_quantizer.create_tensor_from_data(
+                                        q_part, fake_dtype=qkv_dtype, internal=True
+                                    )
+                                    k_part = QKV_quantizer.create_tensor_from_data(
+                                        k_part, fake_dtype=qkv_dtype, internal=True
+                                    )
+                                    v_part = QKV_quantizer.create_tensor_from_data(
+                                        v_part, fake_dtype=qkv_dtype, internal=True
+                                    )
+                                    fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
+                                    fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
+                                out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
+                                    is_training,
+                                    max_seqlen_q,
+                                    max_seqlen_kv // 2,
+                                    cu_seqlens_q_per_step[i],
+                                    cu_seqlens_kv_per_step[i],
+                                    q_part,
+                                    k_part,
+                                    v_part,
+                                    qkv_dtype,
+                                    fused_attn_backend,
+                                    attn_scale=softmax_scale,
+                                    dropout=dropout_p,
+                                    qkv_layout=qkv_layout,
+                                    attn_mask_type="padding" if padding else "no_mask",
+                                    attn_bias_type=attn_bias_type,
+                                    attn_bias=attn_bias_inputs[i % 2],
+                                    cu_seqlens_q_padded=cu_seqlens_q_padded,
+                                    cu_seqlens_kv_padded=(
+                                        None
+                                        if cu_seqlens_kv_padded is None
+                                        else cu_seqlens_kv_padded // 2
+                                    ),
+                                    **fp8_meta_kwargs,
+                                )
+                                if fp8:
+                                    softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                                else:
+                                    softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+                                    attn_biases[i] = rest[0] if len(rest) > 0 else None
+                            else:
+                                fa_forward_args_thd = get_fa_args(
+                                    True,
+                                    use_flash_attn_3,
+                                    qkv_format,
+                                    cu_seqlens_q=cu_seqlens_q_per_step[i],
+                                    cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                                    max_seqlen_q=max_seqlen_q,
+                                    max_seqlen_kv=max_seqlen_kv // 2,
+                                )
+                                if use_flash_attn_3 or (
+                                    fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
+                                ):
+                                    fa_forward_kwargs["window_size"] = (-1, -1)
+                                elif fa_utils.v2_7_0_plus:
+                                    fa_forward_kwargs["window_size_left"] = -1
+                                    fa_forward_kwargs["window_size_right"] = -1
+                                # Need to add MLA support once Flash Attention supports MLA
+                                fa_outputs = flash_attn_fwd(
+                                    q_inputs[i % 2],
                                     (
                                         kv_inputs[i % 2][..., 0, :, :]
                                         if qkv_format in ["bshd", "sbhd"]
@@ -1525,7 +1226,292 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i] = fa_outputs[1]
                                     if not use_flash_attn_3:
                                         rng_states[i] = fa_outputs[3]
-                
+
+                            # count_array[i] = 1  # Mark that this step has been completed
+                            # total_count_array[0] = np.sum(count_array)
+                        else:
+                            if pad_between_seqs:
+                                cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
+                                    cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, False, True
+                                )
+                                cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
+                                    cu_seqlens_kv,
+                                    cu_seqlens_kv_padded,
+                                    cp_size,
+                                    (rank - i) % cp_size,
+                                    True,
+                                    True,
+                                )
+                            elif qkv_format == "thd":
+                                cu_seqlens_q_per_step[i] = cu_seqlens_q // (cp_size * 2)
+                                cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
+                            else:
+                                cu_seqlens_q_per_step[i] = cu_seqlens_q_half
+                                cu_seqlens_kv_per_step[i] = cu_seqlens_kv
+                            if qkv_format == "bshd":
+                                # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
+                                q_inputs[i % 2] = q[:, 1, ...]
+                                if enable_mla:
+                                    # [b, 2, sk//2, np, hn] -> [b, sk, np, hn]
+                                    k_part = k_part.view(k_part.shape[0], -1, *k_part.shape[-2:])
+                                    v_part = v_part.view(v_part.shape[0], -1, *v_part.shape[-2:])
+                                else:
+                                    # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(
+                                        k.shape[0], -1, 2, *k.shape[-2:]
+                                    )
+                            elif qkv_format == "sbhd":
+                                # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
+                                q_inputs[i % 2] = q[1]
+                                if enable_mla:
+                                    # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
+                                    k_part = k_part.view(-1, *k_part.shape[2:])
+                                    v_part = v_part.view(-1, *v_part.shape[2:])
+                                else:
+                                    # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
+                                    kv_inputs[i % 2] = kv_inputs[i % 2].view(
+                                        -1, k.shape[2], 2, *k.shape[-2:]
+                                    )
+                            elif qkv_format == "thd":
+                                # nvshmem.quiet(communicate_stream)
+                                # torch.cuda.synchronize()
+                                # [t, np, hn] -> [t/2, np, hn]
+                                q_inputs[i % 2] = tex.thd_read_half_tensor(
+                                    q, cu_seqlens_q_padded, 1
+                                )
+                                print("finished tex.thd_read_half_tensor for q")
+                            if use_fused_attention:
+                                q_inputs[i % 2] = q_inputs[i % 2].contiguous()
+                                if attn_bias is not None:
+                                    idx = (rank - i) % cp_size
+                                    attn_bias_inputs[i % 2] = torch.cat(
+                                        (
+                                            attn_bias_[..., 1, :, idx, :],
+                                            attn_bias_[..., 1, :, (2 * cp_size - idx - 1), :],
+                                        ),
+                                        dim=-1,
+                                    ).contiguous()
+
+                                q_part = q_inputs[i % 2]
+                                if not enable_mla:
+                                    k_part = (
+                                        kv_inputs[i % 2][..., 0, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][0]
+                                    )
+                                    v_part = (
+                                        kv_inputs[i % 2][..., 1, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][1]
+                                    )
+                                fp8_meta_kwargs = {}
+                                if fp8:
+                                    q_part = QKV_quantizer.create_tensor_from_data(
+                                        q_part, fake_dtype=qkv_dtype, internal=True
+                                    )
+                                    k_part = QKV_quantizer.create_tensor_from_data(
+                                        k_part, fake_dtype=qkv_dtype, internal=True
+                                    )
+                                    v_part = QKV_quantizer.create_tensor_from_data(
+                                        v_part, fake_dtype=qkv_dtype, internal=True
+                                    )
+                                    fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
+                                    fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
+                                out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
+                                    is_training,
+                                    max_seqlen_q // 2,
+                                    max_seqlen_kv,
+                                    cu_seqlens_q_per_step[i],
+                                    cu_seqlens_kv_per_step[i],
+                                    q_part,
+                                    k_part,
+                                    v_part,
+                                    qkv_dtype,
+                                    fused_attn_backend,
+                                    attn_scale=softmax_scale,
+                                    dropout=dropout_p,
+                                    qkv_layout=qkv_layout,
+                                    attn_mask_type="padding" if padding else "no_mask",
+                                    attn_bias_type=attn_bias_type,
+                                    attn_bias=attn_bias_inputs[i % 2],
+                                    cu_seqlens_q_padded=(
+                                        None
+                                        if cu_seqlens_q_padded is None
+                                        else cu_seqlens_q_padded // 2
+                                    ),
+                                    cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                                    **fp8_meta_kwargs,
+                                )
+                                if fp8:
+                                    softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                                else:
+                                    softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+                                    attn_biases[i] = rest[0] if len(rest) > 0 else None
+                            else:
+                                fa_forward_args_thd = get_fa_args(
+                                    True,
+                                    use_flash_attn_3,
+                                    qkv_format,
+                                    cu_seqlens_q=cu_seqlens_q_per_step[i],
+                                    cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                                    max_seqlen_q=max_seqlen_q // 2,
+                                    max_seqlen_kv=max_seqlen_kv,
+                                )
+                                if use_flash_attn_3 or (
+                                    fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
+                                ):
+                                    fa_forward_kwargs["window_size"] = (-1, -1)
+                                elif fa_utils.v2_7_0_plus:
+                                    fa_forward_kwargs["window_size_left"] = -1
+                                    fa_forward_kwargs["window_size_right"] = -1
+                                # Need to add MLA support once Flash Attention supports MLA
+                                fa_outputs = flash_attn_fwd(
+                                    q_inputs[i % 2],
+                                    (
+                                        kv_inputs[i % 2][..., 0, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][0]
+                                    ),
+                                    (
+                                        kv_inputs[i % 2][..., 1, :, :]
+                                        if qkv_format in ["bshd", "sbhd"]
+                                        else kv_inputs[i % 2][1]
+                                    ),
+                                    *fa_forward_args_thd,
+                                    causal=False,
+                                    **fa_forward_kwargs,
+                                )
+                                if not fa_utils.v2_7_0_plus:
+                                    out_per_step[i] = fa_outputs[4]
+                                    softmax_lse_per_step[i] = fa_outputs[5]
+                                    if not use_flash_attn_3:
+                                        rng_states[i] = fa_outputs[7]
+                                else:
+                                    out_per_step[i] = fa_outputs[0]
+                                    softmax_lse_per_step[i] = fa_outputs[1]
+                                    if not use_flash_attn_3:
+                                        rng_states[i] = fa_outputs[3]
+                            # count_array[i] = 1  # Mark that this step has completed
+                            # total_count_array[0] = np.sum(count_array)
+                    else:
+                        if pad_between_seqs:
+                            cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
+                                cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
+                            )
+                            cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
+                                cu_seqlens_kv,
+                                cu_seqlens_kv_padded,
+                                cp_size,
+                                (rank - i) % cp_size,
+                                True,
+                                True,
+                            )
+                        elif qkv_format == "thd":
+                            cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
+                            cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
+                        else:
+                            cu_seqlens_q_per_step[i] = cu_seqlens_q
+                            cu_seqlens_kv_per_step[i] = cu_seqlens_kv
+                        if use_fused_attention:
+                            if attn_bias is not None:
+                                idx = (rank - i) % cp_size
+                                attn_bias_inputs[i % 2] = torch.cat(
+                                    (
+                                        attn_bias[..., idx, :],
+                                        attn_bias[..., (2 * cp_size - idx - 1), :],
+                                    ),
+                                    dim=-1,
+                                ).contiguous()
+
+                            q_part = q
+                            if not enable_mla:
+                                k_part = (
+                                    kv_inputs[i % 2][..., 0, :, :]
+                                    if qkv_format in ["bshd", "sbhd"]
+                                    else kv_inputs[i % 2][0]
+                                )
+                                v_part = (
+                                    kv_inputs[i % 2][..., 1, :, :]
+                                    if qkv_format in ["bshd", "sbhd"]
+                                    else kv_inputs[i % 2][1]
+                                )
+                            fp8_meta_kwargs = {}
+                            if fp8:
+                                q_part = QKV_quantizer.create_tensor_from_data(
+                                    q_part, fake_dtype=qkv_dtype, internal=True
+                                )
+                                k_part = QKV_quantizer.create_tensor_from_data(
+                                    k_part, fake_dtype=qkv_dtype, internal=True
+                                )
+                                v_part = QKV_quantizer.create_tensor_from_data(
+                                    v_part, fake_dtype=qkv_dtype, internal=True
+                                )
+                                fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
+                                fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
+                            out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
+                                is_training,
+                                max_seqlen_q,
+                                max_seqlen_kv,
+                                cu_seqlens_q_per_step[i],
+                                cu_seqlens_kv_per_step[i],
+                                q_part,
+                                k_part,
+                                v_part,
+                                qkv_dtype,
+                                fused_attn_backend,
+                                attn_scale=softmax_scale,
+                                dropout=dropout_p,
+                                qkv_layout=qkv_layout,
+                                attn_mask_type=attn_mask_type,
+                                attn_bias_type=attn_bias_type,
+                                attn_bias=attn_bias_inputs[i % 2],
+                                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                                **fp8_meta_kwargs,
+                            )
+                            if fp8:
+                                softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                            else:
+                                softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+                                attn_biases[i] = rest[0] if len(rest) > 0 else None
+                        else:
+                            fa_forward_args_thd = get_fa_args(
+                                True,
+                                use_flash_attn_3,
+                                qkv_format,
+                                cu_seqlens_q=cu_seqlens_q_per_step[i],
+                                cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                                max_seqlen_q=max_seqlen_q,
+                                max_seqlen_kv=max_seqlen_kv,
+                            )
+                            # Need to add MLA support once Flash Attention supports MLA
+                            fa_outputs = flash_attn_fwd(
+                                q,
+                                (
+                                    kv_inputs[i % 2][..., 0, :, :]
+                                    if qkv_format in ["bshd", "sbhd"]
+                                    else kv_inputs[i % 2][0]
+                                ),
+                                (
+                                    kv_inputs[i % 2][..., 1, :, :]
+                                    if qkv_format in ["bshd", "sbhd"]
+                                    else kv_inputs[i % 2][1]
+                                ),
+                                *fa_forward_args_thd,
+                                causal=False,
+                                **fa_forward_kwargs,
+                            )
+                            if not fa_utils.v2_7_0_plus:
+                                out_per_step[i] = fa_outputs[4]
+                                softmax_lse_per_step[i] = fa_outputs[5]
+                                if not use_flash_attn_3:
+                                    rng_states[i] = fa_outputs[7]
+                            else:
+                                out_per_step[i] = fa_outputs[0]
+                                softmax_lse_per_step[i] = fa_outputs[1]
+                                if not use_flash_attn_3:
+                                    rng_states[i] = fa_outputs[3]
+            
             if i == 0:
                 count_array[i] = 1 
             if i > 0:
