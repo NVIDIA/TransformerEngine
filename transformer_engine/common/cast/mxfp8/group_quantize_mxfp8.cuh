@@ -738,29 +738,29 @@ __device__ __forceinline__ float process_rowwise_stage(
         }
       } else {
         in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
-        #pragma unroll
+#pragma unroll
         for (int e = 0; e < PACK_SIZE / 2; ++e) {
           ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
         }
       }
     }
-      thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+    thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
   } else if constexpr (IS_CACHED_ACT_OP) {
     __syncthreads();
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-    #pragma unroll
+#pragma unroll
     for (int w = 0; w < WAVES; ++w) {
       const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
       const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
       const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
       in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
       if constexpr (std::is_same_v<IType, float>) {
-        #pragma unroll
+#pragma unroll
         for (int e = 0; e < PACK_SIZE; ++e) {
           thread_amax = fmaxf(thread_amax, fabsf(in_cached[w].data.elt[e]));
         }
       } else {
-        #pragma unroll
+#pragma unroll
         for (int e = 0; e < PACK_SIZE; e += 2) {
           const IType2 in_cached_2x = {in_cached[w].data.elt[e], in_cached[w].data.elt[e + 1]};
           ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
@@ -768,11 +768,10 @@ __device__ __forceinline__ float process_rowwise_stage(
       }
     }
     if constexpr (!std::is_same_v<IType, float>) {
-      thread_amax =
-          static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+      thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
     }
   } else {
-    #pragma unroll
+#pragma unroll
     for (int w = 0; w < WAVES; ++w) {
       const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
       const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
@@ -785,7 +784,7 @@ __device__ __forceinline__ float process_rowwise_stage(
       if constexpr (IS_DACT) {
         act_in.load_from(&act_in_sh[shmem_offset_rowwise]);
       }
-      #pragma unroll
+#pragma unroll
       for (int e = 0; e < PACK_SIZE; ++e) {
         const int j = w * PACK_SIZE + e;
         float elt = static_cast<float>(in.data.elt[e]);
@@ -875,14 +874,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const __grid_constant__ CUtensorMap tensor_map_input_static,
     const __grid_constant__ CUtensorMap tensor_map_act_input_static,
     const __grid_constant__ CUtensorMap tensor_map_output_rowwise_static,
-    const __grid_constant__ CUtensorMap tensor_map_output_colwise_static,
-    const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
-    const int64_t *const __restrict__ offsets_ptr,
-    const int64_t *const __restrict__ first_dims_ptr,
-    const int64_t *const __restrict__ last_dims_ptr,
-    e8m0_t *const __restrict__ scales_rowwise_ptr, e8m0_t *const __restrict__ scales_colwise_ptr,
-    const float *__restrict__ noop, float *const __restrict__ dbias_workspace,
-    float *const __restrict__ amax_ptr, const size_t work_blocks_X, const size_t work_blocks_Y) {
+    const __grid_constant__ CUtensorMap tensor_map_output_colwise_static, const size_t num_tensors,
+    const size_t first_logical_dim, const size_t last_logical_dim,
+    const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
+    const int64_t *const __restrict__ last_dims_ptr, e8m0_t *const __restrict__ scales_rowwise_ptr,
+    e8m0_t *const __restrict__ scales_colwise_ptr, const float *__restrict__ noop,
+    float *const __restrict__ dbias_workspace, float *const __restrict__ amax_ptr,
+    const size_t work_blocks_X, const size_t work_blocks_Y) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
@@ -899,8 +897,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       (SCALING_TYPE == ScalingType::COLWISE) || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
 
   constexpr ShapeRepresentation shape_rep = SHAPE_REP;
-  constexpr bool is_single_tensor =
-      (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
+  constexpr bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS || shape_rep == VARYING_FIRST_DIM);
 
   const bool leading_thread = (threadIdx.x == 0);
 
@@ -992,8 +989,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
     if (!job_has_work(current_job)) {
       // Zero-sized tensors are valid grouped-tensor entries; skip them and keep scheduling work.
-      advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id,
-                          static_block_stride, total_work_blocks, work_blocks_X);
+      advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
+                          total_work_blocks, work_blocks_X);
       continue;
     }
 
@@ -1002,8 +999,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const size_t cols = current_job.cols;
     const BlockDescriptor current_block = decode_block<SHAPE_REP>(current_job, offsets_ptr);
 
-    const size_t scale_stride_rowwise =
-        DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
+    const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
     const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
 
     const size_t tensor_base = current_block.tensor_base;
@@ -1040,11 +1036,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const CUtensorMap &tensor_map_act_input =
         is_single_tensor ? tensor_map_act_input_static : g_tensor_maps_act_input[tensor_id];
     const CUtensorMap &tensor_map_output_rowwise = is_single_tensor
-                                                        ? tensor_map_output_rowwise_static
-                                                        : g_tensor_maps_output_rowwise[tensor_id];
+                                                       ? tensor_map_output_rowwise_static
+                                                       : g_tensor_maps_output_rowwise[tensor_id];
     const CUtensorMap &tensor_map_output_colwise = is_single_tensor
-                                                        ? tensor_map_output_colwise_static
-                                                        : g_tensor_maps_output_colwise[tensor_id];
+                                                       ? tensor_map_output_colwise_static
+                                                       : g_tensor_maps_output_colwise[tensor_id];
 
     if (leading_thread && (!is_single_tensor) && (last_acquired_tensor_id != tensor_id)) {
       fence_acquire_tensormap(&tensor_map_input);
@@ -1071,9 +1067,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t global_offset_X = block_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
       uint64_t *barrier = &IN_buff_readable_mbar[buff];
-      prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, tensor_map_input,
-                                            tensor_map_act_input, global_offset_X, global_offset_Y,
-                                            buff_offset, shmem_buff_size, barrier, leading_thread);
+      prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, tensor_map_input, tensor_map_act_input,
+                                           global_offset_X, global_offset_Y, buff_offset,
+                                           shmem_buff_size, barrier, leading_thread);
     }
 
     float partial_dbias_colwise = 0.0f;
@@ -1105,7 +1101,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
 
       ptx::mbarrier_wait_parity_acquire_cta_shared_cta(&IN_buff_readable_mbar[buff_in],
-                                                        IN_buff_readable_parity[buff_in]);
+                                                       IN_buff_readable_parity[buff_in]);
       IN_buff_readable_parity[buff_in] ^= 1;
       ptx::cp_async_bulk_wait_group_read<PREFETCH_STAGES>();
 
@@ -1124,10 +1120,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
         thread_amax =
             process_rowwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
                                   COLWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES, USE_FAST_MATH>(
-                buff, stage_offset_Y, thread_offset_Y_rowwise, thread_offset_X_rowwise,
-                bank_group, scales_offset_Y_rowwise, scales_offset_X_rowwise,
-                scale_stride_rowwise, rowwise_scale_is_within_bounds, cols, in_sh, act_in_sh,
-                cached_act_sh, out_rowwise_data_sh, scales_rowwise, thread_dbias_rowwise);
+                buff, stage_offset_Y, thread_offset_Y_rowwise, thread_offset_X_rowwise, bank_group,
+                scales_offset_Y_rowwise, scales_offset_X_rowwise, scale_stride_rowwise,
+                rowwise_scale_is_within_bounds, cols, in_sh, act_in_sh, cached_act_sh,
+                out_rowwise_data_sh, scales_rowwise, thread_dbias_rowwise);
       }
 
       __builtin_assume(block_amax >= 0);
@@ -1143,8 +1139,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const int buff_offset = buff * BUFF_DIM;
       store_output_stage<OType, ROWWISE_SCALING, COLWISE_SCALING>(
           out_rowwise_data_sh, out_colwise_data_sh, tensor_map_output_rowwise,
-          tensor_map_output_colwise, global_offset_X, global_offset_Y, buff_offset,
-          leading_thread);
+          tensor_map_output_colwise, global_offset_X, global_offset_Y, buff_offset, leading_thread);
 
       buff_in = (buff_in + 1) % BUFFS_NUM;
     }
