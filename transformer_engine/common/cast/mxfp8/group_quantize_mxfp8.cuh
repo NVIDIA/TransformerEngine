@@ -78,6 +78,9 @@ static_assert(BUFF_DIM_Y == 32);
 constexpr size_t STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
 static_assert(STAGES >= 1);
 
+static_assert(CHUNK_DIM_Y % SCALE_DIM_Y == 0);
+static_assert(CHUNK_DIM_X % SCALE_DIM_X == 0);
+
 // Number of 1-byte elements that span 32 banks (4-byte each) of shared memory
 constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 
@@ -275,7 +278,7 @@ __device__ __forceinline__ bool is_job_valid(const JobDescriptor &job,
   const size_t tensor_offset_from_start = job.block_global_offset - tensor_start_offset;
   const size_t block_offset_Y_in_tensor = tensor_offset_from_start / job.cols;
   const size_t block_offset_X_in_tensor = tensor_offset_from_start % job.cols;
-  if (block_offset_Y_in_tensor >= job.rows || block_offset_X_in_tensor >= job.cols) {
+  if (block_offset_Y_in_tensor >= job.rows) {
     return false;
   }
 
@@ -720,7 +723,7 @@ __device__ __forceinline__ float process_rowwise_stage(
               "max.xorsign.abs.bf16x2 x01, x01, x23; \n\t"
               "max.xorsign.abs.bf16x2 %1, %1, x01; \n"
               "}\n"
-              : "+l"(reinterpret_cast<uint64_t &>(in_IType4[w])),
+              : "=l"(reinterpret_cast<uint64_t &>(in_IType4[w])),
                 "+r"(reinterpret_cast<uint32_t &>(thread_amax_2x))
               : "r"(src_smem_ptr));
         } else {
@@ -732,7 +735,7 @@ __device__ __forceinline__ float process_rowwise_stage(
               "max.xorsign.abs.f16x2 x01, x01, x23; \n\t"
               "max.xorsign.abs.f16x2 %1, %1, x01; \n"
               "}\n"
-              : "+l"(reinterpret_cast<uint64_t &>(in_IType4[w])),
+              : "=l"(reinterpret_cast<uint64_t &>(in_IType4[w])),
                 "+r"(reinterpret_cast<uint32_t &>(thread_amax_2x))
               : "r"(src_smem_ptr));
         }
