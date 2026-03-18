@@ -672,6 +672,7 @@ std::vector<std::vector<size_t>> input_config = {
     {SAME_BOTH_DIMS,        2,      256,128},
     {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
     {VARYING_FIRST_DIM,     3,      1024,144,                   128,384,512},
+    {VARYING_FIRST_DIM,     4,      512,160,                    128,0,0,256},
     {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
     {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
     {VARYING_FIRST_DIM,     5,      16 * 4096,512,              128,256,384,1024,2304},
@@ -774,8 +775,13 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
         GTEST_SKIP();
     }
     // Skip fused tests in fast math is enabled.
-    if ((processing_method != ProcessingMethod::CAST_ONLY) && use_fast_math) {
-        GTEST_SKIP();
+    if (use_fast_math) {
+        if (processing_method != ProcessingMethod::CAST_ONLY) {
+            GTEST_SKIP();
+        }
+        if ((input_type != DType::kBFloat16) || (input_type != DType::kFloat16)) {
+            GTEST_SKIP();
+        }
     }
 
     bool rowwise = false;
@@ -848,7 +854,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(scaling_directions),
         ::testing::ValuesIn(input_config),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::Values(true, false)),
     [](const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
         const ProcessingMethod method = std::get<0>(info.param);
