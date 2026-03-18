@@ -224,6 +224,11 @@ def test_fsdp2_dcp_output_parity_async(fp_recipe):
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
 def test_fsdp2_safetensors_fp32_export(fp_recipe):
     """Export FP32 model from optimizer master weights to safetensors."""
+    if fp_recipe == "MXFP8BlockScaling":
+        pytest.xfail(
+            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
+            "MXFP8 quantized tensors, causing illegal memory access"
+        )
     _run_fused_adam_test("safetensors_fp32_export", fp_recipe)
 
 
