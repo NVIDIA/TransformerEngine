@@ -409,7 +409,6 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
                              .set_mode(fe::PointwiseMode_t::ADD)
                              .set_compute_data_type(get_cudnn_fe_dtype(ctype));
       auto _dx_with_add = _graph.pointwise(_dx, _add, add_options);
-      _dx_with_add->set_data_type(get_cudnn_fe_dtype(itype));
       _dx->set_output(false).set_data_type(get_cudnn_fe_dtype(itype));
       _dx = _dx_with_add;
     }
