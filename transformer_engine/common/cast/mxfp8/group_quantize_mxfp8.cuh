@@ -889,7 +889,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
-  constexpr bool NON_FP32_CAST_ONLY = 
+  constexpr bool NON_FP32_CAST_ONLY =
       NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>);
 
   if constexpr (NO_ACTIVATIONS) {
