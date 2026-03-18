@@ -1250,6 +1250,17 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &scale_tensor,
                                   sizeof(scale_tensor));
   } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    // The setup kernel computes scale offsets as data_offset / 32, which is only correct
+    // when the padded scale size equals the unpadded one (no padding gaps).
+    // This requires first_dim % 128 == 0 and last_dim % 128 == 0.
+    for (size_t i = 0; i < num_tensors; ++i) {
+      NVTE_CHECK(first_dims[i] % 128 == 0,
+                 "MXFP8 grouped GEMM test: first_dim must be divisible by 128, got ",
+                 first_dims[i]);
+      NVTE_CHECK(last_dims[i] % 128 == 0,
+                 "MXFP8 grouped GEMM test: last_dim must be divisible by 128, got ",
+                 last_dims[i]);
+    }
     // MXFP8: E8M0 scale_inv per block of 32 elements
     // Helper to gather scale_inv from individual tensors into a contiguous buffer
     auto gather_scales = [&](
@@ -1367,6 +1378,17 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
       nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &col_tensor, sizeof(col_tensor));
     }
   } else if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
+    // The setup kernel computes scale offsets as data_offset / 16, which is only correct
+    // when the padded scale size equals the unpadded one (no padding gaps).
+    // This requires first_dim % 128 == 0 and last_dim % 64 == 0.
+    for (size_t i = 0; i < num_tensors; ++i) {
+      NVTE_CHECK(first_dims[i] % 128 == 0,
+                 "NVFP4 grouped GEMM test: first_dim must be divisible by 128, got ",
+                 first_dims[i]);
+      NVTE_CHECK(last_dims[i] % 64 == 0,
+                 "NVFP4 grouped GEMM test: last_dim must be divisible by 64, got ",
+                 last_dims[i]);
+    }
     // NVFP4: E4M3 scale_inv per block of 16 elements (swizzled for GEMM)
     // Scale layout: [roundup(rows, 128), roundup(cols/16, 4)] E4M3 bytes per tensor
     auto gather_nvfp4_scales = [&](
