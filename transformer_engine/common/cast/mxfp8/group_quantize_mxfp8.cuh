@@ -189,14 +189,15 @@ __global__ void update_tma_descriptors(
       get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
   const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
 
-  const size_t offset_elts = offsets_ptr[tensor_id];
-
   // Zero-sized groups: skip TMA descriptor update. The main kernel already returns
   // early for rows==0 or cols==0, but creating a TMA descriptor with a zero dimension
   // is invalid and causes CUDA_ERROR_ILLEGAL_ADDRESS.
   if (rows == 0 || cols == 0) {
     return;
   }
+
+  const size_t offset_elts = offsets_ptr[tensor_id];
+
 
   if (leading_thread && (tensor_id < num_tensors)) {
     {
