@@ -1055,6 +1055,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
       last_acquired_tensor_id = tensor_id;
     }
+    __syncthreads();
 
     int buff_in = 0;
 
