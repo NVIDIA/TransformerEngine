@@ -53,10 +53,10 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
 }
 
 void multi_tensor_adam_mxfp8_cuda(int chunk_size, at::Tensor noop_flag,
-                                 std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
-                                 const float beta1, const float beta2, const float epsilon,
-                                 const int step, const int mode, const int bias_correction,
-                                 const float weight_decay, DType fp8_dtype) {
+                                  std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
+                                  const float beta1, const float beta2, const float epsilon,
+                                  const int step, const int mode, const int bias_correction,
+                                  const float weight_decay, DType fp8_dtype) {
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -65,10 +65,10 @@ void multi_tensor_adam_mxfp8_cuda(int chunk_size, at::Tensor noop_flag,
              "Expected 8 tensor lists (g, p_master, m, v, rowwise_data, colwise_data, "
              "rowwise_scale_inv, colwise_scale_inv), but found ",
              num_lists);
-  nvte_multi_tensor_adam_mxfp8_cuda(
-      chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists, num_tensors,
-      static_cast<NVTEDType>(fp8_dtype), lr, beta1, beta2, epsilon, step, mode, bias_correction,
-      weight_decay, at::cuda::getCurrentCUDAStream());
+  nvte_multi_tensor_adam_mxfp8_cuda(chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(),
+                                    num_lists, num_tensors, static_cast<NVTEDType>(fp8_dtype), lr,
+                                    beta1, beta2, epsilon, step, mode, bias_correction,
+                                    weight_decay, at::cuda::getCurrentCUDAStream());
 }
 
 void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
