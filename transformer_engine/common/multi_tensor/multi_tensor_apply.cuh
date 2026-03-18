@@ -154,7 +154,6 @@ void multi_tensor_apply_mxfp8(int64_t chunk_size, const transformer_engine::Tens
   int loc_tensor_info = 0;
 
   for (size_t t = 0; t < num_tensors_per_list; ++t) {
-
     const auto &g = tensor_lists[0][t];
     const auto &rowwise_data = tensor_lists[4][t];
     const auto &colwise_data = tensor_lists[5][t];

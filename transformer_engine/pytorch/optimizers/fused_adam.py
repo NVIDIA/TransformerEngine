@@ -639,7 +639,9 @@ class FusedAdam(torch.optim.Optimizer):
                 ):
                     p = p._local_tensor if isinstance(p, DTensor) else p
                     if p._rowwise_data is None or p._columnwise_data is None:
-                        raise RuntimeError("MXFP8Tensor does not have one of rowwise/columnwise data.")
+                        raise RuntimeError(
+                            "MXFP8Tensor does not have one of rowwise/columnwise data."
+                        )
                     if self.capturable:
                         raise RuntimeError(
                             "FusedAdam does not support MXFP8 model weights with capturable=True."

@@ -170,7 +170,7 @@ void run_mxfp8_adam_test(DType fp8_dtype) {
   nvte_multi_tensor_adam_mxfp8_cuda(65536, noop.data(), list_ptrs.data(), lists.size(),
                                     lists[0].size(), static_cast<NVTEDType>(fp8_dtype), lr, beta1,
                                     beta2, eps, step, mode, bias_correction, weight_decay, 0);
-  
+
   std::vector<std::vector<NVTETensor>> ref_lists(4);
   for (size_t i = 0; i < tensor_count; ++i) {
     ref_lists[0].push_back(g[i].data());
