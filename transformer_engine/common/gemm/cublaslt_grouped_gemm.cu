@@ -278,9 +278,9 @@ inline size_t validate_grouped_gemm_inputs(
                "Grouped GEMM: A and B must both use MXFP8 scaling or both not.");
     NVTE_CHECK(transformer_engine::is_fp8_block_scaling(tensor->scaling_mode) == ref_is_fp8_block,
                "Grouped GEMM: A and B must both use FP8 block scaling or both not.");
-    if (ref_is_mxfp8) {
+    if (ref_is_mxfp8 || transformer_engine::is_nvfp_scaling(tensor->scaling_mode)) {
       NVTE_CHECK(tensor->with_gemm_swizzled_scales,
-                 "MXFP8 grouped GEMM: scales must be swizzled for GEMM.");
+                 "Grouped GEMM: scales must be swizzled for GEMM (MXFP8/NVFP4).");
     }
   }
   return num_tensors;
@@ -516,7 +516,8 @@ inline MultiTensorGroupGemmOutputArgs build_grouped_gemm_multi_out_args(
 // passed to the grouped GEMM kernel. Use-case: A --> List of Expert weights
 inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     const NVTETensor *tensor_list, size_t list_size, bool use_rowwise, bool is_fp8,
-    int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name) {
+    int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name,
+    bool needs_scale_inv = false) {
   using namespace transformer_engine;
   MultiTensorGroupGemmInputArgs args{};
   *avg_first_dim = 0;
@@ -524,6 +525,7 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
   if (list_size == 0) {
     return args;
   }
+  const bool requires_scale = is_fp8 || needs_scale_inv;
   for (size_t i = 0; i < list_size; ++i) {
     const transformer_engine::Tensor *t =
         transformer_engine::convertNVTETensorCheck(tensor_list[i]);
@@ -539,9 +541,9 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     *avg_first_dim += static_cast<int64_t>(data.shape[0]);
     *avg_last_dim += static_cast<int64_t>(data.shape[1]);
 
-    if (is_fp8) {
+    if (requires_scale) {
       NVTE_CHECK(scale_inv.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
-                 " requires scale_inv for FP8.");
+                 " requires scale_inv.");
       args.scale_inv_ptrs[i] = scale_inv.dptr;
     } else {
       args.scale_inv_ptrs[i] = nullptr;
@@ -1398,27 +1400,33 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   // Validate A list and selection
   auto A_list_info =
       validate_grouped_gemm_multi_inputA_list(A_list, num_a_tensors, num_tensors, "A");
-  auto is_fp8_or_16bit = [](transformer_engine::DType dtype) {
+  auto is_supported_dtype = [](transformer_engine::DType dtype) {
     return dtype == transformer_engine::DType::kFloat8E4M3 ||
            dtype == transformer_engine::DType::kFloat8E5M2 ||
+           dtype == transformer_engine::DType::kFloat4E2M1 ||
            dtype == transformer_engine::DType::kBFloat16 ||
            dtype == transformer_engine::DType::kFloat16;
   };
-  NVTE_CHECK(is_fp8_or_16bit(A_list_info.all_row ? A_list_info.row_dtype : A_list_info.col_dtype),
-             "Grouped GEMM: A_list tensors must be FP8, BF16, or FP16.");
+  NVTE_CHECK(is_supported_dtype(A_list_info.all_row ? A_list_info.row_dtype
+                                                    : A_list_info.col_dtype),
+             "Grouped GEMM: A_list tensors must be FP8, NVFP4, BF16, or FP16.");
 
   // Cross-operand consistency (mirrors validate_grouped_gemm_inputs).
   const DType a_rep_dtype = A_list_info.all_row ? A_list_info.row_dtype : A_list_info.col_dtype;
-  NVTE_CHECK(is_fp8_dtype(a_rep_dtype) == is_fp8_dtype(inputB->dtype()),
-             "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
-  NVTE_CHECK(transformer_engine::is_mxfp_scaling(A_list_info.scaling_mode) ==
-                 transformer_engine::is_mxfp_scaling(inputB->scaling_mode),
-             "Grouped GEMM: A and B must both use MXFP8 scaling or both use tensor scaling.");
-  if (transformer_engine::is_mxfp_scaling(A_list_info.scaling_mode)) {
+  const bool a_is_low_precision = is_fp8_dtype(a_rep_dtype) ||
+      a_rep_dtype == transformer_engine::DType::kFloat4E2M1;
+  const bool b_is_low_precision = is_fp8_dtype(inputB->dtype()) ||
+      inputB->dtype() == transformer_engine::DType::kFloat4E2M1;
+  NVTE_CHECK(a_is_low_precision == b_is_low_precision,
+             "Grouped GEMM: A and B must both be low-precision (FP8/NVFP4) or both be non-FP8.");
+  NVTE_CHECK(A_list_info.scaling_mode == inputB->scaling_mode,
+             "Grouped GEMM: A and B must use the same scaling mode.");
+  if (transformer_engine::is_mxfp_scaling(A_list_info.scaling_mode) ||
+      transformer_engine::is_nvfp_scaling(A_list_info.scaling_mode)) {
     NVTE_CHECK(A_list_info.with_gemm_swizzled_scales,
-               "MXFP8 grouped GEMM: A scales must be swizzled for GEMM.");
+               "Grouped GEMM: A scales must be swizzled for GEMM (MXFP8/NVFP4).");
     NVTE_CHECK(inputB->with_gemm_swizzled_scales,
-               "MXFP8 grouped GEMM: B scales must be swizzled for GEMM.");
+               "Grouped GEMM: B scales must be swizzled for GEMM (MXFP8/NVFP4).");
   }
 
   // Select operand storage for B (row-wise vs column-wise)
@@ -1449,18 +1457,43 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
     NVTE_CHECK(A_list_info.all_row, "Grouped GEMM: A_list is missing row-wise data");
     A_sel.dtype = A_list_info.row_dtype;
     a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
-        A_list, num_a_tensors, /*use_rowwise=*/true, is_fp8, &avg_first_dim, &avg_last_dim, "A");
+        A_list, num_a_tensors, /*use_rowwise=*/true, is_fp8, &avg_first_dim, &avg_last_dim, "A",
+        /*needs_scale_inv=*/nvfp4 || fp8_block);
   } else {
     NVTE_CHECK(A_list_info.all_col, "Grouped GEMM: A_list is missing column-wise data");
     A_sel.dtype = A_list_info.col_dtype;
     a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
-        A_list, num_a_tensors, /*use_rowwise=*/false, is_fp8, &avg_first_dim, &avg_last_dim, "A");
+        A_list, num_a_tensors, /*use_rowwise=*/false, is_fp8, &avg_first_dim, &avg_last_dim, "A",
+        /*needs_scale_inv=*/nvfp4 || fp8_block);
   }
 
   // For discrete A_list, scale pointers are per-tensor; use multi-tensor args.
   // Base pointer is unused when providing per-tensor pointers.
   A_sel.scale_inv = nullptr;
   A_sel.dptr = nullptr;
+
+  // NVFP4: collect contiguous amax base pointer from discrete A tensors.
+  // Per-tensor amax values must be stored contiguously (as from split_into_quantized_tensors).
+  if (nvfp4 && num_tensors > 0) {
+    const bool use_rowwise = choice.use_rowwise;
+    const transformer_engine::Tensor *t0 =
+        transformer_engine::convertNVTETensorCheck(A_list[0]);
+    const auto &amax0 = use_rowwise ? t0->amax : t0->columnwise_amax;
+    if (amax0.has_data()) {
+      float *amax_base = static_cast<float *>(amax0.dptr);
+      for (size_t i = 1; i < num_tensors; ++i) {
+        const transformer_engine::Tensor *ti =
+            transformer_engine::convertNVTETensorCheck(A_list[i]);
+        const auto &amax_i = use_rowwise ? ti->amax : ti->columnwise_amax;
+        NVTE_CHECK(amax_i.has_data(),
+                   "Grouped GEMM: NVFP4 A_list tensor ", i, " is missing amax.");
+        NVTE_CHECK(static_cast<float *>(amax_i.dptr) == amax_base + i,
+                   "Grouped GEMM: NVFP4 discrete A_list amax values must be contiguous. "
+                   "Use tensors from split_into_quantized_tensors().");
+      }
+      A_sel.amax = amax_base;
+    }
+  }
 
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);

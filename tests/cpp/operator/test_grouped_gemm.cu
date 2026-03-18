@@ -325,6 +325,11 @@ void run_grouped_gemm_case(const TestParams& params) {
     GTEST_SKIP() << "Grouped GEMM requires Hopper (SM90) or newer with cuBLAS 13.4+, "
                  << "but device compute capability is " << cc << ".";
   }
+  // FP8 tensor scaling grouped GEMM is only supported on Blackwell+
+  if (cc < blackwellComputeCapability && params.input_case == InputCase::kFP8Current) {
+    GTEST_SKIP() << "FP8 tensor scaling grouped GEMM requires Blackwell (SM100) or newer, "
+                 << "but device compute capability is " << cc << ".";
+  }
   // MXFP8 grouped GEMM is only supported on Blackwell+
   if (cc < blackwellComputeCapability && params.input_case == InputCase::kMXFP8) {
     GTEST_SKIP() << "MXFP8 grouped GEMM requires Blackwell (SM100) or newer, "
