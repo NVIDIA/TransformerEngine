@@ -668,19 +668,19 @@ std::vector<ScalingDirection> scaling_directions = {
 
 // {shape_representation, num_tensors, [logical_shape_M, logical_shape_K], [M_i], [K_i]}
 std::vector<std::vector<size_t>> input_config = {
-    // {SAME_BOTH_DIMS,        1,      128,128},
-    // {SAME_BOTH_DIMS,        2,      256,128},
-    // {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
-    // {VARYING_FIRST_DIM,     3,      1024,144,                   128,384,512},
+    {SAME_BOTH_DIMS,        1,      128,128},
+    {SAME_BOTH_DIMS,        2,      256,128},
+    {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
+    {VARYING_FIRST_DIM,     3,      1024,144,                   128,384,512},
+    {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
+    {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
+    {VARYING_FIRST_DIM,     5,      16 * 4096,512,              128,256,384,1024,2304},
+    {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
+    {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
+    {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
+    // Empty tensor in the middle of the group must not terminate the persistent work loop.
     {VARYING_FIRST_DIM,     4,      512,160,                    128,0,0,256},
-    // {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
-    // {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
-    // {VARYING_FIRST_DIM,     5,      16 * 4096,512,              128,256,384,1024,2304},
-    // {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
-    // {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
-    // // Empty tensor in the middle of the group must not terminate the persistent work loop.
-    // {VARYING_BOTH_DIMS,     3,      1,(128*128)+(128*128),      128,0,128,      128,0,128},
-    // {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
+    {VARYING_BOTH_DIMS,     3,      1,(128*128)+(128*128),      128,0,128,      128,0,128},
 };
 
 }  // namespace
@@ -845,6 +845,40 @@ std::string to_string(const ActivationKind activation) {
     }
 }
 
+std::string MakeGroupedFusedCastMXFP8TestName(
+    const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
+    const ProcessingMethod method = std::get<0>(info.param);
+    std::string name = to_string(method);
+    name += "X" + to_string(std::get<1>(info.param));
+
+    switch (std::get<2>(info.param)) {
+        case ScalingDirection::ROWWISE: name += "_ROWWISE_"; break;
+        case ScalingDirection::COLWISE: name += "_COLWISE_"; break;
+        case ScalingDirection::BOTH:    name += "_BIDIMENSIONAL_"; break;
+    }
+
+    const std::vector<size_t> input = std::get<3>(info.param);
+
+    switch (static_cast<ShapeRepresentation>(input[0])) {
+        case ShapeRepresentation::SAME_BOTH_DIMS:    name += "SAME_BOTH_DIMS"; break;
+        case ShapeRepresentation::VARYING_FIRST_DIM: name += "VARYING_FIRST_DIM"; break;
+        case ShapeRepresentation::VARYING_LAST_DIM:  name += "VARYING_LAST_DIM"; break;
+        case ShapeRepresentation::VARYING_BOTH_DIMS: name += "VARYING_BOTH_DIMS"; break;
+    }
+
+    name += "_N_" + std::to_string(input[1]);
+
+    name += "_SHAPE_" + std::to_string(input[2]) + "X" + std::to_string(input[3]);
+
+    name += "_" + test::typeName(std::get<4>(info.param)) +
+            "_" + test::typeName(std::get<5>(info.param));
+
+    if (std::get<6>(info.param)) {
+        name += "_FASTMATH";
+    }
+    return name;
+}
+
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     GroupedFusedCastMXFP8TestSuite,
@@ -856,37 +890,4 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::Values(true, false)),
-    [](const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
-        const ProcessingMethod method = std::get<0>(info.param);
-        std::string name = to_string(method);
-        name += "X" + to_string(std::get<1>(info.param));
-
-        switch (std::get<2>(info.param)) {
-            case ScalingDirection::ROWWISE: name += "_ROWWISE_"; break;
-            case ScalingDirection::COLWISE: name += "_COLWISE_"; break;
-            case ScalingDirection::BOTH:    name += "_BIDIMENSIONAL_"; break;
-        }
-
-        const std::vector<size_t> input = std::get<3>(info.param);
-
-        switch(static_cast<ShapeRepresentation>(input[0])) {
-            case ShapeRepresentation::SAME_BOTH_DIMS:       name += "SAME_BOTH_DIMS"; break;
-            case ShapeRepresentation::VARYING_FIRST_DIM:    name += "VARYING_FIRST_DIM"; break;
-            case ShapeRepresentation::VARYING_LAST_DIM:     name += "VARYING_LAST_DIM"; break;
-            case ShapeRepresentation::VARYING_BOTH_DIMS:    name += "VARYING_BOTH_DIMS"; break;
-        };
-
-        name += "_N_" + std::to_string(input[1]);
-
-        name += "_SHAPE_" +
-                std::to_string(input[2]) +
-                "X" + std::to_string(input[3]);
-
-        name += "_" + test::typeName(std::get<4>(info.param)) +
-                "_" + test::typeName(std::get<5>(info.param));
-
-        if (std::get<6>(info.param)) {
-            name += "_FASTMATH";
-        }
-        return name;
-    });
+    MakeGroupedFusedCastMXFP8TestName);

@@ -475,7 +475,9 @@ __device__ __forceinline__ void store_output_stage(OType *out_rowwise_data_sh,
         reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise), global_offset_X,
         global_offset_Y, reinterpret_cast<uint64_t *>(&out_colwise_data_sh[buff_offset]));
   }
-  ptx::cp_async_bulk_commit_group();
+  if constexpr (ROWWISE_SCALING || COLWISE_SCALING) {
+    ptx::cp_async_bulk_commit_group();
+  }
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -887,11 +889,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
+  constexpr bool NON_FP32_CAST_ONLY = 
+      NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>);
 
   if constexpr (NO_ACTIVATIONS) {
     if (noop != nullptr && noop[0] == 1.0f) {
       return;
     }
+  }
+  if constexpr (USE_FAST_MATH && !NON_FP32_CAST_ONLY) {
+    return;
   }
 
   constexpr bool ROWWISE_SCALING =
