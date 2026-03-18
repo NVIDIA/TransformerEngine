@@ -612,12 +612,12 @@ def _segment_ids_pos_to_seqlens_offsets(
     # Currently, this function is only exercised for THD qkv_layout.
 
     # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
-    # if (attn_mask_type.is_causal() and window_size is None) or (
-    #     window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
-    # ):
-    #     return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
-    #         segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
-    #     )
+    if (attn_mask_type.is_causal() and window_size is None) or (
+        window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
+    ):
+        return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+            segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+        )
     q_seqlen = _get_seqlens_thd(
         segment_ids=segment_ids_q, max_segments_per_seq=max_segments_per_seq
     )
