@@ -1464,19 +1464,21 @@ class FusedAttnFunc(torch.autograd.Function):
                     q, k, v = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
                 if _run_shadow_f16_fwd and not _replace_aux_with_shadow_f16:
                     tmp_quantizer = QKV_quantizer.copy()
-                    tmp_quantizer.optimize_for_gemm = False
-                    q_fp8_, k_fp8_, _, _ = combine_and_quantize(
-                        original_qkv_layout, q, k, v, tmp_quantizer
-                    )
+                    if isinstance(tmp_quantizer, MXFP8Quantizer):
+                        tmp_quantizer.optimize_for_gemm = False
+                    q_fp8_, k_fp8_, _, _ = combine_and_quantize(original_qkv_layout, q, k, v, tmp_quantizer)
                     q_ = q_fp8_.dequantize(dtype=out_nominal_dtype)
                     k_ = k_fp8_.dequantize(dtype=out_nominal_dtype)
-                    qkv_format, *_ = dpa_utils.get_qkv_format(original_qkv_layout)
-                    if qkv_format == "bshd":
-                        q = q_.permute(0, 2, 1, 3).contiguous()
-                        k = k_.permute(0, 2, 1, 3).contiguous()
-                    elif qkv_format == "sbhd":
-                        q = q_.permute(2, 0, 1, 3).contiguous()
-                        k = k_.permute(2, 0, 1, 3).contiguous()
+                    if isinstance(tmp_quantizer, MXFP8Quantizer):
+                        qkv_format, *_ = dpa_utils.get_qkv_format(original_qkv_layout)
+                        if qkv_format == "bshd":
+                            q = q_.permute(0, 2, 1, 3).contiguous()
+                            k = k_.permute(0, 2, 1, 3).contiguous()
+                        elif qkv_format == "sbhd":
+                            q = q_.permute(2, 0, 1, 3).contiguous()
+                            k = k_.permute(2, 0, 1, 3).contiguous()
+                    else:
+                        q, k = q_, k_
                 if _run_shadow_f16_fwd and _replace_out_save_with_shadow_f16:
                     out = out_f16_
                 qkvo_tensors = (q, k, v, out)
