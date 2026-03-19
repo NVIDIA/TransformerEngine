@@ -205,7 +205,7 @@ __device__ inline void apply_softmax_on_float(float *scores, int data_size, int 
 
 template <typename T>
 __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, int *topk_indices,
-                                          T *topk_scores, int lane_id) {
+                                           T *topk_scores, int lane_id) {
   // Bit i indicates whether the i-th local element (lane_id + i * warp_size) was selected.
   uint32_t local_mask = 0;
 
@@ -220,14 +220,12 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
       if constexpr (std::is_same_v<CompType, double>) {
         uint64_t mask = -(uint64_t)((local_mask >> bit_idx) & 1u);
         uint64_t x_bits = __double_as_longlong(static_cast<CompType>(scores[i]));
-        uint64_t result_bits =
-          (~mask & x_bits) | (mask & 0xFFF0000000000000ULL);
-        cur_val = __longlong_as_double(result_bits);  
+        uint64_t result_bits = (~mask & x_bits) | (mask & 0xFFF0000000000000ULL);
+        cur_val = __longlong_as_double(result_bits);
       } else {
         uint32_t full_mask = -(uint32_t)((local_mask >> bit_idx) & 1u);
         uint32_t x_bits = __float_as_uint(static_cast<CompType>(scores[i]));
-        uint32_t result_bits =
-            (~full_mask & x_bits) | (full_mask & 0xFF800000u);
+        uint32_t result_bits = (~full_mask & x_bits) | (full_mask & 0xFF800000u);
         cur_val = __uint_as_float(result_bits);
       }
       if (cur_val > local_max_val) {
