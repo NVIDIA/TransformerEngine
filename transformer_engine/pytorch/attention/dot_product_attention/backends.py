@@ -165,6 +165,7 @@ _replace_dq_with_shadow_f16 = os.getenv("NVTE_REPLACE_DQ_WITH_SHADOW_F16", "0") 
 _replace_dk_with_shadow_f16 = os.getenv("NVTE_REPLACE_DK_WITH_SHADOW_F16", "0") == "1"
 _replace_dv_with_shadow_f16 = os.getenv("NVTE_REPLACE_DV_WITH_SHADOW_F16", "0") == "1"
 
+
 class FP8EmulationFunc(torch.autograd.Function):
     """
     Emulate the effects of FP8 quantization on tensors. Used in UnfusedDotProductAttention as follows:
@@ -1778,12 +1779,20 @@ class FusedAttnFunc(torch.autograd.Function):
                         q_fp8_, k_fp8_, v_fp8_, _ = combine_and_quantize(
                             original_qkv_layout, q, k, v, tmp_quantizer
                         )
-                        q_shadow_f16, k_shadow_f16, v_shadow_f16 = [x.dequantize(dtype=dqkv_nominal_dtype) for x in (q_fp8_, k_fp8_, v_fp8_)]
+                        q_shadow_f16, k_shadow_f16, v_shadow_f16 = [
+                            x.dequantize(dtype=dqkv_nominal_dtype) for x in (q_fp8_, k_fp8_, v_fp8_)
+                        ]
                         if isinstance(tmp_quantizer, MXFP8Quantizer):
                             if original_qkv_format == "bshd":
-                                q_shadow_f16, k_shadow_f16, v_shadow_f16 = [x.permute(0, 2, 1, 3).contiguous() for x in (q_shadow_f16, k_shadow_f16, v_shadow_f16)]
+                                q_shadow_f16, k_shadow_f16, v_shadow_f16 = [
+                                    x.permute(0, 2, 1, 3).contiguous()
+                                    for x in (q_shadow_f16, k_shadow_f16, v_shadow_f16)
+                                ]
                             elif original_qkv_format == "sbhd":
-                                q_shadow_f16, k_shadow_f16, v_shadow_f16 = [x.permute(2, 0, 1, 3).contiguous() for x in (q_shadow_f16, k_shadow_f16, v_shadow_f16)]
+                                q_shadow_f16, k_shadow_f16, v_shadow_f16 = [
+                                    x.permute(2, 0, 1, 3).contiguous()
+                                    for x in (q_shadow_f16, k_shadow_f16, v_shadow_f16)
+                                ]
                         dq_shadow_f16, dk_shadow_f16, dv_shadow_f16, *rest = fused_attn_bwd(
                             ctx.max_seqlen_q,
                             ctx.max_seqlen_kv,
@@ -1839,8 +1848,6 @@ class FusedAttnFunc(torch.autograd.Function):
                                 f" {dv_.min():.4f}/{dv_shadow_f16.min():.4f}, max:"
                                 f" {dv_.max():.4f}/{dv_shadow_f16.max():.4f}"
                             )
-
-
 
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq, dk, dv = dq_, dk_, dv_
