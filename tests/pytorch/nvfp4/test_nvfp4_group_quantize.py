@@ -37,7 +37,7 @@ def check_group_quantization_nvfp4_versus_reference(
     x_dtype: torch.dtype,
     M: int,
     N: int,
-    return_identity: bool,
+    return_rowwise: bool,
     return_transpose: bool,
     split_sections: list[int],
     with_rht: bool = True,
@@ -63,7 +63,7 @@ def check_group_quantization_nvfp4_versus_reference(
     quantizers = [
         NVFP4Quantizer(
             fp4_dtype=te_dtype,
-            rowwise=return_identity,
+            rowwise=return_rowwise,
             columnwise=return_transpose,
             with_amax_reduction=False,
             amax_reduction_group=None,
@@ -74,12 +74,12 @@ def check_group_quantization_nvfp4_versus_reference(
         for _ in range(len(split_sections))
     ]
     x_qx_ref, x_sx_ref, x_amax_rowwise_ref, x_qx_t_ref, x_sx_t_ref, x_amax_colwise_ref = (
-        reference_group_quantize(x, quantizers, split_sections, return_identity, return_transpose)
+        reference_group_quantize(x, quantizers, split_sections, return_rowwise, return_transpose)
     )
 
     split_quantize_outputs = tex.split_quantize(x, split_sections, quantizers)
 
-    if return_identity:
+    if return_rowwise:
         x_qx = [output._rowwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
         x_sx = [output._rowwise_scale_inv for output in split_quantize_outputs]
         x_amax_rowwise = [output._amax_rowwise for output in split_quantize_outputs]
@@ -130,6 +130,8 @@ def check_group_quantization_nvfp4_versus_reference(
     [
         # edge case, zero tokens for all
         (0, 512),
+        # edge case, not 128 multiple hidden dimension
+        (1024, 320),
         # full tile cases
         (256, 1024),
         (1024, 256),
@@ -150,9 +152,7 @@ def check_group_quantization_nvfp4_versus_reference(
         "random_uneven_split",
     ],
 )
-@pytest.mark.parametrize(
-    "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "with_random_sign_mask", [True, False], ids=["with_random_sign_mask", "no_random_sign_mask"]
 )
@@ -172,14 +172,14 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     # currently disable pre-RHT amax
     with_post_rht_amax = with_rht
 
-    if quantize_mode == "quantize":
-        return_identity = True
+    if quantize_mode == "rowwise_only":
+        return_rowwise = True
         return_transpose = False
-    elif quantize_mode == "quantize_transpose":
-        return_identity = True
+    elif quantize_mode == "both_directions":
+        return_rowwise = True
         return_transpose = True
-    elif quantize_mode == "quantize_colwise_only":
-        return_identity = False
+    elif quantize_mode == "columnwise_only":
+        return_rowwise = False
         return_transpose = True
     else:
         raise ValueError(f"Invalid quantize mode: {quantize_mode}")
@@ -188,7 +188,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
         x_dtype=x_dtype,
         M=M,
         N=N,
-        return_identity=return_identity,
+        return_rowwise=return_rowwise,
         return_transpose=return_transpose,
         split_sections=split_sections,
         with_rht=with_rht,

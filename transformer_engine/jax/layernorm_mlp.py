@@ -295,8 +295,8 @@ def _layernorm_mlp_fwd_rule(
 
     assert x.shape[x_contracting_dims[0]] == kernel_1.shape[k_contracting_dims[0]]
 
-    use_bias_1 = bias_1 is not None
-    use_bias_2 = bias_1 is not None
+    has_bias_1 = bias_1 is not None
+    has_bias_2 = bias_2 is not None
 
     x = with_sharding_constraint_by_logical_axes(x, norm_input_axes)
 
@@ -328,15 +328,9 @@ def _layernorm_mlp_fwd_rule(
         casted_kernel_1.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
         transpose_batch_sequence=transpose_batch_sequence,
-        bias=bias_1 if not tex.gemm_uses_jax_dot() else None,
-        fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
+        bias=bias_1,
         collective_op=collective_op_set_1.forward,
     )
-
-    if use_bias_1 and tex.gemm_uses_jax_dot():
-        bias_1_shape = bias_1.shape
-        bias_1_new_shape = (1,) * (dot_1_output.ndim - bias_1.ndim) + bias_1_shape
-        dot_1_output += jnp.reshape(bias_1, bias_1_new_shape)
 
     # This sharding constraint is needed to correct the Shardy sharding propagation
     if dot_2_input_axes is not None:
@@ -377,15 +371,9 @@ def _layernorm_mlp_fwd_rule(
         casted_kernel_2.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
         transpose_batch_sequence=transpose_batch_sequence,
-        bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
-        fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
+        bias=bias_2,
         collective_op=collective_op_set_2.forward,
     )
-
-    if use_bias_2 and tex.gemm_uses_jax_dot():
-        bias_2_shape = bias_2.shape
-        bias_2_new_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2_shape
-        dot_2_output += jnp.reshape(bias_2, bias_2_new_shape)
 
     # sharding of outputs should be the same as dot_1's input
     dot_2_output = with_sharding_constraint_by_logical_axes(dot_2_output, dot_1_input_axes)
@@ -406,8 +394,8 @@ def _layernorm_mlp_fwd_rule(
         k_contracting_dims,
         kernel_1.shape,
         kernel_2.shape,
-        use_bias_1,
-        use_bias_2,
+        has_bias_1,
+        has_bias_2,
         quantizer_sets,
     )
 
@@ -461,8 +449,8 @@ def _layernorm_mlp_bwd_rule(
         k_contracting_dims_in_fwd,
         kernel_1_shape,
         kernel_2_shape,
-        use_bias_1,
-        use_bias_2,
+        has_bias_1,
+        has_bias_2,
         quantizer_sets,
     ) = ctx
 
@@ -477,7 +465,7 @@ def _layernorm_mlp_bwd_rule(
 
     casted_grad, dbias_2 = tex.quantize_dbias(
         grad,
-        is_dbias=use_bias_2,
+        is_dbias=has_bias_2,
         quantizer=ffn1_quantizer_set.dgrad,
         amax_scope=AmaxScope.TPSP,
         transpose_batch_sequence=transpose_batch_sequence,
@@ -522,7 +510,7 @@ def _layernorm_mlp_bwd_rule(
         dgrad_2,
         dot_1_output,
         activation_type=activation_type,
-        is_dbias=use_bias_1,
+        is_dbias=has_bias_1,
         quantizer=ffn2_quantizer_set.dgrad,
         act_params=(
             tex.activation.ActivationParams.create(activation_type, **activation_params)

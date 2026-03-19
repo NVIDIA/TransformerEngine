@@ -33,6 +33,16 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<Tenso
                                                                bool rowwise_usage,
                                                                bool columnwise_usage);
 
+using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>;
+
+/*! \brief Swizzle grouped tensor scales for GEMM if needed.
+ * Currently only works for MXFP8 1D scaling with uniform shapes.
+ *
+ * The returned swizzled scales should be kept alive during the GEMM.
+ */
+std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
+    GroupedTensorWrapper& input);
+
 /*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *
  *  If rowwise==false, the columnwise data will be reinterpreted as
