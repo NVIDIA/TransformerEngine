@@ -57,13 +57,11 @@ RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts
   /nvidia/build-scripts/installCUBLASMP.sh
 EOF
 
-RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts <<"EOF" bash -e
+RUN <<"EOF" bash -e
   [[ "${FRAMEWORK}" == "jax" ]] \
   && apt-get update \
   && apt-get install -y python3 python3-pip \
   && pip3 install cmake==3.21.0 \
-  && export NCCL_VERSION=2.29.3 \
-  && /nvidia/build-scripts/installNCCL.sh \
   || [[ ! "${FRAMEWORK}" == "jax" ]]
 EOF
 
