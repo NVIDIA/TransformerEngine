@@ -1150,19 +1150,6 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
              "Input and output tensors must have matching scaling modes, but got ",
              to_string(input->scaling_mode), " and ", to_string(output->scaling_mode), ".");
 
-  switch (scaling_mode) {
-    case NVTE_MXFP8_1D_SCALING:
-      NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP8, got ",
-                 to_string(input->dtype()), ").");
-      break;
-    case NVTE_NVFP4_1D_SCALING:
-      NVTE_CHECK(is_fp4_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP4, got ",
-                 to_string(input->dtype()), ").");
-      break;
-    default:
-      NVTE_ERROR("Invalid scaling mode");
-  }
-
   const bool has_rowwise_scale_inv = output->scale_inv.has_data();
   const bool has_columnwise_scale_inv = output->columnwise_scale_inv.has_data();
   NVTE_CHECK(!has_rowwise_scale_inv || !has_columnwise_scale_inv,
@@ -1170,105 +1157,118 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
   if (!has_rowwise_scale_inv && !has_columnwise_scale_inv) {
     return;
   }
-
-  int m{0}, k{0};
-  switch (scaling_mode) {
-    case NVTE_MXFP8_1D_SCALING: {
-      if (has_rowwise_scale_inv) {
-        NVTE_CHECK(output->scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
-        m = output->scale_inv.shape[0];
-        k = output->scale_inv.shape[1];
-      } else if (has_columnwise_scale_inv) {
-        NVTE_CHECK(output->columnwise_scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", output->columnwise_scale_inv.shape,
-                   ".");
-        m = output->columnwise_scale_inv.shape[1];
-        k = output->columnwise_scale_inv.shape[0];
-      }
-      break;
-    }
-    case NVTE_NVFP4_1D_SCALING: {
-      if (has_rowwise_scale_inv) {
-        NVTE_CHECK(output->scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
-        m = output->scale_inv.shape[0];
-        k = output->scale_inv.shape[1];
-      } else if (has_columnwise_scale_inv) {
-        NVTE_CHECK(output->columnwise_scale_inv.shape.size() == 2,
-                   "Expected 2D scaling factors, got shape=", output->columnwise_scale_inv.shape,
-                   ".");
-        m = output->columnwise_scale_inv.shape[0];
-        k = output->columnwise_scale_inv.shape[1];
-      }
-      break;
-    }
-    default:
-      NVTE_ERROR("Invalid scaling mode");
-  }
-
-  constexpr int SF_TILE_DIM_M = 128;
-  constexpr int SF_TILE_DIM_K = 4;
-  NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Output should be padded in M/N dimension!");
-  NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Output should be padded in K dimension!");
-
   if (has_rowwise_scale_inv) {
     NVTE_CHECK(input->scale_inv.has_data(),
                "Output tensor requests row-wise scaling factors, but input tensor does not "
                "provide them.");
   } else if (has_columnwise_scale_inv) {
     NVTE_CHECK(input->columnwise_scale_inv.has_data(),
-                   "Output tensor requests column-wise scaling factors, but input tensor does not "
-                   "provide them.");
+               "Output tensor requests column-wise scaling factors, but input tensor does not "
+               "provide them.");
   }
 
-  bool rowwise_unswizzle{false}, columnwise_unswizzle{false};
+  constexpr int SF_TILE_DIM_M = 128;
+  constexpr int SF_TILE_DIM_K = 4;
+  const dim3 block_size(TB_DIM, TB_DIM);
+
+  int m{0}, k{0};
+  void* input_ptr{nullptr};
+  void* output_ptr{nullptr};
+  bool rowwise{false};
+
   switch (scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
-      rowwise_unswizzle = has_rowwise_scale_inv;
-      columnwise_unswizzle = has_columnwise_scale_inv;
+      NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP8, got ",
+                 to_string(input->dtype()), ").");
+      if (has_rowwise_scale_inv) {
+        NVTE_CHECK(output->scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
+        m = output->scale_inv.shape[0];
+        k = output->scale_inv.shape[1];
+        NVTE_CHECK(static_cast<size_t>(m) * k == output->scale_inv.numel(),
+                   "Expected output tensor to have ", static_cast<size_t>(m) * k,
+                   " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
+        input_ptr = input->scale_inv.dptr;
+        output_ptr = output->scale_inv.dptr;
+        rowwise = true;
+      } else if (has_columnwise_scale_inv) {
+        NVTE_CHECK(output->columnwise_scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->columnwise_scale_inv.shape,
+                   ".");
+        m = output->columnwise_scale_inv.shape[1];
+        k = output->columnwise_scale_inv.shape[0];
+        NVTE_CHECK(static_cast<size_t>(m) * k == output->columnwise_scale_inv.numel(),
+                   "Expected output tensor to have ", static_cast<size_t>(m) * k,
+                   " column-wise scaling factors, but got shape=",
+                   output->columnwise_scale_inv.shape, ".");
+        input_ptr = input->columnwise_scale_inv.dptr;
+        output_ptr = output->columnwise_scale_inv.dptr;
+        rowwise = false;
+      }
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
-      rowwise_unswizzle = true;
-      columnwise_unswizzle = false;
+      NVTE_CHECK(is_fp4_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP4, got ",
+                 to_string(input->dtype()), ").");
+      // NVFP4: always unswizzle rowwise regardless of which scale buffer holds the data
+      if (has_rowwise_scale_inv) {
+        NVTE_CHECK(output->scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
+        m = output->scale_inv.shape[0];
+        k = output->scale_inv.shape[1];
+        NVTE_CHECK(static_cast<size_t>(m) * k == output->scale_inv.numel(),
+                   "Expected output tensor to have ", static_cast<size_t>(m) * k,
+                   " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
+        input_ptr = input->scale_inv.dptr;
+        output_ptr = output->scale_inv.dptr;
+      } else if (has_columnwise_scale_inv) {
+        NVTE_CHECK(output->columnwise_scale_inv.shape.size() == 2,
+                   "Expected 2D scaling factors, got shape=", output->columnwise_scale_inv.shape,
+                   ".");
+        m = output->columnwise_scale_inv.shape[0];
+        k = output->columnwise_scale_inv.shape[1];
+        NVTE_CHECK(static_cast<size_t>(m) * k == output->columnwise_scale_inv.numel(),
+                   "Expected output tensor to have ", static_cast<size_t>(m) * k,
+                   " column-wise scaling factors, but got shape=",
+                   output->columnwise_scale_inv.shape, ".");
+        input_ptr = input->columnwise_scale_inv.dptr;
+        output_ptr = output->columnwise_scale_inv.dptr;
+      }
+      rowwise = true;
       break;
     }
     default:
       NVTE_ERROR("Invalid scaling mode");
   }
 
-  const dim3 block_size(TB_DIM, TB_DIM);
+  NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Output should be padded in M/N dimension!");
+  NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Output should be padded in K dimension!");
+
   const int num_tiles_m = m / SF_TILE_DIM_M;
   const int num_tiles_k = k / SF_TILE_DIM_K;
 
-  auto launch_unswizzle_scaling = [&](int vec_load_size, const dim3& num_blocks, int slm_size,
-                                      void *input_scale_inv_ptr, void *output_scale_inv_ptr,
-                                      bool rowwise) {
+  auto launch_unswizzle = [&](int vec_load_size, const dim3& num_blocks, int slm_size) {
     switch (vec_load_size) {
       case 4:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+            unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         unswizzle_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
-                                                           output_scale_inv_ptr, m, k, rowwise);
+            <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, m, k, rowwise);
         break;
       case 2:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+            unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         unswizzle_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
-                                                           output_scale_inv_ptr, m, k, rowwise);
+            <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, m, k, rowwise);
         break;
       case 1:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+            unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
         unswizzle_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(input_scale_inv_ptr,
-                                                           output_scale_inv_ptr, m, k, rowwise);
+            <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, m, k, rowwise);
         break;
       default:
         NVTE_ERROR("Not valid vec_load_size.");
@@ -1276,62 +1276,13 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 
-  if (rowwise_unswizzle) {
-    int vec_load_size = (num_tiles_k - 1) % 4 + 1;
-    if (vec_load_size == 3) vec_load_size = 1;
-    int n_tiles_in_tb = TB_DIM * vec_load_size;
-    dim3 num_blocks(DIVUP(num_tiles_k, n_tiles_in_tb), num_tiles_m);
-    int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
-
-    void *input_scale_inv_ptr{nullptr}, *output_scale_inv_ptr{nullptr};
-    switch (scaling_mode) {
-      case NVTE_MXFP8_1D_SCALING: {
-        input_scale_inv_ptr = input->scale_inv.dptr;
-        output_scale_inv_ptr = output->scale_inv.dptr;
-        NVTE_CHECK(static_cast<size_t>(m) * k == output->scale_inv.numel(),
-                   "Expected output tensor to have ", static_cast<size_t>(m) * k,
-                   " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
-        break;
-      }
-      case NVTE_NVFP4_1D_SCALING: {
-        if (has_rowwise_scale_inv) {
-          input_scale_inv_ptr = input->scale_inv.dptr;
-          output_scale_inv_ptr = output->scale_inv.dptr;
-          NVTE_CHECK(static_cast<size_t>(m) * k == output->scale_inv.numel(),
-                     "Expected output tensor to have ", static_cast<size_t>(m) * k,
-                     " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
-        } else if (has_columnwise_scale_inv) {
-          input_scale_inv_ptr = input->columnwise_scale_inv.dptr;
-          output_scale_inv_ptr = output->columnwise_scale_inv.dptr;
-          NVTE_CHECK(static_cast<size_t>(m) * k == output->columnwise_scale_inv.numel(),
-                     "Expected output tensor to have ", static_cast<size_t>(m) * k,
-                     " column-wise scaling factors, but got shape=",
-                     output->columnwise_scale_inv.shape, ".");
-        }
-        break;
-      }
-      default:
-        NVTE_ERROR("Invalid scaling mode");
-    }
-
-    launch_unswizzle_scaling(vec_load_size, num_blocks, slm_size, input_scale_inv_ptr,
-                             output_scale_inv_ptr, true);
-  }
-
-  if (columnwise_unswizzle) {
-    int vec_load_size = (num_tiles_m - 1) % 4 + 1;
-    if (vec_load_size == 3) vec_load_size = 1;
-    int n_tiles_in_tb = TB_DIM * vec_load_size;
-    dim3 num_blocks(DIVUP(num_tiles_k, TB_DIM), DIVUP(num_tiles_m, vec_load_size));
-    int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
-    NVTE_CHECK(static_cast<size_t>(m) * k == output->columnwise_scale_inv.numel(),
-               "Expected output tensor to have ", static_cast<size_t>(m) * k,
-               " column-wise scaling factors, but got shape=", output->columnwise_scale_inv.shape,
-               ".");
-
-    launch_unswizzle_scaling(vec_load_size, num_blocks, slm_size, input->columnwise_scale_inv.dptr,
-                             output->columnwise_scale_inv.dptr, false);
-  }
+  int vec_load_size = rowwise ? (num_tiles_k - 1) % 4 + 1 : (num_tiles_m - 1) % 4 + 1;
+  if (vec_load_size == 3) vec_load_size = 1;
+  int n_tiles_in_tb = TB_DIM * vec_load_size;
+  dim3 num_blocks = rowwise ? dim3(DIVUP(num_tiles_k, n_tiles_in_tb), num_tiles_m)
+                            : dim3(DIVUP(num_tiles_k, TB_DIM), DIVUP(num_tiles_m, vec_load_size));
+  int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
+  launch_unswizzle(vec_load_size, num_blocks, slm_size);
 }
 
 void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
