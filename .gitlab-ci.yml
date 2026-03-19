@@ -1319,16 +1319,16 @@ send_result_to_slack:
       CI_SLURM_TIME: 240
 
 
-.prenyx:
+.bia:
     variables:
       SLURM_PARTITION: "batch"
       SLURM_ACCOUNT: "core_dlfw_ci"
     tags:
-    - prenyx
+    - bia
 
 .B200_1GPU:
     extends:
-    - .prenyx
+    - .bia
     variables:
       GPUS: 1
       CI_BUILDS_DIR: "/lustre/fsw/core_dlfw_ci"
@@ -1338,7 +1338,7 @@ send_result_to_slack:
 
 .B200_8GPU:
     extends:
-    - .prenyx
+    - .bia
     variables:
       GPUS: 8
       CI_BUILDS_DIR: "/lustre/fsw/core_dlfw_ci"
