@@ -287,6 +287,13 @@ bool is_supported_by_CC_100() {
   return deviceComputeCapability >= 100;
 }
 
+// KL: test function for CC 120
+bool is_supported_by_CC_120() {
+  int deviceComputeCapability = cuda::sm_arch(cuda::current_device());
+
+  return deviceComputeCapability == 120;
+}
+
 std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
                                                         size_t outer_size, size_t inner_size) {
   std::vector<std::vector<Tensor *>> ret;
