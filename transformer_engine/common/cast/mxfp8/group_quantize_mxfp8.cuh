@@ -453,14 +453,11 @@ __device__ __forceinline__ void prefetch_input_stage(
 
 // Issue TMA shared->global transfer for one stage of outputs.
 template <typename OType, bool ROWWISE_SCALING, bool COLWISE_SCALING>
-__device__ __forceinline__ void store_output_stage(OType *out_rowwise_data_sh,
-                                                   OType *out_colwise_data_sh,
-                                                   const CUtensorMap &tensor_map_output_rowwise,
-                                                   const CUtensorMap &tensor_map_output_colwise,
-                                                   const size_t global_offset_X,
-                                                   const size_t global_offset_Y,
-                                                   const size_t buff_offset,
-                                                   const bool leading_thread) {
+__device__ __forceinline__ void store_output_stage(
+    OType *out_rowwise_data_sh, OType *out_colwise_data_sh,
+    const CUtensorMap &tensor_map_output_rowwise, const CUtensorMap &tensor_map_output_colwise,
+    const size_t global_offset_X, const size_t global_offset_Y, const size_t buff_offset,
+    const bool leading_thread) {
   if (!leading_thread) {
     return;
   }
