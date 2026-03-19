@@ -155,8 +155,9 @@ else:
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
 _run_shadow_f16_fwd = os.getenv("NVTE_RUN_SHADOW_F16_FWD", "0") == "1"
-_replace_out_with_shadow = os.getenv("NVTE_REPLACE_OUT_WITH_SHADOW", "0") == "1"
-_replace_aux_with_shadow = os.getenv("NVTE_REPLACE_AUX_WITH_SHADOW", "0") == "1"
+_replace_out_return_with_shadow_f16 = os.getenv("NVTE_REPLACE_OUT_RETURN_WITH_SHADOW_F16", "0") == "1"
+_replace_out_save_with_shadow_f16 = os.getenv("NVTE_REPLACE_OUT_SAVE_WITH_SHADOW_F16", "0") == "1"
+_replace_aux_with_shadow_f16 = os.getenv("NVTE_REPLACE_AUX_WITH_SHADOW_F16", "0") == "1"
 
 
 class FP8EmulationFunc(torch.autograd.Function):
@@ -1383,20 +1384,8 @@ class FusedAttnFunc(torch.autograd.Function):
                     is_graph_capturing(),
                 )
                 if torch.cuda.current_device() == 0:
-                    print(
-                        f"L{layer_number}: real/shadow out   min:"
-                        f" {out_.min():.4f}/{out_f16_.min():.4f}, max:"
-                        f" {out_.max():.4f}/{out_f16_.max():.4f}"
-                    )
-                    print(
-                        f"L{layer_number}: real/shadow stats min:"
-                        f" {aux_ctx_tensors[0].min():.4f}/{aux_ctx_tensors_f16[0].min():.4f}, max:"
-                        f" {aux_ctx_tensors[0].max():.4f}/{aux_ctx_tensors_f16[0].max():.4f}"
-                    )
-                if _replace_out_with_shadow:
-                    out_ = out_f16_
-                if _replace_aux_with_shadow:
-                    aux_ctx_tensors[0] = aux_ctx_tensors_f16[0]
+                    print(f"L{layer_number}: real/shadow out   min: {out_.min():.4f}/{out_f16_.min():.4f}, max: {out_.max():.4f}/{out_f16_.max():.4f}")
+                    print(f"L{layer_number}: real/shadow stats min: {aux_ctx_tensors[0].min():.4f}/{aux_ctx_tensors_f16[0].min():.4f}, max: {aux_ctx_tensors[0].max():.4f}/{aux_ctx_tensors_f16[0].max():.4f}")
 
             # out_fp8: Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16
             #                        fp8_dtype = tex.DType.kFloat8E4M3
@@ -1442,6 +1431,10 @@ class FusedAttnFunc(torch.autograd.Function):
 
             # return appropriate tensors
             out_ret = out_fp8 if is_output_fp8 else out
+            if _run_shadow_f16_fwd and _replace_out_return_with_shadow_f16:
+                out_ret = out_f16_
+            if _run_shadow_f16_fwd and _replace_aux_with_shadow_f16:
+                aux_ctx_tensors[0] = aux_ctx_tensors_f16[0]
 
             # save appropriate tensors
             fp8_tensors = (None, None, None, None)
@@ -1459,6 +1452,21 @@ class FusedAttnFunc(torch.autograd.Function):
             else:
                 if is_input_fp8:
                     q, k, v = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
+                if _run_shadow_f16_fwd and not _replace_aux_with_shadow_f16:
+                    tmp_quantizer = QKV_quantizer.copy()
+                    tmp_quantizer.optimize_for_gemm = False
+                    q_fp8_, k_fp8_, _, _ = combine_and_quantize(original_qkv_layout, q, k, v, tmp_quantizer)
+                    q_ = q_fp8_.dequantize(dtype=out_nominal_dtype)
+                    k_ = k_fp8_.dequantize(dtype=out_nominal_dtype)
+                    qkv_format, *_ = dpa_utils.get_qkv_format(original_qkv_layout)
+                    if qkv_format == "bshd":
+                        q = q_.permute(0, 2, 1, 3).contiguous()
+                        k = k_.permute(0, 2, 1, 3).contiguous()
+                    elif qkv_format == "sbhd":
+                        q = q_.permute(2, 0, 1, 3).contiguous()
+                        k = k_.permute(2, 0, 1, 3).contiguous()
+                if _run_shadow_f16_fwd and _replace_out_save_with_shadow_f16:
+                    out = out_f16_
                 qkvo_tensors = (q, k, v, out)
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
