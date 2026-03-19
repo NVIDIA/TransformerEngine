@@ -1098,7 +1098,8 @@ def get_attention_backend(
             and device_compute_capability >= (10, 0)
         ):
             logger.debug(
-                "Determinism not supported on Blackwell for FP16/BF16 with 9.7 <= cuDNN < 9.18.1"
+                "Disabling FusedAtttention because determinism is not supported on Blackwell for "
+                "FP16/BF16 with 9.7 <= cuDNN < 9.18.1"
             )
             use_fused_attention = False
             fused_attention_backend = None
