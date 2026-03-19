@@ -71,6 +71,37 @@ What gets saved for backward depends on the configuration:
 contain both rowwise data (used by dgrad GEMM) and columnwise data (used by wgrad GEMM).
 Memory cost: ~2× the FP8 data size (rowwise + columnwise).
 
+Saving QuantizedTensorStorage via prepare_for_saving
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+PyTorch offers two ways to pass data from forward to backward: direct attributes on
+``ctx``, and ``ctx.save_for_backward()``. Direct ``ctx`` attributes are not released after
+the backward pass — they persist until the *next* forward pass. Storing tensors there
+would keep memory alive throughout the entire backward pass and into the next forward,
+which is very wasteful. Using ``save_for_backward`` lets PyTorch release the memory
+promptly, but it only accepts ``torch.Tensor`` objects.
+
+Since ``QuantizedTensorStorage`` is not a ``torch.Tensor``, the helper function
+``prepare_for_saving()`` (in ``quantized_tensor.py``) splits each storage into:
+
+- Its **metadata** (with all tensor fields set to ``None``) — stored on ``ctx.tensor_objects``.
+- A list of raw **``torch.Tensor`` objects** — passed through ``ctx.save_for_backward()``.
+
+In the backward pass, ``restore_from_saved()`` reassembles the original
+``QuantizedTensorStorage`` objects from the saved tensors and metadata.
+
+.. code-block:: python
+
+   # Forward: split and save
+   tensors_to_save, tensor_objects = prepare_for_saving(inputmat, weightmat, weight, bias)
+   ctx.save_for_backward(*tensors_to_save)
+   ctx.tensor_objects = tensor_objects
+
+   # Backward: reassemble
+   inputmat, weightmat, weight, bias = restore_from_saved(
+       ctx.saved_tensors, ctx.tensor_objects,
+   )
+
 **FP8 enabled + activation recompute**: Only save the high-precision input (or a stashed
 copy). During backward, re-run the quantization to produce fresh FP8 data. Saves memory
 at the cost of recomputation.

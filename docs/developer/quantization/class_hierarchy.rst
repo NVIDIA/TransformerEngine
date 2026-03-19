@@ -83,6 +83,21 @@ responsibilities:
        @property
        def scaling_mode(self) -> str: ...
 
+The ``internal`` Flag
+^^^^^^^^^^^^^^^^^^^^^
+
+The ``Quantizer.internal`` flag controls whether ``__call__()`` returns a
+``QuantizedTensorStorage`` (lightweight, no autograd overhead) or a full
+``QuantizedTensor`` (``torch.Tensor`` subclass with autograd support):
+
+- ``internal=True`` → returns ``QuantizedTensorStorage``. Used for tensors that stay
+  within the boundaries of a custom ``torch.autograd.Function`` (e.g., the activation
+  inside ``_Linear``). Because these tensors never escape to user code or participate in
+  autograd, the storage-only form avoids the CPU overhead of ``torch.Tensor`` subclass
+  mechanics.
+- ``internal=False`` → returns ``QuantizedTensor``. Used for tensors that are visible
+  outside the autograd function (e.g., returned to the user as a quantized output).
+
 Concrete Quantizers
 ^^^^^^^^^^^^^^^^^^^
 

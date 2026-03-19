@@ -101,6 +101,14 @@ For delayed tensor scaling, the amax update follows this sequence each iteration
 For current-scaling and block-scaling modes, scales are computed just-in-time during
 the cast kernel, so no amax history is maintained.
 
+.. warning::
+
+   For the amax all-reduce to work correctly, every rank must participate in the
+   collective. This means each ``fp8_autocast`` region must contain at least one FP8
+   module to trigger the reduction. The modules do not need to be the same across
+   ranks — the reduction operates on amaxes from all layers simultaneously and updates
+   only those that were touched (identified by checking against the initial zero value).
+
 Recipe → Quantizer Mapping
 --------------------------
 

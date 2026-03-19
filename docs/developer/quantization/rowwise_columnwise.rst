@@ -101,9 +101,13 @@ Producing both layouts doubles the quantization work and memory for activations.
 a deliberate trade-off:
 
 - **Without dual layout**: The wgrad GEMM would need to transpose and requantize at
-  backward time, adding latency to the critical path.
+  backward time. Beyond the performance cost (extra kernel launch and temporary memory),
+  this is a numerics problem for block-wise formats. For MXFP8, block-wise FP8, and
+  NVFP4, transposing requires requantization with different block boundaries, which
+  introduces additional quantization error.
 - **With dual layout**: Extra memory and compute during forward, but the backward wgrad
-  can proceed immediately with pre-computed columnwise data.
+  can proceed immediately with pre-computed columnwise data, avoiding both the latency
+  and the accuracy loss.
 
 For memory-constrained scenarios, activation recomputation can be used — the forward
 pass discards the saved columnwise data and recomputes it during backward. See
