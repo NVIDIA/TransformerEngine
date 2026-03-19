@@ -1029,6 +1029,8 @@ void create_2D_tensor_map(
 
 bool is_supported_by_CC_100();
 
+bool is_supported_by_CC_120();
+
 std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
                                                         size_t outer_size, size_t inner_size);
 
