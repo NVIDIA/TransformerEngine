@@ -44,7 +44,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.float8_tensor import Float8TensorStorage
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from transformer_engine.pytorch.tensor.storage.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
@@ -2313,17 +2313,28 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
         )
         q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
         # quantize q, k, v
-        if d_qk == d_v:
-            grouped_tensor = GroupedTensor.create_and_quantize(
-                tensors=[q, k, v], quantizer=qkv_quantizer
-            )
-            q_fp8, k_fp8, v_fp8 = grouped_tensor.quantized_tensors
-        else:
-            grouped_tensor = GroupedTensor.create_and_quantize(
-                tensors=[q, k], quantizer=qkv_quantizer
-            )
-            q_fp8, k_fp8 = grouped_tensor.quantized_tensors
-            v_fp8 = qkv_quantizer(v)
+        # if d_qk == d_v:
+        #     grouped_tensor = GroupedTensor.create_and_quantize(
+        #         tensors=[q, k, v], quantizer=qkv_quantizer
+        #     )
+        #     q_fp8, k_fp8, v_fp8 = grouped_tensor.quantized_tensors
+        # else:
+        #     grouped_tensor = GroupedTensor.create_and_quantize(
+        #         tensors=[q, k], quantizer=qkv_quantizer
+        #     )
+        #     q_fp8, k_fp8 = grouped_tensor.quantized_tensors
+        #     v_fp8 = qkv_quantizer(v)
+        input_tensors = [q, k, v]
+        num_tensors = len(input_tensors)
+        shapes = [x.shape for x in input_tensors]
+        grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
+            num_tensors=num_tensors,
+            shapes=shapes,
+            quantizer=qkv_quantizer,
+            device="cuda",
+            dtype=q.dtype,
+        )
+        q_fp8, k_fp8, v_fp8 = grouped_tensor.quantize(input_tensors)
         # view rowwise/columnwise data back to original shapes, not rowwise_scale_inv/columnwise_scale_inv
         q_fp8, k_fp8, v_fp8 = [x.view(s) for x, s in zip([q_fp8, k_fp8, v_fp8], original_shapes)]
 
