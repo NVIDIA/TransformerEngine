@@ -1466,7 +1466,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     tmp_quantizer = QKV_quantizer.copy()
                     if isinstance(tmp_quantizer, MXFP8Quantizer):
                         tmp_quantizer.optimize_for_gemm = False
-                    q_fp8_, k_fp8_, _, _ = combine_and_quantize(original_qkv_layout, q, k, v, tmp_quantizer)
+                    q_fp8_, k_fp8_, _, _ = combine_and_quantize(
+                        original_qkv_layout, q, k, v, tmp_quantizer
+                    )
                     q_ = q_fp8_.dequantize(dtype=out_nominal_dtype)
                     k_ = k_fp8_.dequantize(dtype=out_nominal_dtype)
                     if isinstance(tmp_quantizer, MXFP8Quantizer):
