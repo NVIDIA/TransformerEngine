@@ -61,7 +61,7 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -501,14 +501,9 @@ class _Linear(torch.autograd.Function):
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
         with get_nvtx_range_context("_Linear_backward"):
-            saved_tensors = ctx.saved_tensors
             inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
-                restore_from_saved(ctx.tensor_objects, saved_tensors)
+                restore_from_func_ctx(ctx)
             )
-
-            # Delete the references to tensor objects once they've been consumed
-            # by the `restore_from_saved` method to construct back the actual tensors.
-            ctx.tensor_objects = None
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
