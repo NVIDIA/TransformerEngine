@@ -80,17 +80,19 @@ from transformer_engine.pytorch import export
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.graph import is_graph_capturing
 
+# Global vars for flash attn v2
+flash_attn_cuda_bwd = None
+flash_attn_func = None
+flash_attn_varlen_func = None
+_flash_attn_fwd = None
+_flash_attn_bwd = None
+_flash_attn_varlen_fwd = None
+_flash_attn_varlen_bwd = None
+
 # Try to import Flash Attention v2
 try:
     fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
-    flash_attn_cuda_bwd = None
-    flash_attn_func = None
-    flash_attn_varlen_func = None
-    _flash_attn_fwd = None
-    _flash_attn_bwd = None
-    _flash_attn_varlen_fwd = None
-    _flash_attn_varlen_bwd = None
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
     if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
@@ -156,20 +158,21 @@ else:
 
 # Try to import Flash Attention v4
 try:
-    fa_utils.fa4_version = PkgVersion(get_pkg_version("flash-attn-cute"))
+    fa_utils.fa4_version = PkgVersion(get_pkg_version("flash-attn-4"))
 except PackageNotFoundError:
     flash_attn_func_v4 = None
     flash_attn_varlen_func_v4 = None
-    flash_attn_with_kvcache_v4 = None
+    # flash_attn_combine_v4 = None
     _flash_attn_fwd_v4 = None
     _flash_attn_bwd_v4 = None
-    # pass  # only print warning if use_flash_attention_4 = True in get_attention_backend
 else:
-    from flash_attn.cute.interface import flash_attn_func as flash_attn_func_v4
-    from flash_attn.cute.interface import flash_attn_varlen_func as flash_attn_varlen_func_v4
-    from flash_attn.cute.interface import _flash_attn_fwd as _flash_attn_fwd_v4
-    from flash_attn.cute.interface import _flash_attn_bwd as _flash_attn_bwd_v4
-    # flash_attn_with_kvcache_v4 = None  # FA4 does not support kvcache yet
+    from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports
+        flash_attn_func as flash_attn_func_v4,
+        flash_attn_varlen_func as flash_attn_varlen_func_v4,
+        _flash_attn_fwd as _flash_attn_fwd_v4,
+        _flash_attn_bwd as _flash_attn_bwd_v4,
+    )
+
     fa_utils.set_flash_attention_4_params()
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
@@ -938,12 +941,14 @@ class FlashAttention(torch.nn.Module):
                         batch_size * context_len,
                     )
 
-        use_flash_attn_3 = False
-        if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
-            use_flash_attn_3 = True
         use_flash_attn_4 = False
-        if flash_attention_backend is not None and str(flash_attention_backend).endswith("cute"):
+        if flash_attention_backend is not None and flash_attention_backend > PkgVersion("4.0.0b"):
             use_flash_attn_4 = True
+        use_flash_attn_3 = False
+        if flash_attention_backend is not None and PkgVersion(
+            "3.0.0b"
+        ) < flash_attention_backend < PkgVersion("4.0.0"):
+            use_flash_attn_3 = True
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):
@@ -996,6 +1001,9 @@ class FlashAttention(torch.nn.Module):
                 #       |                         | thd + padding
                 #       | flash_attn_with_kvcache | KV cache (not-paged/paged), i.e.
                 #       |                         |     bshd/sbhd/thd + padding
+                # FA v4 | flash_attn_func         | bshd/sbhd + not padding
+                #       | flash_attn_varlen_func  | bshd/sbhd + padding
+                #       |                         | thd + padding
                 fa_optional_forward_args_thd = []
                 if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
                     func = None
@@ -1006,24 +1014,31 @@ class FlashAttention(torch.nn.Module):
                     else:
                         func = flash_attn_func
                 else:
-                    if not use_flash_attn_3:
+                    if use_flash_attn_4:
+                        func = flash_attn_varlen_func_v4
+                    elif not use_flash_attn_3:
                         func = flash_attn_varlen_func
                     elif inference_params is None:
                         func = flash_attn_varlen_func_v3  # pylint: disable=possibly-used-before-assignment
                     else:
                         func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
-                    if not use_flash_attn_3 or inference_params is None:
+                    if not use_flash_attn_4 and (not use_flash_attn_3 or inference_params is None):
                         fa_optional_forward_args_thd.append(cu_seqlens_q)
                         fa_optional_forward_args_thd.append(cu_seqlens_kv)
                         fa_optional_forward_args_thd.append(max_seqlen_q)
                         fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if use_flash_attn_4:
                     fa_4_optional_forward_kwargs = {
-                        # "window_size": window_size,
+                        "window_size": window_size,
                         "num_splits": num_splits,
                     }
                     if inference_params is None:
                         fa_4_optional_forward_kwargs["deterministic"] = self.deterministic
+                    if func is flash_attn_varlen_func_v4:
+                        fa_4_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
+                        fa_4_optional_forward_kwargs["cu_seqlens_k"] = cu_seqlens_kv
+                        fa_4_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
+                        fa_4_optional_forward_kwargs["max_seqlen_k"] = max_seqlen_kv
                     output = func(
                         query_layer,
                         key_layer,
