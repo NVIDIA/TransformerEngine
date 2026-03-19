@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_
 #define TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_
 
+#include <cassert>
+
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -208,6 +210,8 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
                                            T *topk_scores, int lane_id) {
   // Bit i indicates whether the i-th local element (lane_id + i * warp_size) was selected.
   uint32_t local_mask = 0;
+  assert(data_size <= static_cast<int>(sizeof(local_mask) * 8 * kThreadsPerWarp) &&
+         "local_mask too small for data_size > 1024");
 
   for (int k = 0; k < topk; k++) {
     CompType local_max_val = -std::numeric_limits<CompType>::infinity();
