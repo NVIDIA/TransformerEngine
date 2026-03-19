@@ -938,6 +938,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     # Call wgrad GEMM now
                     wgrad, grad_bias_ = wgrad_gemm(ln_out_total, grad_output)
 
+                    if ctx.etp_size > 1:
+                        wgrad = origin_weight.wgrad_reduce_scatter(wgrad, ctx.fuse_wgrad_accumulation)
+
                     # Update grad bias if needed
                     if grad_bias is None:
                         grad_bias = grad_bias_
@@ -963,7 +966,6 @@ class _LayerNormLinear(torch.autograd.Function):
                         dgrad = reduce_scatter_out
                     else:
                         dgrad = ub_obj_wgrad.get_buffer(local_chunk=True).clone()
-
             # --------------------------------------------------
             # Grad weight has been computed...
             # --------------------------------------------------
@@ -1018,7 +1020,7 @@ class _LayerNormLinear(torch.autograd.Function):
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
             if ctx.etp_size > 1:
-                wgrad = origin_weight.wgrad_reduce_scatter(wgrad, ctx.fuse_wgrad_accumulation)
+                pass
             elif ctx.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
                 origin_weight.grad_added_to_main_grad = True
                 if getattr(origin_weight, "zero_out_wgrad", False):

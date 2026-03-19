@@ -1253,12 +1253,16 @@ def _post_process_nvfp4_gather(
         handle.wait()
         handle = None
 
-    # Fix the interleaved transposed data from gathering along first dim.
-    out._columnwise_scale_inv = _swap_first_dims(columnwise_scale_inv_interleaved, world_size)
-    out._columnwise_data = _swap_first_dims(columnwise_data_interleaved, world_size)
+    # TODO
+    # # Fix the interleaved transposed data from gathering along first dim.
+    # out._columnwise_scale_inv = _swap_first_dims(columnwise_scale_inv_interleaved, world_size)
+    # out._columnwise_data = _swap_first_dims(columnwise_data_interleaved, world_size)
+    out._columnwise_scale_inv.copy_(_swap_first_dims(columnwise_scale_inv_interleaved, world_size)) 
+    out._columnwise_data.copy_(_swap_first_dims(columnwise_data_interleaved, world_size)) 
 
-    # Optionally pad the scaling inverse if needed.
-    out._columnwise_scale_inv = pad_columnwise_scale_inv(out._columnwise_scale_inv)
+    # # Optionally pad the scaling inverse if needed.
+    # out._columnwise_scale_inv = pad_columnwise_scale_inv(out._columnwise_scale_inv)
+    out._columnwise_scale_inv.copy_(pad_columnwise_scale_inv(out._columnwise_scale_inv)) 
 
 
 @dataclass
@@ -1409,7 +1413,9 @@ def _all_gather_nvfp4(
             )
 
             # Transfer amax to output.
-            out._amax_rowwise = inp._amax_rowwise
+            #TODO: jiemingz
+            # out._amax_rowwise = inp._amax_rowwise
+            out._amax_rowwise.copy_(inp._amax_rowwise)
 
         # Gather the transposed NVFP4 data along first dimension. Fix format later.
         if quantizer.columnwise_usage:
@@ -1458,7 +1464,8 @@ def _all_gather_nvfp4(
             )
 
             # Transfer amax to output.
-            out._amax_columnwise = inp._amax_columnwise
+            out._amax_columnwise.copy_(inp._amax_columnwise)
+
 
     handle = coalesced_handle if async_op else None
 
@@ -1473,6 +1480,9 @@ def _all_gather_nvfp4(
             )
         else:
             _post_process_nvfp4_gather(out, out_columnwise_data, out_scale_inv, world_size, handle)
+    else:
+        if handle is not None:
+            handle.output = out
 
     return out, handle
 
