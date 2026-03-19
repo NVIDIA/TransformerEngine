@@ -465,18 +465,20 @@ def get_attention_backend(
     ):
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug(
-                "Disabling FlashAttention 3 for unsupported qkv_dtype = %s, qkv_type = %s. "
-                "Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, "
-                "qkv_type = {torch.Tensor, Float8Tensor, Float8TensorStorage, MXFP8Tensor, MXFP8TensorStorage}. ",
+                "Disabling FlashAttention 3 for unsupported qkv_dtype = %s, qkv_type = %s."
+                " Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn},"
+                " qkv_type = {torch.Tensor, Float8Tensor, Float8TensorStorage, MXFP8Tensor,"
+                " MXFP8TensorStorage}. ",
                 qkv_dtype,
                 qkv_type,
             )
         use_flash_attention_3 = False
         if use_fused_attention:
             logger.debug(
-                "Disabling FusedAttention for unsupported qkv_dtype = %s, qkv_type = %s. "
-                "Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, "
-                "qkv_type = {torch.Tensor, Float8Tensor, Float8TensorStorage, MXFP8Tensor, MXFP8TensorStorage}. ",
+                "Disabling FusedAttention for unsupported qkv_dtype = %s, qkv_type = %s. Supported:"
+                " qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, qkv_type ="
+                " {torch.Tensor, Float8Tensor, Float8TensorStorage, MXFP8Tensor,"
+                " MXFP8TensorStorage}. ",
                 qkv_dtype,
                 qkv_type,
             )
@@ -496,7 +498,9 @@ def get_attention_backend(
             if FlashAttentionUtils.v3_is_installed:
                 logger.debug("Disabling FlashAttention 3 for FP8 training")
             use_flash_attention_3 = False
-        if use_flash_attention_3 and not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
+        if use_flash_attention_3 and not (
+            fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()
+        ):
             if FlashAttentionUtils.v3_is_installed:
                 logger.debug(f"Disabling FlashAttention 3 for {fp8_recipe.__class__.__name__}")
             use_flash_attention_3 = False
@@ -508,8 +512,15 @@ def get_attention_backend(
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
                 use_unfused_attention = False
         if use_fused_attention and fp8_recipe.delayed():
-            if device_compute_capability >= (10, 0) and deterministic and cudnn_version < (9, 18, 0):
-                logger.debug("Disabling FusedAttention for FP8 delayed scaling on arch >= sm100 with determinism for cuDNN < 9.18.0")
+            if (
+                device_compute_capability >= (10, 0)
+                and deterministic
+                and cudnn_version < (9, 18, 0)
+            ):
+                logger.debug(
+                    "Disabling FusedAttention for FP8 delayed scaling on arch >= sm100 with"
+                    " determinism for cuDNN < 9.18.0"
+                )
                 use_fused_attention = False
         if use_fused_attention and fp8_recipe.float8_current_scaling():
             if device_compute_capability < (10, 0):
@@ -2296,9 +2307,10 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
         original_shapes = [x.shape for x in [q, k, v]]
         s_q, d_qk = q.shape[-2:]
         s_kv, d_v = v.shape[-2:]
-        assert (
-            s_q % 128 == 0 and s_kv % 128 == 0 and d_qk % 32 == 0 and d_v % 32 == 0
-        ), f"MXFP8 quantization requires s_q % 128 == 0, s_kv % 128 == 0, d_qk % 32 == 0, d_v % 32 == 0. Found {s_q=}, {s_kv=}, {d_qk=}, {d_v=}."
+        assert s_q % 128 == 0 and s_kv % 128 == 0 and d_qk % 32 == 0 and d_v % 32 == 0, (
+            "MXFP8 quantization requires s_q % 128 == 0, s_kv % 128 == 0, d_qk % 32 == 0, d_v % 32"
+            f" == 0. Found {s_q=}, {s_kv=}, {d_qk=}, {d_v=}."
+        )
         q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
         # quantize q, k, v
         if d_qk == d_v:

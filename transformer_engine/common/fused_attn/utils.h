@@ -103,9 +103,10 @@ inline void generateMatrixStridesWithFormat(int64_t b, int64_t h, int64_t s, int
 }
 
 // get matrix strides based on layout and matrix type
-inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv,
-                                     int64_t d_qk, int64_t d_v, int64_t *q_strides, int64_t *k_strides, int64_t *v_strides,
-                                     NVTE_QKV_Layout layout) {
+inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, int64_t s_q,
+                                            int64_t s_kv, int64_t d_qk, int64_t d_v,
+                                            int64_t *q_strides, int64_t *k_strides,
+                                            int64_t *v_strides, NVTE_QKV_Layout layout) {
   constexpr int b_dim = 0;
   constexpr int h_dim = 1;
   constexpr int s_dim = 2;
@@ -131,17 +132,17 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       }
       break;
     case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
-        q_strides[b_dim] = h * d_qk;
-        q_strides[h_dim] = d_qk;
-        q_strides[s_dim] = b * h * d_qk;
-        q_strides[d_dim] = 1;
-        k_strides[b_dim] = 2 * hg * d_qk;
-        k_strides[h_dim] = d_qk;
-        k_strides[s_dim] = b * 2 * hg * d_qk;
-        k_strides[d_dim] = 1;
-        for (int i = 0; i < 4; i++) {
-          v_strides[i] = k_strides[i];
-        }
+      q_strides[b_dim] = h * d_qk;
+      q_strides[h_dim] = d_qk;
+      q_strides[s_dim] = b * h * d_qk;
+      q_strides[d_dim] = 1;
+      k_strides[b_dim] = 2 * hg * d_qk;
+      k_strides[h_dim] = d_qk;
+      k_strides[s_dim] = b * 2 * hg * d_qk;
+      k_strides[d_dim] = 1;
+      for (int i = 0; i < 4; i++) {
+        v_strides[i] = k_strides[i];
+      }
       break;
     case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
       q_strides[b_dim] = h * d_qk;
@@ -158,18 +159,18 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       break;
     case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD:
-        q_strides[b_dim] = h * d_qk;
-        q_strides[h_dim] = d_qk;
-        q_strides[s_dim] = b * h * d_qk;
-        q_strides[d_dim] = 1;
-        k_strides[b_dim] = hg * d_qk;
-        k_strides[h_dim] = d_qk;
-        k_strides[s_dim] = b * hg * d_qk;
-        k_strides[d_dim] = 1;
-        v_strides[b_dim] = hg * d_v;
-        v_strides[h_dim] = d_v;
-        v_strides[s_dim] = b * hg * d_v;
-        v_strides[d_dim] = 1;
+      q_strides[b_dim] = h * d_qk;
+      q_strides[h_dim] = d_qk;
+      q_strides[s_dim] = b * h * d_qk;
+      q_strides[d_dim] = 1;
+      k_strides[b_dim] = hg * d_qk;
+      k_strides[h_dim] = d_qk;
+      k_strides[s_dim] = b * hg * d_qk;
+      k_strides[d_dim] = 1;
+      v_strides[b_dim] = hg * d_v;
+      v_strides[h_dim] = d_v;
+      v_strides[s_dim] = b * hg * d_v;
+      v_strides[d_dim] = 1;
       break;
     case NVTE_QKV_Layout::NVTE_BS3HD:
     case NVTE_QKV_Layout::NVTE_T3HD:

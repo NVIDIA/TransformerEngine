@@ -1780,7 +1780,8 @@ void fused_attn_fp8_fwd_impl_v1(
       std::vector<int64_t> q_strides(4);
       std::vector<int64_t> k_strides(4);
       std::vector<int64_t> v_strides(4);
-      generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(), k_strides.data(), v_strides.data(), qkv_layout);
+      generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(),
+                                      k_strides.data(), v_strides.data(), qkv_layout);
       Q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("Q")
                                 .set_dim({b, h, s_q, d_qk})
@@ -1989,17 +1990,17 @@ void fused_attn_fp8_fwd_impl_v1(
       NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
-      auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple,
-                                         bias_tuple, softmax_offset_tuple, padding_tuple,
-                                         dropout_tuple);
+      auto return_tuple =
+          std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
+                         softmax_offset_tuple, padding_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
     };
 
     auto [mha_graph, Q, K, V, descale_q, descale_k, descale_v, descale_s, scale_s, scale_o,
-          attn_scale, O, amax_s, amax_o, Stats, bias, softmax_offset, seq_q, seq_kv,
-          dropout_seed, dropout_offset] = get_graph(sdpa_fp8_fprop_cache, descriptor);
+          attn_scale, O, amax_s, amax_o, Stats, bias, softmax_offset, seq_q, seq_kv, dropout_seed,
+          dropout_offset] = get_graph(sdpa_fp8_fprop_cache, descriptor);
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
@@ -2076,21 +2077,19 @@ void fused_attn_fp8_bwd_impl_v1(
     NVTE_QKV_Format o_format, NVTE_QKV_Format d_out_format, NVTE_QKV_Layout dqkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    bool deterministic, void* devPtrQ, void* devPtrK, void* devPtrV,
-    void* devPtrM, void* devPtrZInv,
-    void* devPtrO, void* devPtrdO, void* devPtrSoftmaxOffset, void* devPtrdQ, void* devPtrdK, void* devPtrdV,
-    void* devPtrdSoftmaxOffset, void* devPtrDescaleQ,
+    bool deterministic, void* devPtrQ, void* devPtrK, void* devPtrV, void* devPtrM,
+    void* devPtrZInv, void* devPtrO, void* devPtrdO, void* devPtrSoftmaxOffset, void* devPtrdQ,
+    void* devPtrdK, void* devPtrdV, void* devPtrdSoftmaxOffset, void* devPtrDescaleQ,
     void* devPtrDescaleK, void* devPtrDescaleV, void* devPtrDescaleO, void* devPtrDescaledO,
     void* devPtrDescaleS, void* devPtrDescaledP, void* devPtrScaleS, void* devPtrScaledP,
     void* devPtrScaledQ, void* devPtrScaledK, void* devPtrScaledV, void* devPtrAmaxdP,
     void* devPtrAmaxdQ, void* devPtrAmaxdK, void* devPtrAmaxdV, void* devPtrQ_t, void* devPtrK_t,
     void* devPtrdO_f16, void* devPtrdO_t, void* devPtrDescaleQ_t, void* devPtrDescaleK_t,
     void* devPtrDescaledO_t, void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
-    void* devPtrDropoutSeed, void* devPtrDropoutOffset,
-    cudnn_frontend::DataType_t qkv_tensor_type, cudnn_frontend::DataType_t o_tensor_type,
-    cudnn_frontend::DataType_t do_tensor_type, cudnn_frontend::DataType_t dqkv_tensor_type,
-    NVTEScalingMode scaling_mode, void* workspace, size_t* workspace_size, cudaStream_t stream,
-    cudnnHandle_t handle) {
+    void* devPtrDropoutSeed, void* devPtrDropoutOffset, cudnn_frontend::DataType_t qkv_tensor_type,
+    cudnn_frontend::DataType_t o_tensor_type, cudnn_frontend::DataType_t do_tensor_type,
+    cudnn_frontend::DataType_t dqkv_tensor_type, NVTEScalingMode scaling_mode, void* workspace,
+    size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   const auto cudnn_runtime_version = cudnnGetVersion();
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -2240,7 +2239,8 @@ void fused_attn_fp8_bwd_impl_v1(
       std::vector<int64_t> v_strides(4);
       std::vector<int64_t> o_strides(4);
       std::vector<int64_t> dO_strides(4);
-      generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(), k_strides.data(), v_strides.data(), qkv_layout);
+      generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(),
+                                      k_strides.data(), v_strides.data(), qkv_layout);
       generateMatrixStridesWithFormat(b, h, s_q, d_v, o_strides.data(), o_format);
       generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_strides.data(), d_out_format);
       Q = mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -2528,7 +2528,8 @@ void fused_attn_fp8_bwd_impl_v1(
       std::vector<int64_t> dq_strides(4);
       std::vector<int64_t> dk_strides(4);
       std::vector<int64_t> dv_strides(4);
-      generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, dq_strides.data(), dk_strides.data(), dv_strides.data(), dqkv_layout);
+      generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, dq_strides.data(),
+                                      dk_strides.data(), dv_strides.data(), dqkv_layout);
       dQ->set_output(true)
           .set_dim({b, h, s_q, d_qk})
           .set_stride(dq_strides)
@@ -2732,16 +2733,15 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
                         NVTE_Softmax_Type softmax_type, size_t window_size_left,
                         size_t window_size_right, bool bottom_right_diagonal, const Tensor* input_Q,
                         const Tensor* input_K, const Tensor* input_V,
-                        const Tensor* input_SoftmaxOffset, Tensor* input_output_S,
-                        Tensor* output_O, NVTETensorPack* Aux_CTX_Tensors,
-                        const Tensor* cu_seqlens_q, const Tensor* cu_seqlens_kv,
-                        const Tensor* rng_state, Tensor* workspace, cudaStream_t stream,
-                        cudnnHandle_t handle) {
+                        const Tensor* input_SoftmaxOffset, Tensor* input_output_S, Tensor* output_O,
+                        NVTETensorPack* Aux_CTX_Tensors, const Tensor* cu_seqlens_q,
+                        const Tensor* cu_seqlens_kv, const Tensor* rng_state, Tensor* workspace,
+                        cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
-  void* devPtrQ = nullptr, *devPtrK = nullptr, *devPtrV = nullptr;
-  void* devPtrDescaleQ = nullptr, *devPtrDescaleK = nullptr, *devPtrDescaleV = nullptr;
-  void* devPtrO = nullptr, *devPtrAmaxO = nullptr, *devPtrScaleO = nullptr;
-  void* devPtrAmaxS = nullptr, *devPtrScaleS = nullptr, *devPtrDescaleS = nullptr;
+  void *devPtrQ = nullptr, *devPtrK = nullptr, *devPtrV = nullptr;
+  void *devPtrDescaleQ = nullptr, *devPtrDescaleK = nullptr, *devPtrDescaleV = nullptr;
+  void *devPtrO = nullptr, *devPtrAmaxO = nullptr, *devPtrScaleO = nullptr;
+  void *devPtrAmaxS = nullptr, *devPtrScaleS = nullptr, *devPtrDescaleS = nullptr;
   devPtrQ = input_Q->data.dptr;
   devPtrDescaleQ = input_Q->scale_inv.dptr;
   devPtrK = input_K->data.dptr;
@@ -2821,10 +2821,10 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
     fused_attn::fused_attn_fp8_fwd_impl_v1(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
         is_training, attn_scale, p_dropout, qkv_layout, o_format, bias_type, mask_type,
-        softmax_type, window_size_left, window_size_right, bottom_right_diagonal, devPtrQ,
-        devPtrK, devPtrV, devPtrSoftmaxOffset, devPtrM, devPtrZInv, devPtrO, devPtrDescaleQ,
-        devPtrDescaleK, devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO,
-        devPtrAmaxS, devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset,
+        softmax_type, window_size_left, window_size_right, bottom_right_diagonal, devPtrQ, devPtrK,
+        devPtrV, devPtrSoftmaxOffset, devPtrM, devPtrZInv, devPtrO, devPtrDescaleQ, devPtrDescaleK,
+        devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO, devPtrAmaxS,
+        devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset,
         get_cudnn_fe_dtype(QKV_type), get_cudnn_fe_dtype(O_type), input_Q->scaling_mode,
         workspace->data.dptr, &workspace_size, stream, handle);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
@@ -2852,22 +2852,19 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   }
 }
 // fused attention BWD FP8 with separate Q, K, V
-void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
-                        size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-                        size_t head_dim_v, float attn_scale, float p_dropout,
-                        NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-                        NVTE_QKV_Format d_out_format, NVTE_QKV_Layout dqkv_layout,
-                        NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-                        NVTE_Softmax_Type softmax_type, size_t window_size_left,
-                        size_t window_size_right, bool bottom_right_diagonal, bool deterministic,
-                        const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V,
-                        const Tensor* input_O, const Tensor* input_dO, const Tensor* input_dO_f16,
-                        const Tensor* input_M, const Tensor* input_ZInv, const Tensor* input_S,
-                        const Tensor* input_SoftmaxOffset, Tensor* input_output_dP,
-                        const Tensor* output_dQ, const Tensor* output_dK, const Tensor* output_dV,
-                        Tensor* output_dSoftmaxOffset, const Tensor* cu_seqlens_q,
-                        const Tensor* cu_seqlens_kv, const Tensor* rng_state, Tensor* workspace,
-                        cudaStream_t stream, cudnnHandle_t handle) {
+void fused_attn_fp8_bwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float attn_scale, float p_dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format d_out_format,
+    NVTE_QKV_Layout dqkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_Softmax_Type softmax_type, size_t window_size_left, size_t window_size_right,
+    bool bottom_right_diagonal, bool deterministic, const Tensor* input_Q, const Tensor* input_K,
+    const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO,
+    const Tensor* input_dO_f16, const Tensor* input_M, const Tensor* input_ZInv,
+    const Tensor* input_S, const Tensor* input_SoftmaxOffset, Tensor* input_output_dP,
+    const Tensor* output_dQ, const Tensor* output_dK, const Tensor* output_dV,
+    Tensor* output_dSoftmaxOffset, const Tensor* cu_seqlens_q, const Tensor* cu_seqlens_kv,
+    const Tensor* rng_state, Tensor* workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   void* devPtrQ = input_Q->data.dptr;
   void* devPtrK = input_K->data.dptr;
@@ -2875,7 +2872,8 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   void* devPtrDescaleQ = input_Q->scale_inv.dptr;
   void* devPtrDescaleK = input_K->scale_inv.dptr;
   void* devPtrDescaleV = input_V->scale_inv.dptr;
-  void* devPtrQ_t = nullptr, *devPtrK_t = nullptr, *devPtrDescaleQ_t = nullptr, *devPtrDescaleK_t = nullptr;
+  void *devPtrQ_t = nullptr, *devPtrK_t = nullptr, *devPtrDescaleQ_t = nullptr,
+       *devPtrDescaleK_t = nullptr;
   if (input_Q->scaling_mode == NVTE_MXFP8_1D_SCALING) {
     devPtrQ_t = input_Q->columnwise_data.dptr;
     devPtrDescaleQ_t = input_Q->columnwise_scale_inv.dptr;
@@ -2891,7 +2889,7 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   }
   void* devPtrdO = input_dO->data.dptr;
   void* devPtrDescaledO = input_dO->scale_inv.dptr;
-  void* devPtrdO_t = nullptr, *devPtrdO_f16 = nullptr, *devPtrDescaledO_t = nullptr;
+  void *devPtrdO_t = nullptr, *devPtrdO_f16 = nullptr, *devPtrDescaledO_t = nullptr;
   if (input_dO->scaling_mode == NVTE_MXFP8_1D_SCALING) {
     devPtrdO_t = input_dO->columnwise_data.dptr;
     devPtrdO_f16 = input_dO_f16->data.dptr;
@@ -2945,8 +2943,8 @@ void fused_attn_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
         attn_scale, p_dropout, qkv_layout, o_format, d_out_format, dqkv_layout, bias_type,
         mask_type, softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
-        deterministic, devPtrQ, devPtrK, devPtrV,
-        devPtrM, devPtrZInv, devPtrO, devPtrdO, devPtrSoftmaxOffset, devPtrdQ, devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ,
+        deterministic, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv, devPtrO, devPtrdO,
+        devPtrSoftmaxOffset, devPtrdQ, devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ,
         devPtrDescaleK, devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS,
         devPtrDescaledP, devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV,
         devPtrAmaxdP, devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16,

@@ -627,7 +627,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             # ignore the recipe from autocast, set fp8_dpa = False, fp8_mha = False
             fp8_recipe.fp8_dpa = False
             fp8_recipe.fp8_mha = False
-        elif (fp8_recipe.float8_current_scaling() or fp8_recipe.mxfp8()) and _dpa_fp8_recipe == "DelayedScaling":
+        elif (
+            fp8_recipe.float8_current_scaling() or fp8_recipe.mxfp8()
+        ) and _dpa_fp8_recipe == "DelayedScaling":
             # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a DS recipe
             fake_recipe = DelayedScaling(
                 fp8_format=fp8_recipe.fp8_format,
@@ -695,7 +697,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_dpa=fp8_recipe.fp8_dpa,
                     fp8_mha=fp8_recipe.fp8_mha,
                     reduce_amax=_dpa_fp8ds_reduce_amax,
-                )
+                ),
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
@@ -719,7 +721,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
-        elif (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()) and _dpa_fp8_recipe == "MXFP8BlockScaling":
+        elif (
+            fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()
+        ) and _dpa_fp8_recipe == "MXFP8BlockScaling":
             # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a MXFP8 recipe
             fake_recipe = MXFP8BlockScaling(
                 fp8_format=fp8_recipe.fp8_format,
@@ -1262,7 +1266,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded = None
 
             # get qkv's memory layout
-            if all(isinstance(x, Float8TensorStorage) for x in [query_layer, key_layer, value_layer]):
+            if all(
+                isinstance(x, Float8TensorStorage) for x in [query_layer, key_layer, value_layer]
+            ):
                 (
                     qkv_layout,
                     query_layer._data,

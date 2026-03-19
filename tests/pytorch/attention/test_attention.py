@@ -1802,6 +1802,7 @@ def _run_dpa_fp8_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
 
     return outputs
 
+
 attn_mask_type = "causal"
 # attn_mask_type = "no_mask"
 # attn_mask_type = "causal_bottom_right"
@@ -1815,9 +1816,7 @@ model_configs_fp8_vs_f16 = {
         head_dim_v=128,
         attn_mask_type=attn_mask_type,
     ),
-    "fp8_10": ModelConfig(
-        2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type=attn_mask_type
-    ),
+    "fp8_10": ModelConfig(2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type=attn_mask_type),
     "fp8_11": ModelConfig(2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type=attn_mask_type),
     "fp8_12": ModelConfig(2, 8192, 64, 64, attn_mask_type=attn_mask_type, window_size=(128, 0)),
     # "fp8_13": ModelConfig(2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"),

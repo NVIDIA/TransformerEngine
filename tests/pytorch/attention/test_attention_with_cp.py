@@ -169,7 +169,12 @@ model_configs_fused_attn = {
     ),  # MHA
     "cp_1_5": ModelConfig(2, 4096, 32, 128, attn_mask_type="causal", window_size=(128, 0)),  # MHA
     "cp_2_0": ModelConfig(
-        2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal",
+        2,
+        4096,
+        32,
+        128,
+        num_gqa_groups=4,
+        attn_mask_type="causal",
     ),  # GQA
     "cp_2_1": ModelConfig(
         2, 4096, 128, 192, head_dim_v=128, attn_mask_type="causal"
@@ -311,7 +316,11 @@ def test_cp_with_fused_attention(
         pytest.skip("No support for SWA with cp_comm_type={p2p, a2a+p2p}!")
 
     # TODO: Remove this once the issue is fixed!
-    if dtype == "fp8" and (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0]) and cp_comm_type == "all_gather":
+    if (
+        dtype == "fp8"
+        and (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0])
+        and cp_comm_type == "all_gather"
+    ):
         pytest.skip("No support for SWA with FP8 attention and cp_comm_type=all_gather!")
 
     if cp_comm_type in ["a2a", "a2a+p2p"] and (

@@ -158,6 +158,7 @@ _run_shadow_f16_fwd = os.getenv("NVTE_RUN_SHADOW_F16_FWD", "0") == "1"
 _replace_out_with_shadow = os.getenv("NVTE_REPLACE_OUT_WITH_SHADOW", "0") == "1"
 _replace_aux_with_shadow = os.getenv("NVTE_REPLACE_AUX_WITH_SHADOW", "0") == "1"
 
+
 class FP8EmulationFunc(torch.autograd.Function):
     """
     Emulate the effects of FP8 quantization on tensors. Used in UnfusedDotProductAttention as follows:
@@ -1345,7 +1346,9 @@ class FusedAttnFunc(torch.autograd.Function):
 
             if _run_shadow_f16_fwd:
                 # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-                assert all(x.dtype in [torch.float16, torch.bfloat16] for x in [q, k, v]), "q, k, v must be torch.float16 or torch.bfloat16"
+                assert all(
+                    x.dtype in [torch.float16, torch.bfloat16] for x in [q, k, v]
+                ), "q, k, v must be torch.float16 or torch.bfloat16"
                 out_f16_, aux_ctx_tensors_f16, *_ = fused_attn_fwd(
                     is_training,
                     max_seqlen_q,
@@ -1380,8 +1383,16 @@ class FusedAttnFunc(torch.autograd.Function):
                     is_graph_capturing(),
                 )
                 if torch.cuda.current_device() == 0:
-                    print(f"L{layer_number}: real/shadow out   min: {out_.min():.4f}/{out_f16_.min():.4f}, max: {out_.max():.4f}/{out_f16_.max():.4f}")
-                    print(f"L{layer_number}: real/shadow stats min: {aux_ctx_tensors[0].min():.4f}/{aux_ctx_tensors_f16[0].min():.4f}, max: {aux_ctx_tensors[0].max():.4f}/{aux_ctx_tensors_f16[0].max():.4f}")
+                    print(
+                        f"L{layer_number}: real/shadow out   min:"
+                        f" {out_.min():.4f}/{out_f16_.min():.4f}, max:"
+                        f" {out_.max():.4f}/{out_f16_.max():.4f}"
+                    )
+                    print(
+                        f"L{layer_number}: real/shadow stats min:"
+                        f" {aux_ctx_tensors[0].min():.4f}/{aux_ctx_tensors_f16[0].min():.4f}, max:"
+                        f" {aux_ctx_tensors[0].max():.4f}/{aux_ctx_tensors_f16[0].max():.4f}"
+                    )
                 if _replace_out_with_shadow:
                     out_ = out_f16_
                 if _replace_aux_with_shadow:

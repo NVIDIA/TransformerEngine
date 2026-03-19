@@ -103,9 +103,8 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
       }
     } else {
       std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
-      NVTE_CHECK(
-          !data.has_value(),
-          "MXFP8Quantizer::create_tensor() does not take data tensor as input!");
+      NVTE_CHECK(!data.has_value(),
+                 "MXFP8Quantizer::create_tensor() does not take data tensor as input!");
     }
   }
   return {std::move(te_T), std::move(py_T)};
@@ -155,8 +154,7 @@ std::vector<py::object> fused_attn_fwd(
   auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
   size_t b = 0, h = 0, s = 0, d = 0, t = 0;
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-  nvte_convert_qkv_format(q_format, o_shape_tmp, o_format, o_shape, &b, &h, &s,
-                          &d, &t);
+  nvte_convert_qkv_format(q_format, o_shape_tmp, o_format, o_shape, &b, &h, &s, &d, &t);
   if (q_format == NVTE_QKV_Format::NVTE_THD) {
     b = cu_seqlens_q.size(0) - 1;
   }
@@ -337,8 +335,7 @@ std::vector<py::object> fused_attn_bwd(
     NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
     bool bottom_right_diagonal, bool deterministic, const at::Tensor cu_seqlens_q,
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
-    const py::handle O, const py::handle dO,
-    const at::ScalarType fake_dtype,
+    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype,
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
@@ -375,12 +372,9 @@ std::vector<py::object> fused_attn_bwd(
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
   NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
-  nvte_convert_qkv_format(q_format, q_shape, dq_format,
-                          dQ_shape, &b, &h_q, &s_q, &d_qk, &t_q);
-  nvte_convert_qkv_format(kv_format, k_shape, dkv_format,
-                          dK_shape, &b, &h_kv, &s_kv, &d_qk, &t_kv);
-  nvte_convert_qkv_format(kv_format, v_shape, dkv_format,
-                          dV_shape, &b, &h_kv, &s_kv, &d_v, &t_kv);
+  nvte_convert_qkv_format(q_format, q_shape, dq_format, dQ_shape, &b, &h_q, &s_q, &d_qk, &t_q);
+  nvte_convert_qkv_format(kv_format, k_shape, dkv_format, dK_shape, &b, &h_kv, &s_kv, &d_qk, &t_kv);
+  nvte_convert_qkv_format(kv_format, v_shape, dkv_format, dV_shape, &b, &h_kv, &s_kv, &d_v, &t_kv);
   if (dq_format == NVTE_QKV_Format::NVTE_THD) {
     b = cu_seqlens_q.size(0) - 1;
   } else if (dkv_format == NVTE_QKV_Format::NVTE_THD) {

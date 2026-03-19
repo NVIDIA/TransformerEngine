@@ -517,7 +517,7 @@ def flash_attn_a2a_communicate(
                         tmp_list.insert(0, "2")
                     tmp_list.insert(0, "c")
                     tmp_format = "".join(tmp_list)
-                    head_dim_ = tmp_format.index("h")-1
+                    head_dim_ = tmp_format.index("h") - 1
                     tmp_list.insert(head_dim_, tmp_list.pop(0))
                     x = x.movedim(0, head_dim_)
                     # [2, b, s//2, cp, h//cp, d] -> [b, 2, s//2, cp, h//cp, d]
@@ -526,7 +526,7 @@ def flash_attn_a2a_communicate(
                     # or [t, cp, h//cp, d] -> [t, cp, h//cp, d]
                     if "t" not in qkv_format:
                         tmp_format = "".join(tmp_list)
-                        seq_dim_ = tmp_format.index("s")-1
+                        seq_dim_ = tmp_format.index("s") - 1
                         tmp_list.insert(seq_dim_, tmp_list.pop(0))
                         x = x.movedim(0, seq_dim_)
                     else:
@@ -2797,7 +2797,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     Float8Tensor.make_like(x, data=y, dtype=bwd_nominal_dtype)
                     for x, y in zip([dq_fp8, dk_fp8, dv_fp8], [dq, dk, dv])
                 ]
-            dq, dk, dv = [x.view(y) for x,y in zip([dq, dk, dv], [ctx.orig_q_shape, ctx.orig_k_shape, ctx.orig_v_shape])]
+            dq, dk, dv = [
+                x.view(y)
+                for x, y in zip(
+                    [dq, dk, dv], [ctx.orig_q_shape, ctx.orig_k_shape, ctx.orig_v_shape]
+                )
+            ]
 
         if attn_dbias is not None:
             # [b, h, sq, 2*cp, sk//(2*cp)] -> [b, h, sq, sk]
@@ -2912,18 +2917,25 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
 
         assert qkv_format != "thd", f"No support for cp_comm_type='all_gather' and {qkv_format=}."
-        assert "padding" not in attn_mask_type, f"No support for cp_comm_type='all_gather' and {attn_mask_type=}."
-        assert attn_bias_type == "no_bias", f"No support for cp_comm_type='all_gather' and {attn_bias_type=}."
+        assert (
+            "padding" not in attn_mask_type
+        ), f"No support for cp_comm_type='all_gather' and {attn_mask_type=}."
+        assert (
+            attn_bias_type == "no_bias"
+        ), f"No support for cp_comm_type='all_gather' and {attn_bias_type=}."
         assert (
             window_size == (-1, 0)
             or window_size == (-1, -1)
             or use_fused_attention
             or fa_utils.v2_3_plus
-        ), f"cp_comm_type='all_gather' only supports SWA through FusedAttention or FlashAttention >= 2.3. Found {use_fused_attention=} and {fa_utils.v2_3_plus=}."
-        assert (
-            q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0
-        ), f"cp_comm_type='all_gather' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q = {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}, cp_size = {cp_size}."
-
+        ), (
+            "cp_comm_type='all_gather' only supports SWA through FusedAttention or FlashAttention"
+            f" >= 2.3. Found {use_fused_attention=} and {fa_utils.v2_3_plus=}."
+        )
+        assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
+            "cp_comm_type='all_gather' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="
+            f" {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}, cp_size = {cp_size}."
+        )
 
         flash_attn_fwd = None
         if not use_fused_attention:
@@ -3012,7 +3024,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # reshape: split s
         # [b, s, h, d] -> [b, 2, s//2, h, d]
         # [s, b, h, d] -> [2, s//2, b, h, d]
-        q = q.view(*q.shape[:seq_dim_qkv], 2, q.shape[seq_dim_qkv] // 2, *q.shape[(seq_dim_qkv + 1) :])
+        q = q.view(
+            *q.shape[:seq_dim_qkv], 2, q.shape[seq_dim_qkv] // 2, *q.shape[(seq_dim_qkv + 1) :]
+        )
         # s dim first for all-gather
         # [b, s, h, d]/[s, b, h, d] -> [s, b, h, d]
         k, v = [x.movedim(seq_dim_qkv, 0).contiguous() for x in [k, v]]
@@ -3083,7 +3097,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     # select range: [s_range, b, h, d]
                     k_part, v_part = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
                     # reshape to original format: [b, s_range, h, d] or [s_range, b, h, d]
-                    k_part, v_part = [x.movedim(0, seq_dim_qkv).contiguous() for x in [k_part, v_part]]
+                    k_part, v_part = [
+                        x.movedim(0, seq_dim_qkv).contiguous() for x in [k_part, v_part]
+                    ]
                     if use_fused_attention:
                         new_qkv_layout = qkv_layout
                         if fp8:
@@ -3239,7 +3255,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # FP8DS or (FP8CS+not _dpa_fp8_cs_o_in_f16): q/k/v/o all in FP8
             # FP8CS+_dpa_fp8_cs_o_in_f16: q/k/v in FP8, o in f16
             # MXFP8: q/k/v/o all in f16
-            if fp8_recipe.delayed() or (fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16):
+            if fp8_recipe.delayed() or (
+                fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16
+            ):
                 fp8_tensors = (q_fp8_save, k_fp8_save, v_fp8_save, out_fp8)
             elif fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16:
                 fp8_tensors = (q_fp8_save, k_fp8_save, v_fp8_save, None)
@@ -3380,7 +3398,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if ctx.fp8 and not ctx.fp8_recipe.mxfp8():
             q, k, v = [x._data for x in [q_fp8, k_fp8, v_fp8]]
         if not ctx.qkv_reshaped:
-            q = q.view(*q.shape[:seq_dim_qkv], 2, q.shape[seq_dim_qkv] // 2, *q.shape[(seq_dim_qkv + 1) :])
+            q = q.view(
+                *q.shape[:seq_dim_qkv], 2, q.shape[seq_dim_qkv] // 2, *q.shape[(seq_dim_qkv + 1) :]
+            )
             k, v = [x.movedim(seq_dim_qkv, 0).contiguous() for x in [k, v]]
 
         # set up out:
@@ -3389,7 +3409,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # MXFP8/F16: torch.float16 or torch.bfloat16
         # [b, s, h, d] -> [b, 2, s//2, h, d]
         # [s, b, h, d] -> [2, s//2, b, h, d]
-        if ctx.fp8 and (ctx.fp8_recipe.delayed() or (ctx.fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16)):
+        if ctx.fp8 and (
+            ctx.fp8_recipe.delayed()
+            or (ctx.fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16)
+        ):
             out = out_fp8._data
         out = out.view(ctx.o_shape)
 
@@ -3479,7 +3502,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     # select range: [s_range, b, h, d]
                     k_part, v_part = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
                     # reshape to original format: [b, s_range, h, d] or [s_range, b, h, d]
-                    k_part, v_part = [x.movedim(0, seq_dim_qkv).contiguous() for x in [k_part, v_part]]
+                    k_part, v_part = [
+                        x.movedim(0, seq_dim_qkv).contiguous() for x in [k_part, v_part]
+                    ]
                     # [b, 2, s//2, h, d] -> [b, s//2, h, d]
                     # [2, s//2, b, h, d] -> [s//2, b, h, d]
                     out_part = out.select(seq_dim_o, i).contiguous()
@@ -3513,7 +3538,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                     v_fp8, data=v_part, dtype=ctx.fwd_nominal_dtype
                                 )
                                 if ctx.fp8_recipe.delayed() or (
-                                    ctx.fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16
+                                    ctx.fp8_recipe.float8_current_scaling()
+                                    and not _dpa_fp8_cs_o_in_f16
                                 ):
                                     out_part = Float8Tensor.make_like(
                                         out_fp8, data=out_part, dtype=ctx.fwd_nominal_dtype
@@ -3744,20 +3770,29 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
 
         if qkv_format in ["bshd", "sbhd"]:
-            assert "padding" not in attn_mask_type, f"No support for cp_comm_type='a2a', {attn_mask_type=} and {qkv_format=}."
-        assert attn_bias_type == "no_bias", f"No support for cp_comm_type='a2a' and {attn_bias_type=}."
+            assert (
+                "padding" not in attn_mask_type
+            ), f"No support for cp_comm_type='a2a', {attn_mask_type=} and {qkv_format=}."
+        assert (
+            attn_bias_type == "no_bias"
+        ), f"No support for cp_comm_type='a2a' and {attn_bias_type=}."
         assert (
             window_size == (-1, 0)
             or window_size == (-1, -1)
             or use_fused_attention
             or fa_utils.v2_3_plus
-        ), f"cp_comm_type='a2a' only supports SWA through FusedAttention or FlashAttention >= 2.3. Found {use_fused_attention=} and {fa_utils.v2_3_plus=}."
-        assert (
-            q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0
-        ), f"cp_comm_type='a2a' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q = {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}, cp_size = {cp_size}."
-        assert (
-            q.shape[-2] % cp_size == 0 and k.shape[-2] % cp_size == 0
-        ), f"cp_comm_type='a2a' requires num_heads % cp_size == 0 for Q, K, V. Found num_heads_q = {q.shape[-2]}, num_heads_kv = {k.shape[-2]}, cp_size = {cp_size}."
+        ), (
+            "cp_comm_type='a2a' only supports SWA through FusedAttention or FlashAttention >= 2.3."
+            f" Found {use_fused_attention=} and {fa_utils.v2_3_plus=}."
+        )
+        assert q.shape[seq_dim_qkv] % 2 == 0 and k.shape[seq_dim_qkv] % 2 == 0, (
+            "cp_comm_type='a2a' requires seq_len % 2 == 0 for Q, K, V. Found seq_len_q ="
+            f" {q.shape[seq_dim_qkv]}, seq_len_kv = {k.shape[seq_dim_qkv]}, cp_size = {cp_size}."
+        )
+        assert q.shape[-2] % cp_size == 0 and k.shape[-2] % cp_size == 0, (
+            "cp_comm_type='a2a' requires num_heads % cp_size == 0 for Q, K, V. Found num_heads_q ="
+            f" {q.shape[-2]}, num_heads_kv = {k.shape[-2]}, cp_size = {cp_size}."
+        )
 
         flash_attn_fwd = None
         if not use_fused_attention:
@@ -4031,10 +4066,14 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if ctx.fp8:
                 # FP8DS or (FP8CS+not _dpa_fp8_cs_o_in_f16): q/k/v/o all in FP8
                 # (FP8CS+_dpa_fp8_cs_o_in_f16) or MXFP8: q/k/v in FP8, o in F16
-                if (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16) or fp8_recipe.mxfp8():
+                if (
+                    fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
+                ) or fp8_recipe.mxfp8():
                     fp8_tensors = (q_part, k_part, v_part, None)
                     f16_tensors = (None, None, None, out_part)
-                elif fp8_recipe.delayed() or (fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16):
+                elif fp8_recipe.delayed() or (
+                    fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16
+                ):
                     fp8_tensors = (q_part, k_part, v_part, out_part)
             elif fp8:
                 # FP8DS/CS: convert post-a2a FP8 q/k/v to F16
@@ -4044,7 +4083,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     f16_tensors = (q, k, v, out_part)
                     ctx.qkv_layout = original_qkv_layout
                 else:
-                    q_part, k_part, v_part = combine_and_dequantize(qkv_layout, q_part, k_part, v_part)
+                    q_part, k_part, v_part = combine_and_dequantize(
+                        qkv_layout, q_part, k_part, v_part
+                    )
                     f16_tensors = (q_part, k_part, v_part, out_part)
             else:
                 # all tensors are already in F16
@@ -4310,7 +4351,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             qkv_format=ctx.dqkv_format,
             cu_seqlens_padded=cu_seqlens_q_padded,
         )
-        dq, dk, dv = [x.view(y) for x,y in zip([dq, dk, dv], [ctx.orig_q_shape, ctx.orig_k_shape, ctx.orig_v_shape])]
+        dq, dk, dv = [
+            x.view(y)
+            for x, y in zip([dq, dk, dv], [ctx.orig_q_shape, ctx.orig_k_shape, ctx.orig_v_shape])
+        ]
 
         # d_bias, d_softmax_offset
         d_bias = None
