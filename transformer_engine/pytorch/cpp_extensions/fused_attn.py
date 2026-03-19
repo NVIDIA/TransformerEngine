@@ -16,6 +16,7 @@ from transformer_engine_torch import (
     NVTE_Fused_Attn_Backend,
 )
 from ..quantized_tensor import Quantizer
+from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 
 
 __all__ = [
@@ -105,12 +106,12 @@ FusedAttnBackend = {
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
 
-META_QKV = tex.FP8FwdTensors.GEMM1_OUTPUT
-META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
-META_O = tex.FP8FwdTensors.GEMM2_INPUT
-META_DO = tex.FP8BwdTensors.GRAD_INPUT2
-META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
-META_DP = tex.FP8BwdTensors.GRAD_INPUT3
+META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
+META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
+META_O = FP8FwdTensorIdx.GEMM2_INPUT
+META_DO = FP8BwdTensorIdx.GRAD_INPUT2
+META_S = FP8FwdTensorIdx.GEMM3_OUTPUT
+META_DP = FP8BwdTensorIdx.GRAD_INPUT3
 
 
 def fused_attn_fwd(
@@ -275,14 +276,23 @@ def fused_attn_fwd(
         attn_scale = 1.0 / math.sqrt(d)
 
     if attn_bias_type not in ["no_bias", "alibi"]:
-        assert (
-            attn_bias is not None
-        ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
-        assert attn_bias.dtype == q.dtype, "attn_bias tensor must be in the same dtype as q and kv."
+        if attn_bias is None:
+            raise ValueError(
+                f"attn_bias tensor cannot be None when attn_bias_type={attn_bias_type!r}."
+            )
+        if attn_bias.dtype != q.dtype:
+            raise ValueError(
+                "attn_bias tensor must have the same dtype as q and kv: "
+                f"attn_bias.dtype={attn_bias.dtype} but q.dtype={q.dtype}."
+            )
 
-    assert (
-        fused_attention_backend != FusedAttnBackend["No_Backend"]
-    ), "Fused attention does not support this input combination."
+    if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+        raise ValueError(
+            "Fused attention does not support this input combination:"
+            f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
+            f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
+            f" q.dtype={q.dtype}, backend={fused_attention_backend}."
+        )
 
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
@@ -495,14 +505,21 @@ def fused_attn_bwd(
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
 
-    assert (
-        fused_attention_backend != FusedAttnBackend["No_Backend"]
-    ), "Fused attention does not support this input combination."
+    if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+        raise ValueError(
+            "Fused attention backward does not support this input combination:"
+            f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
+            f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
+            f" q.dtype={q.dtype}, backend={fused_attention_backend}."
+        )
 
     if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
-        assert (
-            len(aux_ctx_tensors) >= 1
-        ), "aux_ctx_tensors must contain rng_state as its last element."
+        if len(aux_ctx_tensors) < 1:
+            raise ValueError(
+                "aux_ctx_tensors must contain rng_state as its last element,"
+                f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
+                f" for backend={fused_attention_backend}."
+            )
 
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
