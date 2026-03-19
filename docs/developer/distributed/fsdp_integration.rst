@@ -87,7 +87,7 @@ during weight all-gather. No explicit setup or registration is needed.
    # FSDP2 automatically handles quantized weight all-gather
    fully_shard(model)
 
-   with te.fp8_autocast(enabled=True):
+   with te.autocast(enabled=True):
        output = model(input)  # Weights gathered/scattered automatically
 
 FSDP1: Activation Scatter/Gather
@@ -134,7 +134,7 @@ TE also provides a convenience wrapper:
    model = FSDP(te_model, ...)
    prepare_te_modules_for_fsdp(model)
 
-   with te.fp8_autocast(enabled=True):
+   with te.autocast(enabled=True):
        output = model(input)
 
 Summary: Which Mechanism Does What

@@ -54,7 +54,8 @@ TE modules that support FP8 quantization. Key responsibilities:
 
 **Quantizer Access**
 
-- Maintains quantizers for each quantized tensor (input, weight, gradient).
+- Maintains quantizers for each quantized tensor (input, weight, output, gradient input,
+  gradient output, gradient weight).
 - Quantizer instances are recreated when the recipe changes.
 
 **Distributed Hooks**
@@ -63,101 +64,14 @@ TE modules that support FP8 quantization. Key responsibilities:
 - ``set_sequence_parallel()``: Enable sequence parallelism.
 - Manages all-reduce of amax values across distributed ranks.
 
-**Parameter Management**
+**Weight Caching**
 
-- ``weight`` parameter with optional FP8 storage.
-- ``bias`` parameter (optional).
-- Weight caching for FP8 weights that persist across iterations.
+- Provides caching infrastructure for quantized weights that persist across microbatches
+  during gradient accumulation.
 
-Module Subclasses
------------------
-
-Linear
-^^^^^^
-
-**Location**: ``transformer_engine/pytorch/module/linear.py``
-
-The workhorse module. Performs ``output = input × weight^T + bias`` with optional FP8
-quantization of both input and weight.
-
-- Defines a ``_Linear`` autograd function (see :doc:`autograd_integration`).
-- Supports tensor parallelism (column-parallel and row-parallel modes).
-- Can fuse with preceding LayerNorm (via ``LayerNormLinear``).
-
-LayerNorm / RMSNorm
-^^^^^^^^^^^^^^^^^^^^
-
-**Location**: ``transformer_engine/pytorch/module/layernorm.py``,
-``transformer_engine/pytorch/module/rmsnorm.py``
-
-Normalization modules that can fuse their output quantization with the normalization
-kernel (single kernel pass for norm + cast to FP8).
-
-LayerNormLinear
-^^^^^^^^^^^^^^^
-
-**Location**: ``transformer_engine/pytorch/module/layernorm_linear.py``
-
-Fuses LayerNorm (or RMSNorm) with a subsequent Linear. The normalization output is
-produced directly in FP8, avoiding a round-trip through high precision.
-
-LayerNormMLP
-^^^^^^^^^^^^
-
-**Location**: ``transformer_engine/pytorch/module/layernorm_mlp.py``
-
-Fuses LayerNorm + Linear + Activation + Linear (the full MLP block). This is the most
-aggressively fused module, combining up to 4 operations.
-
-GroupedLinear
-^^^^^^^^^^^^^
-
-**Location**: ``transformer_engine/pytorch/module/grouped_linear.py``
-
-Batched linear operations for Mixture-of-Experts (MoE) where multiple smaller linear
-layers execute as a single grouped GEMM.
-
-DotProductAttention
-^^^^^^^^^^^^^^^^^^^
-
-**Location**: ``transformer_engine/pytorch/attention/dot_product_attention/dot_product_attention.py``
-
-Computes scaled dot-product attention with automatic backend selection
-(see :doc:`/developer/attention/backends`). Supports FP8 attention on Hopper+.
-
-MultiheadAttention
-^^^^^^^^^^^^^^^^^^
-
-**Location**: ``transformer_engine/pytorch/attention/multi_head_attention.py``
-
-Composes QKV projection (Linear), DotProductAttention, and output projection (Linear)
-into a complete multi-head attention block. Handles the split into heads and optional
-key-value caching for inference.
-
-.. note::
-
-   ``MultiheadAttention`` extends ``torch.nn.Module`` directly, **not**
-   ``TransformerEngineBaseModule``. It delegates FP8 behavior to its child modules
-   (``Linear``, ``DotProductAttention``) rather than managing FP8 state itself.
-
-Fp8Padding / Fp8Unpadding
-^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-**Location**: ``transformer_engine/pytorch/module/fp8_padding.py``,
-``transformer_engine/pytorch/module/fp8_unpadding.py``
-
-Modules for padding/unpadding sequences to token-count multiples required by FP8 kernels.
-These extend ``torch.nn.Module`` directly (not ``TransformerEngineBaseModule``) and use
-custom autograd functions internally.
-
-TransformerLayer
-^^^^^^^^^^^^^^^^
-
-**Location**: ``transformer_engine/pytorch/transformer.py``
-
-Composes a full Transformer block (see :doc:`transformer_layer`). Like
-``MultiheadAttention``, it extends ``torch.nn.Module`` directly and delegates FP8
-behavior to its child TE modules.
+Note that individual parameters (``weight``, ``bias``) are defined by each subclass,
+not by the base module. See the module hierarchy diagram above for the full list of
+subclasses and their docstrings for module-specific details.
 
 Module Lifecycle
 ----------------
@@ -166,12 +80,12 @@ A typical forward pass through a TE module:
 
 .. code-block:: text
 
-   1. fp8_autocast() sets global FP8 state
+   1. autocast() sets global FP8 state
    2. module.forward() called
       a. pre_forward() — refresh FP8 scales, create quantizers
       b. Quantize input via input_quantizer(input)
       c. Get quantized weight (cached or quantize via weight_quantizer)
-      d. Call _Linear.forward() autograd function
+      d. Call the module's custom autograd function
          i.  general_gemm(quantized_input, quantized_weight)
          ii. Save tensors for backward
       e. post_forward() — record amax values

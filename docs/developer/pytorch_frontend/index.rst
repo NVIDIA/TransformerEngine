@@ -7,8 +7,7 @@ PyTorch Frontend
 ================
 
 The PyTorch frontend (``transformer_engine/pytorch/``) provides ``nn.Module`` subclasses,
-autograd integration, quantized tensor types, and distributed utilities. It is the most
-widely used frontend and the primary development target.
+autograd integration, quantized tensor types, and distributed utilities.
 
 .. toctree::
    :maxdepth: 1

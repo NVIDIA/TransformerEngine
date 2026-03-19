@@ -24,7 +24,7 @@ sit on top of a shared C++ core that dispatches to optimized CUDA kernels.
    Second band: "Binding Layer" with sub-boxes "pybind11 (PyTorch)" and "XLA FFI (JAX)".
    Third band: "C++ Core Library" (single box spanning full width).
    Bottom band: "CUDA Kernels" with sub-boxes for major areas: GEMM, Normalization,
-   Activation, Attention, Cast/Transpose, Fused Rope, Fused Softmax.
+   Quantize, Activation, Attention, Other.
    Arrows flow downward between bands. A side annotation shows "transformer_engine/common/"
    pointing at the bottom two bands.
 
@@ -41,7 +41,7 @@ Layer Diagram
 
 **C++ Core** (``transformer_engine/common/``)
    Framework-agnostic library implementing the actual computation logic. Exposes a C API
-   (``transformer_engine.h``) for stability across framework bindings.
+   (``transformer_engine.h``, etc.) for stability across framework bindings.
 
 **CUDA Kernels** (within ``transformer_engine/common/``)
    Hand-optimized CUDA kernels and cuDNN/cuBLASLt integrations organized by functional
@@ -93,7 +93,8 @@ Directory Map
 Data Flow: Forward Pass
 -----------------------
 
-A typical forward pass through a quantized linear layer follows this path:
+A typical forward pass through a quantized linear layer follows this path (see
+:doc:`linear_walkthrough` for a detailed end-to-end trace):
 
 .. figure:: ./img/data_flow_forward.svg
    :align: center
@@ -123,8 +124,9 @@ For delayed tensor scaling, an amax (absolute maximum) feedback loop maintains s
 factor history across iterations.
 
 The backward pass follows the same pattern twice: once for the activation gradient (dgrad)
-and once for the weight gradient (wgrad). The wgrad path uses *columnwise* quantized data
-to satisfy cuBLASLt's transposed layout requirements — see
+and once for the weight gradient (wgrad). Both backward GEMMs use inputs already quantized
+during the forward pass (saved via autograd). The wgrad path uses *columnwise* quantized
+data to satisfy cuBLASLt's transposed layout requirements — see
 :doc:`quantization/rowwise_columnwise` for details.
 
 Guiding Principles
@@ -150,8 +152,7 @@ layer.
 **Leverage the ecosystem, don't reinvent it**
    TE provides custom CUDA kernels where they deliver clear performance wins (fused
    attention, quantized GEMM, fused normalization + cast). For everything else, we prefer
-   the framework's native capabilities — ``torch.compile`` for fusion, XLA for graph
-   optimization, cuBLASLt for matrix multiplication. A custom kernel must justify its
+   the framework's native capabilities. A custom kernel must justify its
    existence against the ecosystem alternative.
 
 **No memory allocation in the C++ layer**
@@ -164,7 +165,7 @@ layer.
 **Hide complexity, but stay extensible**
    Low-precision training involves many moving parts (scaling modes, amax history, block
    sizes, format selection). TE hides this complexity behind simple APIs — a user can
-   pass a recipe to ``fp8_autocast`` and get FP8 training without understanding the
+   pass a recipe to ``autocast`` and get FP8 training without understanding the
    internals. But we do not want to be a black box: the quantization system is designed
    to be extensible (see :doc:`quantization/adding_new_type`), scaling recipes are
    configurable, and advanced users can provide custom quantizers.

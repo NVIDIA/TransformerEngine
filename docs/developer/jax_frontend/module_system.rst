@@ -95,7 +95,7 @@ use ``MeshResource`` and rely on XLA SPMD for communication:
        mesh_resource=MeshResource(tp_resource="tp"),
    )
 
-**Quantization context**: Instead of ``fp8_autocast()``, JAX uses explicit quantizer
+**Quantization context**: Instead of ``autocast()``, JAX uses explicit quantizer
 arguments:
 
 .. code-block:: python

@@ -45,7 +45,7 @@ Recipe classes specify:
        amax_compute_algo="max",
    )
 
-   with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+   with te.autocast(enabled=True, recipe=recipe):
        output = model(input)
 
 FP8GlobalStateManager
@@ -59,15 +59,15 @@ that coordinates FP8 state across all modules in a model. Key responsibilities:
 - **Coordinate amax reduction** across distributed ranks (for delayed scaling, all ranks
   must agree on the global amax).
 
-The manager is activated by the ``fp8_autocast`` context manager:
+The manager is activated by the ``autocast`` context manager:
 
 .. code-block:: python
 
-   # Pseudocode for fp8_autocast
+   # Pseudocode for autocast
    @contextmanager
-   def fp8_autocast(enabled, fp8_recipe):
+   def autocast(enabled, recipe):
        FP8GlobalStateManager.set_enabled(enabled)
-       FP8GlobalStateManager.set_recipe(fp8_recipe)
+       FP8GlobalStateManager.set_recipe(recipe)
        try:
            yield
        finally:
@@ -104,7 +104,7 @@ the cast kernel, so no amax history is maintained.
 .. warning::
 
    For the amax all-reduce to work correctly, every rank must participate in the
-   collective. This means each ``fp8_autocast`` region must contain at least one FP8
+   collective. This means each ``autocast`` region must contain at least one FP8
    module to trigger the reduction. The modules do not need to be the same across
    ranks — the reduction operates on amaxes from all layers simultaneously and updates
    only those that were touched (identified by checking against the initial zero value).

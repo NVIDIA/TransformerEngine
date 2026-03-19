@@ -77,7 +77,7 @@ Here is the basic example of how one could create and call the Linear layer:
 
    # Enable FP8 with MXFP8 recipe
    recipe = MXFP8BlockScaling()
-   with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+   with te.autocast(enabled=True, recipe=recipe):
        output = linear(input)  # Triggers the flow below
 
 Phase 1: Module Forward Entry
@@ -116,7 +116,7 @@ that actually perform casts.
    - ``grad_weight_quantizer`` — for the backward weight gradient (currently unused)
 
    All six are created here because the backward pass executes outside the
-   ``fp8_autocast`` context and therefore no longer has access to the recipe
+   ``autocast`` context and therefore no longer has access to the recipe
    configuration. By creating the backward quantizers during forward setup, we
    capture the recipe information while it is still available.
 
