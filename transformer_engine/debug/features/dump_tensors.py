@@ -34,15 +34,10 @@ class TensorLogger:
         if TensorLogger._initialized:
             return
         self.root_dir = None
-        self.rank = 0
         TensorLogger._initialized = True
 
     def initialize(self, root_log_dir: str):
         """Initialize the TensorLogger with the root directory for tensor dumps."""
-        self.rank = 0
-        if dist.is_initialized():
-            self.rank = dist.get_rank()
-
         self.root_dir = self._expected_root_dir(root_log_dir)
         os.makedirs(self.root_dir, exist_ok=True)
 
@@ -83,10 +78,9 @@ class TensorLogger:
 
         safe_layer_name = self._sanitize_name(layer_name)
         safe_tensor_name = self._sanitize_name(tensor_name)
-        filepath = os.path.join(
-            self.root_dir,
-            f"{safe_layer_name}_{safe_tensor_name}_iter_{iteration:06d}.pt",
-        )
+        iter_dir = os.path.join(self.root_dir, f"iter_{iteration:06d}")
+        os.makedirs(iter_dir, exist_ok=True)
+        filepath = os.path.join(iter_dir, f"{safe_layer_name}_{safe_tensor_name}.pt")
 
         if os.path.exists(filepath):
             debug_api.log_message(f"[TE DumpTensors] Overwriting existing dump file: {filepath}")
@@ -156,10 +150,10 @@ class DumpTensors(TEConfigAPIMapper):
 
     Output Structure
     ----------------
-    Files are saved to: ``{nvdlfw_inspect_log_dir}/tensor_dumps/rank_{rank}/``
+    Files are saved to: ``{nvdlfw_inspect_log_dir}/tensor_dumps/rank_{rank}/iter_{iter:06d}/``
 
     Each tensor is saved as a dictionary in a single file:
-        ``{layer}_{tensor}_iter_{iter:06d}.pt``
+        ``{layer}_{tensor}.pt``
 
     Dictionary keys:
         - ``high_precision``: pre-quantization tensor (if high_precision_tensor=True)
@@ -169,6 +163,23 @@ class DumpTensors(TEConfigAPIMapper):
         The ``quantized`` value is a pickled ``QuantizedTensor`` object. Loading it
         (with ``weights_only=False``) requires the same version of TransformerEngine
         to be installed.
+
+    Loading and Analyzing Dumped Tensors
+    ------------------------------------
+    .. code-block:: python
+
+        import torch
+
+        # Load dumped tensor (requires the same TE version that produced the dump)
+        data = torch.load("tensor_dumps/rank_0/iter_000100/fc1_activation.pt",
+                          weights_only=False)
+
+        hp = data["high_precision"]                 # original high-precision tensor
+        qt = data["quantized"]                      # QuantizedTensor object
+        dequant = qt.dequantize(dtype=hp.dtype)     # dequantize back to high precision
+
+        mse = torch.mean((hp - dequant) ** 2).item()
+        print(f"MSE between original and dequantized: {mse}")
     """
 
     @api_method

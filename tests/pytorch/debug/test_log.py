@@ -692,14 +692,17 @@ def test_dump_tensors_sanity(feature_dirs):
         dump_dir = os.path.join(log_dir, "tensor_dumps", "rank_0")
         assert os.path.exists(dump_dir), f"Dump directory not created: {dump_dir}"
 
-        dump_files = os.listdir(dump_dir)
+        iter_dir = os.path.join(dump_dir, "iter_000000")
+        assert os.path.exists(iter_dir), f"Iteration directory not created: {iter_dir}"
+
+        dump_files = os.listdir(iter_dir)
         assert len(dump_files) == 1, f"Expected 1 dump file, got {len(dump_files)}"
         assert (
-            dump_files[0] == "test_layer_activation_iter_000000.pt"
+            dump_files[0] == "test_layer_activation.pt"
         ), f"Unexpected dump filename: {dump_files[0]}"
 
         # Load and verify structure
-        dump_file = os.path.join(dump_dir, dump_files[0])
+        dump_file = os.path.join(iter_dir, dump_files[0])
         # weights_only=False is required because the dump may contain QuantizedTensor objects,
         # which are custom Python classes incompatible with the safe weights_only=True path.
         data = torch.load(dump_file, weights_only=False)
@@ -711,7 +714,10 @@ def test_dump_tensors_sanity(feature_dirs):
             data["quantized"], QuantizedTensor
         ), f"Expected QuantizedTensor, got {type(data['quantized'])}"
 
-        # Verify tensor shapes match
+        # Verify tensor shapes and values match
         assert data["high_precision"].shape == tensor.shape, "high_precision shape mismatch"
+        assert torch.allclose(data["high_precision"], tensor), (
+            "high_precision tensor values do not match original tensor"
+        )
 
     print("DumpTensors sanity test passed!")
