@@ -12,7 +12,7 @@ from typing import Any, Optional, TypeAlias
 import torch
 
 from ..quantization import FP8GlobalStateManager, Recipe, DelayedScaling
-from ..quantized_tensor import prepare_for_saving, restore_from_saved
+from ..quantized_tensor import prepare_for_saving, restore_from_func_ctx
 from .op import (
     BasicOperation,
     FusibleOperation,
@@ -212,7 +212,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = func_ctx.basic_op_ctxs
 
         # Restore saved tensors
-        saved_tensors = restore_from_saved(func_ctx.tensor_objects, func_ctx.saved_tensors)
+        saved_tensors = restore_from_func_ctx(func_ctx)
 
         # Unflatten list of saved tensors
         for ctx in basic_op_ctxs:
