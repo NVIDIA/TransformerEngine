@@ -6,15 +6,16 @@
 Quantization
 ============
 
-Transformer Engine supports multiple low-precision formats (FP8 E4M3/E5M2, MXFP8,
-block-scaled FP8, NVFP4) through a unified quantization architecture. This section
-describes the internal design of that system.
+This section describes the internal design of the quantization system. For user-facing
+documentation on supported formats, recipes, and usage examples, see
+:doc:`/features/low_precision_training/index`.
 
-The quantization system has three main axes:
+The developer documentation here focuses on the internal implementation:
 
-- **What** to quantize (the Quantizer/Storage/Tensor class hierarchy)
-- **How** to scale (the scaling recipe and global FP8 state)
-- **Where** to store (rowwise vs. columnwise layouts for GEMM)
+- The Quantizer / QuantizedTensorStorage / QuantizedTensor class hierarchy
+- How scaling recipes map to quantizer instances
+- The rowwise vs. columnwise layout design for GEMM operands
+- How to add a new quantization type
 
 .. toctree::
    :maxdepth: 1
