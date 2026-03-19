@@ -217,17 +217,10 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
     int bit_idx = 0;
     for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
       CompType cur_val = 0.0f;
-      if constexpr (std::is_same_v<CompType, double>) {
-        uint64_t mask = -(uint64_t)((local_mask >> bit_idx) & 1u);
-        uint64_t x_bits = __double_as_longlong(static_cast<CompType>(scores[i]));
-        uint64_t result_bits = (~mask & x_bits) | (mask & 0xFFF0000000000000ULL);
-        cur_val = __longlong_as_double(result_bits);
-      } else {
-        uint32_t full_mask = -(uint32_t)((local_mask >> bit_idx) & 1u);
-        uint32_t x_bits = __float_as_uint(static_cast<CompType>(scores[i]));
-        uint32_t result_bits = (~full_mask & x_bits) | (full_mask & 0xFF800000u);
-        cur_val = __uint_as_float(result_bits);
-      }
+      uint32_t full_mask = -(uint32_t)((local_mask >> bit_idx) & 1u);
+      uint32_t x_bits = __float_as_uint(static_cast<CompType>(scores[i]));
+      uint32_t result_bits = (~full_mask & x_bits) | (full_mask & 0xFF800000u);
+      cur_val = __uint_as_float(result_bits);
       if (cur_val > local_max_val) {
         local_max_val = cur_val;
         local_max_idx = i;
