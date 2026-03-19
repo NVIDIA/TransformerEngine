@@ -77,6 +77,7 @@ static_assert(BUFF_DIM_Y == 32);
 constexpr uint STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
 static_assert(STAGES >= 1);
 
+static_assert(CHUNK_DIM_Y % BUFF_DIM_Y == 0);
 static_assert(CHUNK_DIM_Y % SCALE_DIM_Y == 0);
 static_assert(CHUNK_DIM_X % SCALE_DIM_X == 0);
 
