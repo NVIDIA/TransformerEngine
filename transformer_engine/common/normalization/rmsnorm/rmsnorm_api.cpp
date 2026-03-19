@@ -210,7 +210,6 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
   bool is_aligned = true;
   bool gamma_in_weight_dtype = false;
   if (use_cudnn_norm_bwd()) {
-    // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
     gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
   } else {
