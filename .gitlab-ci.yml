@@ -49,6 +49,9 @@ variables:
     BUILD_ARM64:
       description: Enable ARM64 builds and tests
       value: 0
+    B200_RUNNER:
+      description: Runner tag for B200 jobs (prenyx or bia)
+      value: prenyx
     RUN_L0_TESTS:
       description: Run L0 tests automatically (otherwise run tests manually)
       value: 1
@@ -244,6 +247,7 @@ before_script:
             --form "variables[BUILD_JAX]=${BUILD_JAX}" \
             --form "variables[BUILD_AMD64]=${BUILD_AMD64}" \
             --form "variables[BUILD_ARM64]=${BUILD_ARM64}" \
+            --form "variables[B200_RUNNER]=${B200_RUNNER}" \
             --form "variables[RUN_L0_TESTS]=${RUN_L0_TESTS}" \
             --form "variables[RUN_L1_TESTS]=${RUN_L1_TESTS}" \
             --form "variables[RUN_L2_TESTS]=${RUN_L2_TESTS}" \
@@ -1319,16 +1323,16 @@ send_result_to_slack:
       CI_SLURM_TIME: 240
 
 
-.bia:
+.B200_runner:
     variables:
       SLURM_PARTITION: "batch"
       SLURM_ACCOUNT: "core_dlfw_ci"
     tags:
-    - bia
+    - ${B200_RUNNER}
 
 .B200_1GPU:
     extends:
-    - .bia
+    - .B200_runner
     variables:
       GPUS: 1
       CI_BUILDS_DIR: "/lustre/fsw/core_dlfw_ci"
@@ -1338,7 +1342,7 @@ send_result_to_slack:
 
 .B200_8GPU:
     extends:
-    - .bia
+    - .B200_runner
     variables:
       GPUS: 8
       CI_BUILDS_DIR: "/lustre/fsw/core_dlfw_ci"
