@@ -47,13 +47,13 @@ model_configs_flash_attn = {
     "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
     "cp_1_2": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
     "cp_1_3": ModelConfig(2, 4096, 12, 128, window_size=(512, 512)),  # MHA
-    "cp_2_0": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal"),  # GQA
+    "cp_2_0": ModelConfig(2, 4096, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),  # GQA
     "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(
-        2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 0)
+        2, 4096, 32, 128, attn_mask_type="causal", window_size=(128, 0)
     ),  # GQA
     "cp_2_3": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, window_size=(512, 512)),  # GQA
-    "cp_3_0": ModelConfig(2, 4096, 12, 192, attn_mask_type="causal", head_dim_v=128),  # MLA
+    "cp_3_0": ModelConfig(2, 4096, 128, 192, attn_mask_type="causal", head_dim_v=128),  # MLA
     "cp_3_1": ModelConfig(2, 4096, 12, 192, head_dim_v=128),  # MLA
     "cp_3_2": ModelConfig(
         2, 4096, 12, 192, attn_mask_type="causal", window_size=(512, 0), head_dim_v=128
@@ -81,10 +81,10 @@ dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_1_0", "cp_1_2", "cp_2_1", "cp_3_2", "cp_3_3"]
+    configs = ["cp_2_0", "cp_3_0", "cp_2_2"] #, "cp_1_2", "cp_2_1"]#, "cp_1_1", "cp_3_3"]
     model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
-    qkv_formats = ["sbhd", "thd"]
+    qkv_formats = ["bshd","sbhd", "thd"]
 
 
 @pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
@@ -257,7 +257,7 @@ if test_essential:
     ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
-    qkv_formats = ["bshd"]  # , "sbhd", "thd"]
+    qkv_formats = ["bshd", "sbhd","thd"]
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
