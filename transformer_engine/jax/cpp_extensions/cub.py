@@ -13,6 +13,7 @@ from .base import BasePrimitive, register_primitive
 
 __all__ = ["CubTopkPrimitive"]
 
+
 def get_cub_topk_workspace_bytes() -> int:
     """
     Get the workspace size for CUB Topk
@@ -91,6 +92,7 @@ class CubTopkPrimitive(BasePrimitive):
 
 
 register_primitive(CubTopkPrimitive)
+
 
 def cub_topk(
     x: jnp.ndarray,
