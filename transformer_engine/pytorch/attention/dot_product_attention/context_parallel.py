@@ -921,15 +921,15 @@ def cp_p2p_fwd_flash_attn(
     flash_attn_fwd,
     max_seqlen_q,
     max_seqlen_kv,
+    pad_between_seqs,
+    cu_seqlens_q_padded,
+    cu_seqlens_kv_padded,
     q_part,
     k_part,
     v_part,
     cu_seqlens_q_per_step,
     cu_seqlens_kv_per_step,
     section,
-    pad_between_seqs=False,
-    cu_seqlens_q_padded=None,
-    cu_seqlens_kv_padded=None,
 ):
     """Per-tile forward call of CP P2P with FlashAttention backend"""
     cu_seqlens_q_ = cu_seqlens_q_per_step
@@ -1203,15 +1203,15 @@ def cp_p2p_bwd_flash_attn(
     rng_states,
     softmax_lse,
     softmax_lse_,
+    pad_between_seqs,
+    cu_seqlens_q_padded,
+    cu_seqlens_kv_padded,
     q_part,
     k_part,
     v_part,
     out_part,
     dout_part,
     section,
-    pad_between_seqs=False,
-    cu_seqlens_q_padded=None,
-    cu_seqlens_kv_padded=None,
 ):
     """Per-tile backward call of CP P2P with FlashAttention backend"""
     if pad_between_seqs:
@@ -1687,6 +1687,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             flash_attn_fwd,
                             max_seqlen_q,
                             max_seqlen_kv,
+                            pad_between_seqs,
+                            cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded,
                         ]
 
                     # cp_size = 4:
@@ -1732,9 +1735,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                         *flash_attn_inputs,
                                         *prepare_outputs,
                                         section,
-                                        pad_between_seqs=pad_between_seqs,
-                                        cu_seqlens_q_padded=cu_seqlens_q_padded,
-                                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                                     )
                                 )
                         elif i <= rank:
@@ -1764,9 +1764,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                         *flash_attn_inputs,
                                         *prepare_outputs,
                                         section,
-                                        pad_between_seqs=pad_between_seqs,
-                                        cu_seqlens_q_padded=cu_seqlens_q_padded,
-                                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                                     )
                                 )
                         else:
@@ -1796,9 +1793,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                         *flash_attn_inputs,
                                         *prepare_outputs,
                                         section,
-                                        pad_between_seqs=pad_between_seqs,
-                                        cu_seqlens_q_padded=cu_seqlens_q_padded,
-                                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                                     )
                                 )
                     else:
@@ -1827,9 +1821,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     *flash_attn_inputs,
                                     *prepare_outputs,
                                     section,
-                                    pad_between_seqs=pad_between_seqs,
-                                    cu_seqlens_q_padded=cu_seqlens_q_padded,
-                                    cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                                 )
                             )
 
@@ -2481,6 +2472,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     rng_states,
                     softmax_lse,
                     softmax_lse_,
+                    ctx.pad_between_seqs,
+                    cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded,
                 ]
 
             # Reverse the steps in forward. In the cp_size x cp_size (i.e. GPU x step) matrix,
@@ -2499,9 +2493,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             *flash_attn_inputs,
                             *prepare_outputs,
                             section,
-                            pad_between_seqs=ctx.pad_between_seqs,
-                            cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                         )
                 elif i >= (cp_size - rank - 1):
                     section = "lower-triangle"
@@ -2515,9 +2506,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             *flash_attn_inputs,
                             *prepare_outputs,
                             section,
-                            pad_between_seqs=ctx.pad_between_seqs,
-                            cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                         )
                 else:
                     section = "upper-triangle"
@@ -2531,9 +2519,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             *flash_attn_inputs,
                             *prepare_outputs,
                             section,
-                            pad_between_seqs=ctx.pad_between_seqs,
-                            cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                         )
             else:
                 section = "all"
@@ -2547,9 +2532,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         *flash_attn_inputs,
                         *prepare_outputs,
                         section,
-                        pad_between_seqs=ctx.pad_between_seqs,
-                        cu_seqlens_q_padded=cu_seqlens_q_padded,
-                        cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                     )
 
             # dq, dk, dv are reduced across steps in higher precision

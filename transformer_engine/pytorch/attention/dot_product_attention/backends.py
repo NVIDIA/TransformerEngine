@@ -738,6 +738,7 @@ class FlashAttention(torch.nn.Module):
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
         quantizers=None,
+        pad_between_seqs: Optional[bool] = False,
         inference_params: Optional[InferenceParams] = None,
         flash_attention_backend: Optional[PkgVersion] = PkgVersion("0"),
         fp8_output: bool = False,
@@ -922,9 +923,6 @@ class FlashAttention(torch.nn.Module):
         if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
             use_flash_attn_3 = True
 
-        pad_between_seqs = False
-        if qkv_format == "thd" and cu_seqlens_q_padded is not None:
-            pad_between_seqs = not torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
 
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]

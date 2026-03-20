@@ -505,14 +505,11 @@ def run_dpa_with_cp(
                 tensors_to_deq[i] = tensor.dequantize()
         if not fp8_bwd:
             tensors[0], tensors[5] = tensors_to_deq
-    if pad_between_seqs == "True":
-        # FA3 backward may produce NaN at padding positions; replace with 0
-        tensors = [t.detach().nan_to_num(nan=0.0) if t is not None else t for t in tensors]
     for tensor, name in zip(tensors, tensor_names):
         # dbias/dbias_ could be None, so skip check for it
         if tensor is not None:
-            assert torch.all(~torch.isnan(tensor)), f"NaN in {name}"
-            assert torch.all(~torch.isinf(tensor)), f"Inf in {name}"
+            assert torch.all(~torch.isnan(tensor))
+            assert torch.all(~torch.isinf(tensor))
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############
@@ -565,7 +562,7 @@ def run_dpa_with_cp(
         if is_training:
             dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
             dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
-            dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
+            dq_, dk_, dv_, out_ = [x.clone() for x in [dq_, dk_, dv_, out_]]
             cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
             cu_seqlens_q = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
