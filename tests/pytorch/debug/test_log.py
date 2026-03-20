@@ -716,7 +716,7 @@ def test_dump_tensors_sanity(feature_dirs):
 
         # Verify tensor shapes and values match
         assert data["high_precision"].shape == tensor.shape, "high_precision shape mismatch"
-        assert torch.allclose(
+        assert torch.equal(
             data["high_precision"], tensor
         ), "high_precision tensor values do not match original tensor"
 
