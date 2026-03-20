@@ -528,23 +528,20 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                    "Please upgrade your cuDNN version if possible."
                 << std::endl;
     }
-    if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen && sm_arch_ == 120){
-      if (cudnn_runtime_version < 91801){
+    if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen && sm_arch_ == 120) {
+      if (cudnn_runtime_version < 91801) {
         backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-        std::cout << "Warning: Given combination of sm_arch_ == 120 and cudnn_runtime_version < 91801 is not supported. "
-                  << " Please upgrade your cuDNN version if possible."
-                  << std::endl;
-      }
-      else{
+        std::cout << "Warning: Given combination of sm_arch_ == 120 and cudnn_runtime_version < "
+                     "91801 is not supported. "
+                  << " Please upgrade your cuDNN version if possible." << std::endl;
+      } else {
         // Known missing support for T3HD/TH3D layouts on SM120
         const bool is_t3hd_or_th3d =
-            (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD ||
-            qkv_layout == NVTE_QKV_Layout::NVTE_TH3D);
+            (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD || qkv_layout == NVTE_QKV_Layout::NVTE_TH3D);
         if (is_t3hd_or_th3d) {
           backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
           std::cout << "Warning: Given combination of T3HD/TH3D layouts on SM120 is not supported. "
-                    << " Please consider using other THD layouts if possible."
-                      << std::endl;
+                    << " Please consider using other THD layouts if possible." << std::endl;
         }
       }
     }
