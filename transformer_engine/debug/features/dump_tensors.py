@@ -208,6 +208,7 @@ class DumpTensors(TEConfigAPIMapper):
         rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
+        tp_size: int = 1,
     ):  # pylint: disable=unused-argument
         """
         API call used to dump tensors to files.
