@@ -326,8 +326,6 @@ __global__ void __launch_bounds__(128)
   ptx::cp_async_bulk_wait_group_read<0>();
   __syncthreads();
 
-  parity ^= 1;
-
   if (is_master_thread) {
 #pragma unroll
     for (int iter = 0; iter < ITERATIONS; ++iter) {

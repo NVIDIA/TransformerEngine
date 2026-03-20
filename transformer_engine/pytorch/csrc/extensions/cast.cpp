@@ -275,6 +275,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   auto rowwise_scale_inv = get_optional_tensor("scale_inv");
   auto columnwise_scale_inv = get_optional_tensor("columnwise_scale_inv");
   auto first_dims = get_optional_tensor("first_dims");
+  auto last_dims = get_optional_tensor("last_dims");
   auto tensor_offsets = get_optional_tensor("tensor_offsets");
 
   // Early-return for empty input.
@@ -308,6 +309,9 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   }
   if (first_dims.has_value()) {
     input_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
+  }
+  if (last_dims.has_value()) {
+    input_cpp.set_last_dims(last_dims->data_ptr(), DType::kInt64, getTensorShape(*last_dims));
   }
   if (tensor_offsets.has_value()) {
     input_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
