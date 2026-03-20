@@ -1218,10 +1218,7 @@ def cp_p2p_bwd_flash_attn(
         dq, dk, dv = [torch.zeros_like(x) for x in [q_part, k_part, v_part]]
     else:
         dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
-    if use_flash_attn_3:
-        fa_backward_kwargs["window_size_left"] = -1
-        fa_backward_kwargs["window_size_right"] = -1
-    elif fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
+    if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size"] = (-1, -1)
     elif use_flash_attn_3 or fa_utils.v2_7_0_plus:
         fa_backward_kwargs["window_size_left"] = -1
