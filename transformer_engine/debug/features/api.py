@@ -498,7 +498,9 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             kwargs_copy = kwargs.copy()
             for k in ["tp_size"]:
                 if k not in call.__code__.co_varnames:
-                    kwargs_copy.pop(k, None)  # use None default to avoid KeyError if kwarg wasn't passed
+                    kwargs_copy.pop(
+                        k, None
+                    )  # use None default to avoid KeyError if kwarg wasn't passed
 
         return call(feat_config, layer_name, **kwargs_copy)
 
