@@ -1287,8 +1287,8 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
 
 void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
                                             std::vector<Tensor*>& output, cudaStream_t stream) {
-  size_t num_tensors = input.size();
-  const auto& first_scaling_mode = input[0]->scaling_mode;
+  size_t num_tensors = output.size();
+  const auto& first_scaling_mode = output[0]->scaling_mode;
 
   constexpr int SF_TILE_DIM_M = 128;
   constexpr int SF_TILE_DIM_K = 4;
@@ -1297,7 +1297,7 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
   bool all_has_columnwise_data = true;
   bool all_nvfp4 = true;
   for (size_t i = 0; i < num_tensors; i++) {
-    const auto scaling_mode = input[i]->scaling_mode;
+    const auto scaling_mode = output[i]->scaling_mode;
     const auto is_fp8 = is_fp8_dtype(input[i]->dtype());
     const auto is_fp4 = is_fp4_dtype(input[i]->dtype());
 
@@ -1314,9 +1314,9 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
     CheckInputTensor(*input[i], "scaling_factor_input[" + std::to_string(i) + "]");
     CheckInputTensor(*output[i], "scaling_factor_output[" + std::to_string(i) + "]");
 
-    all_has_data = all_has_data && input[i]->scale_inv.has_data();
+    all_has_data = all_has_data && output[i]->scale_inv.has_data();
     all_has_columnwise_data =
-        (all_has_columnwise_data && input[i]->columnwise_scale_inv.has_data());
+        (all_has_columnwise_data && output[i]->columnwise_scale_inv.has_data());
     all_nvfp4 = all_nvfp4 && is_nvfp4_scaling(scaling_mode);
   }
   NVTE_CHECK(all_has_data || all_has_columnwise_data,
@@ -1342,33 +1342,36 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
       }
       int m, k;
       if (all_has_data) {
-        m = input[i]->scale_inv.shape[0];
-        k = input[i]->scale_inv.shape[1];
-      } else {
-        NVTE_CHECK(all_nvfp4,
-                   "When doing rowwise unswizzle with columnwise data, it has to be NVFP4");
-        m = input[i]->columnwise_scale_inv.shape[0];
-        k = input[i]->columnwise_scale_inv.shape[1];
-      }
-
-      NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Input should be padded in M/N dimension!");
-      NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Input should be padded in K dimension!");
-      NVTE_CHECK(k > 0, "Input scale inverse should be 2D!");
-
-      if (all_has_data) {
-        NVTE_CHECK(output[i]->scale_inv.has_data(), "Output tensor ", i,
+        NVTE_CHECK(input[i]->scale_inv.has_data(), "Input tensor ", i,
                    " does not have row-wise scaling factors.");
-        NVTE_CHECK(m * k == output[i]->scale_inv.numel(), "Expected output tensor ", i, " to have ",
+        NVTE_CHECK(m * k == input[i]->scale_inv.numel(), "Expected input tensor ", i, " to have ",
                    m * k, " row-wise scaling factors, but got shape=", output[i]->scale_inv.shape,
                    ".");
+        NVTE_CHECK(output[i]->scale_inv.shape.size() == 2, "Expected output tensor ", i, " to have ",
+                   "2D scaling factors, got shape=", output[i]->scale_inv.shape, ".");
+        m = output[i]->scale_inv.shape[0];
+        k = output[i]->scale_inv.shape[1];
       }
+
       if (all_has_columnwise_data) {
-        NVTE_CHECK(output[i]->columnwise_scale_inv.has_data(), "Output tensor ", i,
+        NVTE_CHECK(all_nvfp4,
+                   "When doing rowwise unswizzle with columnwise data, it has to be NVFP4");
+        NVTE_CHECK(input[i]->columnwise_scale_inv.has_data(), "Input tensor ", i,
                    " does not have column-wise scaling factors.");
-        NVTE_CHECK(m * k == output[i]->columnwise_scale_inv.numel(), "Expected output tensor ", i,
+        NVTE_CHECK(m * k == input[i]->columnwise_scale_inv.numel(), "Expected input tensor ", i,
                    " to have ", m * k, " column-wise scaling factors, but got shape=",
-                   output[i]->columnwise_scale_inv.shape, ".");
+                   input[i]->columnwise_scale_inv.shape, ".");
+        NVTE_CHECK(output[i]->columnwise_scale_inv.shape.size() == 2,
+                   "Expected output tensor ", i, " to have ",
+                   "2D scaling factors, got shape=", output[i]->columnwise_scale_inv.shape,
+                   ".");
+        m = output[i]->columnwise_scale_inv.shape[0];
+        k = output[i]->columnwise_scale_inv.shape[1];
       }
+
+      NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Output should be padded in M/N dimension!");
+      NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Output should be padded in K dimension!");
+      NVTE_CHECK(k > 0, "Output scale inverse should be 2D!");
 
       int num_tiles_k = k / SF_TILE_DIM_K;
       int vec_load_size_i = (num_tiles_k - 1) % 4 + 1;
@@ -1381,13 +1384,9 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
         int block_scale_size = all_nvfp4 ? NVFP4_BLOCK_SIZE : MXFP8_BLOCK_SIZE;
         kernel_args.input_list[pos] = const_cast<void*>(input[i]->scale_inv.dptr);
         kernel_args.output_list[pos] = output[i]->scale_inv.dptr;
-        kernel_args.original_m_list[pos] = output[i]->flat_first_dim();
-        kernel_args.original_k_list[pos] = output[i]->flat_last_dim() / block_scale_size;
       } else {
         kernel_args.input_list[pos] = const_cast<void*>(input[i]->columnwise_scale_inv.dptr);
         kernel_args.output_list[pos] = output[i]->columnwise_scale_inv.dptr;
-        kernel_args.original_m_list[pos] = output[i]->flat_last_dim();
-        kernel_args.original_k_list[pos] = output[i]->flat_first_dim() / NVFP4_BLOCK_SIZE;
       }
       kernel_args.num_tensors++;
     }
@@ -1411,8 +1410,12 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
         kernel_args.num_tensors = 0;
         vec_load_size = 4;
       }
-      const int m = input[i]->columnwise_scale_inv.shape[1];
-      const int k = input[i]->columnwise_scale_inv.shape[0];
+      NVTE_CHECK(output[i]->columnwise_scale_inv.shape.size() == 2,
+                   "Expected output tensor ", i, " to have ",
+                   "2D scaling factors, got shape=", output[i]->columnwise_scale_inv.shape,
+                   ".");
+      const int m = output[i]->columnwise_scale_inv.shape[1];
+      const int k = output[i]->columnwise_scale_inv.shape[0];
 
       NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Input should be padded in M/N dimension!");
       NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Input should be padded in K dimension!");
@@ -1432,8 +1435,6 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
       kernel_args.output_list[pos] = output[i]->columnwise_scale_inv.dptr;
       kernel_args.m_list[pos] = m;
       kernel_args.k_list[pos] = k;
-      kernel_args.original_m_list[pos] = output[i]->flat_last_dim();
-      kernel_args.original_k_list[pos] = output[i]->flat_first_dim() / MXFP8_BLOCK_SIZE;
       kernel_args.num_tensors++;
     }
     if (vec_load_size == 3) vec_load_size = 1;
