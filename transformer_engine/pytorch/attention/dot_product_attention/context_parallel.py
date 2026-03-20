@@ -432,7 +432,12 @@ def flash_attn_a2a_communicate(
     assert (
         qkv_format != "thd" or cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
     ), "cu_seqlens_q_padded and cu_seqlens_kv_padded are required for THD format!"
-    assert a2a_input_names in [["q", "k", "v"], ["out"], ["dout"], ["dq", "dk", "dv"]], "a2a_input_names must be one of ['q', 'k', 'v'], ['out'], ['dout'], ['dq', 'dk', 'dv']!"
+    assert a2a_input_names in [
+        ["q", "k", "v"],
+        ["out"],
+        ["dout"],
+        ["dq", "dk", "dv"],
+    ], "a2a_input_names must be one of ['q', 'k', 'v'], ['out'], ['dout'], ['dq', 'dk', 'dv']!"
     a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
     _, _, head_dim = get_bsh_dims(qkv_format)
@@ -459,7 +464,11 @@ def flash_attn_a2a_communicate(
                             *x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]
                         )
                     else:  # qkv_format == "thd"
-                        cu_seqlens_padded = cu_seqlens_q_padded if a2a_input_names[i - 1] in ["q", "out", "dout", "dq"] else cu_seqlens_kv_padded
+                        cu_seqlens_padded = (
+                            cu_seqlens_q_padded
+                            if a2a_input_names[i - 1] in ["q", "out", "dout", "dq"]
+                            else cu_seqlens_kv_padded
+                        )
                         # [cp, t, h//cp, d] -> [cp*t, h//cp, d]
                         x = x.view(-1, *x.shape[2:])
                         # reorder the sequence chunks
@@ -503,7 +512,11 @@ def flash_attn_a2a_communicate(
                         x, chunk_ids_for_a2a, seq_dim, cp_size
                     )
                 else:  # qkv_format == "thd"
-                    cu_seqlens_padded = cu_seqlens_q_padded if a2a_input_names[i - 1] in ["q", "out", "dout", "dq"] else cu_seqlens_kv_padded
+                    cu_seqlens_padded = (
+                        cu_seqlens_q_padded
+                        if a2a_input_names[i - 1] in ["q", "out", "dout", "dq"]
+                        else cu_seqlens_kv_padded
+                    )
                     # reorder the sequence chunks
                     x = reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens_padded, cp_size)
                     # [cp*t, h//cp, d] -> [cp, t, h//cp, d]
@@ -1452,7 +1465,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     q, k, v = [q_fp8._data, k_fp8._data, v_fp8._data]
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size_a2a, q.device)
             q, k, v = flash_attn_a2a_communicate(
-                [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, True, qkv_format=qkv_format, cu_seqlens_q_padded=cu_seqlens_q_padded, cu_seqlens_kv_padded=cu_seqlens_kv_padded, a2a_input_names=["q", "k", "v"]
+                [q, k, v],
+                chunk_ids_for_a2a,
+                seq_dim,
+                cp_size_a2a,
+                cp_group_a2a,
+                cp_stream,
+                True,
+                qkv_format=qkv_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                a2a_input_names=["q", "k", "v"],
             )
             if fp8 and is_input_fp8 and not fp8_recipe.mxfp8():
                 q_fp8, k_fp8, v_fp8 = [
@@ -1967,7 +1990,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size_a2a, out.device)
             out = flash_attn_a2a_communicate(
-                out, chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, False, qkv_format=o_format, cu_seqlens_q_padded=cu_seqlens_q_padded, a2a_input_names=["out"]
+                out,
+                chunk_ids_for_a2a,
+                seq_dim,
+                cp_size_a2a,
+                cp_group_a2a,
+                cp_stream,
+                False,
+                qkv_format=o_format,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                a2a_input_names=["out"],
             )
             out = out.view(orig_o_shape)
             if return_max_logit:
