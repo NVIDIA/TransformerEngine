@@ -500,8 +500,11 @@ class NVFP4QuantizerRef(Quantizer):
             if global_encode_scale == torch.tensor(0.0, device=x.device, dtype=torch.float32):
                 global_encode_scale = torch.tensor(1.0, device=x.device, dtype=torch.float32)
             global_decode_scale = torch.div(1.0, global_encode_scale)
+            global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(FLOAT4_E2M1_MAX)
 
-            decode_scale = decode_scale * global_encode_scale
+            # Match the kernel's default path: fold the FP4 reciprocal into the
+            # global scale multiplier, but keep the final reciprocal exact.
+            decode_scale = vec_max * global_encode_scale_multiplier
             decode_scale = torch.min(
                 decode_scale,
                 torch.tensor(
