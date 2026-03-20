@@ -429,15 +429,15 @@ def flash_attn_a2a_communicate(
     a2a_input_names: List[str] = None,
 ) -> Union[torch.Tensor, List[torch.Tensor]]:
     """A2A communication for context parallelism."""
-    assert (
-        qkv_format != "thd" or cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
-    ), "cu_seqlens_q_padded and cu_seqlens_kv_padded are required for THD format!"
-    assert a2a_input_names in [
-        ["q", "k", "v"],
-        ["out"],
-        ["dout"],
-        ["dq", "dk", "dv"],
-    ], "a2a_input_names must be one of ['q', 'k', 'v'], ['out'], ['dout'], ['dq', 'dk', 'dv']!"
+    assert a2a_input_names in [["q", "k", "v"], ["out"], ["dout"], ["dq", "dk", "dv"]], "a2a_input_names must be one of ['q', 'k', 'v'], ['out'], ['dout'], ['dq', 'dk', 'dv']!"
+    if a2a_input_names in [["out"], ["dout"]]:
+        assert (
+            qkv_format != "thd" or cu_seqlens_q_padded is not None
+        ), f"flash_attn_a2a_communicate requires cu_seqlens_q_padded for {a2a_input_names} with THD format!"
+    if a2a_input_names in [["q", "k", "v"], ["dq", "dk", "dv"]]:
+        assert (
+            qkv_format != "thd" or (cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None)
+        ), f"flash_attn_a2a_communicate requires cu_seqlens_q_padded and cu_seqlens_kv_padded for {a2a_input_names} with THD format!"
     a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
     _, _, head_dim = get_bsh_dims(qkv_format)
@@ -464,11 +464,7 @@ def flash_attn_a2a_communicate(
                             *x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]
                         )
                     else:  # qkv_format == "thd"
-                        cu_seqlens_padded = (
-                            cu_seqlens_q_padded
-                            if a2a_input_names[i - 1] in ["q", "out", "dout", "dq"]
-                            else cu_seqlens_kv_padded
-                        )
+                        cu_seqlens_padded = cu_seqlens_q_padded if a2a_input_names[i-2] in ["q", "out", "dout", "dq"] else cu_seqlens_kv_padded
                         # [cp, t, h//cp, d] -> [cp*t, h//cp, d]
                         x = x.view(-1, *x.shape[2:])
                         # reorder the sequence chunks
@@ -512,11 +508,7 @@ def flash_attn_a2a_communicate(
                         x, chunk_ids_for_a2a, seq_dim, cp_size
                     )
                 else:  # qkv_format == "thd"
-                    cu_seqlens_padded = (
-                        cu_seqlens_q_padded
-                        if a2a_input_names[i - 1] in ["q", "out", "dout", "dq"]
-                        else cu_seqlens_kv_padded
-                    )
+                    cu_seqlens_padded = cu_seqlens_q_padded if a2a_input_names[i] in ["q", "out", "dout", "dq"] else cu_seqlens_kv_padded
                     # reorder the sequence chunks
                     x = reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens_padded, cp_size)
                     # [cp*t, h//cp, d] -> [cp, t, h//cp, d]
@@ -3021,6 +3013,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             cu_seqlens_q_padded = None
         if use_fused_attention and attn_mask_type == "causal":
             attn_mask_type = attn_mask_type + "_bottom_right"
+        causal = "causal" in attn_mask_type
 
         # FP8 setup
         assert isinstance(k, q.__class__) and isinstance(
@@ -3125,7 +3118,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             max_seqlen_q,
                             max_seqlen_kv,
                             window_size,
-                            "causal" in attn_mask_type,
+                            causal,
                         )
                     )
                     seq_start_idx, seq_end_idx = (
@@ -3217,7 +3210,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             k_part,
                             v_part,
                             *fa_forward_args_thd,
-                            causal="causal" in attn_mask_type,
+                            causal=causal,
                             **fa_forward_kwargs,
                         )
                         if not fa_utils.v2_7_0_plus:
@@ -3414,6 +3407,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         _, seq_dim_qkv, _ = get_bsh_dims(ctx.qkv_format)
         _, seq_dim_dqkv, _ = get_bsh_dims(ctx.dqkv_format)
         _, seq_dim_o, _ = get_bsh_dims(ctx.o_format)
+        causal = "causal" in ctx.attn_mask_type
 
         # set up dout:
         # FP8DS/CS: torch.uint8, [b, s, h, d] or [s, b, h, d]
@@ -3659,9 +3653,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             fa_backward_kwargs["window_size_left"] = window_size_per_step[i][0]
                             fa_backward_kwargs["window_size_right"] = window_size_per_step[i][1]
                         if ctx.use_flash_attn_3:
-                            fa_backward_kwargs["is_causal"] = "causal" in ctx.attn_mask_type
+                            fa_backward_kwargs["is_causal"] = causal
                         else:
-                            fa_backward_kwargs["causal"] = "causal" in ctx.attn_mask_type
+                            fa_backward_kwargs["causal"] = causal
                         flash_attn_bwd(
                             dout_part,
                             q_part,
@@ -3811,6 +3805,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         _, seq_dim_o, _ = get_bsh_dims(o_format)
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
+        causal = "causal" in attn_mask_type
 
         if qkv_format in ["bshd", "sbhd"]:
             assert (
@@ -4032,7 +4027,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 k_part,
                 v_part,
                 *fa_forward_args_thd,
-                causal="causal" in attn_mask_type,
+                causal=causal,
                 **fa_forward_kwargs,
             )
             if not fa_utils.v2_7_0_plus:
@@ -4213,6 +4208,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         _, seq_dim_do, _ = get_bsh_dims(ctx.o_format)
         bwd_nominal_dtype = ctx.fwd_nominal_dtype
         fused_attn_backend = None
+        causal = "causal" in ctx.attn_mask_type
 
         dout_fp8 = None
         fp8_meta_kwargs = {}
@@ -4375,7 +4371,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 out,
                 softmax_lse,
                 *fa_backward_args_thd,
-                causal="causal" in ctx.attn_mask_type,
                 **fa_backward_kwargs,
             )
 
