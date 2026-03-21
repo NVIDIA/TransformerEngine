@@ -508,8 +508,8 @@ def run_dpa_with_cp(
     for tensor, name in zip(tensors, tensor_names):
         # dbias/dbias_ could be None, so skip check for it
         if tensor is not None:
-            assert torch.all(~torch.isnan(tensor))
-            assert torch.all(~torch.isinf(tensor))
+            assert torch.all(~torch.isnan(tensor)), f"{name} has nan values"
+            assert torch.all(~torch.isinf(tensor)), f"{name} has inf values"
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############
@@ -562,38 +562,38 @@ def run_dpa_with_cp(
         if is_training:
             dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
             dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
-            dq_, dk_, dv_, out_ = [x.clone() for x in [dq_, dk_, dv_, out_]]
+            out_ = out_.clone()
             cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
             cu_seqlens_q = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
             )
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
+            # FA3 forward doesn't zero padding positions in output;
+            # zero them in out_ (reference) so comparison is valid.
+            if pad_between_seqs == "True":
+                out_[cu_seqlens_q_padded[-1] :] = 0.0
+                for b in range(config.batch_size):
+                    if num_pads_q[b] > 0:
+                        out_[
+                            (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
+                                b + 1
+                            ]
+                        ] = 0.0
             for x in [dq, out, dq_, out_]:
-                if pad_between_seqs == "True":
-                    # FA3 doesn't guarantee zeros at padding positions; zero them explicitly
-                    x[cu_seqlens_q_padded[-1] :] = 0.0
-                    for b in range(config.batch_size):
-                        if num_pads_q[b] > 0:
+                assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
+                for b in range(config.batch_size):
+                    assert (
+                        num_pads_q[b] == 0
+                        or torch.count_nonzero(
                             x[
-                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
-                                    b + 1
-                                ]
-                            ] = 0.0
-                else:
-                    assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
-                    for b in range(config.batch_size):
-                        assert (
-                            num_pads_q[b] == 0
-                            or torch.count_nonzero(
-                                x[
-                                    (
-                                        cu_seqlens_q_padded[b + 1] - num_pads_q[b]
-                                    ) : cu_seqlens_q_padded[b + 1]
-                                ]
-                            ).item()
-                            == 0
-                        )
+                                (
+                                    cu_seqlens_q_padded[b + 1] - num_pads_q[b]
+                                ) : cu_seqlens_q_padded[b + 1]
+                            ]
+                        ).item()
+                        == 0
+                    )
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
@@ -601,20 +601,10 @@ def run_dpa_with_cp(
             cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
             num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
             for x in [dk, dv, dk_, dv_]:
-                if pad_between_seqs == "True":
-                    x[cu_seqlens_kv_padded[-1] :] = 0.0
-                    for b in range(config.batch_size):
-                        if num_pads_kv[b] > 0:
-                            x[
-                                (
-                                    cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
-                                ) : cu_seqlens_kv_padded[b + 1]
-                            ] = 0.0
-                else:
-                    assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
-                    for b in range(config.batch_size):
-                        assert (
-                            num_pads_kv[b] == 0
+                assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
+                for b in range(config.batch_size):
+                    assert (
+                        num_pads_kv[b] == 0
                             or torch.count_nonzero(
                                 x[
                                     (
