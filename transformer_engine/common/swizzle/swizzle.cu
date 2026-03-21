@@ -1429,11 +1429,11 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
       const int m = output[i]->columnwise_scale_inv.shape[1];
       const int k = output[i]->columnwise_scale_inv.shape[0];
 
-      NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Input should be padded in M/N dimension!");
-      NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Input should be padded in K dimension!");
-      NVTE_CHECK(k > 0, "Input scale inverse should be 2D!");
-      NVTE_CHECK(m * k == std::accumulate(output[i]->columnwise_scale_inv.shape.begin(),
-                                          output[i]->columnwise_scale_inv.shape.end(), 1,
+      NVTE_CHECK(m % SF_TILE_DIM_M == 0, "Output should be padded in M/N dimension!");
+      NVTE_CHECK(k % SF_TILE_DIM_K == 0, "Output should be padded in K dimension!");
+      NVTE_CHECK(k > 0, "Output scale inverse should be 2D!");
+      NVTE_CHECK(m * k == std::accumulate(input[i]->columnwise_scale_inv.shape.begin(),
+                                          input[i]->columnwise_scale_inv.shape.end(), 1,
                                           std::multiplies<int>()),
                  "Input.columnwise_scale_inv size is not equal to "
                  "Output.columnwise_scale_inv size!");
