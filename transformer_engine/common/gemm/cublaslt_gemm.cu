@@ -118,8 +118,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   bool is_B_transposed = transB == CUBLAS_OP_T;
 
   // Set conditions for MXFP8 and NVFP4 gemm execution.
-  const auto nvfp4 = is_nvfp_scaling(A.scaling_mode) && is_nvfp_scaling(B.scaling_mode);
-  const auto mxfp8 = !nvfp4 && is_mxfp_scaling(A.scaling_mode) && is_mxfp_scaling(B.scaling_mode);
+  const auto nvfp4 = is_nvfp4_scaling(A.scaling_mode) && is_nvfp4_scaling(B.scaling_mode);
+  const auto mxfp8 = !nvfp4 && is_mxfp8_scaling(A.scaling_mode) && is_mxfp8_scaling(B.scaling_mode);
   int is_nvte_non_tn_fp8_gemm_supported = 0;  // needed only for per tensor scaling
   if (is_tensor_scaling(A.scaling_mode) || is_tensor_scaling(B.scaling_mode)) {
     is_nvte_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
@@ -820,7 +820,7 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
 
   // Check for NVFP4
   // TODO Remove once alpha scale logic is moved into cublas_gemm function
-  if (is_nvfp_scaling(inputA->scaling_mode) || is_nvfp_scaling(inputB->scaling_mode)) {
+  if (is_nvfp4_scaling(inputA->scaling_mode) || is_nvfp4_scaling(inputB->scaling_mode)) {
     NVTE_ERROR("nvte_cublas_gemm does not support NVFP4 data. Use nvte_cublas_gemm_v2 instead.");
   }
 
@@ -908,7 +908,7 @@ void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor 
 
   // Check for NVFP4
   // TODO Remove once alpha scale logic is moved into cublas_gemm function
-  if (is_nvfp_scaling(inputA->scaling_mode) || is_nvfp_scaling(inputB->scaling_mode)) {
+  if (is_nvfp4_scaling(inputA->scaling_mode) || is_nvfp4_scaling(inputB->scaling_mode)) {
     NVTE_ERROR("nvte_cublas_gemm does not support NVFP4 data. Use nvte_cublas_gemm_v2 instead.");
   }
 

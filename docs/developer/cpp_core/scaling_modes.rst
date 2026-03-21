@@ -13,6 +13,12 @@ different trade-offs between precision, performance, and hardware requirements. 
 scaling mode is selected via the ``NVTEScalingMode`` enum and propagated through the
 ``Tensor.scaling_mode`` field.
 
+For user-facing documentation on recipes and how to select scaling modes, see
+:doc:`/features/low_precision_training/index`. For state management details (amax
+history, scale updates, recipe-to-quantizer mapping), see
+:doc:`/developer/quantization/scaling_recipes`. This page focuses on what the C++ core
+needs to know: data layouts, scale tensor shapes, and GEMM constraints.
+
 .. figure:: ./img/scaling_modes_comparison.svg
    :align: center
    :width: 80%
@@ -23,136 +29,125 @@ scaling mode is selected via the ``NVTEScalingMode`` enum and propagated through
    Diagram description for ``scaling_modes_comparison.svg``:
    A table/matrix with 5 rows (one per scaling mode) and columns:
    Mode Name | Enum Value | Scale Granularity | Block Size | Data Type | Min Arch.
-   DELAYED_TENSOR_SCALING | 0 | 1 scale per tensor | N/A | FP8 E4M3/E5M2 | Hopper
+   DELAYED_TENSOR_SCALING | 0 | 1 scale per tensor | N/A | FP8 E4M3/E5M2 | Ada
    MXFP8_1D_SCALING | 1 | 1 scale per 32 elements | 32 | FP8 + E8M0 scales | Blackwell
-   BLOCK_SCALING_1D | 2 | 1 scale per 1×N block | configurable | FP8 E4M3/E5M2 | Blackwell
-   BLOCK_SCALING_2D | 3 | 1 scale per N×N block | configurable | FP8 E4M3/E5M2 | Blackwell
+   BLOCK_SCALING_1D | 2 | 1 scale per 1×128 block | 128 | FP8 E4M3/E5M2 | Blackwell
+   BLOCK_SCALING_2D | 3 | 1 scale per 128×128 block | 128 | FP8 E4M3/E5M2 | Blackwell
    NVFP4_1D_SCALING | 4 | 1 scale per 16 elements | 16 | FP4 E2M1 + E8M0 | Blackwell
 
-Overview
---------
+Non-TN GEMM Support
+---------------------
 
-.. list-table::
-   :header-rows: 1
-   :widths: 25 10 25 15 25
+A cross-cutting concern that affects all scaling modes is non-TN GEMM support.
+cuBLASLt traditionally required FP8 GEMMs to use TN (transpose-normal) layout, which
+is why the forward pass needs rowwise data for one operand and columnwise data for
+the other. On architectures that support non-TN FP8 GEMM (compute capability 10.x and
+13.0+, i.e. Blackwell), this constraint is relaxed — cuBLASLt can consume rowwise data
+for both operands.
 
-   * - Mode
-     - Enum
-     - Scale Granularity
-     - Block Size
-     - Data Type
-   * - Delayed Tensor Scaling
-     - ``0``
-     - 1 scale per tensor
-     - N/A
-     - FP8 E4M3 / E5M2
-   * - MXFP8 1D Scaling
-     - ``1``
-     - 1 scale per 32 elements
-     - 32
-     - FP8 + E8M0 scales
-   * - Block Scaling 1D
-     - ``2``
-     - 1 scale per 1×N block
-     - Configurable
-     - FP8 E4M3 / E5M2
-   * - Block Scaling 2D
-     - ``3``
-     - 1 scale per N×N block
-     - Configurable
-     - FP8 E4M3 / E5M2
-   * - NVFP4 1D Scaling
-     - ``4``
-     - 1 scale per 16 elements
-     - 16
-     - FP4 E2M1 + E8M0
+This has a significant impact on data layout: when non-TN GEMM is supported,
+``data`` and ``columnwise_data`` may point to the same buffer (since a separate
+transposed copy is no longer needed for the GEMM). When non-TN is not supported, they
+must be separate buffers with physically transposed data.
 
-Delayed Tensor Scaling (``NVTE_DELAYED_TENSOR_SCALING``)
---------------------------------------------------------
+Tensor Scaling (``NVTE_DELAYED_TENSOR_SCALING``)
+--------------------------------------------------
 
-The original FP8 scaling mode. A single scale factor applies to the entire tensor,
-computed from the *previous iteration's* amax (absolute maximum) value.
+A single scale factor applies to the entire tensor. Minimum architecture: Ada (sm89).
 
-**How it works:**
+.. note::
 
-1. After each forward/backward pass, the kernel records the amax of the output.
-2. The ``FP8GlobalStateManager`` maintains an amax history window (typically 1024 values).
-3. Before the next iteration, the scale is computed as:
-   ``scale = fp8_max / amax_history.max()``
-4. This scale is applied uniformly to all elements during quantization.
+   The enum name ``NVTE_DELAYED_TENSOR_SCALING`` is a legacy misnomer. This mode is
+   used for all per-tensor scaling (delayed and current) as well as for high-precision
+   (unquantized) tensors. The C++ core does not distinguish between delayed and current
+   scaling — both use the same code paths. The distinction only matters at the framework
+   level (see :doc:`/developer/quantization/scaling_recipes`).
 
-**Trade-offs:**
+Data layout:
 
-- Simple and fast (no per-element scale overhead in GEMM).
-- Scale is one iteration stale — can cause overflow/underflow on loss spikes.
-- Requires the amax feedback loop between iterations.
+- ``data``: row-major, one scale for the entire tensor
+- ``columnwise_data``: column-major (physically transposed), same single scale
+- ``scale_inv``: shape ``[1]`` (one element) for FP8 tensors, empty for high-precision
+- ``amax``: populated by delayed scaling (framework responsibility), unused by current
+  scaling
 
-**C++ helpers:**
+C++ helpers:
 
 .. code-block:: cpp
 
+   // True for NVTE_DELAYED_TENSOR_SCALING (per-tensor scaling, including current)
    bool is_tensor_scaling(const NVTEScalingMode &mode);
+   // Alias — identical behavior
    bool is_delayed_tensor_scaling(const NVTEScalingMode &mode);
 
 MXFP8 1D Scaling (``NVTE_MXFP8_1D_SCALING``)
 ----------------------------------------------
 
 Microscaling FP8 format per the OCP MX specification. Each block of 32 contiguous
-elements shares a single E8M0 (8-bit exponent-only) scale factor.
+elements shares a single E8M0 (8-bit exponent-only) scale factor. Minimum architecture:
+Blackwell.
 
-**Key details:**
+Data layout:
 
-- Block size is fixed at 32 elements.
-- Scales are E8M0 format (power-of-two only, no mantissa bits).
-- Scales may need "GEMM swizzling" — a specific memory layout that cuBLASLt expects.
-  The ``with_gemm_swizzled_scales`` flag on ``Tensor`` tracks this.
-- Current scaling (no amax history needed).
+- ``data``: row-major FP8, shape ``[M, N]``
+- ``columnwise_data``: the physically transposed data, shape ``[N, M]`` — this is a
+  separate buffer with independently quantized blocks along the transposed dimension
+- ``scale_inv`` (rowwise): shape ``[ceil(M), ceil(N/32)]``, padded to ``[128, 4]``
+  multiples for GEMM alignment
+- ``columnwise_scale_inv``: shape ``[ceil(N), ceil(M/32)]``, padded to ``[128, 4]``
+  multiples
 
-**C++ helpers:**
+Scales may need "GEMM swizzling" — a specific memory layout that cuBLASLt expects for
+block-scaled operands. See the `cuBLAS documentation on block scaling factors layout
+<https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout>`_.
+The ``with_gemm_swizzled_scales`` flag on ``Tensor`` tracks whether scales have been
+swizzled.
+
+C++ helper:
 
 .. code-block:: cpp
 
    bool is_mxfp8_scaling(const NVTEScalingMode &mode);
-   bool is_mxfp_scaling(const NVTEScalingMode &mode);  // alias
 
 Block Scaling (``NVTE_BLOCK_SCALING_1D`` / ``NVTE_BLOCK_SCALING_2D``)
 ----------------------------------------------------------------------
 
-Per-block FP8 scaling with configurable block dimensions. ``1D`` uses 1×N blocks
-(one scale per row-slice of N elements), while ``2D`` uses N×N blocks.
+Per-block FP8 scaling with a fixed block size of 128 (matching the DeepSeek v3 recipe).
+``1D`` uses 1×128 blocks (one scale per row-slice of 128 elements), while ``2D`` uses
+128×128 blocks. The block size itself is not configurable — only the 1D vs 2D aspect is
+selectable via the recipe. Minimum architecture: Blackwell.
 
-**Key details:**
+Scales are FP32 (more precise than MXFP8's E8M0). Like MXFP8, scales may require GEMM
+swizzling.
 
-- Block size is configurable via the quantizer's ``block_scaling_dim`` property.
-- Scales are FP32, not E8M0 (more precise than MXFP8).
-- Current scaling (computed just-in-time, no history).
-- Available on Blackwell and later architectures.
-
-**C++ helpers:**
+C++ helper:
 
 .. code-block:: cpp
 
    bool is_block_scaling(const NVTEScalingMode &mode);
-   // Returns true for all non-tensor-scaling modes
+   // Returns true for both 1D and 2D block scaling
 
 NVFP4 1D Scaling (``NVTE_NVFP4_1D_SCALING``)
 ----------------------------------------------
 
-4-bit floating point with E8M0 block scales, targeting maximum compression.
+4-bit floating point with E8M0 block scales, targeting maximum compression. Minimum
+architecture: Blackwell.
 
-**Key details:**
+Data layout:
 
-- Data is FP4 E2M1 format (2 exponent bits, 1 mantissa bit).
-- Each block of 16 elements shares one E8M0 scale.
-- Like MXFP8, may require GEMM-swizzled scales.
-- Blackwell and later only.
+- ``data``: FP4 E2M1 format, packed 2 elements per byte (uint8 storage)
+- ``columnwise_data``: physically transposed FP4 data
+- ``scale_inv`` (rowwise): E8M0 format, shape ``[ceil(M/16), ceil(N/16)]``, padded to
+  ``[4, 128]`` multiples for GEMM alignment
+- ``columnwise_scale_inv``: shape ``[ceil(N/16), ceil(M/16)]``, padded to ``[128, 4]``
 
-**C++ helpers:**
+Like MXFP8, scales may require GEMM swizzling.
+
+C++ helper:
 
 .. code-block:: cpp
 
    bool is_nvfp4_scaling(const NVTEScalingMode &mode);
-   bool is_nvfp_scaling(const NVTEScalingMode &mode);  // alias
 
 Scale Storage and Layout
 ------------------------

@@ -88,11 +88,12 @@ In the C++ ``Tensor`` struct, the layout is reflected in separate fields:
        // ...
    };
 
-For **tensor scaling** (delayed/current), ``data`` and ``columnwise_data`` point to
-different memory buffers (the data is physically transposed).
-
-For **block scaling** modes, the data may be the same buffer but with different scale
-tensors (row-oriented vs. column-oriented block scales).
+Whether ``data`` and ``columnwise_data`` point to the same or different memory buffers
+depends on non-TN GEMM support (see :doc:`/developer/cpp_core/scaling_modes`). On
+architectures that support non-TN FP8 GEMM (Blackwell and later), cuBLASLt can consume
+rowwise data directly for both operands, so ``data`` and ``columnwise_data`` may share
+the same buffer. On architectures without non-TN support, the data must be physically
+transposed into a separate buffer for the columnwise layout.
 
 Performance Implications
 ------------------------

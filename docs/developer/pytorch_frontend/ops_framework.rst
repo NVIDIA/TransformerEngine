@@ -181,121 +181,17 @@ This allows an op to **quantize its output eagerly** using the next op's quantiz
 enabling fused cast kernels. For example, a LayerNorm op receiving the next Linear's
 input quantizer can fuse the normalization and FP8 cast into a single kernel.
 
-Catalog of Basic Operations
-----------------------------
+Available Operations
+---------------------
 
-.. list-table::
-   :header-rows: 1
-   :widths: 25 40 35
+Basic operations are located in ``transformer_engine/pytorch/ops/basic/``. Each file
+implements a single atomic operation (GEMM, normalization, activation, communication,
+etc.).
 
-   * - Operation
-     - File
-     - Description
-   * - ``BasicLinear``
-     - ``basic/basic_linear.py``
-     - Core GEMM (no bias). Supports FP8, TP, SP.
-   * - ``Bias``
-     - ``basic/bias.py``
-     - Additive bias parameter.
-   * - ``LayerNorm``
-     - ``basic/layer_norm.py``
-     - Layer normalization with learnable scale/bias.
-   * - ``RMSNorm``
-     - ``basic/rmsnorm.py``
-     - Root mean square normalization.
-   * - ``GELU``, ``SiLU``, ``ReLU``, ``QGELU``
-     - ``basic/activation.py``
-     - Element-wise activation functions.
-   * - ``GEGLU``, ``SwiGLU``, ``ReGLU``, ``SReGLU``, ``QGEGLU``, ``GLU``,
-       ``ClampedSwiGLU``, ``ScaledSwiGLU``
-     - ``basic/activation.py``, ``basic/swiglu.py``
-     - Gated activation functions (2× input split).
-   * - ``Quantize``
-     - ``basic/quantize.py``
-     - Explicit FP8 cast (identity if FP8 disabled).
-   * - ``AllGather``
-     - ``basic/all_gather.py``
-     - Distributed all-gather along first dim.
-   * - ``AllReduce``
-     - ``basic/all_reduce.py``
-     - Distributed all-reduce.
-   * - ``ReduceScatter``
-     - ``basic/reduce_scatter.py``
-     - Distributed reduce-scatter along first dim.
-   * - ``AddExtraInput``
-     - ``basic/add_extra_input.py``
-     - Add an extra tensor input (for residual connections).
-   * - ``MakeExtraOutput``
-     - ``basic/make_extra_output.py``
-     - Export intermediate tensor as extra output.
-   * - ``Dropout``
-     - ``basic/dropout.py``
-     - Random zeroing.
-   * - ``Reshape``
-     - ``basic/reshape.py``
-     - Tensor reshape.
-   * - ``Identity``
-     - ``basic/identity.py``
-     - Pass-through (useful as fusion anchor).
-   * - ``ConstantScale``
-     - ``basic/constant_scale.py``
-     - Multiply by constant factor.
-   * - ``L2Normalization``
-     - ``basic/l2normalization.py``
-     - L2 normalization.
-   * - ``GroupedLinear``
-     - ``basic/grouped_linear.py``
-     - Multiple parallel GEMMs (MoE).
-
-Catalog of Fused Operations
-----------------------------
-
-**Forward fusions** (registered in ``ops/fused/__init__.py``):
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 35 35
-
-   * - Fused Operation
-     - Pattern
-     - Description
-   * - ``ForwardLinearBiasActivation``
-     - ``BasicLinear`` + ``Bias`` + activation
-     - Fused GEMM + bias + activation
-   * - ``ForwardLinearBiasAdd``
-     - ``BasicLinear`` + ``Bias`` + ``AddExtraInput``
-     - Fused GEMM + bias + residual add
-   * - ``ForwardLinearScaleAdd``
-     - ``BasicLinear`` + ``ConstantScale`` + ``AddExtraInput``
-     - Fused GEMM + scale + add
-   * - ``UserbuffersForwardLinear``
-     - ``BasicLinear`` + ``Bias`` + ``ReduceScatter``
-     - GEMM overlapped with TP communication
-
-**Backward fusions**:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 35 35
-
-   * - Fused Operation
-     - Pattern
-     - Description
-   * - ``BackwardActivationBias``
-     - Backward of activation + bias
-     - Fused activation and bias gradients
-   * - ``BackwardAddRMSNorm``
-     - Backward of add + RMSNorm
-     - Fused residual add and norm gradients
-   * - ``BackwardLinearAdd``
-     - ``MakeExtraOutput`` + ``BasicLinear``
-     - Fused dgrad GEMM + residual add
-   * - ``BackwardLinearScale``
-     - Backward GEMM + scale
-     - Fused backward GEMM and scaling
-   * - ``UserbuffersBackwardLinear``
-     - Backward with Userbuffers
-     - Backward GEMM overlapped with TP communication
+Fused operations are located in ``transformer_engine/pytorch/ops/fused/``. Forward and
+backward fusions are registered separately in ``ops/fused/__init__.py``. Each fused
+operation matches a specific pattern of basic operations (e.g., GEMM + bias + activation)
+and replaces them with a single fused kernel call.
 
 Extra Inputs and Outputs
 -------------------------
@@ -376,9 +272,10 @@ functionality:
      - Production
      - Experimental
 
-Both approaches call the same C++ extensions and CUDA kernels. The ops framework is
-intended to eventually replace the monolithic modules as the primary implementation,
-once it reaches feature parity.
+Both approaches call the same C++ extensions and CUDA kernels. The two implementations
+will eventually be merged, with the ops framework being the more future-proof API. New
+developers should be aware that the ops framework is the preferred direction for new
+work, even though the monolithic modules are currently more mature.
 
 See Also
 --------

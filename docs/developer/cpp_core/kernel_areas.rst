@@ -12,177 +12,87 @@ The C++ core organizes CUDA kernels into functional areas, each in its own subdi
 under ``transformer_engine/common/``. Every area exposes a C API header in
 ``include/transformer_engine/`` and implements one or more CUDA kernels.
 
-GEMM (``gemm/``)
------------------
+The major areas include GEMM (``gemm/``), normalization (``normalization/``),
+quantization/cast (``cast/``), activation (``activation/``), fused attention
+(``fused_attn/``), communication-GEMM overlap (``comm_gemm/``), and several others.
+See the directory listing for the full set.
 
-Matrix multiplication via cuBLASLt with FP8/MXFP8/NVFP4 support.
+Rather than cataloging each area, this page describes the general architectural patterns
+that a developer writing new kernels should understand.
 
-- **Header**: ``include/transformer_engine/gemm.h``
-- **Key file**: ``gemm/cublaslt_gemm.cu``
-- **Entry point**: ``nvte_general_gemm()``
-- Handles: scale/scale-inverse application, bias addition, pre-GeLU fusion, grouped GEMM
-- Dispatches to cuBLASLt with appropriate compute types based on input precision and
-  scaling mode.
+Output-Driven Computation
+--------------------------
 
-Normalization (``normalization/``)
-----------------------------------
+A key design principle: the **output tensor** dictates what computation the kernel
+performs. Kernels inspect the output ``NVTETensor`` to determine:
 
-LayerNorm and RMSNorm with optional FP8 output quantization.
+- Whether to produce rowwise data (``output.has_data()``), columnwise data
+  (``output.has_columnwise_data()``), or both.
+- The scaling mode (``output.scaling_mode``), which determines scale granularity.
+- The output dtype, which determines the quantization target.
 
-- **Header**: ``include/transformer_engine/normalization.h``
-- **Key files**: ``normalization/layernorm/``, ``normalization/rmsnorm/``
-- Variants: forward, backward, fused with quantization (cast output to FP8 in the same
-  kernel to save memory bandwidth)
-- Architecture dispatch: separate kernel implementations for different GPU architectures
-  (e.g., Hopper uses warp-specialized kernels).
+The input tensor is then validated to confirm it provides the fields needed for the
+requested computation (e.g., the input must have data and the correct dtype). This
+output-driven design makes sense because, for example, in a quantize kernel the input is
+high-precision and knows nothing about rowwise/columnwise layouts — only the output
+carries that information.
 
-Activation (``activation/``)
------------------------------
+Scaling Mode Dispatch
+----------------------
 
-Element-wise activation functions with optional FP8 output.
-
-- **Header**: ``include/transformer_engine/activation.h``
-- Supports: GeLU, SiLU/Swish, ReLU, QuickGeLU, SReLU, and their gated variants
-- Fused quantization: activation + cast to FP8 in a single kernel pass.
-
-Cast (``cast/``)
------------------
-
-Type-casting and quantization kernels.
-
-- **Header**: ``include/transformer_engine/cast.h``
-- ``nvte_quantize()`` — cast high-precision data to quantized format with scale computation
-- Handles all scaling modes (tensor, block, MXFP8, NVFP4) with mode-specific kernels.
-
-Transpose (``transpose/``)
----------------------------
-
-Transpose operations, often fused with casting.
-
-- **Header**: ``include/transformer_engine/transpose.h``
-- ``nvte_transpose()`` — standalone transpose
-- Fused variants: cast + transpose in a single kernel (critical for producing columnwise
-  data efficiently during forward pass).
-
-Fused Attention (``fused_attn/``)
----------------------------------
-
-The largest and most complex kernel area. See :doc:`/developer/attention/fused_attn_kernels`
-for detailed coverage.
-
-- **Header**: ``include/transformer_engine/fused_attn.h``
-- Multiple backends: cuDNN-based (F16 and FP8), custom CUDA kernels
-- Supports: MHA, GQA, MQA, arbitrary head dims, causal/padding masks, dropout,
-  sliding window, FP8 quantization.
-
-Fused RoPE (``fused_rope/``)
------------------------------
-
-Rotary positional embedding applied as a fused CUDA kernel.
-
-- **Header**: ``include/transformer_engine/fused_rope.h``
-- Applies rotary embedding in-place during forward and backward passes.
-
-Fused Softmax (``fused_softmax/``)
------------------------------------
-
-Scaled softmax variants optimized for attention score computation.
-
-- **Header**: ``include/transformer_engine/softmax.h``
-- Variants: scaled softmax, scaled masked softmax, scaled upper-triangular masked softmax.
-
-Fused Router (``fused_router/``)
----------------------------------
-
-Mixture-of-Experts (MoE) routing kernels.
-
-- Permutation and unpermutation of tokens across experts.
-- Includes its own type-switch macros (note: these need DType casting, see
-  :doc:`type_system`).
-
-Communication-GEMM Overlap (``comm_gemm/``)
---------------------------------------------
-
-Overlapping NCCL collectives with GEMM computation using CUDA multi-stream.
-
-- See :doc:`/developer/distributed/comm_gemm_overlap` for the design.
-- Uses CUDA events and user-allocated buffers (``UserBuffers``) to pipeline communication
-  and computation.
-
-Multi-Tensor Operations (``multi_tensor/``)
--------------------------------------------
-
-Fused operations over lists of tensors (e.g., multi-tensor scale for optimizer steps).
-
-- **Header**: ``include/transformer_engine/multi_tensor.h``
-
-Hadamard Transform (``hadamard_transform/``)
---------------------------------------------
-
-Hadamard and group Hadamard transforms, with optional fused quantization.
-
-- **Header**: ``include/transformer_engine/hadamard_transform.h``
-- Variants: standard, group, fused with cast, graph-safe implementations.
-
-Recipe (``recipe/``)
---------------------
-
-Scaling recipe kernels that compute quantization scales for each recipe type.
-
-- **Header**: ``include/transformer_engine/recipe.h``
-- Per-recipe files: ``current_scaling.cu``, ``delayed_scaling.cu``,
-  ``fp8_block_scaling.cu``, ``mxfp8_scaling.cu``, ``nvfp4.cu``.
-
-Dropout (``dropout/``)
------------------------
-
-Dropout kernel.
-
-- **Header**: ``include/transformer_engine/dropout.h``
-
-Swizzle (``swizzle/``)
------------------------
-
-Scale swizzling for GEMM-compatible layouts.
-
-- **Header**: ``include/transformer_engine/swizzle.h``
-- Includes block scaling variant (``swizzle_block_scaling.cu``).
-
-Permutation (``permutation/``)
--------------------------------
-
-Token permutation/unpermutation for MoE expert routing.
-
-- **Header**: ``include/transformer_engine/permutation.h``
-
-Padding (``util/padding.cu``)
-------------------------------
-
-Utility kernel for padding tensors to alignment requirements.
-
-- **Header**: ``include/transformer_engine/padding.h``
-
-Architecture Dispatch
----------------------
-
-Many kernel areas provide architecture-specific implementations. Unlike some CUDA
-libraries that use separate source files per architecture (e.g., ``kernel_sm80.cu``,
-``kernel_sm90.cu``), TE uses **template specialization and compile-time dispatch** within
-shared source files:
+Kernels that handle multiple scaling modes use a switch on the output's
+``scaling_mode`` to dispatch to the appropriate implementation. For example, in
+``cast/dispatch/quantize.cuh``:
 
 .. code-block:: text
 
-   normalization/
-   ├── common.h                    # Shared types and helpers
-   ├── common.cpp                  # KernelRegistry, runtime dispatch
-   ├── layernorm/
-   │   ├── ln_fwd_cuda_kernel.cu   # Forward kernels (all archs)
-   │   ├── ln_bwd_semi_cuda_kernel.cu  # Backward kernels
-   │   ├── ln_fwd_kernels.cuh      # Templated kernel implementations
-   │   └── ln_bwd_kernels.cuh
+   switch (output_tensor->scaling_mode):
+     NVTE_DELAYED_TENSOR_SCALING  → fp8::quantize() or cast_transpose()
+     NVTE_MXFP8_1D_SCALING       → mxfp8::quantize()
+     NVTE_BLOCK_SCALING_1D/2D    → quantize_transpose_square_blockwise()
+     NVTE_NVFP4_1D_SCALING       → nvfp4::quantize_transpose()
 
-Kernels are heavily templated (data types, hidden sizes, warp configurations) and the
-appropriate specialization is selected at runtime via a ``KernelRegistry``. CMake compile
-flags (``NVTE_CUDA_ARCHS``) control which GPU architectures are compiled — this affects
-which template instantiations are generated, not which source files are included. See
-:doc:`build_system` for details.
+Each scaling mode may have separate code paths for rowwise-only, columnwise-only, or
+both layouts, again driven by which fields are populated on the output tensor.
+
+Architecture Dispatch
+----------------------
+
+Many kernel areas provide architecture-specific implementations for different GPU
+generations (Ampere, Hopper, Blackwell). The dispatch mechanism varies by area:
+
+- **Normalization** uses a ``KernelRegistry`` (in ``normalization/common.h``) that
+  maps (hidden_size, dtype, warp_config) tuples to kernel function pointers. Kernels are
+  heavily templated and the appropriate specialization is selected at runtime from the
+  registry.
+
+- **Other areas** (cast, GEMM, activation, etc.) use direct dispatch — typically switch
+  statements or if/else chains on the compute capability. Some kernels only support
+  certain GPU architectures (e.g., FP4 kernels require Blackwell).
+
+There is no rigid pattern — the dispatch strategy is chosen per area based on what
+makes sense for that area's complexity. The ``NVTE_CUDA_ARCHS`` CMake flag controls
+which architectures are compiled. This affects which template instantiations are
+generated, which in turn determines build time and binary size. See :doc:`build_system`
+for details.
+
+Fused Kernels
+--------------
+
+Many areas support fusing quantization with the primary computation:
+
+- **Normalization + quantize**: The normalization kernel can produce FP8 output directly,
+  avoiding a separate cast kernel launch.
+- **Activation + quantize**: Similarly, activation functions can cast their output to FP8
+  in the same kernel pass.
+- **Cast + transpose**: A single kernel produces both rowwise and transposed (columnwise)
+  output, critical for efficiently preparing data for the backward pass.
+
+These fusions are driven by the same output-driven pattern: if the output tensor's dtype
+is an FP8 type and has the appropriate scale fields, the kernel produces quantized output
+directly.
+
+For fused attention, see :doc:`/developer/attention/fused_attn_kernels` for dedicated
+coverage.
+
+For communication-GEMM overlap, see :doc:`/developer/distributed/comm_gemm_overlap`.

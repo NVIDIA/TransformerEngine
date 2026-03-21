@@ -244,12 +244,12 @@ inline GroupedGemmInputProperties validate_grouped_gemm_inputs(
              "Grouped GEMM inputs must be FP8 or BF16.");
   NVTE_CHECK(is_fp8_dtype(inputA->dtype()) == is_fp8_dtype(inputB->dtype()),
              "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
-  NVTE_CHECK(transformer_engine::is_mxfp_scaling(inputA->scaling_mode) ==
-                 transformer_engine::is_mxfp_scaling(inputB->scaling_mode),
+  NVTE_CHECK(transformer_engine::is_mxfp8_scaling(inputA->scaling_mode) ==
+                 transformer_engine::is_mxfp8_scaling(inputB->scaling_mode),
              "Grouped GEMM: A and B must both use MXFP8 scaling or both use tensor scaling, "
              "mixed configurations are not supported.");
   const bool is_fp8 = is_fp8_dtype(inputA->dtype());
-  const bool is_mxfp8 = transformer_engine::is_mxfp_scaling(inputA->scaling_mode);
+  const bool is_mxfp8 = transformer_engine::is_mxfp8_scaling(inputA->scaling_mode);
   if (is_mxfp8) {
     NVTE_CHECK(inputA->with_gemm_swizzled_scales,
                "MXFP8 grouped GEMM: A scales must be swizzled for GEMM");
@@ -318,7 +318,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
              "Grouped GEMM operand is missing both row-wise and column-wise data");
 
   const auto sm = t->scaling_mode;
-  const bool mxfp8 = is_mxfp_scaling(sm);
+  const bool mxfp8 = is_mxfp8_scaling(sm);
 
   // Validate scaling mode
   NVTE_CHECK(sm == NVTE_DELAYED_TENSOR_SCALING || mxfp8,

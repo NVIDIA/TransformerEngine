@@ -16,10 +16,11 @@ with opaque ``NVTETensor`` handles rather than C++ objects directly. The C++ ``T
 and ``SimpleTensor`` structs in ``common.h`` are internal implementation details —
 they are never exposed across the API boundary.
 
-This design means there are **two dtype enums** (``NVTEDType`` in C, ``DType`` in C++)
-and **two tensor abstractions** (``NVTEBasicTensor`` in C, ``SimpleTensor`` in C++). They
-mirror each other but are not implicitly convertible. The rest of this page documents both
-systems and the conversion patterns between them.
+This follows the standard pattern of having a pure C API with corresponding C++ wrappers
+that add type safety and convenience. There are two dtype enums (``NVTEDType`` in C,
+``DType`` in C++) and two tensor abstractions (``NVTEBasicTensor`` in C, ``SimpleTensor``
+in C++). They have identical numeric values and ``SimpleTensor`` provides implicit
+conversion operators, so crossing the boundary is straightforward.
 
 C Types (Public API)
 --------------------
@@ -65,8 +66,14 @@ NVTETensor
 ^^^^^^^^^^
 
 An opaque handle (``typedef void *NVTETensor``) to the internal ``Tensor`` object.
-Created with ``nvte_create_tensor()`` and populated via ``nvte_tensor_set()`` with
-``NVTETensorParam`` keys:
+Despite the ``void *`` typedef, ``NVTETensor`` is not a direct pointer to a ``Tensor``
+struct. Instead, it is a 1-based integer index into a pre-allocated pool of ``Tensor``
+objects (see ``transformer_engine.cpp``). The pool has a fixed capacity of approximately
+26,000 tensors (20 MB / sizeof(Tensor)). Freed tensors are returned to a free-list for
+reuse. This means ``nvte_create_tensor()`` does not allocate memory — it retrieves an
+entry from the pool. If the pool is exhausted, an error is raised.
+
+``NVTETensor`` is populated via ``nvte_tensor_set()`` with ``NVTETensorParam`` keys:
 
 .. code-block:: c
 
@@ -84,7 +91,11 @@ Created with ``nvte_create_tensor()`` and populated via ``nvte_tensor_set()`` wi
 NVTEScalingMode
 ^^^^^^^^^^^^^^^
 
-Controls the quantization granularity — see :doc:`scaling_modes` for details.
+Controls the quantization granularity — see :doc:`scaling_modes` for details. Note that
+``NVTE_DELAYED_TENSOR_SCALING`` (value 0) is used not only for delayed scaling but also
+for current scaling and for high-precision (unquantized) tensors. The C++ core
+distinguishes these cases by checking the data dtype (FP8 vs high-precision) and whether
+the amax field is populated.
 
 C++ Types (Internal)
 --------------------
@@ -185,9 +196,13 @@ The main internal tensor type, composed of multiple ``SimpleTensor`` members:
        bool with_gemm_swizzled_scales;  // MXFP8/NVFP4 scale format flag
    };
 
-This structure holds all the metadata needed for a quantized tensor: the data itself,
-scaling factors for both rowwise and columnwise layouts, and amax values for delayed
-scaling.
+This structure holds all the metadata needed for a quantized tensor. Not all fields are
+valid at the same time — which fields are populated depends on the ``scaling_mode`` and
+the data dtype. For example, ``amax`` is only used with delayed tensor scaling and FP8
+dtypes. ``scale_inv`` has shape ``[1]`` for tensor scaling but a multi-element shape for
+block scaling modes. ``columnwise_data`` and ``columnwise_scale_inv`` are only populated
+when the tensor was quantized with columnwise usage enabled. Validation functions in
+``transformer_engine.cpp`` (e.g., ``CheckScaleTensorShape``) enforce these constraints.
 
 DType / NVTEDType Conversion Patterns
 --------------------------------------
@@ -241,6 +256,9 @@ Common Pitfalls
    won't be found by ADL when called with ``NVTEDType`` arguments (which are in global
    scope). Use the namespace qualifier: ``transformer_engine::to_string(nvte_type)``.
 
-4. **Custom switch macros**: Macros like ``TRANSFORMER_ENGINE_TYPE_SWITCH_ALL`` cast to
-   ``DType`` internally, but custom switch macros (e.g., in ``fused_router/utils.h``)
-   may need the same treatment.
+4. **Domain-specific switch macros**: Some kernel areas define their own switch macros
+   that restrict the set of valid types. For example, ``fused_router/utils.h`` defines
+   ``TE_ROUTER_PROBS_TYPE_SWITCH_ALL`` (only FP32/FP16/BF16) and
+   ``TE_ROUTER_INDEX_TYPE_SWITCH_ALL`` (only Int32/Int64/BF16/FP32). These use
+   ``DType`` directly in their switch cases, so the same ``static_cast`` rules apply
+   when calling them with ``NVTEDType`` values.
