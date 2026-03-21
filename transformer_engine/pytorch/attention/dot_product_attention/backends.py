@@ -36,7 +36,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     restore_from_saved,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8TensorStorage
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8TensorStorage
 from transformer_engine.pytorch.constants import (
     TE_DType,
     QKVLayouts,
@@ -185,26 +185,15 @@ class FP8EmulationFunc(torch.autograd.Function):
             query_layer, key_layer, value_layer = [
                 x.contiguous() for x in [tensor1, tensor2, tensor3]
             ]
-            assert qkv_layout == "sbhd_sbhd_sbhd", (
-                "sbhd_sbhd_sbhd is assumed to be the shape always at this point in"
-                " UnfusedDotProductAttention."
-            )
+            # sbhd_sbhd_sbhd should always be the shape at this point
             q_fp8, k_fp8, v_fp8, qkv_layout = combine_and_quantize(
                 qkv_layout, query_layer, key_layer, value_layer, quantizer
             )
             tensors = combine_and_dequantize(
-                qkv_layout,
-                q_fp8,
-                k_fp8,
-                v_fp8,
-                src_nominal_dtype=query_layer.dtype,
-                des_nominal_dtype=query_layer.dtype,
+                qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=query_layer.dtype
             )
             if isinstance(quantizer, MXFP8Quantizer):
-                assert qkv_layout == "bhsd_bhsd_bhsd", (
-                    "bhsd_bhsd_bhsd is assumed to be the shape always at this point in"
-                    " UnfusedDotProductAttention."
-                )
+                # bhsd_bhsd_bhsd should always be the shape at this point
                 # permute back to sbhd_sbhd_sbhd
                 tensors = [x.permute(2, 0, 1, 3).contiguous() for x in tensors]
         elif quantizer_name in ["S_quantizer", "O_quantizer"]:
@@ -238,10 +227,7 @@ class FP8EmulationFunc(torch.autograd.Function):
                 ctx.qkv_layout, dq_fp8, dk_fp8, dv_fp8, src_nominal_dtype=query_grad.dtype
             )
             if isinstance(ctx.quantizer, MXFP8Quantizer):
-                assert ctx.qkv_layout == "bhsd_bhsd_bhsd", (
-                    "bhsd_bhsd_bhsd is assumed to be the shape always at this point in"
-                    " UnfusedDotProductAttention."
-                )
+                # bhsd_bhsd_bhsd should always be the shape at this point
                 # permute back to sbhd_sbhd_sbhd
                 tensors = [x.permute(2, 0, 1, 3).contiguous() for x in tensors]
         else:
@@ -447,7 +433,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
         )
 
-        # [b, np, sq, sk]
+        # [b, h, sq, sk]
         output_size = (
             query_layer.size(1),
             query_layer.size(2),
@@ -466,7 +452,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 int(query_layer.shape[2] / value_layer.shape[2]), dim=2
             )
 
-        # preallocting result tensor: [b * np, sq, sk]
+        # preallocting result tensor: [b * h, sq, sk]
         matmul_result = torch.empty(
             output_size[0] * output_size[1],
             output_size[2],
@@ -529,17 +515,17 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 "sbhd_sbhd_sbhd",
             )
 
-        # [sq, b, np, hn] -> [sq, b * np, hn]
+        # [sq, b, h, d] -> [sq, b * h, d]
         query_layer = query_layer.reshape(output_size[2], output_size[0] * output_size[1], -1)
-        # [sk, b, np, hn] -> [sk, b * np, hn]
+        # [sk, b, h, d] -> [sk, b * h, d]
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
-        # Raw attention scores. [b * np, sq, sk]
+        # Raw attention scores. [b * h, sq, sk]
         if core_attention_bias_type == "no_bias":
             matmul_result = torch.baddbmm(
                 matmul_result,
-                query_layer.transpose(0, 1),  # [b * np, sq, hn]
-                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                query_layer.transpose(0, 1),  # [b * h, sq, d]
+                key_layer.transpose(0, 1).transpose(1, 2),  # [b * h, d, sk]
                 beta=0.0,
                 alpha=scale,
             ).view(*output_size)
@@ -547,8 +533,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         elif core_attention_bias_type == "pre_scale_bias":
             assert core_attention_bias is not None, "core_attention_bias should not be None!"
             matmul_result = torch.bmm(
-                query_layer.transpose(0, 1),  # [b * np, sq, hn]
-                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                query_layer.transpose(0, 1),  # [b * h, sq, d]
+                key_layer.transpose(0, 1).transpose(1, 2),  # [b * h, d, sk]
             )
             matmul_result = matmul_result.view(*output_size) + core_attention_bias
             matmul_result *= scale
@@ -573,8 +559,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 )
             matmul_result = torch.baddbmm(
                 matmul_result,
-                query_layer.transpose(0, 1),  # [b * np, sq, hn]
-                key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
+                query_layer.transpose(0, 1),  # [b * h, sq, d]
+                key_layer.transpose(0, 1).transpose(1, 2),  # [b * h, d, sk]
                 beta=0.0,
                 alpha=scale,
             )
@@ -591,13 +577,13 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # max attention score
         max_logit = None
         if self.return_max_logit:
-            # matmul_result [b, np, sq, dk], max_logit [np]
+            # matmul_result [b, h, sq, dk], max_logit [h]
             max_logit = matmul_result
             if attn_mask_type != "no_mask":
                 max_logit = self.mask_func(matmul_result, attention_mask)
             max_logit = torch.amax(max_logit, dim=(0, 2, 3))
 
-        # add attention sink to the last column: [b, np, sq, sk+1]
+        # add attention sink to the last column: [b, h, sq, sk+1]
         if self.softmax_type != "vanilla":
             matmul_result = torch.cat(
                 [
@@ -622,7 +608,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if "padding" in attn_mask_type:
             attention_probs = attention_probs.masked_fill(attention_mask, 0)
 
-        # remove attention sink: [b, np, sq, sk]
+        # remove attention sink: [b, h, sq, sk]
         if self.softmax_type != "vanilla":
             attention_probs = attention_probs[..., :-1]
 
@@ -632,7 +618,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             attention_probs = self.attention_dropout(attention_probs)
 
         # value_layer -> context layer.
-        # [sk, b, np, hn] --> [b, np, sq, hn]
+        # [sk, b, h, d] --> [b, h, sq, d]
         output_size = (
             value_layer.size(1),
             value_layer.size(2),
@@ -640,10 +626,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             value_layer.size(3),
         )
 
-        # change view [sk, b * np, hn]
+        # change view [sk, b * h, d]
         value_layer = value_layer.reshape(value_layer.size(0), output_size[0] * output_size[1], -1)
 
-        # change view [b * np, sq, sk]
+        # change view [b * h, sq, sk]
         attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
 
         if fp8:
@@ -652,37 +638,37 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 attention_probs, None, None, S_quantizer, "S_quantizer", None
             )
 
-        # matmul: [b * np, sq, hn]
+        # matmul: [b * h, sq, d]
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
 
-        # change view [b, np, sq, hn]
+        # change view [b, h, sq, d]
         context_layer = context_layer.view(*output_size)
 
         if q_format == "sbhd":
-            # [b, np, sq, hn] --> [sq, b, np, hn]
+            # [b, h, sq, d] --> [sq, b, h, d]
             context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
 
-            # [sq, b, np, hn] --> [sq, b, hp]
+            # [sq, b, h, d] --> [sq, b, hd]
             context_layer = context_layer.view(max_seqlen_q, batch_size, -1)
 
         if q_format == "bshd":
-            # [b, np, sq, hn] --> [b, sq, np, hn]
+            # [b, h, sq, d] --> [b, sq, h, d]
             context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
 
-            # [b, sq, np, hn] --> [b, sq, hp]
+            # [b, sq, h, d] --> [b, sq, hd]
             context_layer = context_layer.view(batch_size, max_seqlen_q, -1)
 
         if q_format == "thd":
-            # [b, np, sq, hn] --> [b, sq, np, hn]
+            # [b, h, sq, d] --> [b, sq, h, d]
             context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
 
-            # [b, sq, np, hn] --> [tq, np, hn]
+            # [b, sq, h, d] --> [tq, h, d]
             context_layer = ConvertBSHDtoTHD.apply(
                 context_layer,
                 cu_seqlens_q,
             )
 
-            # [tq, np, hn] --> [tq, hp]
+            # [tq, h, d] --> [tq, hd]
             context_layer = context_layer.view(context_layer.shape[0], -1)
 
         if fp8:
@@ -1258,7 +1244,8 @@ class FusedAttnFunc(torch.autograd.Function):
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
 
-        # save qkv_layout and get output format
+        # qkv_layout may change due to MXFP8 quantization
+        # o_format should stay the same as original qkv_format
         original_qkv_layout = qkv_layout
         _, o_format, _ = dpa_utils.get_qkv_format(qkv_layout)
 
@@ -1600,12 +1587,15 @@ class FusedAttnFunc(torch.autograd.Function):
                 ctx.qkv_layout = reload_layout[:-1]
             else:
                 ctx.qkv_layout = qkv_layout
+                if fp8 and not ctx.fp8:
+                    ctx.qkv_layout = original_qkv_layout
         else:
             ctx.qkv_layout = qkv_layout
             if fp8 and not ctx.fp8:
                 ctx.qkv_layout = original_qkv_layout
 
         ctx.o_format = o_format
+        # dqkv should have the same layout as the original qkv
         ctx.dqkv_layout = original_qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
@@ -1717,18 +1707,18 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.dP_quantizer,
                     )
 
-                    # # get tex.DType for dq, dk, dv data
-                    # dqkv_te_dtype = d_out_fp8._fp8_dtype
-
-                    # q_fp8, k_fp8, v_fp8, out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16,
+                    # q_fp8, k_fp8, v_fp8:          Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16,
                     #                               fp8_dtype = tex.DType.kFloat8E4M3
-                    # d_out_fp8:                    Float8Tensor; dtype = torch.float16 or torch.bfloat16
+                    # d_out_fp8:                    Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16
                     #                               fp8_dtype = tex.DType.kFloat8E5M2
                     # DelayedScaling:
                     # out_, dq_, dk_, dv_:          Float8Tensor; dtype = torch.float16 or torch.bfloat16
                     #                               fp8_dtype = tex.DType.kFloat8E4M3
-                    # Float8CurrentScaling:
+                    # Float8CurrentScaling + NVTE_DPA_FP8CS_O_in_F16=1:
                     # out_, dq_, dk_, dv_:          torch.Tensor; dtype = torch.float16 or torch.bfloat16
+                    # Float8CurrentScaling + NVTE_DPA_FP8CS_O_in_F16=0:
+                    # out_:                         Float8Tensor; dtype = torch.float16 or torch.bfloat16
+                    # dq_, dk_, dv_:                torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     # MXFP8BlockScaling:
                     # out_, dq_, dk_, dv_, d_out:   torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     out_ = out_fp8
@@ -1748,7 +1738,6 @@ class FusedAttnFunc(torch.autograd.Function):
                         out_,
                         d_out_fp8,
                         dqkv_nominal_dtype,
-                        # dqkv_te_dtype, # could we remove this?
                         aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         cu_seqlens_q_padded,
@@ -1881,7 +1870,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 else:
                     if isinstance(d_out, QuantizedTensorStorage):
                         d_out = d_out.dequantize(dtype=ctx.nominal_dtype)
-                    # dqkv_te_dtype = TE_DType[d_out.dtype]
                     # q, k, v, out, d_out, dq, dk, dv: torch.Tensor; torch.float16 or torch.bfloat16
                     dq, dk, dv, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
@@ -1894,7 +1882,6 @@ class FusedAttnFunc(torch.autograd.Function):
                         out,
                         d_out,
                         dqkv_nominal_dtype,
-                        # dqkv_te_dtype,
                         aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         cu_seqlens_q_padded,
@@ -2073,9 +2060,9 @@ class FusedAttention(torch.nn.Module):
             fused_attention_backend != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
         ), "No fused attention backend supports this input combination!"
         assert all(
-            x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor)
+            x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, QuantizedTensorStorage)
             for x in [query_layer, key_layer, value_layer]
-        ), "FusedAttention only supports FP16 and BF16 data types, or Float8Tensors."
+        ), "FusedAttention only supports FP16 and BF16 data types, or QuantizedTensors."
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
         ), "FusedAttention only supports CUDA tensors."

@@ -23,8 +23,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.common.recipe import MXFP8BlockScaling, Format
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.constants import (
@@ -251,10 +249,10 @@ def get_seq_chunk_ids_for_reordering_after_attn(cp_size, device):
 def reorder_seq_chunks_for_a2a_before_attn(x, chunk_ids_for_a2a, seq_dim, cp_size):
     """Reorder sequence chunk for A2A communication before attention compute."""
     # [cp, b, s, h//cp, d] -> [b, cp, s, h//cp, d]
-    # or [cp, s, b, h//cp, d] -> [cp, s, b, h//cp, d]
+    # [cp, s, b, h//cp, d] -> [cp, s, b, h//cp, d]
     x = x.movedim(0, seq_dim).contiguous()
     # [b, cp, s, h//cp, d] -> [b, cp*2, s//2, h//cp, d]
-    # or [cp, s, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
+    # [cp, s, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
     x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 2) :])
     # reorder the sequence chunks
     x = torch.index_select(x, dim=seq_dim, index=chunk_ids_for_a2a)
@@ -265,12 +263,12 @@ def reorder_seq_chunks_for_a2a_before_attn(x, chunk_ids_for_a2a, seq_dim, cp_siz
 def reorder_seq_chunks_for_a2a_after_attn(x, chunk_ids_for_a2a, seq_dim, cp_size):
     """Reorder sequence chunk for A2A communication after attention compute."""
     # [b, cp*2, s//2, h//cp, d] -> [cp*2, b, s//2, h//cp, d]
-    # or [cp*2, s//2, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
+    # [cp*2, s//2, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
     x = x.movedim(seq_dim, 0).contiguous()
     # reorder the sequence chunks
     x = torch.index_select(x, dim=0, index=chunk_ids_for_a2a)
     # [cp*2, b, s//2, h//cp, d] -> [cp, 2, b, s//2, h//cp, d]
-    # or [cp*2, s//2, b, h//cp, d] -> [cp, 2, s//2, b, h//cp, d]
+    # [cp*2, s//2, b, h//cp, d] -> [cp, 2, s//2, b, h//cp, d]
     x = x.view(cp_size, 2, *x.shape[1:])
     return x
 
@@ -458,8 +456,8 @@ def flash_attn_a2a_communicate(
                             x, chunk_ids_for_a2a, seq_dim, cp_size
                         )
                         # [b, cp*2, s//2, h//cp, d] -> [b, cp*s, h//cp, d]
-                        # or [cp*2, s//2, b, h//cp, d] -> [cp*s, b, h//cp, d]
-                        # or [b, h//cp, cp*2, s//2, d] -> [b, h//cp, cp*s, d]
+                        # [cp*2, s//2, b, h//cp, d] -> [cp*s, b, h//cp, d]
+                        # [b, h//cp, cp*2, s//2, d] -> [b, h//cp, cp*s, d]
                         a2a_outputs[i - 2] = x.view(
                             *x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]
                         )
@@ -475,9 +473,9 @@ def flash_attn_a2a_communicate(
             if i < len(a2a_inputs):
                 x = a2a_inputs[i]
                 # [b, s, h, d] -> [b, s, cp, h//cp, d]
-                # or [s, b, h, d] -> [s, b, cp, h//cp, d]
-                # or [b, h, s, d] -> [b, cp, h//cp, s, d]
-                # or [t, h, d] -> [t, cp, h//cp, d]
+                # [s, b, h, d] -> [s, b, cp, h//cp, d]
+                # [b, h, s, d] -> [b, cp, h//cp, s, d]
+                # [t, h, d] -> [t, cp, h//cp, d]
                 x = x.view(
                     *x.shape[:head_dim],
                     cp_size,
@@ -485,9 +483,9 @@ def flash_attn_a2a_communicate(
                     *x.shape[head_dim + 1 :],
                 )
                 # [b, s, cp, h//cp, d] -> [cp, b, s, h//cp, d]
-                # or [s, b, cp, h//cp, d] -> [cp, s, b, h//cp, d]
-                # or [b, cp, h//cp, s, d] -> [cp, b, h//cp, s, d]
-                # or [t, cp, h//cp, d] -> [cp, t, h//cp, d]
+                # [s, b, cp, h//cp, d] -> [cp, s, b, h//cp, d]
+                # [b, cp, h//cp, s, d] -> [cp, b, h//cp, s, d]
+                # [t, cp, h//cp, d] -> [cp, t, h//cp, d]
                 a2a_inputs[i] = x.movedim(head_dim, 0).contiguous()
     else:
         for i in range(len(a2a_inputs) + 2):
@@ -500,8 +498,8 @@ def flash_attn_a2a_communicate(
                 x = a2a_inputs[i]
                 if qkv_format in ["bshd", "sbhd", "bhsd"]:
                     # [b, cp*s, h//cp, d] -> [b, cp*2, s//2, h//cp, d]
-                    # or [cp*s, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
-                    # or [b, h//cp, cp*s, d] -> [b, h//cp, cp*2, s//2, d]
+                    # [cp*s, b, h//cp, d] -> [cp*2, s//2, b, h//cp, d]
+                    # [b, h//cp, cp*s, d] -> [b, h//cp, cp*2, s//2, d]
                     x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 1) :])
                     # reorder the sequence chunks
                     a2a_inputs[i] = reorder_seq_chunks_for_a2a_after_attn(
@@ -518,9 +516,9 @@ def flash_attn_a2a_communicate(
                     a2a_reqs[i - 2].wait()
                     x = a2a_outputs[i - 2]
                     # [cp, 2, b, s//2, h//cp, d] -> [2, b, s//2, cp, h//cp, d]
-                    # or [cp, 2, s//2, b, h//cp, d] -> [2, s//2, b, cp, h//cp, d]
-                    # or [cp, 2, b, h//cp, s//2, d] -> [2, b, cp, h//cp, s//2, d]
-                    # or [cp, t, h//cp, d] -> [t, cp, h//cp, d]
+                    # [cp, 2, s//2, b, h//cp, d] -> [2, s//2, b, cp, h//cp, d]
+                    # [cp, 2, b, h//cp, s//2, d] -> [2, b, cp, h//cp, s//2, d]
+                    # [cp, t, h//cp, d] -> [t, cp, h//cp, d]
                     tmp_list = [x for x in qkv_format]
                     if "t" not in qkv_format:
                         tmp_list.insert(0, "2")
@@ -530,9 +528,9 @@ def flash_attn_a2a_communicate(
                     tmp_list.insert(head_dim_, tmp_list.pop(0))
                     x = x.movedim(0, head_dim_)
                     # [2, b, s//2, cp, h//cp, d] -> [b, 2, s//2, cp, h//cp, d]
-                    # or [2, s//2, b, cp, h//cp, d] -> [2, s//2, b, cp, h//cp, d]
-                    # or [2, b, cp, h//cp, s//2, d] -> [b, cp, h//cp, 2, s//2, d]
-                    # or [t, cp, h//cp, d] -> [t, cp, h//cp, d]
+                    # [2, s//2, b, cp, h//cp, d] -> [2, s//2, b, cp, h//cp, d]
+                    # [2, b, cp, h//cp, s//2, d] -> [b, cp, h//cp, 2, s//2, d]
+                    # [t, cp, h//cp, d] -> [t, cp, h//cp, d]
                     if "t" not in qkv_format:
                         tmp_format = "".join(tmp_list)
                         seq_dim_ = tmp_format.index("s") - 1
@@ -542,9 +540,9 @@ def flash_attn_a2a_communicate(
                         seq_dim_ = 0
                     x = x.contiguous()
                     # [b, 2, s//2, cp, h//cp, d] -> [b*s, h, d]
-                    # or [2, s//2, b, cp, h//cp, d] -> [s*b, h, d]
-                    # or [b, cp, h//cp, 2, s//2, d] -> [b*h, s, d]
-                    # or [t, cp, h//cp, d] -> [t, h, d]
+                    # [2, s//2, b, cp, h//cp, d] -> [s*b, h, d]
+                    # [b, cp, h//cp, 2, s//2, d] -> [b*h, s, d]
+                    # [t, cp, h//cp, d] -> [t, h, d]
                     a2a_outputs[i - 2] = x.view(-1, x.shape[-3] * x.shape[-2], x.shape[-1])
     torch.cuda.current_stream().wait_stream(cp_stream)
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
@@ -1226,7 +1224,6 @@ def cp_p2p_bwd_fused_attn(
         out_part,
         dout_part,
         bwd_nominal_dtype,
-        # bwd_output_te_dtype,
         aux_tensors,
         fused_attn_backend,
         cu_seqlens_q_padded=cu_seqlens_q_padded_,
@@ -1434,6 +1431,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         is_input_fp8 = isinstance(q, QuantizedTensorStorage)
         is_output_fp8 = fp8_output
         is_bwd_fp8 = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        # recipe passed in through autocast or set by NVTE_DPA_FP8_RECIPE;
+        # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
