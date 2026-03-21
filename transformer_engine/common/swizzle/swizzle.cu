@@ -1362,7 +1362,7 @@ void multi_tensor_unswizzle_scaling_factors(const std::vector<Tensor*>& input,
         m = output[i]->scale_inv.shape[0];
         k = output[i]->scale_inv.shape[1];
         NVTE_CHECK(m * k == input[i]->scale_inv.numel(), "Expected input tensor ", i, " to have ",
-                   m * k, " row-wise scaling factors, but got shape=", output[i]->scale_inv.shape,
+                   m * k, " row-wise scaling factors, but got shape=", input[i]->scale_inv.shape,
                    ".");
       }
 
