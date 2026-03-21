@@ -587,9 +587,9 @@ def run_dpa_with_cp(
                         num_pads_q[b] == 0
                         or torch.count_nonzero(
                             x[
-                                (
-                                    cu_seqlens_q_padded[b + 1] - num_pads_q[b]
-                                ) : cu_seqlens_q_padded[b + 1]
+                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
+                                    b + 1
+                                ]
                             ]
                         ).item()
                         == 0
@@ -605,15 +605,15 @@ def run_dpa_with_cp(
                 for b in range(config.batch_size):
                     assert (
                         num_pads_kv[b] == 0
-                            or torch.count_nonzero(
-                                x[
-                                    (
-                                        cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
-                                    ) : cu_seqlens_kv_padded[b + 1]
-                                ]
-                            ).item()
-                            == 0
-                        )
+                        or torch.count_nonzero(
+                            x[
+                                (
+                                    cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]
+                                ) : cu_seqlens_kv_padded[b + 1]
+                            ]
+                        ).item()
+                        == 0
+                    )
         else:
             # Forward-only: reshape only out/out_ for comparison
             out = out.index_select(0, seq_idx_q).contiguous()
