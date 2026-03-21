@@ -1185,6 +1185,9 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
                    "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
         m = output->scale_inv.shape[0];
         k = output->scale_inv.shape[1];
+        NVTE_CHECK(static_cast<size_t>(m) * k == input->scale_inv.numel(),
+                   "Expected input tensor to have ", static_cast<size_t>(m) * k,
+                   " row-wise scaling factors, but got shape=", input->scale_inv.shape, ".");
         NVTE_CHECK(static_cast<size_t>(m) * k == output->scale_inv.numel(),
                    "Expected output tensor to have ", static_cast<size_t>(m) * k,
                    " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
@@ -1197,6 +1200,9 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
                    ".");
         m = output->columnwise_scale_inv.shape[1];
         k = output->columnwise_scale_inv.shape[0];
+        NVTE_CHECK(static_cast<size_t>(m) * k == input->columnwise_scale_inv.numel(),
+                   "Expected input tensor to have ", static_cast<size_t>(m) * k,
+                   " column-wise scaling factors, but got shape=", input->columnwise_scale_inv.shape, ".");
         NVTE_CHECK(static_cast<size_t>(m) * k == output->columnwise_scale_inv.numel(),
                    "Expected output tensor to have ", static_cast<size_t>(m) * k,
                    " column-wise scaling factors, but got shape=",
@@ -1216,6 +1222,10 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
                    "Expected 2D scaling factors, got shape=", output->scale_inv.shape, ".");
         m = output->scale_inv.shape[0];
         k = output->scale_inv.shape[1];
+        // Example for NVFP4 rowwise path:  
+        NVTE_CHECK(static_cast<size_t>(m) * k == input->scale_inv.numel(),  
+                  "Expected input tensor to have ", static_cast<size_t>(m) * k, 
+                  " row-wise scaling factors, but got shape=", input->scale_inv.shape, ".");
         NVTE_CHECK(static_cast<size_t>(m) * k == output->scale_inv.numel(),
                    "Expected output tensor to have ", static_cast<size_t>(m) * k,
                    " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
@@ -1227,6 +1237,9 @@ void unswizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t
                    ".");
         m = output->columnwise_scale_inv.shape[0];
         k = output->columnwise_scale_inv.shape[1];
+        NVTE_CHECK(static_cast<size_t>(m) * k == input->columnwise_scale_inv.numel(),
+                   "Expected input tensor to have ", static_cast<size_t>(m) * k,
+                   " column-wise scaling factors, but got shape=", input->columnwise_scale_inv.shape, ".");
         NVTE_CHECK(static_cast<size_t>(m) * k == output->columnwise_scale_inv.numel(),
                    "Expected output tensor to have ", static_cast<size_t>(m) * k,
                    " column-wise scaling factors, but got shape=",
