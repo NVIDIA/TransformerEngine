@@ -543,6 +543,9 @@ def get_attention_backend(
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for MXFP8 on arch < sm100")
                 use_fused_attention = False
+            elif fp8_recipe.fp8_mha:
+                logger.debug("Disabling FusedAttention for MXFP8 with fp8_mha=True")
+                use_fused_attention = False
             else:
                 if cudnn_version < (9, 21, 0):
                     logger.debug("Disabling FusedAttention for MXFP8 with cuDNN < 9.21.0")
@@ -762,8 +765,6 @@ def get_attention_backend(
         logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
         use_flash_attention = False
         if fp8 and fp8_recipe.fp8_dpa:
-            logger.debug("Disabling FusedAttention for softmax_type = %s in FP8", softmax_type)
-            use_fused_attention = False
             logger.debug(
                 "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
             )
@@ -1137,15 +1138,15 @@ def get_attention_backend(
             )
             use_flash_attention_2 = False
     if use_fused_attention and deterministic:
-        if softmax_type != "vanilla":
-            logger.debug(
-                "Disabling FusedAttention for determinism reasons with softmax_type = %s. "
-                "Sink attention (off-by-one and learnable softmax) requires "
-                "NVTE_ALLOW_NONDETERMINISTIC_ALGO=1",
-                softmax_type,
-            )
-            use_fused_attention = False
-            fused_attention_backend = None
+        # if softmax_type != "vanilla":
+        #     logger.debug(
+        #         "Disabling FusedAttention for determinism reasons with softmax_type = %s. "
+        #         "Sink attention (off-by-one and learnable softmax) requires "
+        #         "NVTE_ALLOW_NONDETERMINISTIC_ALGO=1",
+        #         softmax_type,
+        #     )
+        #     use_fused_attention = False
+        #     fused_attention_backend = None
         if (
             fused_attention_backend == FusedAttnBackend["FP8"]
             and is_training

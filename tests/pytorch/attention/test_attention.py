@@ -1816,17 +1816,20 @@ model_configs_fp8_vs_f16 = {
         head_dim_v=128,
         attn_mask_type=attn_mask_type,
     ),
-    "fp8_10": ModelConfig(2, 8192, 32, 128, attn_mask_type=attn_mask_type, window_size=(128, 0)),
-    "fp8_11": ModelConfig(2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type=attn_mask_type),
+    "fp8_10": ModelConfig(2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type=attn_mask_type),
+    "fp8_11": ModelConfig(2, 8192, 32, 128, attn_mask_type=attn_mask_type, window_size=(128, 0)),
     "fp8_12": ModelConfig(
-        2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type=attn_mask_type, window_size=(128, 0)
+        2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type=attn_mask_type
     ),
     "fp8_13": ModelConfig(
-        2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
+        2, 8192, 64, 64, attn_mask_type=attn_mask_type, window_size=(128, 0)
     ),
-    "fp8_14": ModelConfig(
-        2, 8192, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
-    ),
+    # "fp8_14": ModelConfig(
+    #     2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
+    # ),
+    # "fp8_15": ModelConfig(
+    #     2, 8192, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
+    # ),
     # "fp8_15": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding"),
     # "fp8_16": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding"),
     # "fp8_17": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding"),
@@ -2312,6 +2315,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             layer_number=1,
             attention_type="self",
             qkv_format=qkv_format,
+            softmax_type=config.softmax_type,
         ).to(dtype=dtype, device="cuda")
         if not is_training:
             dpa = dpa.eval()
