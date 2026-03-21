@@ -361,7 +361,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
        (cudnn_runtime_version >= 92100 && head_dim_qk <= 192 && head_dim_v <= 128)) &&
       !requires_64bit_ragged_offset &&
       // pre-9.21: softmax_type=vanilla, 9.21+: softmax_type={vanilla, off-by-one, learnable}
-      ((cudnn_runtime_version < 92100 && softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) || cudnn_runtime_version >= 92100) &&
+      ((cudnn_runtime_version < 92100 && softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) ||
+       cudnn_runtime_version >= 92100) &&
       // 9.10.0: known bugs with SDPA FP8
       (cudnn_runtime_version != 91000) && !return_max_logit) {
     if (cudnn_runtime_version >= 8900) {
