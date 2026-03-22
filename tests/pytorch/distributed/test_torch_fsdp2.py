@@ -34,9 +34,7 @@ def test_fsdp2_model_tests():
         ],
         env=os.environ,
     )
-    assert result.returncode in (0, 5), (
-        f"Inner pytest failed with exit code {result.returncode}"
-    )
+    assert result.returncode in (0, 5), f"Inner pytest failed with exit code {result.returncode}"
 
 
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
@@ -59,9 +57,7 @@ def test_fsdp2_fused_adam_tests():
         ],
         env=os.environ,
     )
-    assert result.returncode in (0, 5), (
-        f"Inner pytest failed with exit code {result.returncode}"
-    )
+    assert result.returncode in (0, 5), f"Inner pytest failed with exit code {result.returncode}"
 
 
 def test_dummy() -> None:

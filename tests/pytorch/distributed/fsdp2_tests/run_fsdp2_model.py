@@ -293,8 +293,7 @@ def _run_training(args):
         dist_print(f" Sharded parameters materialized and initialized on cuda device.")
 
     dist_print(
-        f"FSDP2 model in cuda, memory allocated:"
-        f" {torch.cuda.memory_allocated(device) / 1e6} MB"
+        f"FSDP2 model in cuda, memory allocated: {torch.cuda.memory_allocated(device) / 1e6} MB"
     )
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -341,7 +340,9 @@ def _train(args):
 
     assert dist.is_nccl_available()
     dist.init_process_group(
-        backend="nccl", rank=WORLD_RANK, world_size=WORLD_SIZE,
+        backend="nccl",
+        rank=WORLD_RANK,
+        world_size=WORLD_SIZE,
     )
     try:
         _run_training(args)
@@ -364,9 +365,7 @@ NUM_PROCS = int(os.environ.get("WORLD_SIZE", "1"))
 @pytest.mark.parametrize("layer_type", ["LayerNormLinear", "TransformerLayer"])
 def test_distributed(recipe_name, fp8_init, sharding_dims, layer_type):
     if recipe_name in ("Float8BlockScaling", "NVFP4BlockScaling") and fp8_init:
-        pytest.xfail(
-            f"{recipe_name} + fp8_init: test_fp8_fsdp2_allgather is currently failing."
-        )
+        pytest.xfail(f"{recipe_name} + fp8_init: test_fp8_fsdp2_allgather is currently failing.")
 
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)

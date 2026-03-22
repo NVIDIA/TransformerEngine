@@ -40,6 +40,7 @@ from torch.distributed.tensor import DTensor
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import QuantizedTensor
 import transformer_engine.common.recipe
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from conftest import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
@@ -125,11 +126,13 @@ def _shard_model(model, world_size):
     restore_custom_attrs(model, custom_attrs)
     return model
 
+
 def _get_dist_info():
     """Get world_size and device from environment (PG already initialized by session fixture)."""
     world_size = int(os.environ["WORLD_SIZE"])
     device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
     return world_size, device
+
 
 def test_fused_adam_fp8_master_weights(recipe_name):
     """FusedAdam with master_weights + FSDP2 + quantized_model_init (FP8 params).
@@ -234,9 +237,7 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
         master_weight_dtype=torch.float32,
     )
 
-    x = torch.randn(
-        SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device
-    )
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     target = torch.randn_like(x)
 
     for step in range(NUM_STEPS):
@@ -562,8 +563,11 @@ def test_dcp_output_parity(recipe_name, async_save):
             "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
         )
 
-
-    if recipe_name == "Float8BlockScaling" and not async_save and torch.cuda.get_device_capability()[0] == 12:
+    if (
+        recipe_name == "Float8BlockScaling"
+        and not async_save
+        and torch.cuda.get_device_capability()[0] == 12
+    ):
         pytest.xfail(
             "Float8BlockScaling is failing on SM120 with RuntimeError: "
             "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu:534 "
@@ -727,7 +731,6 @@ def test_dcp_output_parity(recipe_name, async_save):
 
     if int(os.environ.get("RANK", "0")) == 0:
         shutil.rmtree(checkpoint_dir, ignore_errors=True)
-
 
 
 TESTS = {
