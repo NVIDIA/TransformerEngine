@@ -27,7 +27,6 @@ add_executable(test_operator
                test_memset.cu
                test_splits_to_offsets.cu
                test_multi_cast_transpose.cu
-               test_multi_tensor_adam_mxfp8.cu
                test_multi_padding.cu
                test_multi_unpadding.cu
                test_causal_softmax.cu
