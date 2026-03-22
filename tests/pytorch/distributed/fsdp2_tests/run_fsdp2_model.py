@@ -4,9 +4,37 @@
 #
 # See LICENSE for license information.
 
+"""FSDP2 model sharding tests.
+
+Run all tests (via torchrun + pytest):
+  torchrun -m pytest <this_file> -v --tb=short
+
+Run standalone (for debugging):
+  torchrun <this_file> --recipe <recipe> [options]
+
+Available --recipe values:
+  DelayedScaling, Float8CurrentScaling, Float8BlockScaling,
+  MXFP8BlockScaling, NVFP4BlockScaling
+
+Other options:
+  --fp8-init              Initialize weights in FP8
+  --layer-type TYPE       Linear, LayerNormLinear, LayerNormMLP,
+                          MultiheadAttention, TransformerLayer (default)
+  --sharding-dims N [M]   FSDP dims, e.g. "2" or "2 2" for HSDP
+  --num-layers N          Number of layers (default: 4)
+  --iter N                Training iterations (default: 10)
+  --device cuda|meta      Device for init (default: meta)
+"""
+
+import gc
 import os
+import pathlib
 import sys
 import argparse
+from types import SimpleNamespace
+from contextlib import nullcontext
+
+import pytest
 
 import transformer_engine.pytorch as te
 import transformer_engine.common.recipe
@@ -19,14 +47,13 @@ from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
-from transformer_engine.pytorch import QuantizedTensor
-from contextlib import nullcontext
 
-LOCAL_RANK = None
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from conftest import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
 
 def dist_print(msg):
-    if LOCAL_RANK == 0:
+    if int(os.getenv("LOCAL_RANK", "0")) == 0:
         print(msg)
 
 
@@ -114,10 +141,6 @@ def get_te_layer_from_string(layer_name):
     return te_layer_map[layer_name.lower()]
 
 
-def get_recipe_from_string(recipe):
-    return getattr(transformer_engine.common.recipe, recipe)()
-
-
 def init_te_model(config):
     hidden_size = config.num_heads * config.head_dim
     args = [hidden_size, hidden_size]
@@ -188,31 +211,8 @@ def shard_model_with_fsdp2(model, mesh):
     return model
 
 
-#### Methods to save the custom attributes of QuantizedTensors before sharding
-#### them with FSDP2, and restore them after sharding.
-def save_custom_attrs(module):
-    custom_attrs = {}
-    for name, param in module.named_parameters():
-        if isinstance(param, QuantizedTensor):
-            # Ignore FP8 metadata attributes. Otherwise we will save duplicate copies
-            # for data/transpose FP8 tensors on top of FP8 tensors that FSDP2 will save.
-            ignore_keys = [key for key in param.__dict__.keys() if key.startswith("_")]
-        else:
-            ignore_keys = []
-        attrs = vars(param)
-        custom_attrs[name] = {k: v for k, v in attrs.items() if k not in ignore_keys}
-    return custom_attrs
-
-
-def restore_custom_attrs(module, custom_attrs):
-    for name, param in module.named_parameters():
-        if name in custom_attrs:
-            for attr_name, attr_value in custom_attrs[name].items():
-                setattr(param, attr_name, attr_value)
-
-
 @torch.no_grad()
-def test_fp8_fsdp2_allgather(model):
+def _check_fp8_fsdp2_allgather(model):
     # Do manual allgather in fp32 and match against fp8 allgather done
     # with fsdp2
     # FP32 manual weight allgather
@@ -249,37 +249,15 @@ def test_fp8_fsdp2_allgather(model):
             module.reshard()
 
 
-def _train(args):
-    global LOCAL_RANK
-    assert "TORCHELASTIC_RUN_ID" in os.environ
-    WORLD_RANK = int(os.getenv("RANK", "0"))
-    WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
-    LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
-    LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
-    assert LOCAL_SIZE == WORLD_SIZE
+def _run_training(args):
+    """Core training logic. Assumes dist is already initialized."""
+    device = torch.device(f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}")
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
 
-    # Set device and initialize RNG states
-    torch.cuda.set_device(WORLD_RANK)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-
-    # Initialize torch.distributed global process group and get DP/TP groups
-    dist_init_kwargs = {
-        "backend": "nccl",
-        "rank": WORLD_RANK,
-        "world_size": WORLD_SIZE,
-    }
-    assert dist.is_nccl_available()
-    dist.init_process_group(**dist_init_kwargs)
-    nccl_world = dist.new_group(backend="nccl")
-    device = torch.device(f"cuda:{LOCAL_RANK}")
-
-    # FP8 Configuration
     fp8_recipe = get_recipe_from_string(args.recipe)
 
     build_model_context_args = {}
     if not args.fp8_init:
-        # Build model context (FP8 init)
         build_model_context = nullcontext
     else:
         from transformer_engine.pytorch import fp8_model_init
@@ -289,7 +267,6 @@ def _train(args):
         build_model_context_args["recipe"] = fp8_recipe
 
     dist_print(f"Memory before model init: {torch.cuda.memory_allocated(device) / 1e6} MB")
-    # Create the model on the meta/cuda device as per args
     with build_model_context(**build_model_context_args):
         model, inp_shape, out_shape = init_te_model(args)
     dist_print(
@@ -297,37 +274,30 @@ def _train(args):
         f" {torch.cuda.memory_allocated(device) / 1e6} MB"
     )
 
-    # Creating a DeviceMesh for fully_shard
-    world_size = int(WORLD_SIZE)
-    # Setup the sharding mesh for FSDP/HSDP
     mesh = get_device_mesh(world_size, args.sharding_dims)
     custom_attrs = save_custom_attrs(model)
     model = shard_model_with_fsdp2(model, mesh)
     restore_custom_attrs(model, custom_attrs)
-    # model now has DTensors as its parameters
 
     if args.device == "meta":
-        # After FSDP2 has been applied, materialize and initialize the sharded parameters
-        # TE base.py's reset_parameters() handles DTensors with FP8 initialization
         for module in model.modules():
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
         dist_print(f" Sharded parameters materialized and initialized on cuda device.")
 
     dist_print(
-        f"FSDP2 model in cuda, memory allocated: {torch.cuda.memory_allocated(device) / 1e6} MB"
+        f"FSDP2 model in cuda, memory allocated:"
+        f" {torch.cuda.memory_allocated(device) / 1e6} MB"
     )
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     for iteration in range(args.iter):
-        # Zero the parameter gradients
         optimizer.zero_grad()
 
         input_data = torch.randn(inp_shape, device=device)
         target = torch.randn(out_shape, device=device)
 
-        # NVFP4BlockScaling requires bfloat16 inputs in both the forward and backward passes.
         with (
             torch.autocast(device_type="cuda", dtype=torch.bfloat16)
             if args.recipe == "NVFP4BlockScaling"
@@ -341,13 +311,71 @@ def _train(args):
         optimizer.step()
         dist_print(f"Iteration {iteration} completed with loss {loss.item()}")
 
-    # Some of the FSDP states are lazy initialized during FSDP forward pass
-    # so testing fp8 allgather at the end of the training loop.
     if args.fp8_init:
-        test_fp8_fsdp2_allgather(model)
+        _check_fp8_fsdp2_allgather(model)
 
-    dist.destroy_process_group()
+
+def _train(args):
+    """Standalone entry point with full dist lifecycle."""
+    assert "TORCHELASTIC_RUN_ID" in os.environ
+    WORLD_RANK = int(os.getenv("RANK", "0"))
+    WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
+    LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
+    LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
+    assert LOCAL_SIZE == WORLD_SIZE
+
+    torch.cuda.set_device(LOCAL_RANK)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+
+    assert dist.is_nccl_available()
+    dist.init_process_group(
+        backend="nccl", rank=WORLD_RANK, world_size=WORLD_SIZE,
+    )
+    try:
+        _run_training(args)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        torch.cuda.empty_cache()
+        gc.collect()
+
     return 0
+
+
+# ── Pytest test function ─────────────────────────────────────────────
+
+NUM_PROCS = int(os.environ.get("WORLD_SIZE", "1"))
+
+
+@pytest.mark.parametrize("sharding_dims", [[NUM_PROCS], [2, NUM_PROCS // 2]])
+@pytest.mark.parametrize("fp8_init", [False, True])
+@pytest.mark.parametrize("layer_type", ["LayerNormLinear", "TransformerLayer"])
+def test_distributed(recipe_name, fp8_init, sharding_dims, layer_type):
+    if recipe_name in ("Float8BlockScaling", "NVFP4BlockScaling") and fp8_init:
+        pytest.xfail(
+            f"{recipe_name} + fp8_init: test_fp8_fsdp2_allgather is currently failing."
+        )
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    args = SimpleNamespace(
+        recipe=recipe_name,
+        fp8_init=fp8_init,
+        sharding_dims=list(sharding_dims),
+        layer_type=layer_type,
+        seed=42,
+        num_heads=8,
+        head_dim=64,
+        batch_size=16,
+        seq_length=128,
+        params_dtype="float32",
+        num_layers=4,
+        iter=10,
+        device="meta",
+    )
+    _run_training(args)
 
 
 if __name__ == "__main__":
