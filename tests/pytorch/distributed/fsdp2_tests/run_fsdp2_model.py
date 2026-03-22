@@ -259,6 +259,7 @@ def _run_training(args):
 
     build_model_context_args = {}
     if not args.fp8_init:
+        # Build model context (FP8 init)
         build_model_context = nullcontext
     else:
         from transformer_engine.pytorch import fp8_model_init
