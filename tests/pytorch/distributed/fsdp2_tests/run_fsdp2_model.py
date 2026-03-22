@@ -254,6 +254,7 @@ def _run_training(args):
     device = torch.device(f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}")
     world_size = int(os.getenv("WORLD_SIZE", "1"))
 
+    # FP8 Configuration
     fp8_recipe = get_recipe_from_string(args.recipe)
 
     build_model_context_args = {}
@@ -267,6 +268,7 @@ def _run_training(args):
         build_model_context_args["recipe"] = fp8_recipe
 
     dist_print(f"Memory before model init: {torch.cuda.memory_allocated(device) / 1e6} MB")
+    # Create the model on the meta/cuda device as per args
     with build_model_context(**build_model_context_args):
         model, inp_shape, out_shape = init_te_model(args)
     dist_print(
@@ -274,12 +276,17 @@ def _run_training(args):
         f" {torch.cuda.memory_allocated(device) / 1e6} MB"
     )
 
+    # Creating a DeviceMesh for fully_shard
+    # Setup the sharding mesh for FSDP/HSDP
     mesh = get_device_mesh(world_size, args.sharding_dims)
     custom_attrs = save_custom_attrs(model)
     model = shard_model_with_fsdp2(model, mesh)
     restore_custom_attrs(model, custom_attrs)
+    # model now has DTensors as its parameters
 
     if args.device == "meta":
+        # After FSDP2 has been applied, materialize and initialize the sharded parameters
+        # TE base.py's reset_parameters() handles DTensors with FP8 initialization
         for module in model.modules():
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
@@ -293,11 +300,13 @@ def _run_training(args):
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
     for iteration in range(args.iter):
+        # Zero the parameter gradients
         optimizer.zero_grad()
 
         input_data = torch.randn(inp_shape, device=device)
         target = torch.randn(out_shape, device=device)
 
+        # NVFP4BlockScaling requires bfloat16 inputs in both the forward and backward passes.
         with (
             torch.autocast(device_type="cuda", dtype=torch.bfloat16)
             if args.recipe == "NVFP4BlockScaling"
@@ -311,6 +320,8 @@ def _run_training(args):
         optimizer.step()
         dist_print(f"Iteration {iteration} completed with loss {loss.item()}")
 
+    # Some of the FSDP states are lazy initialized during FSDP forward pass
+    # so testing fp8 allgather at the end of the training loop.
     if args.fp8_init:
         _check_fp8_fsdp2_allgather(model)
 
