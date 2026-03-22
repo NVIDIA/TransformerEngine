@@ -12,13 +12,14 @@ import torch
 import transformer_engine.pytorch as te
 
 NUM_PROCS: int = torch.cuda.device_count()
+_FSDP2_DIR = Path(__file__).parent.resolve() / "fsdp2_tests"
 
 
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
 def test_fsdp2_model_tests():
     """All FSDP2 model tests (parametrized internally by recipe, fp8_init, sharding, layer)."""
-    test_path = Path(__file__).parent.resolve() / "fsdp2_tests" / "run_fsdp2_model.py"
+    test_path = _FSDP2_DIR / "run_fsdp2_model.py"
     result = subprocess.run(
         [
             "torchrun",
@@ -28,6 +29,7 @@ def test_fsdp2_model_tests():
             "pytest",
             str(test_path),
             "-v",
+            "-s",
             "--tb=short",
         ],
         env=os.environ,
@@ -41,7 +43,7 @@ def test_fsdp2_model_tests():
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
 def test_fsdp2_fused_adam_tests():
     """All FSDP2 FusedAdam tests (parametrized internally by recipe, test variant)."""
-    test_path = Path(__file__).parent.resolve() / "fsdp2_tests" / "run_fsdp2_fused_adam.py"
+    test_path = _FSDP2_DIR / "run_fsdp2_fused_adam.py"
     nproc = min(NUM_PROCS, 2)
     result = subprocess.run(
         [
@@ -52,6 +54,7 @@ def test_fsdp2_fused_adam_tests():
             "pytest",
             str(test_path),
             "-v",
+            "-s",
             "--tb=short",
         ],
         env=os.environ,
