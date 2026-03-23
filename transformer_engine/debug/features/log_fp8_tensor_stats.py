@@ -10,10 +10,9 @@ import warnings
 
 import torch
 import nvdlfw_inspect.api as debug_api
-import transformer_engine_torch as tex
-
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
+import transformer_engine_torch as tex
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
@@ -122,6 +121,10 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 - scale_inv_max - maximum of the inverse of the scaling factors,
                 - mse - mean squared error of the quantized tensor and the original tensor = sum((quantized_tensor - original_tensor)**2) / num_elements,
 
+            When collecting stats for the weight tensor with FP8 model parameters enabled,
+            only "scale_inv_min" and "scale_inv_max" are available.
+            All other statistics require access to the high precision tensor.
+
         tensors/tensors_struct: List[str]
             list of tensors to log
                 - activation,
@@ -159,13 +162,26 @@ class LogFp8TensorStats(BaseLogTensorStats):
                     end_step: 80
     """
 
-    def check_if_stat_is_supported(self, stat: str, current_recipe: str):
+    def check_if_stat_is_supported(
+        self, stat: str, current_recipe: str, high_precision_tensor_provided: bool
+    ):
         """Returns True if stat is supported, raises ValueError otherwise."""
         columnwise = stat.endswith("_columnwise")
         if columnwise:
             stat = stat[: -len("_columnwise")]
         recipe_from_stat, _ = self.get_recipe_from_stat(stat, default_recipe=current_recipe)
         stat_without_recipe = stat.replace(recipe_from_stat + "_", "")
+
+        need_high_precision_tensor_stats = ["underflows%", "overflows%", "mse"]
+        if (
+            stat_without_recipe in need_high_precision_tensor_stats
+            and not high_precision_tensor_provided
+        ):
+            raise ValueError(
+                f"Stat {stat} requires a high precision tensor to be provided. "
+                "This feature is not supported for weight tensors when using fp8 model "
+                "parameters."
+            )
 
         if current_recipe == "" and recipe_from_stat == "":
             raise ValueError(
@@ -290,10 +306,11 @@ class LogFp8TensorStats(BaseLogTensorStats):
         tensor_name: str,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
-        tensor: torch.Tensor,
+        tensor: Optional[torch.Tensor],
         rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
+        tp_size: int = 1,
     ):
         """
         API call used to collect the data about the tensor after process_tensor()/quantization.
@@ -322,7 +339,9 @@ class LogFp8TensorStats(BaseLogTensorStats):
         recipe_name = _get_recipe_name(quantizer)
 
         for stat in config["stats"]:
-            self.check_if_stat_is_supported(stat, recipe_name)
+            self.check_if_stat_is_supported(
+                stat, recipe_name, high_precision_tensor_provided=tensor is not None
+            )
 
         start_step = config.get("start_step", None)
         end_step = config.get("end_step", None)
@@ -338,7 +357,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         )
 
         skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(
-            tensor_name, tp_group
+            tensor_name, tp_group, tp_size
         )
 
         STATS_BUFFERS.try_add_buffer(
