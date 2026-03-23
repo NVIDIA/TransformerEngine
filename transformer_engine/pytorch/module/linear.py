@@ -19,6 +19,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
+    quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -88,10 +89,11 @@ class _Linear(torch.autograd.Function):
     def forward(
         ctx,
         weight: torch.Tensor,
+        weight_workspace: Optional[torch.Tensor],
         inp: torch.Tensor,
         bias: Optional[torch.Tensor],
         non_tensor_args: Tuple,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # pylint: disable=missing-function-docstring
 
         (
@@ -123,7 +125,7 @@ class _Linear(torch.autograd.Function):
             ub_name,
             fp8_output,  # pylint: disable=unused-variable
             fsdp_group,
-            module,
+            cache_weight,
             skip_fp8_weight_update,
             symmetric_ar_type,
             save_original_input,
@@ -249,6 +251,7 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+        new_weight_workspace = None
         weightmat = weight
         if fp8 or debug:
             # Configure quantizer
@@ -262,18 +265,18 @@ class _Linear(torch.autograd.Function):
                     )
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             elif isinstance(weight, QuantizedTensor):
-                # If weight is already quantized, no need to set quantizer states
                 weight_quantizer = weight._quantizer
             # Get quantized weight
-            update_workspace = is_first_microbatch is None or is_first_microbatch
-            weightmat = module.get_weight_workspace(
+            update_ws = is_first_microbatch is None or is_first_microbatch
+            weightmat, new_weight_workspace = quantize_weight(
                 tensor=weight,
                 quantizer=weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "weight"),
-                update_workspace=update_workspace,
+                workspace=weight_workspace,
+                update_workspace=update_ws,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                cache=cache_weight,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -490,10 +493,12 @@ class _Linear(torch.autograd.Function):
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
 
-        return out
+        return out, new_weight_workspace
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(
+        ctx, grad_output: torch.Tensor, _grad_weight_workspace
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
 
         # NVTX label for profiling
@@ -977,6 +982,7 @@ class _Linear(torch.autograd.Function):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
+            None,  # weight_workspace
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
             None,
@@ -1424,6 +1430,11 @@ class Linear(TransformerEngineBaseModule):
                 linear_fn = _Linear.forward
                 autograd_ctx = [None]
 
+            cache_name = None if is_first_microbatch is None else "weight"
+            weight_workspace = (
+                self._fp8_workspaces.get(cache_name) if cache_name is not None else None
+            )
+
             non_tensor_args = (
                 is_first_microbatch,
                 self.fp8,
@@ -1453,19 +1464,24 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
-                self,
+                cache_name is not None,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
             )
-            out = linear_fn(
+            out, new_weight_workspace = linear_fn(
                 *autograd_ctx,
                 weight_tensor,
+                weight_workspace,
                 inp,
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None,
                 non_tensor_args,
             )
+
+            if new_weight_workspace is not None and cache_name is not None:
+                self._fp8_workspaces[cache_name] = new_weight_workspace
+
         finally:
             self.end_forward()
         if self.gemm_bias_unfused_add:

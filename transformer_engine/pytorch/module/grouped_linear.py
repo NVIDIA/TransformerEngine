@@ -17,6 +17,7 @@ from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.tensor.storage.grouped_tensor import GroupedTensor
 from .base import (
     get_dummy_wgrad,
+    quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -93,7 +94,9 @@ class _GroupedLinear(torch.autograd.Function):
             sequence_parallel,
             activation_dtype,
             is_grad_enabled,
-            module,
+            weight_workspaces,
+            new_workspaces_out,
+            cache_weight,
             skip_fp8_weight_update,
             save_original_input,
             debug,
@@ -167,19 +170,21 @@ class _GroupedLinear(torch.autograd.Function):
         # Initialize weights
         weights_fp8: list
         if fp8 or debug:
-            # FP8 cast to workspace buffer
             weights_fp8 = []
-            update_workspace = is_first_microbatch is None or is_first_microbatch
+            update_ws = is_first_microbatch is None or is_first_microbatch
             for i in range(num_gemms):
-                weight_fp8 = module.get_weight_workspace(
+                weight_fp8, new_ws = quantize_weight(
                     tensor=weights[i],
                     quantizer=weight_quantizers[i],
-                    cache_name=(None if is_first_microbatch is None else f"weight{i}"),
-                    update_workspace=update_workspace,
+                    workspace=weight_workspaces[i] if weight_workspaces else None,
+                    update_workspace=update_ws,
                     skip_update_flag=skip_fp8_weight_update,
                     workspace_dtype=activation_dtype,
+                    cache=cache_weight,
                 )
                 weights_fp8.append(weight_fp8)
+                if new_workspaces_out is not None:
+                    new_workspaces_out[i] = new_ws
 
         else:
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
@@ -893,6 +898,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                 linear_fn = _GroupedLinear.forward
                 autograd_ctx = [None]
 
+            num_gemms = len(m_splits)
+            cache_weight = is_first_microbatch is not None
+            weight_workspaces = [
+                self._fp8_workspaces.get(f"weight{i}") if cache_weight else None
+                for i in range(num_gemms)
+            ]
+            new_workspaces_out = [None] * num_gemms if cache_weight else None
+
             non_tensor_args = (
                 m_splits,
                 self.apply_bias,
@@ -911,12 +924,19 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.sequence_parallel,
                 self.activation_dtype,
                 is_grad_enabled,
-                self,
+                weight_workspaces,
+                new_workspaces_out,
+                cache_weight,
                 None,  # skip_fp8_weight_update
                 self.save_original_input,
                 debug,
             )
             out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
+
+            if new_workspaces_out is not None:
+                for i, ws in enumerate(new_workspaces_out):
+                    if ws is not None:
+                        self._fp8_workspaces[f"weight{i}"] = ws
 
         finally:
             self.end_forward()
