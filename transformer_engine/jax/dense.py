@@ -471,7 +471,7 @@ def _grouped_dense_fwd_rule(
 def _grouped_dense_bwd_rule(
     contracting_dims, precision, preferred_element_type, group_offset, kernel_fsdp_info, ctx, grad
 ):
-    kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx = kernel_fsdp_info
+    kernel_fsdp_mesh_axis, _ = kernel_fsdp_info
     kernel_fsdp_enabled = kernel_fsdp_mesh_axis is not None
     assert not kernel_fsdp_enabled, "FSDP sharding for grouped_dense is not supported yet."
 

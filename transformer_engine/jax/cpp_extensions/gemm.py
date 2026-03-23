@@ -74,6 +74,7 @@ num_cublas_streams = get_num_compute_streams()
 # Cache whether the CUDA-graphable grouped GEMM implementation is available at import time.
 # Calling get_grouped_gemm_setup_workspace_size raises a RuntimeError mentioning "cublas" when
 # compiled against cuBLAS < 13.2, in which case the cuda-graphable path is unavailable.
+_v2_grouped_gemm_available_reason = ""
 try:
     get_grouped_gemm_setup_workspace_size(1)
     _v2_grouped_gemm_available = True
@@ -1498,6 +1499,10 @@ class GroupedGemmPrimitive(BasePrimitive):
         Returns:
             A jnp.ndarray containing the result of the grouped GEMM operation
         """
+        del lhs_data_aval, rhs_data_aval
+        del lhs_is_trans, rhs_is_trans
+        del lhs_axis_boundary, rhs_axis_boundary
+        del lhs_left_size, lhs_right_size, rhs_left_size, rhs_right_size
         del bias_aval
         del has_bias, use_async_d2h_group_sizes
 
