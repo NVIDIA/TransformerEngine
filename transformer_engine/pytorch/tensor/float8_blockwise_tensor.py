@@ -704,7 +704,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             )
 
         # For 2D block scaling, derive columnwise data and scales from rowwise
-        # via local fp8 transpose instead of all-gathering them separately.
+        # via local fp8 transpose.
         if columnwise_usage:
             out._create_columnwise()
         # remove usages if not needed.
