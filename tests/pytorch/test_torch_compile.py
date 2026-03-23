@@ -99,6 +99,24 @@ def test_autocast_sanity(fp8_recipe, fp8_enabled):
     out.sum().backward()
 
 
+@pytest.mark.skipif(not _fp8_available, reason="FP8 not supported")
+def test_autocast_delayed_scaling_unsupported():
+    """DelayedScaling raises a clear error when enabled under torch.compile."""
+    torch._dynamo.reset()
+
+    model = ToyLinear(32, 64, device="cuda", dtype=torch.bfloat16)
+    inp = torch.randn(8, 32, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    delayed = recipe.DelayedScaling()
+
+    def fn(inp):
+        with te.autocast(recipe=delayed, enabled=True):
+            return model(inp)
+
+    compiled = torch.compile(fn, fullgraph=True)
+    with pytest.raises(RuntimeError, match="DelayedScaling is not supported under torch.compile"):
+        compiled(inp)
+
+
 def _make_tagged_qfactory(tag: str):
     def qfactory(role: str):
         q = Float8CurrentScalingQuantizer(
