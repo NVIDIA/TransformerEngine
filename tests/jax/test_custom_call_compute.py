@@ -1789,10 +1789,10 @@ class TestGroupedDense:
 
         # jitting grouped_gemm
         lhs_tensor = GroupedNoScaleTensor(
-            data=lhs, first_dims=group_sizes, last_dims=None, group_axis=0, original_shape=lhs.shape
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
         )
         rhs_tensor = GroupedNoScaleTensor(
-            data=rhs, first_dims=None, last_dims=None, group_axis=0, original_shape=rhs.shape
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
         )
         prim_out = jax.jit(
             tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
@@ -1832,10 +1832,10 @@ class TestGroupedDense:
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         lhs_tensor = GroupedNoScaleTensor(
-            data=lhs, first_dims=group_sizes, last_dims=None, group_axis=0, original_shape=lhs.shape
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
         )
         rhs_tensor = GroupedNoScaleTensor(
-            data=rhs, first_dims=None, last_dims=None, group_axis=0, original_shape=rhs.shape
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
         )
         prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
             lhs_tensor,

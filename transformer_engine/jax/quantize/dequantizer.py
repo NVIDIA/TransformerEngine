@@ -284,18 +284,16 @@ def _grouped_dequantize(grouped_scaled_tensor):
     # For non-ragged groups (kernel case), group_sizes is not stored; derive from original_shape
     if group_sizes is None:
         group_sizes = jnp.ones(
-            grouped_scaled_tensor.original_shape[grouped_scaled_tensor.group_axis], dtype=jnp.int32
+            grouped_scaled_tensor.original_shape[0], dtype=jnp.int32
         )
     flatten_axis = grouped_scaled_tensor.flatten_axis
     scaling_mode = grouped_scaled_tensor.scaling_mode
     original_shape = grouped_scaled_tensor.original_shape
-    group_axis = grouped_scaled_tensor.group_axis
-
     flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
 
     output = []
     non_group_shape = tuple(
-        original_shape[i] for i in range(len(original_shape)) if i != group_axis
+        original_shape[i] for i in range(len(original_shape)) if i != 0
     )
     matrix_sizes = group_sizes * math.prod(non_group_shape)
 
@@ -304,9 +302,8 @@ def _grouped_dequantize(grouped_scaled_tensor):
     scale_inv_ptr = 0
     for i, data_i in enumerate(data):
         data_shape_i = (
-            *original_shape[:group_axis],
             group_sizes[i],
-            *original_shape[group_axis + 1 :],
+            *original_shape[1:],
         )
         assert math.prod(data_shape_i) == data_i.size, (
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"

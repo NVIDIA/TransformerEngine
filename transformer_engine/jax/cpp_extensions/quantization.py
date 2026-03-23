@@ -43,6 +43,7 @@ from ..quantize import (
     ScalingMode,
     compute_scale_from_amax,
     NoScaleTensor,
+    GroupedNoScaleTensor,
     get_rht_matrix,
     QuantizeLayout,
 )
@@ -1001,7 +1002,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         5,
         6,
         7,
-        8,
     )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype
     inner_primitive = None
     outer_primitive = None
@@ -1016,7 +1016,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         scaling_mode,
         q_layout,
         flatten_axis,
-        group_axis,
         scale_dtype,
     ):
         """
@@ -1038,7 +1037,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         ).get_grouped_scale_shape_2x(
             x_aval.shape,
             group_sizes_aval.size,
-            group_axis,
             is_padded=True,
             flatten_axis=flatten_axis,
         )
@@ -1099,7 +1097,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         scaling_mode,
         q_layout,
         flatten_axis,
-        group_axis,
         scale_dtype,
     ):
         """
@@ -1110,7 +1107,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval.dtype == jnp.float32
         assert group_sizes_aval.dtype == jnp.int32
-        assert group_axis == 0
         return ffi.ffi_lowering(GroupedQuantizePrimitive.name)(
             ctx,
             x,
@@ -1130,7 +1126,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         scaling_mode,
         q_layout,
         flatten_axis,
-        group_axis,
         scale_dtype,
     ):
         """
@@ -1151,7 +1146,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
             scaling_mode=scaling_mode,
             q_layout=q_layout,
             flatten_axis=flatten_axis,
-            group_axis=group_axis,
             scale_dtype=scale_dtype,
         )
         return (rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax)
@@ -1166,12 +1160,12 @@ def grouped_quantize(
     group_sizes: jnp.ndarray = None,
     amax: jnp.ndarray = None,
     flatten_axis: int = -1,
-) -> GroupedScaledTensor1x:
+) -> Union[GroupedScaledTensor1x, GroupedNoScaleTensor]:
     """Quantize a tensor in grouped manner.
 
     This function quantizes a tensor by splitting it into groups along a specified axis
     and applying quantization to each group separately. The groups can be either specified
-    explicitly through group_sizes or automatically split along the group_axis.
+    explicitly through group_sizes or automatically split along axis 0.
 
     Args:
         x: Input tensor to quantize
@@ -1185,31 +1179,36 @@ def grouped_quantize(
 
     Note:
         - If group_sizes is not provided, the tensor will be split into equal-sized groups
-          along the group_axis
-        - The group_axis is currently fixed to 0
+          along axis 0
         - The quantizer's q_layout determines whether row-wise, column-wise, or both
           quantization is applied
     """
 
     if quantizer is None:
-        if isinstance(x, NoScaleTensor):
+        if isinstance(x, GroupedNoScaleTensor):
+            assert amax is None, "If the input to grouped_quantize is already a GroupedNoScaleTensor, providing an amax could be ambiguous. Please set amax to None and set the amax on your GroupedNoScaleTensor directly, if needed. Alternatively, please call grouped_quantize with a raw jnp.ndarray along with an amax value if you'd like this function to handle amax for you."
             return x
-        return NoScaleTensor(data=x, amax=None)
+        return GroupedNoScaleTensor(
+            data=x,
+            amax=amax,
+            first_dims=group_sizes,
+            last_dims=None,
+            original_shape=x.shape,
+        )
 
     # TODO(Phuong): add support for flatten_axis = -2
     assert flatten_axis in (
         -1,
         x.ndim - 1,
     ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
-    group_axis = 0
 
     ragged_first_dims = group_sizes  # None if no explicit group_sizes (kernel case)
     if group_sizes is None:
-        group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
+        group_sizes = jnp.ones(x.shape[0], dtype=jnp.int32)
 
     if not GroupedQuantizePrimitive.enabled():
         return quantizer.quantize(
-            x, flatten_axis=flatten_axis, group_sizes=group_sizes, group_axis=group_axis
+            x, flatten_axis=flatten_axis, group_sizes=group_sizes
         )
     n_groups = group_sizes.size
     original_shape = x.shape
@@ -1226,9 +1225,9 @@ def grouped_quantize(
         if amax is not None:
             row_amax = amax
         else:
-            row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
+            row_amax = jnp.max(jnp.abs(x), axis=range(1, x.ndim))
         segment_ids = jnp.repeat(
-            jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[group_axis]
+            jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[0]
         )
         grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
@@ -1257,7 +1256,6 @@ def grouped_quantize(
         scaling_mode=quantizer.scaling_mode.value,
         q_layout=q_layout,
         flatten_axis=flatten_axis,
-        group_axis=group_axis,
         scale_dtype=quantizer.get_scale_dtype(),
     )
 
@@ -1283,7 +1281,6 @@ def grouped_quantize(
         flatten_axis=flatten_axis,
         first_dims=ragged_first_dims,
         original_shape=original_shape,
-        group_axis=group_axis,
     )
     return out
 

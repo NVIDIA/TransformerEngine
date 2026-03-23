@@ -698,7 +698,8 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                             Buffer_Type alpha, Buffer_Type beta, Result_Type output,
                             Result_Type cublas_workspace, Result_Type setup_workspace,
                             Result_Type int64_workspace, GroupedGemmV2Config config) {
-  auto [lhs_is_trans, rhs_is_trans, scaling_mode, lhs_axis_boundary, rhs_axis_boundary] = config;
+  auto [lhs_is_trans, rhs_is_trans, scaling_mode, lhs_axis_boundary, rhs_axis_boundary,
+        lhs_left_size, lhs_right_size, rhs_left_size, rhs_right_size] = config;
 
   NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
              "Only non-quantized grouped GEMM is supported in current implementation.");
@@ -780,7 +781,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                           Buffer_Type group_offset, Result_Type output, Result_Type workspace,
                           GroupedGemmConfig config) {
   auto [lhs_is_trans, rhs_is_trans, scaling_mode, has_bias, use_async_d2h_group_sizes,
-        lhs_axis_boundary, rhs_axis_boundary] = config;
+        lhs_axis_boundary, rhs_axis_boundary,
+        lhs_left_size, lhs_right_size, rhs_left_size, rhs_right_size] = config;
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -830,26 +832,19 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   else if (is_rhs_last_ragged)
     active_gs_ptr = &rhs_last_dims;
 
-  // Derive m, n, k from N-D buffer dimensions using axis_boundary.
-  // axis_boundary splits contracting dims from non-contracting dims.
-  auto lhs_dims = lhs_data.dimensions();
-  auto rhs_dims = rhs_data.dimensions();
-  NVTE_CHECK(lhs_dims.size() >= 2, "lhs_data must be at least 2D.");
-  NVTE_CHECK(rhs_dims.size() >= 2, "rhs_data must be at least 2D.");
-  size_t lab = static_cast<size_t>(lhs_axis_boundary);
-  size_t rab = static_cast<size_t>(rhs_axis_boundary);
-  // k = product of contracting dims of lhs
-  size_t k = lhs_is_trans ? product(lhs_dims, 0, lab) : product(lhs_dims, lab, lhs_dims.size());
+  // Derive m, n, k from pre-computed original shape sizes (passed from Python).
+  // lhs_left_size = product of original lhs dims before axis_boundary
+  // lhs_right_size = product of original lhs dims after axis_boundary
+  // Same pattern for rhs.
+  size_t k = lhs_is_trans ? lhs_left_size : lhs_right_size;
   size_t m, n;
   if (is_rhs_ragged) {
     // wgrad: non-contracting lhs dims form M; non-contracting rhs dims form N
-    m = lhs_is_trans ? product(lhs_dims, lab, lhs_dims.size()) : product(lhs_dims, 0, lab);
-    n = rhs_is_trans ? product(rhs_dims, 0, rab) : product(rhs_dims, rab, rhs_dims.size());
+    m = lhs_is_trans ? lhs_right_size : lhs_left_size;
+    n = rhs_is_trans ? rhs_left_size : rhs_right_size;
   } else {
-    m = lhs_is_trans ? product(lhs_dims, lab, lhs_dims.size())
-                     : product(lhs_dims, 0, lab);  // total M (sum of group sizes)
-    n = rhs_is_trans ? product(rhs_dims, 0, rab) / num_gemms
-                     : product(rhs_dims, rab, rhs_dims.size());
+    m = lhs_is_trans ? lhs_right_size : lhs_left_size;  // total M (sum of group sizes)
+    n = rhs_is_trans ? rhs_left_size / num_gemms : rhs_right_size;
   }
 
   // Inputs
