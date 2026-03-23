@@ -696,9 +696,7 @@ def test_dcp_output_parity(recipe_name, async_save):
                 ref_output,
                 rtol=0.05,
                 atol=0.1,
-                msg=lambda x: (
-                    f"Fresh model loaded from DCP checkpoint produces different output: {x}"
-                ),
+                msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
             )
         else:
             torch.testing.assert_close(
@@ -706,9 +704,7 @@ def test_dcp_output_parity(recipe_name, async_save):
                 ref_output,
                 rtol=0,
                 atol=0,
-                msg=lambda x: (
-                    f"Fresh model loaded from DCP checkpoint produces different output: {x}"
-                ),
+                msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
             )
 
         # ── Verify one more training step produces identical results ─────
