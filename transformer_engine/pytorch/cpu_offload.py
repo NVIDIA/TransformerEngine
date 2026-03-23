@@ -310,7 +310,6 @@ class OffloadableLayerState:
             self.finish_offload_event = torch.cuda.Event()
             self.finish_offload_event.record(self.offload_stream)
 
-
     def release_activation_forward_gpu_memory(self):
         """
         Release GPU memory of the activations.
