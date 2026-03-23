@@ -21,6 +21,12 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
 )
 
 
+# Custom ops that should pass through __torch_dispatch__ without unwrapping
+# QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
+# handle quantized tensors internally.
+_quantized_tensor_passthrough_ops: set = set()
+
+
 class QuantizedTensorStorage:
     r"""Base class for all TensorStorage classes.
 
@@ -37,6 +43,7 @@ class QuantizedTensorStorage:
     XTensor should only implement the functionality needed
     to behave like regular torch.Tensor (like __torch_dispatch__)."""
 
+    _dtype: torch.dtype
     _quantizer: Optional[Quantizer]
 
     def update_usage(
@@ -158,7 +165,9 @@ def restore_from_saved(
         list[Optional[torch.Tensor]],
     ]
 ):
-    """Recombine the tensor data and metadata during backward pass."""
+    """Recombine the tensor data and metadata during backward pass.
+    Note: please use `restore_from_func_ctx` instead if you are restoring tensors from a function context to make sure tensor_objects is detached and its memory can be freed
+    """
     tensor_objects = []
     for tensor in tensors:
         if tensor is None or isinstance(tensor, torch.Tensor):
@@ -171,6 +180,24 @@ def restore_from_saved(
     if return_saved_tensors:
         return tensor_objects, saved_tensors
     return tensor_objects
+
+
+def restore_from_func_ctx(ctx: torch.autograd.function.FunctionCtx, return_saved_tensors=False) -> (
+    list[Optional[torch.Tensor | QuantizedTensorStorage]]
+    | tuple[
+        list[Optional[torch.Tensor | QuantizedTensorStorage]],
+        list[Optional[torch.Tensor]],
+    ]
+):
+    """Recombine the tensor data and metadata during backward pass and delete tensor objects attached to function context."""
+    if not hasattr(ctx, "tensor_objects") or ctx.tensor_objects is None:
+        raise AttributeError("ctx must have .tensor_objects to restore saved tensors")
+    out = restore_from_saved(
+        ctx.tensor_objects, ctx.saved_tensors, return_saved_tensors=return_saved_tensors
+    )
+    # Delete the references to tensor objects once they've been consumed by the `restore_from_saved` method to construct back the actual tensors.
+    ctx.tensor_objects = None
+    return out
 
 
 class Quantizer(abc.ABC):
@@ -367,11 +394,18 @@ class QuantizedTensor(torch.Tensor):
         shape: Iterable[int],
         dtype: torch.dtype,
         *,
+        fake_dtype: Optional[torch.dtype] = None,
         requires_grad: bool = False,
         device: Optional[torch.device] = None,
+        stride: Optional[Iterable[int]] = None,
     ):
-        # We are assuming only contiguous tensors
-        stride = _stride_from_shape(shape)
+        if fake_dtype is not None and fake_dtype != dtype:
+            raise ValueError(f"fake_dtype ({fake_dtype}) does not match dtype ({dtype})")
+        # For stride, We are assuming only contiguous tensors
+        # Calculate stride from shape if not provided. When creating this object from
+        # C++ code, we provide the stride computed from shape in C++ to avoid the
+        # PyobjectVectorCall overhead of calling _stride_from_shape from C++ to Python.
+        stride = _stride_from_shape(shape) if stride is None else stride
         instance = torch.Tensor._make_wrapper_subclass(
             cls,
             shape,
@@ -382,8 +416,74 @@ class QuantizedTensor(torch.Tensor):
             requires_grad=requires_grad,
             device=torch.cuda.current_device() if device is None else device,
         )
-
+        instance._requires_grad = requires_grad
+        instance._dtype = dtype
         return instance
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """
+        Return the high precision data type of the tensor
+        Attribute access of custom tensors goes through an
+        expensive Pyobject lookup. Since dtype for a tensor is never
+        change after creation, we cache it in a member variable and return
+        """
+        # Lazy initialization for tensors created via alternate paths
+        if not hasattr(self, "_dtype"):
+            # pylint: disable=unnecessary-dunder-call
+            self._dtype = torch._C.TensorBase.dtype.__get__(self, type(self))
+        return self._dtype
+
+    @dtype.setter
+    def dtype(self, value: torch.dtype) -> None:
+        """Set dtype property"""
+        self._dtype = value
+
+    @property
+    def requires_grad(self) -> bool:
+        """
+        Return whether or not the tensor requires gradient.
+        Attribute access of custom tensors goes through an
+        expensive Pyobject lookup. Since requires_grad is set during
+        initialization and may be updated, we cache it in a member variable.
+        """
+        # Fallback to parent if not cached yet
+        if not hasattr(self, "_requires_grad"):
+            # pylint: disable=unnecessary-dunder-call
+            self._requires_grad = torch._C.TensorBase.requires_grad.__get__(self, type(self))
+        return self._requires_grad
+
+    @requires_grad.setter
+    def requires_grad(self, value: bool) -> None:
+        """Set requires_grad property so that autograd engine is aware of the change"""
+        # Update the cached value and call parent class method to ensure autograd engine is aware
+        self.requires_grad_(value)
+
+    def requires_grad_(self, requires_grad: bool = True) -> QuantizedTensor:
+        """Cache requires_grad property and call parent class method"""
+        # pylint: disable=missing-function-docstring
+        # Update the cached value
+        self._requires_grad = requires_grad
+        # Call parent class method to ensure autograd engine is aware
+        super().requires_grad_(requires_grad)
+        return self
+
+    def _get_data(self) -> torch.Tensor:
+        """Get tensor data property"""
+        return super().data
+
+    def _set_data(self, tensor: torch.Tensor) -> None:
+        """Set tensor data property
+        Updates the underlying tensor data and syncs the dtype cache.
+        """
+        # Update the parent class's data descriptor
+        # pylint: disable=unnecessary-dunder-call
+        super(QuantizedTensor, type(self)).data.__set__(self, tensor)
+        # Update the dtype cache
+        self._dtype = tensor.dtype
+
+    # Create the data property with getter and setter
+    data = property(_get_data, _set_data)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Convert quantized data to standard PyTorch tensor"""
@@ -415,7 +515,7 @@ class QuantizedTensor(torch.Tensor):
         )
 
     def __repr__(self, *, tensor_contents=None) -> str:
-        return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
+        return f"{self.__class__.__name__}(data={self.dequantize()})"
 
     def float(self) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -478,13 +578,37 @@ class QuantizedTensor(torch.Tensor):
                 dst.quantize_(src)
             else:
                 if isinstance(src, QuantizedTensor):
-                    src = src.dequantize()
+                    dtype = dst.dtype
+                    if dtype not in (torch.float32, torch.float16, torch.bfloat16):
+                        dtype = torch.float32
+                    src = src.dequantize(dtype=dtype)
                 dst.copy_(src)
             return None
 
         # View op
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
+
+        # New empty op (used by DCP async staging to create CPU copies)
+        if func == torch.ops.aten.new_empty.default:
+            tensor = args[0]
+            size = args[1]
+            dtype = kwargs.get("dtype", tensor.dtype)
+            device = kwargs.get("device", tensor.device)
+            pin_memory = kwargs.get("pin_memory", False)
+            if tensor._quantizer is None:
+                raise RuntimeError(
+                    f"{type(tensor).__name__} does not have a quantizer; "
+                    "cannot create new_empty QuantizedTensor"
+                )
+            out = tensor._quantizer.make_empty(
+                shape=torch.Size(size),
+                dtype=dtype,
+                device=device,
+                requires_grad=tensor.requires_grad,
+                pin_memory=pin_memory,
+            )
+            return out
 
         # Empty like op
         if func == torch.ops.aten.empty_like.default:
@@ -516,9 +640,15 @@ class QuantizedTensor(torch.Tensor):
                     return func(t)
             return False  # Or error out?
 
+        # Pass through registered custom ops without unwrapping
+        if func in _quantized_tensor_passthrough_ops:
+            if kwargs is None:
+                kwargs = {}
+            return super().__torch_dispatch__(func, types, args, kwargs)
+
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
-                return arg.dequantize(dtype=arg.dtype)
+                return arg.dequantize()
             return arg
 
         def maybe_update_inplace(arg, new_arg, schema_arg):
@@ -601,6 +731,7 @@ class QuantizedTensor(torch.Tensor):
         shape = shape if shape is not None else tensor.shape
         dtype = dtype if dtype is not None else tensor.dtype
         kwargs = tensor.get_metadata()
+        kwargs["fake_dtype"] = dtype
         return cls(shape=shape, dtype=dtype, requires_grad=requires_grad, **kwargs)
 
     def to_dtype(self, dtype: torch.dtype) -> QuantizedTensor:
