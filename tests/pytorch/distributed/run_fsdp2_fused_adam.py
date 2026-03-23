@@ -754,13 +754,17 @@ def test_benchmark_optimizer_step(recipe=None):
             mn = min(times)
             mx = max(times)
             std = statistics.stdev(times) if len(times) > 1 else 0.0
-            print(f"  {name:12s}:  avg={avg:8.3f}ms  med={med:8.3f}ms  "
-                  f"min={mn:8.3f}ms  max={mx:8.3f}ms  std={std:7.3f}ms")
+            print(
+                f"  {name:12s}:  avg={avg:8.3f}ms  med={med:8.3f}ms  "
+                f"min={mn:8.3f}ms  max={mx:8.3f}ms  std={std:7.3f}ms"
+            )
 
         print(f"\n{'=' * 72}")
         print(f"Benchmark: {BENCH_STEPS} iterations (after {WARMUP_STEPS} warmup)")
-        print(f"Model: TransformerLayer(h={HIDDEN_SIZE}, ffn={FFN_HIDDEN_SIZE}, "
-              f"heads={NUM_ATTENTION_HEADS}) x {NUM_LAYERS}")
+        print(
+            f"Model: TransformerLayer(h={HIDDEN_SIZE}, ffn={FFN_HIDDEN_SIZE}, "
+            f"heads={NUM_ATTENTION_HEADS}) x {NUM_LAYERS}"
+        )
         print(f"Recipe: {type(recipe).__name__}")
         print(f"World size: {world_size}")
         print(f"{'=' * 72}")

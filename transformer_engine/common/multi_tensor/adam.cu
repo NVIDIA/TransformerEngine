@@ -601,9 +601,9 @@ __device__ __forceinline__ float fp8_max_norm_rcp(uint8_t fp8_dtype) {
 
 template <typename PARAM_T, typename GRAD_T, typename MOMENT_T, typename index_t>
 __global__ void adam_mxfp8_fused_kernel(int64_t chunk_size, volatile int *noop_gmem,
-                        MXFP8TensorListMetadata tl, float beta1, float beta2,
-                        float beta1_correction, float beta2_correction,
-                        float epsilon, float lr, int mode, float weight_decay) {
+                                        MXFP8TensorListMetadata tl, float beta1, float beta2,
+                                        float beta1_correction, float beta2_correction,
+                                        float epsilon, float lr, int mode, float weight_decay) {
   if (noop_gmem != nullptr && *noop_gmem == 1) {
     return;
   }
@@ -671,9 +671,9 @@ __global__ void adam_mxfp8_fused_kernel(int64_t chunk_size, volatile int *noop_g
         r_p[ii] = static_cast<float>(p[idx[ii]]);
         float r_m = static_cast<float>(m[idx[ii]]);
         float r_v = static_cast<float>(v[idx[ii]]);
-        transformer_engine::multi_tensor_adam::adam_update(
-            r_g, r_p[ii], r_m, r_v, beta1, beta2, beta1_correction,
-            beta2_correction, epsilon, lr, adam_mode, weight_decay);
+        transformer_engine::multi_tensor_adam::adam_update(r_g, r_p[ii], r_m, r_v, beta1, beta2,
+                                                           beta1_correction, beta2_correction,
+                                                           epsilon, lr, adam_mode, weight_decay);
         m[idx[ii]] = static_cast<MOMENT_T>(r_m);
         v[idx[ii]] = static_cast<MOMENT_T>(r_v);
         abs_p[ii] = fabsf(r_p[ii]);
@@ -689,14 +689,12 @@ __global__ void adam_mxfp8_fused_kernel(int64_t chunk_size, volatile int *noop_g
     for (int ii = 0; ii < ILP; ii++) {
       row_amax[ii] = abs_p[ii];
       for (int mask = 16; mask >= 1; mask >>= 1) {
-        row_amax[ii] = fmaxf(row_amax[ii],
-                              __shfl_xor_sync(0xFFFFFFFF, row_amax[ii], mask));
+        row_amax[ii] = fmaxf(row_amax[ii], __shfl_xor_sync(0xFFFFFFFF, row_amax[ii], mask));
       }
     }
 
     // ── Col amax via cross-warp shared memory reduction ──────────────
-    float col_local = fmaxf(fmaxf(abs_p[0], abs_p[1]),
-                            fmaxf(abs_p[2], abs_p[3]));
+    float col_local = fmaxf(fmaxf(abs_p[0], abs_p[1]), fmaxf(abs_p[2], abs_p[3]));
     col_partial[warp_id][lane_id] = col_local;
     __syncthreads();
 
@@ -751,13 +749,11 @@ __global__ void adam_mxfp8_fused_kernel(int64_t chunk_size, volatile int *noop_g
         if (dtype == static_cast<uint8_t>(transformer_engine::DType::kFloat8E4M3)) {
           reinterpret_cast<fp8e4m3 *>(rowwise_data)[idx[ii]] =
               cast_to_fp8<fp8e4m3>(r_p[ii] * rsi[ii]);
-          reinterpret_cast<fp8e4m3 *>(colwise_data)[idx[ii]] =
-              cast_to_fp8<fp8e4m3>(r_p[ii] * csi);
+          reinterpret_cast<fp8e4m3 *>(colwise_data)[idx[ii]] = cast_to_fp8<fp8e4m3>(r_p[ii] * csi);
         } else {
           reinterpret_cast<fp8e5m2 *>(rowwise_data)[idx[ii]] =
               cast_to_fp8<fp8e5m2>(r_p[ii] * rsi[ii]);
-          reinterpret_cast<fp8e5m2 *>(colwise_data)[idx[ii]] =
-              cast_to_fp8<fp8e5m2>(r_p[ii] * csi);
+          reinterpret_cast<fp8e5m2 *>(colwise_data)[idx[ii]] = cast_to_fp8<fp8e5m2>(r_p[ii] * csi);
         }
       }
     }

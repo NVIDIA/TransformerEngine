@@ -149,8 +149,7 @@ void multi_tensor_apply_mxfp8(int64_t chunk_size, const transformer_engine::Tens
                " has size=", tensor_lists[i].size(), ", but expected size=", num_tensors_per_list);
   }
 
-  const int tiles_per_block =
-      std::max(1, static_cast<int>(chunk_size / TileElems));
+  const int tiles_per_block = std::max(1, static_cast<int>(chunk_size / TileElems));
 
   MXFP8TensorListMetadata tl;
   tl.start_tensor_this_launch = 0;
@@ -175,8 +174,7 @@ void multi_tensor_apply_mxfp8(int64_t chunk_size, const transformer_engine::Tens
     const int tiles_y = (rows_val + TileRows - 1) / TileRows;
     const int tiles_x = (cols_val + TileCols - 1) / TileCols;
     const int tiles_this_tensor = tiles_y * tiles_x;
-    const int blocks_this_tensor =
-        (tiles_this_tensor + tiles_per_block - 1) / tiles_per_block;
+    const int blocks_this_tensor = (tiles_this_tensor + tiles_per_block - 1) / tiles_per_block;
 
     for (int block = 0; block < blocks_this_tensor; ++block) {
       tl.block_to_tensor[loc_block_info] = loc_tensor_info - 1;
@@ -186,8 +184,7 @@ void multi_tensor_apply_mxfp8(int64_t chunk_size, const transformer_engine::Tens
       const bool blocks_full = (loc_block_info == MXFP8_MAX_BLOCKS);
       const bool tensors_full =
           (loc_tensor_info == MXFP8_MAX_TENSORS && block == blocks_this_tensor - 1);
-      const bool last_block =
-          (t == num_tensors_per_list - 1 && block == blocks_this_tensor - 1);
+      const bool last_block = (t == num_tensors_per_list - 1 && block == blocks_this_tensor - 1);
       if (blocks_full || tensors_full || last_block) {
         Kernel<<<loc_block_info, BlockThreads, 0, stream>>>(
             chunk_size, reinterpret_cast<int *>(noop_flag.data.dptr), tl, args...);
