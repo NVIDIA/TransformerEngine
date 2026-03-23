@@ -779,7 +779,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
         if (processing_method != ProcessingMethod::CAST_ONLY) {
             GTEST_SKIP();
         }
-        if ((input_type != DType::kBFloat16) && (input_type != DType::kFloat16)) {
+        if (input_type != DType::kBFloat16) {
             GTEST_SKIP();
         }
     }

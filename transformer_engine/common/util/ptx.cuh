@@ -326,10 +326,15 @@ __device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_da
   }
 }
 
+constexpr uint32_t BF16_MANTISSA_BITS = 7;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
-__device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
+template <typename T>
+__device__ __forceinline__ T exp2f_rcp(e8m0_t biased_exp);
+
+template <>
+__device__ __forceinline__ float exp2f_rcp<float>(e8m0_t biased_exp) {
   // Handle the special case of NaN.
   if (biased_exp == 255) return __int_as_float(0x7fffffff);
   // Handle the special case where the unbiased exponent is 127, so the reciprocal is 2^-127 which needs the first bit of
@@ -337,6 +342,17 @@ __device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
   if (biased_exp == 254) return __int_as_float(0x00400000);
   // Fast calculation when the unbiased exp is in [-126, 126], and only the exponent part is used to express the reciprocal.
   return __int_as_float((254 - biased_exp) << FP32_MANTISSA_BITS);
+}
+
+template <>
+__device__ __forceinline__ bf16 exp2f_rcp<bf16>(e8m0_t biased_exp) {
+  // Handle the special case of NaN.
+  if (biased_exp == 255) return __ushort_as_bfloat16(0x7fff);
+  // Handle the special case where the unbiased exponent is 127, so the reciprocal is 2^-127 which needs the first bit of
+  // the mantissa to be 1, which can't be obtained by shifting `BF16_MANTISSA_BITS` bits to the left.
+  if (biased_exp == 254) return __ushort_as_bfloat16(0x0040);
+  // Fast calculation when the unbiased exp is in [-126, 126], and only the exponent part is used to express the reciprocal.
+  return __ushort_as_bfloat16((254 - biased_exp) << BF16_MANTISSA_BITS);
 }
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
