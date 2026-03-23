@@ -2,8 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Shared utility functions for FSDP2 distributed tests.
-"""
+"""Shared utility functions for FSDP2 distributed tests."""
 
 import transformer_engine.common.recipe
 from transformer_engine.pytorch import QuantizedTensor
