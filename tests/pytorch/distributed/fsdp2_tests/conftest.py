@@ -79,5 +79,3 @@ def _cleanup():
 @pytest.fixture(params=_parametrize_recipes())
 def recipe_name(request):
     return request.param
-
-
