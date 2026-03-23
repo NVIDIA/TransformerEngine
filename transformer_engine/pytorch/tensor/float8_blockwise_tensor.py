@@ -624,6 +624,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             metadata: Metadata needed for reconstructing the tensor after all-gather.
         """
         # pylint: disable=unused-argument
+        # PyTorch FSDP2 private API – tested with PyTorch 2.5+;
         from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
 
@@ -639,14 +640,20 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         ), "Rowwise data must be available for FSDP2 all-gather with 2D block scaling."
 
         fsdp_state = _get_module_fsdp_state(module)
-        reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+        param_group = fsdp_state._fsdp_param_group
+        if param_group is None:
+            raise RuntimeError(
+                "FSDP state for this module has no parameter group; "
+                "cannot determine reshard_after_forward."
+            )
+        reshard_after_forward = param_group._reshard_after_forward
 
         # If weights are resharded after forward pass, only the relevant usage
         # is needed based on whether it's a forward or backward pass.
         # If not resharded, the same all-gathered weights are reused in backward,
         # so both usages may be needed.
         if reshard_after_forward:
-            training_state = fsdp_state._fsdp_param_group._training_state
+            training_state = param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             rowwise_usage = not is_backward_pass
             columnwise_usage = is_backward_pass
@@ -690,6 +697,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         if out is not None:
             out._rowwise_data = rowwise_data
             out._rowwise_scale_inv = rowwise_scale_inv
+            out._columnwise_data = None
+            out._columnwise_scale_inv = None
         else:
             out = Float8BlockwiseQTensor(
                 shape=data_shape,

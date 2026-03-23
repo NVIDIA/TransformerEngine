@@ -860,14 +860,20 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
             self._quantizer.with_amax_reduction = True
 
         fsdp_state = _get_module_fsdp_state(module)
-        reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+        param_group = fsdp_state._fsdp_param_group
+        if param_group is None:
+            raise RuntimeError(
+                "FSDP state for this module has no parameter group; "
+                "cannot determine reshard_after_forward."
+            )
+        reshard_after_forward = param_group._reshard_after_forward
         # If weights are resharded after forward pass, then its enough to set the quantizer usages
         # based on whether its forward or backward pass for the allgathered weights.
         # If not resharded after forward pass, the same weights allgathered in forward
         # are used again in backward and so we dont change the quantizer usages which might need
         # both rowwise and columnwise usages.
         if reshard_after_forward:
-            training_state = fsdp_state._fsdp_param_group._training_state
+            training_state = param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # In case of hopper/L40, only one of data/transpose is needed
             # based on forward or backward pass. So setting the quantizer usages appropriately.
