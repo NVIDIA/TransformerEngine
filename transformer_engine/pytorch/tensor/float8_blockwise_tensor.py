@@ -10,7 +10,6 @@ import warnings
 from typing import Any, Optional, Tuple, Union
 
 import torch
-from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
@@ -625,6 +624,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             metadata: Metadata needed for reconstructing the tensor after all-gather.
         """
         # pylint: disable=unused-argument
+        from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
         from transformer_engine.pytorch.distributed import _get_module_fsdp_state
 
         if not self._is_2D_scaled:
