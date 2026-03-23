@@ -33,6 +33,7 @@ def test_fsdp2_model_tests():
             "--tb=short",
         ],
         env=os.environ,
+        timeout=600,
     )
     assert result.returncode in (0, 5), f"Inner pytest failed with exit code {result.returncode}"
 
@@ -56,6 +57,7 @@ def test_fsdp2_fused_adam_tests():
             "--tb=short",
         ],
         env=os.environ,
+        timeout=600,
     )
     assert result.returncode in (0, 5), f"Inner pytest failed with exit code {result.returncode}"
 

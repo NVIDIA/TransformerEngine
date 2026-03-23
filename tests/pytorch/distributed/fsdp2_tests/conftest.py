@@ -15,6 +15,12 @@ import torch
 import torch.distributed as dist
 from transformer_engine.pytorch import fp8
 
+# Ensure the correct CUDA device is active before _parametrize_recipes()
+# runs at collection time, since the session-scoped dist_init fixture
+# has not executed yet.
+_local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+torch.cuda.set_device(_local_rank)
+
 
 # ── FP8 recipe parametrization ──────────────────────────────────────
 def _check_nvfp4_support():
