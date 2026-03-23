@@ -749,9 +749,7 @@ def quantize_weight(
 
     # Cache miss — create new workspace
     if tensor is None or quantizer is None:
-        raise ValueError(
-            "tensor and quantizer kwargs must be provided to construct FP8 workspace"
-        )
+        raise ValueError("tensor and quantizer kwargs must be provided to construct FP8 workspace")
     if cache:
         saved_internal = quantizer.internal
         quantizer.internal = False

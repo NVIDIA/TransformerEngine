@@ -938,14 +938,25 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Unpack saved tensors and pass None for weight workspaces (recomputed from scratch)
             (
-                inp_r, ln_weight_r, ln_bias_r,
-                fc1_weight_r, fc1_bias_r, fc2_weight_r, fc2_bias_r,
+                inp_r,
+                ln_weight_r,
+                ln_bias_r,
+                fc1_weight_r,
+                fc1_bias_r,
+                fc2_weight_r,
+                fc2_bias_r,
             ) = tensors
             out = _LayerNormMLP._forward(  # recompute
                 ctx,
-                inp_r, ln_weight_r, ln_bias_r,
-                fc1_weight_r, None, fc1_bias_r,
-                fc2_weight_r, None, fc2_bias_r,
+                inp_r,
+                ln_weight_r,
+                ln_bias_r,
+                fc1_weight_r,
+                None,
+                fc1_bias_r,
+                fc2_weight_r,
+                None,
+                fc2_bias_r,
                 tuple(ctx.other_args.values()),
             )
 
@@ -2126,14 +2137,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
             cache_name_fc1 = None if is_first_microbatch is None else "fc1_weight"
             cache_name_fc2 = None if is_first_microbatch is None else "fc2_weight"
             fc1_weight_workspace = (
-                self._fp8_workspaces.get(cache_name_fc1)
-                if cache_name_fc1 is not None
-                else None
+                self._fp8_workspaces.get(cache_name_fc1) if cache_name_fc1 is not None else None
             )
             fc2_weight_workspace = (
-                self._fp8_workspaces.get(cache_name_fc2)
-                if cache_name_fc2 is not None
-                else None
+                self._fp8_workspaces.get(cache_name_fc2) if cache_name_fc2 is not None else None
             )
 
             non_tensor_args = (
