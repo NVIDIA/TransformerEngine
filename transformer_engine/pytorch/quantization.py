@@ -575,9 +575,7 @@ class FP8GlobalStateManager:
         Object identity is sufficient since autocast contexts never outlive a single
         training session.
         """
-        return str(
-            (str(recipe), id(group) if group is not None else None)
-        )
+        return str((str(recipe), id(group) if group is not None else None))
 
     @classmethod
     def autocast_enter(
