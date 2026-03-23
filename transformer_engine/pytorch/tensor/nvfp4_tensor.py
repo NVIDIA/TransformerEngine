@@ -175,31 +175,35 @@ class NVFP4Quantizer(Quantizer):
         )
 
     def __hash__(self):
-        return hash((
-            type(self),
-            self.dtype,
-            self.with_rht,
-            self.with_post_rht_amax,
-            self.with_amax_reduction,
-            self.with_2d_quantization,
-            self.stochastic_rounding,
-            self.with_random_sign_mask,
-            self.rowwise_usage,
-            self.columnwise_usage,
-        ))
+        return hash(
+            (
+                type(self),
+                self.dtype,
+                self.with_rht,
+                self.with_post_rht_amax,
+                self.with_amax_reduction,
+                self.with_2d_quantization,
+                self.stochastic_rounding,
+                self.with_random_sign_mask,
+                self.rowwise_usage,
+                self.columnwise_usage,
+            )
+        )
 
     def __fx_repr__(self):
         return (
-            f"NVFP4Quantizer("
-            f"fp4_dtype=TE_DType.{self.dtype.name}, "
-            f"rowwise={self.rowwise_usage}, "
-            f"columnwise={self.columnwise_usage}, "
-            f"with_amax_reduction={self.with_amax_reduction}, "
-            f"with_rht={self.with_rht}, "
-            f"with_post_rht_amax={self.with_post_rht_amax}, "
-            f"with_2d_quantization={self.with_2d_quantization}, "
-            f"stochastic_rounding={self.stochastic_rounding}, "
-            f"with_random_sign_mask={self.with_random_sign_mask})",
+            (
+                "NVFP4Quantizer("
+                f"fp4_dtype=TE_DType.{self.dtype.name}, "
+                f"rowwise={self.rowwise_usage}, "
+                f"columnwise={self.columnwise_usage}, "
+                f"with_amax_reduction={self.with_amax_reduction}, "
+                f"with_rht={self.with_rht}, "
+                f"with_post_rht_amax={self.with_post_rht_amax}, "
+                f"with_2d_quantization={self.with_2d_quantization}, "
+                f"stochastic_rounding={self.stochastic_rounding}, "
+                f"with_random_sign_mask={self.with_random_sign_mask})"
+            ),
             {"NVFP4Quantizer": NVFP4Quantizer, "TE_DType": TE_DType},
         )
 

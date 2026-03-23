@@ -67,25 +67,29 @@ class Float8BlockQuantizer(Quantizer):
         )
 
     def __hash__(self):
-        return hash((
-            type(self),
-            self.dtype,
-            self.force_pow_2_scales,
-            self.amax_epsilon,
-            self.block_scaling_dim,
-            self.rowwise_usage,
-            self.columnwise_usage,
-        ))
+        return hash(
+            (
+                type(self),
+                self.dtype,
+                self.force_pow_2_scales,
+                self.amax_epsilon,
+                self.block_scaling_dim,
+                self.rowwise_usage,
+                self.columnwise_usage,
+            )
+        )
 
     def __fx_repr__(self):
         return (
-            f"Float8BlockQuantizer("
-            f"fp8_dtype=TE_DType.{self.dtype.name}, "
-            f"rowwise={self.rowwise_usage}, "
-            f"columnwise={self.columnwise_usage}, "
-            f"amax_epsilon={self.amax_epsilon}, "
-            f"force_pow_2_scales={self.force_pow_2_scales}, "
-            f"block_scaling_dim={self.block_scaling_dim})",
+            (
+                "Float8BlockQuantizer("
+                f"fp8_dtype=TE_DType.{self.dtype.name}, "
+                f"rowwise={self.rowwise_usage}, "
+                f"columnwise={self.columnwise_usage}, "
+                f"amax_epsilon={self.amax_epsilon}, "
+                f"force_pow_2_scales={self.force_pow_2_scales}, "
+                f"block_scaling_dim={self.block_scaling_dim})"
+            ),
             {"Float8BlockQuantizer": Float8BlockQuantizer, "TE_DType": TE_DType},
         )
 

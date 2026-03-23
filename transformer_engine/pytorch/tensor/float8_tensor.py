@@ -295,9 +295,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             buf = torch.empty(1, dtype=torch.float32, device=torch.cuda.current_device())
             object.__setattr__(self, name, buf)
             return buf
-        raise AttributeError(
-            f"'{type(self).__name__}' object has no attribute '{name}'"
-        )
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def __eq__(self, other):
         if not isinstance(other, Float8CurrentScalingQuantizer):
@@ -313,27 +311,31 @@ class Float8CurrentScalingQuantizer(Quantizer):
         )
 
     def __hash__(self):
-        return hash((
-            type(self),
-            self.dtype,
-            self.use_existing_amax,
-            self.with_amax_reduction,
-            self.force_pow_2_scales,
-            self.amax_epsilon,
-            self.rowwise_usage,
-            self.columnwise_usage,
-        ))
+        return hash(
+            (
+                type(self),
+                self.dtype,
+                self.use_existing_amax,
+                self.with_amax_reduction,
+                self.force_pow_2_scales,
+                self.amax_epsilon,
+                self.rowwise_usage,
+                self.columnwise_usage,
+            )
+        )
 
     def __fx_repr__(self):
         return (
-            f"Float8CurrentScalingQuantizer("
-            f"fp8_dtype=TE_DType.{self.dtype.name}, "
-            f"rowwise={self.rowwise_usage}, "
-            f"columnwise={self.columnwise_usage}, "
-            f"use_existing_amax={self.use_existing_amax}, "
-            f"with_amax_reduction={self.with_amax_reduction}, "
-            f"force_pow_2_scales={self.force_pow_2_scales}, "
-            f"amax_epsilon={self.amax_epsilon})",
+            (
+                "Float8CurrentScalingQuantizer("
+                f"fp8_dtype=TE_DType.{self.dtype.name}, "
+                f"rowwise={self.rowwise_usage}, "
+                f"columnwise={self.columnwise_usage}, "
+                f"use_existing_amax={self.use_existing_amax}, "
+                f"with_amax_reduction={self.with_amax_reduction}, "
+                f"force_pow_2_scales={self.force_pow_2_scales}, "
+                f"amax_epsilon={self.amax_epsilon})"
+            ),
             {
                 "Float8CurrentScalingQuantizer": Float8CurrentScalingQuantizer,
                 "TE_DType": TE_DType,

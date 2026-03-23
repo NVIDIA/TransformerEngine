@@ -59,8 +59,10 @@ class MXFP8Quantizer(Quantizer):
 
     def __fx_repr__(self):
         return (
-            f"MXFP8Quantizer(fp8_dtype=TE_DType.{self.dtype.name}, "
-            f"rowwise={self.rowwise_usage}, columnwise={self.columnwise_usage})",
+            (
+                f"MXFP8Quantizer(fp8_dtype=TE_DType.{self.dtype.name}, "
+                f"rowwise={self.rowwise_usage}, columnwise={self.columnwise_usage})"
+            ),
             {"MXFP8Quantizer": MXFP8Quantizer, "TE_DType": TE_DType},
         )
 

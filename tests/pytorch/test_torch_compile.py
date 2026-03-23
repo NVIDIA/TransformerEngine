@@ -35,10 +35,12 @@ def _make_quantizers():
         ),
     ]
     if torch.cuda.is_available():
-        pairs.append((
-            NVFP4Quantizer(with_rht=True, stochastic_rounding=True),
-            NVFP4Quantizer(with_rht=False, stochastic_rounding=False),
-        ))
+        pairs.append(
+            (
+                NVFP4Quantizer(with_rht=True, stochastic_rounding=True),
+                NVFP4Quantizer(with_rht=False, stochastic_rounding=False),
+            )
+        )
     return pairs
 
 
