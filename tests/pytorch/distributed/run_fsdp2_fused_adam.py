@@ -38,9 +38,11 @@ BATCH_PER_RANK = 2
 NUM_STEPS = 3
 LOCAL_RANK = None
 
+
 def dist_print(msg):
     if LOCAL_RANK == 0:
         print(msg)
+
 
 def save_custom_attrs(module):
     custom_attrs = {}

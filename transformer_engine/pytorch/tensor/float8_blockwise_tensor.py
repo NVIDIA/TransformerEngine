@@ -634,9 +634,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 "layout has M in dim1, which is incompatible with FSDP2 dim0 all-gather."
             )
 
-        assert self._rowwise_data is not None and self._rowwise_scale_inv is not None, (
-            "Rowwise data must be available for FSDP2 all-gather with 2D block scaling."
-        )
+        assert (
+            self._rowwise_data is not None and self._rowwise_scale_inv is not None
+        ), "Rowwise data must be available for FSDP2 all-gather with 2D block scaling."
 
         fsdp_state = _get_module_fsdp_state(module)
         reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward

@@ -178,11 +178,13 @@ void nvte_multi_tensor_adam_fp8_cuda(int chunk_size, NVTETensor noop_flag,
  *  \param[in]      weight_decay            L2 penalty for weight decay.
  *  \param[in]      stream                  CUDA stream used for this operation.
  */
-void nvte_multi_tensor_adam_mxfp8_cuda(
-    int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
-    const size_t num_tensor_lists, const size_t num_tensors_per_list, const NVTEDType fp8_dtype,
-    const float lr, const float beta1, const float beta2, const float epsilon, const int step,
-    const int mode, const int bias_correction, const float weight_decay, cudaStream_t stream);
+void nvte_multi_tensor_adam_mxfp8_cuda(int chunk_size, NVTETensor noop_flag,
+                                       NVTETensor **tensor_lists, const size_t num_tensor_lists,
+                                       const size_t num_tensors_per_list, const NVTEDType fp8_dtype,
+                                       const float lr, const float beta1, const float beta2,
+                                       const float epsilon, const int step, const int mode,
+                                       const int bias_correction, const float weight_decay,
+                                       cudaStream_t stream);
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer
  *          with CUDA graph support and LR scheduling.

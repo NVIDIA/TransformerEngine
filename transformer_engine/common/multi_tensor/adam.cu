@@ -4,16 +4,17 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <utility>
 #include <assert.h>
 #include <cuda_fp8.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <utility>
+
 #include "../common.h"
 #include "../util/math.h"
-#include "../utils.cuh"
 #include "../util/ptx.cuh"
+#include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
 
 namespace transformer_engine {
@@ -599,10 +600,10 @@ __device__ __forceinline__ float fp8_max_norm_rcp(uint8_t fp8_dtype) {
 }
 
 template <typename PARAM_T, typename GRAD_T, typename MOMENT_T, typename index_t>
-__global__ void adam_mxfp8_fused_kernel(
-    int64_t chunk_size, volatile int *noop_gmem, MXFP8TensorListMetadata tl, float beta1,
-    float beta2, float beta1_correction, float beta2_correction, float epsilon, float lr, int mode,
-    float weight_decay) {
+__global__ void adam_mxfp8_fused_kernel(int64_t chunk_size, volatile int *noop_gmem,
+                                        MXFP8TensorListMetadata tl, float beta1, float beta2,
+                                        float beta1_correction, float beta2_correction,
+                                        float epsilon, float lr, int mode, float weight_decay) {
   // Stage 0: optional early-exit if a noop flag is set.
   if (noop_gmem != nullptr && *noop_gmem == 1) {
     return;
@@ -638,8 +639,7 @@ __global__ void adam_mxfp8_fused_kernel(
 
   const int64_t unpadded_scales_X_rowwise = (cols_val + MXFP8_TILE - 1) / MXFP8_TILE;
   constexpr int64_t kRowwiseScaleAlign = 4;
-  const int64_t row_stride =
-      DIVUP_TO_MULTIPLE(unpadded_scales_X_rowwise, kRowwiseScaleAlign);
+  const int64_t row_stride = DIVUP_TO_MULTIPLE(unpadded_scales_X_rowwise, kRowwiseScaleAlign);
   constexpr int64_t kColwiseScaleAlign = 128;
   const int64_t col_stride = DIVUP_TO_MULTIPLE(cols_val, kColwiseScaleAlign);
   const uint8_t dtype = tl.fp8_dtype[tensor_idx];
@@ -670,9 +670,9 @@ __global__ void adam_mxfp8_fused_kernel(
     float r_v = static_cast<float>(v[idx]);
 
     // Stage 4: apply Adam update in FP32 and write back updated p/m/v.
-    transformer_engine::multi_tensor_adam::adam_update(
-        r_g, r_p, r_m, r_v, beta1, beta2, beta1_correction, beta2_correction, epsilon, lr,
-        adam_mode, weight_decay);
+    transformer_engine::multi_tensor_adam::adam_update(r_g, r_p, r_m, r_v, beta1, beta2,
+                                                       beta1_correction, beta2_correction, epsilon,
+                                                       lr, adam_mode, weight_decay);
 
     p[idx] = static_cast<PARAM_T>(r_p);
     m[idx] = static_cast<MOMENT_T>(r_m);
@@ -973,7 +973,6 @@ inline void check_tensor_list_sizes(const std::vector<std::vector<Tensor *>> &te
   }
 }
 
-
 void multi_tensor_adam_fp8_cuda(int chunk_size, Tensor noop_flag,
                                 std::vector<std::vector<Tensor *>> tensor_lists, const float lr,
                                 const float beta1, const float beta2, const float epsilon,
@@ -1273,11 +1272,13 @@ void nvte_multi_tensor_adam_fp8_cuda(int chunk_size, NVTETensor noop_flag,
       epsilon, step, mode, bias_correction, weight_decay, static_cast<DType>(fp8_dtype), stream);
 }
 
-void nvte_multi_tensor_adam_mxfp8_cuda(
-    int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
-    const size_t num_tensor_lists, const size_t num_tensors_per_list, const NVTEDType fp8_dtype,
-    const float lr, const float beta1, const float beta2, const float epsilon, const int step,
-    const int mode, const int bias_correction, const float weight_decay, cudaStream_t stream) {
+void nvte_multi_tensor_adam_mxfp8_cuda(int chunk_size, NVTETensor noop_flag,
+                                       NVTETensor **tensor_lists, const size_t num_tensor_lists,
+                                       const size_t num_tensors_per_list, const NVTEDType fp8_dtype,
+                                       const float lr, const float beta1, const float beta2,
+                                       const float epsilon, const int step, const int mode,
+                                       const int bias_correction, const float weight_decay,
+                                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_adam_mxfp8_cuda);
   using namespace transformer_engine;
   multi_tensor_adam::multi_tensor_adam_mxfp8_cuda(
