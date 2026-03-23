@@ -678,11 +678,7 @@ class ScaledTensorFactory:
 
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
 
-        if (
-            first_dims is not None
-            or last_dims is not None
-            or original_shape is not None
-        ):
+        if first_dims is not None or last_dims is not None or original_shape is not None:
             assert (
                 original_shape is not None
             ), "original_shape is not given for GroupedScaledTensor1x"

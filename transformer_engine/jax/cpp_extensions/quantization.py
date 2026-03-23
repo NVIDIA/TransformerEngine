@@ -1186,7 +1186,13 @@ def grouped_quantize(
 
     if quantizer is None:
         if isinstance(x, GroupedNoScaleTensor):
-            assert amax is None, "If the input to grouped_quantize is already a GroupedNoScaleTensor, providing an amax could be ambiguous. Please set amax to None and set the amax on your GroupedNoScaleTensor directly, if needed. Alternatively, please call grouped_quantize with a raw jnp.ndarray along with an amax value if you'd like this function to handle amax for you."
+            assert amax is None, (
+                "If the input to grouped_quantize is already a GroupedNoScaleTensor, providing an"
+                " amax could be ambiguous. Please set amax to None and set the amax on your"
+                " GroupedNoScaleTensor directly, if needed. Alternatively, please call"
+                " grouped_quantize with a raw jnp.ndarray along with an amax value if you'd like"
+                " this function to handle amax for you."
+            )
             return x
         return GroupedNoScaleTensor(
             data=x,
@@ -1207,9 +1213,7 @@ def grouped_quantize(
         group_sizes = jnp.ones(x.shape[0], dtype=jnp.int32)
 
     if not GroupedQuantizePrimitive.enabled():
-        return quantizer.quantize(
-            x, flatten_axis=flatten_axis, group_sizes=group_sizes
-        )
+        return quantizer.quantize(x, flatten_axis=flatten_axis, group_sizes=group_sizes)
     n_groups = group_sizes.size
     original_shape = x.shape
     assert n_groups == len(
@@ -1226,9 +1230,7 @@ def grouped_quantize(
             row_amax = amax
         else:
             row_amax = jnp.max(jnp.abs(x), axis=range(1, x.ndim))
-        segment_ids = jnp.repeat(
-            jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[0]
-        )
+        segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[0])
         grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
             tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype, margin=0.0)

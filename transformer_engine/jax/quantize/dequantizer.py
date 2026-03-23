@@ -283,18 +283,14 @@ def _grouped_dequantize(grouped_scaled_tensor):
     )
     # For non-ragged groups (kernel case), group_sizes is not stored; derive from original_shape
     if group_sizes is None:
-        group_sizes = jnp.ones(
-            grouped_scaled_tensor.original_shape[0], dtype=jnp.int32
-        )
+        group_sizes = jnp.ones(grouped_scaled_tensor.original_shape[0], dtype=jnp.int32)
     flatten_axis = grouped_scaled_tensor.flatten_axis
     scaling_mode = grouped_scaled_tensor.scaling_mode
     original_shape = grouped_scaled_tensor.original_shape
     flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
 
     output = []
-    non_group_shape = tuple(
-        original_shape[i] for i in range(len(original_shape)) if i != 0
-    )
+    non_group_shape = tuple(original_shape[i] for i in range(len(original_shape)) if i != 0)
     matrix_sizes = group_sizes * math.prod(non_group_shape)
 
     data = jnp.split(data, jnp.cumulative_sum(matrix_sizes)[:-1])

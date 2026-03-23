@@ -2018,10 +2018,12 @@ def grouped_gemm_copy_group_sizes(
     )
     return out
 
+
 @cache
 def _should_enforce_v2_grouped_gemm() -> bool:
     """Read NVTE_JAX_ENFORCE_V2_GROUPED_GEMM once per process (cached)."""
     return os.getenv("NVTE_JAX_ENFORCE_V2_GROUPED_GEMM", "0") == "1"
+
 
 def _can_use_v2_grouped_gemm(
     scaling_mode: ScalingMode,
@@ -2038,21 +2040,32 @@ def _can_use_v2_grouped_gemm(
 
     if not _v2_grouped_gemm_available:
         if enforce_v2_gmm:
-            raise RuntimeError(f"The TE V2 grouped GEMM is not available but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled. The reason for V2 grouped GEMM not being available: {_v2_grouped_gemm_available_reason}")
+            raise RuntimeError(
+                "The TE V2 grouped GEMM is not available but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is"
+                " enabled. The reason for V2 grouped GEMM not being available:"
+                f" {_v2_grouped_gemm_available_reason}"
+            )
         return False
 
     # nvte_grouped_gemm (the v2 kernel) requires SM100+ (Blackwell or newer).
     # Fall back to the v1 path on SM90 (Hopper) and older architectures.
     if get_device_compute_capability(0) < 100:
         if enforce_v2_gmm:
-            raise RuntimeError(f"The TE V2 grouped GEMM requires SM100+ (Blackwell or newer) but current device compute capability of GPU 0 is {get_device_compute_capability(0)} and NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled.")
+            raise RuntimeError(
+                "The TE V2 grouped GEMM requires SM100+ (Blackwell or newer) but current device"
+                f" compute capability of GPU 0 is {get_device_compute_capability(0)} and"
+                " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
+            )
         return False
 
     if scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias:
         return True
 
     if enforce_v2_gmm:
-        raise RuntimeError(f"The TE V2 grouped GEMM currently only supports BF16 with no quantization recipe and without bias, but received {scaling_mode=}, {dtype=}, {has_bias=}")
+        raise RuntimeError(
+            "The TE V2 grouped GEMM currently only supports BF16 with no quantization recipe and"
+            f" without bias, but received {scaling_mode=}, {dtype=}, {has_bias=}"
+        )
     return False
 
 
@@ -2281,11 +2294,7 @@ def grouped_gemm(
     else:
         lhs_non_contracting = lhs_shape[:lhs_axis_boundary]
     if rhs_is_trans:
-        rhs_non_contracting = tuple(
-            rhs_shape[d]
-            for d in range(rhs_axis_boundary)
-            if d != 0
-        )
+        rhs_non_contracting = tuple(rhs_shape[d] for d in range(rhs_axis_boundary) if d != 0)
     else:
         rhs_non_contracting = rhs_shape[rhs_axis_boundary:]
     if rhs_first_dims.size > 0 or rhs_last_dims.size > 0:

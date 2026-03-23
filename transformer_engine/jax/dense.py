@@ -417,10 +417,6 @@ def _grouped_dense_fwd_rule(
     assert not kernel_fsdp_enabled, "FSDP sharding for grouped_dense is not supported yet."
     del kernel_fsdp_mesh_axis, kernel_fsdp_axis_idx, kernel_fsdp_info, kernel_fsdp_enabled
 
-
-    
-
-
     x_contracting_dims, k_contracting_dims = contracting_dims
     flatten_axis_x = -len(x_contracting_dims)
     flatten_axis_k = len(k_contracting_dims) - len(kernel.shape) + 1  # +1 for G axis
@@ -516,7 +512,7 @@ def _grouped_dense_bwd_rule(
         range(0, len(x_shape) - len(fwd_x_contracting_dims))
     )
     wgrad_contracting_dims = (x_contracting_dim, g_contracting_dim)
-    
+
     wgrad_x_T = ctx_x
     wgrad_grad = casted_grad.get_tensor(usage=TensorUsage.RHS)
     dgrad = tex.grouped_gemm(
