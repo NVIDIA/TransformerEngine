@@ -177,17 +177,26 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
             flatten_axis=flatten_axis,
         )
 
-    assert not isinstance(lhs_q, ScaledTensor2x)
-    assert not isinstance(rhs_q, ScaledTensor2x)
+    if isinstance(lhs_q, ScaledTensor2x):
+        raise TypeError(
+            "Expected lhs_q to not be ScaledTensor2x after quantization, but got"
+            f" type={type(lhs_q)}"
+        )
+    if isinstance(rhs_q, ScaledTensor2x):
+        raise TypeError(
+            "Expected rhs_q to not be ScaledTensor2x after quantization, but got"
+            f" type={type(rhs_q)}"
+        )
 
     def has_rht_applied(q: AbstractBaseTensor) -> bool:
         return isinstance(q, ScaledTensor1x) and q.has_rht_applied
 
-    assert has_rht_applied(lhs_q) == has_rht_applied(rhs_q), (
-        "With NVFP4_1D_SCALING, if one operand is quantized with RHT, the other must be quantized"
-        " with RHT as well. This is to ensure the RHT is applied to both and will cancel out in the"
-        " GEMM."
-    )
+    if has_rht_applied(lhs_q) != has_rht_applied(rhs_q):
+        raise ValueError(
+            "With NVFP4_1D_SCALING, if one operand is quantized with RHT, the other must be"
+            " quantized with RHT as well. This is to ensure the RHT is applied to both and will"
+            " cancel out in the GEMM."
+        )
 
     return lhs_q, rhs_q
 
@@ -284,14 +293,15 @@ def collective_gemm_bootstrap(
         this function with its own unique process_id.
     """
 
-    assert (
-        num_devices_per_process == 1 and jax.local_device_count() == 1
-    ), "Only single device per process is supported at the moment!"
-    assert num_total_devices % num_devices_per_process == 0, (
-        f"Invalid num_total_devices={num_total_devices},"
-        f" num_devices_per_process={num_devices_per_process}"
-    )
-    assert 0 <= process_id < num_total_devices, f"Invalid process_id={process_id}"
+    if not (num_devices_per_process == 1 and jax.local_device_count() == 1):
+        raise RuntimeError("Only single device per process is supported at the moment!")
+    if num_total_devices % num_devices_per_process != 0:
+        raise ValueError(
+            f"Invalid num_total_devices={num_total_devices},"
+            f" num_devices_per_process={num_devices_per_process}"
+        )
+    if not 0 <= process_id < num_total_devices:
+        raise ValueError(f"Invalid process_id={process_id}")
     initialize_cgemm_communicator(
         num_total_devices,
         num_devices_per_process,
@@ -390,10 +400,53 @@ def assert_cublas_requirements(scaling_mode, contracting_size, tensor_name):
         # Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
         alignment = 32 if scaling_mode.is_nvfp4_scaling else 16
 
-        assert contracting_size % alignment == 0, (
-            f"cuBLAS GEMM {tensor_name} tensor's contracting dimension must be a multiple of"
-            f" {alignment} when using quantized inputs. Got contracting_size={contracting_size}"
-        )
+        if contracting_size % alignment != 0:
+            raise ValueError(
+                f"cuBLAS GEMM {tensor_name} tensor's contracting dimension must be a multiple of"
+                f" {alignment} when using quantized inputs. Got contracting_size={contracting_size}"
+            )
+
+
+def _reorder_tpsp_leading(tensor, original_shape):
+    """Reorder tensor so the tpsp axis is leading: reshape (dp, n, tpsp, m, ...), transpose (2, 0, 1, 3, ...)."""
+    assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+        f"Original_shape[0]={original_shape[0]} is not divisible by"
+        f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+    )
+    assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+        f"Original_shape[1]={original_shape[1]} is not divisible by"
+        f" tpsp_axis_size()={tpsp_axis_size()}"
+    )
+    reshaped = tensor.reshape(
+        dp_or_fsdp_axis_size(),
+        int(original_shape[0] / dp_or_fsdp_axis_size()),
+        tpsp_axis_size(),
+        int(original_shape[1] / tpsp_axis_size()),
+        *original_shape[2:],
+    )
+    reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
+    return reordered.reshape(original_shape)
+
+
+def _reorder_dp_leading(tensor, original_shape):
+    """Reorder tensor so the dp axis is leading: reshape (tpsp, dp, n, m, ...), transpose (1, 2, 0, 3, ...)."""
+    assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+        f"Original_shape[0]={original_shape[0]} is not divisible by"
+        f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+    )
+    assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+        f"Original_shape[1]={original_shape[1]} is not divisible by"
+        f" tpsp_axis_size()={tpsp_axis_size()}"
+    )
+    reshaped = tensor.reshape(
+        tpsp_axis_size(),
+        dp_or_fsdp_axis_size(),
+        int(original_shape[0] / dp_or_fsdp_axis_size()),
+        int(original_shape[1] / tpsp_axis_size()),
+        *original_shape[2:],
+    )
+    reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
+    return reordered.reshape(original_shape)
 
 
 class GemmPrimitive(BasePrimitive):
@@ -439,57 +492,63 @@ class GemmPrimitive(BasePrimitive):
             lhs_contracting_dims,
             rhs_contracting_dims,
         ) = map(sanitize_dims, operand_ndims, contracting_dims)
-        assert _dims_are_consecutive(lhs_contracting_dims), (
-            "cuBLAS GEMM expected consecutive contracting dimensions for LHS operand, but got "
-            f"{lhs_contracting_dims}."
-        )
-        assert _dims_are_consecutive(rhs_contracting_dims), (
-            "cuBLAS GEMM expected consecutive contracting dimensions for RHS operand, but got "
-            f"{rhs_contracting_dims}."
-        )
+        if not _dims_are_consecutive(lhs_contracting_dims):
+            raise ValueError(
+                "cuBLAS GEMM expected consecutive contracting dimensions for LHS operand, but got "
+                f"{lhs_contracting_dims}."
+            )
+        if not _dims_are_consecutive(rhs_contracting_dims):
+            raise ValueError(
+                "cuBLAS GEMM expected consecutive contracting dimensions for RHS operand, but got "
+                f"{rhs_contracting_dims}."
+            )
 
         lhs_contracting_size, rhs_contracting_size = map(
             lambda shape, dims: reduce(operator.mul, [shape[dim] for dim in dims]),
             (lhs.shape, rhs.shape),
             (lhs_contracting_dims, rhs_contracting_dims),
         )
-        assert lhs_contracting_size == rhs_contracting_size, (
-            "cuBLAS GEMM operands have incompatible contracting dimensions: "
-            f"{lhs.shape} @ idx {lhs_contracting_dims} X {rhs.shape} @ idx {rhs_contracting_dims}."
-        )
+        if lhs_contracting_size != rhs_contracting_size:
+            raise ValueError(
+                f"cuBLAS GEMM operands have incompatible contracting dimensions: {lhs.shape} @ idx"
+                f" {lhs_contracting_dims} X {rhs.shape} @ idx {rhs_contracting_dims}."
+            )
         assert_cublas_requirements(scaling_mode, lhs_contracting_size, "LHS")
         assert_cublas_requirements(scaling_mode, rhs_contracting_size, "RHS")
 
         lhs_is_transposed, rhs_is_transposed = _get_gemm_layout(operand_ndims, contracting_dims)
         if scaling_mode != ScalingMode.NO_SCALING:
-            assert scaling_mode.is_nvfp4_scaling or _compatible_fp8_gemm_dtypes(
-                lhs.dtype, rhs.dtype
-            ), (
-                "cuBLAS GEMM quantized operands have incompatible data types: "
-                f"{lhs.dtype} x {rhs.dtype}."
-            )
-            assert (
-                lhs_scale_inv.size > 0 and rhs_scale_inv.size > 0
-            ), "Quantized cuBLAS GEMM requires inverse scaling factors for both operands."
+            if not (
+                scaling_mode.is_nvfp4_scaling or _compatible_fp8_gemm_dtypes(lhs.dtype, rhs.dtype)
+            ):
+                raise ValueError(
+                    "cuBLAS GEMM quantized operands have incompatible data types: "
+                    f"{lhs.dtype} x {rhs.dtype}."
+                )
+            if not (lhs_scale_inv.size > 0 and rhs_scale_inv.size > 0):
+                raise ValueError(
+                    "Quantized cuBLAS GEMM requires inverse scaling factors for both operands."
+                )
             if (
                 scaling_mode != ScalingMode.MXFP8_1D_SCALING
                 and not is_fp8_gemm_with_all_layouts_supported()
             ):
-                assert not lhs_is_transposed and rhs_is_transposed, (
-                    "cuBLAS FP8 GEMM on devices with compute capability < 10.0 (Hopper) "
-                    "require non-transposed LHS and transposed RHS operands "
-                    "(`contracting_dims=((-1, ), (-1, ))`)."
-                )
+                if lhs_is_transposed or not rhs_is_transposed:
+                    raise ValueError(
+                        "cuBLAS FP8 GEMM on devices with compute capability < 10.0 (Hopper) "
+                        "require non-transposed LHS and transposed RHS operands "
+                        "(`contracting_dims=((-1, ), (-1, ))`)."
+                    )
         else:
-            assert lhs.dtype == rhs.dtype, (
-                "For TE cuBLAS GEMM for non-quantized inputs, the operand dtypes must be equal."
-                f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
-            )
+            if lhs.dtype != rhs.dtype:
+                raise ValueError(
+                    "For TE cuBLAS GEMM for non-quantized inputs, the operand dtypes must be equal."
+                    f" LHS dtype != RHS dtype, lhs.dtype={lhs.dtype}, rhs.dtype={rhs.dtype}"
+                )
 
         # Determine output shape and dtype
-        assert (
-            dtypes.canonicalize_dtype(out_dtype).itemsize > 1
-        ), "cuBLAS GEMM custom op does not support 8-bit quantized output types."
+        if not dtypes.canonicalize_dtype(out_dtype).itemsize > 1:
+            raise ValueError("cuBLAS GEMM custom op does not support 8-bit quantized output types.")
         lhs_non_contracting_shape, rhs_non_contracting_shape = map(
             lambda shape, dims: [shape[dim] for dim in range(len(shape)) if dim not in dims],
             (lhs.shape, rhs.shape),
@@ -500,7 +559,8 @@ class GemmPrimitive(BasePrimitive):
 
         # Adjust output shape for comm+GEMM overlap
         if not collective_op.is_none and not is_outer:  # Inner abstract
-            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            if sequence_dim != 1:
+                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
             overlap_out_shape = list(out_shape).copy()
             if collective_op.is_all_gather:
                 overlap_out_shape[1] *= tpsp_axis_size()
@@ -508,22 +568,33 @@ class GemmPrimitive(BasePrimitive):
                 overlap_out_shape[sequence_dim] = (
                     overlap_out_shape[sequence_dim] // tpsp_axis_size()
                 )
-            assert out_dtype == jnp.bfloat16, f"Unsupported out_dtype={out_dtype}"
+            if out_dtype != jnp.bfloat16:
+                raise ValueError(f"Unsupported out_dtype={out_dtype}")
             output = jax.core.ShapedArray(shape=overlap_out_shape, dtype=out_dtype)
 
         # Validate bias when present (bias.size > 0 means fuse bias)
         if bias.size > 0:
-            assert bias.shape == tuple(rhs_non_contracting_shape), (
-                "cuBLAS GEMM bias tensor has incorrect shape, "
-                f"expected ({tuple(rhs_non_contracting_shape)}, ) but found {bias.shape}."
-            )
-            assert bias.dtype == out_dtype, (
-                "cuBLAS GEMM bias tensor has incorrect data type, "
-                f"expected {out_dtype} but found {bias.dtype}."
-            )
+            if bias.shape != tuple(rhs_non_contracting_shape):
+                raise ValueError(
+                    "cuBLAS GEMM bias tensor has incorrect shape, "
+                    f"expected ({tuple(rhs_non_contracting_shape)}, ) but found {bias.shape}."
+                )
+            if bias.dtype != out_dtype:
+                raise ValueError(
+                    "cuBLAS GEMM bias tensor has incorrect data type, "
+                    f"expected {out_dtype} but found {bias.dtype}."
+                )
 
-        assert alpha.size == 1 and alpha.dtype == jnp.float32
-        assert beta.size == 1 and beta.dtype == jnp.float32
+        if alpha.size != 1 or alpha.dtype != jnp.float32:
+            raise ValueError(
+                f"Expected alpha to be a single float32 scalar, but got alpha.size={alpha.size},"
+                f" alpha.dtype={alpha.dtype}"
+            )
+        if beta.size != 1 or beta.dtype != jnp.float32:
+            raise ValueError(
+                f"Expected beta to be a single float32 scalar, but got beta.size={beta.size},"
+                f" beta.dtype={beta.dtype}"
+            )
 
         # Declare cuBLAS workspace
         workspace_size = get_cublas_workspace_size_bytes()
@@ -610,44 +681,64 @@ class GemmPrimitive(BasePrimitive):
             lhs_flatten_axis = max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims)
             rhs_flatten_axis = min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1
 
-            lhs_scale_inv = apply_padding_to_scale_inv(
-                lhs_scale_inv, scaling_mode, lhs.shape, lhs_transposed, lhs_flatten_axis
-            )
-            rhs_scale_inv = apply_padding_to_scale_inv(
-                rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
-            )
+            if not collective_op.is_none and not is_outer:
+                # MXFP8 + Collective AG/RS: both sides of flatten_axis must be multiples of 128.
+                # No padding is needed in this case
+                lhs_first, lhs_last = math.prod(lhs.shape[:lhs_flatten_axis]), math.prod(
+                    lhs.shape[lhs_flatten_axis:]
+                )
+                assert lhs_first % 128 == 0 and lhs_last % 128 == 0, (
+                    "MXFP8 + Collective AG/RS requires LHS dimensions before and after the flatten"
+                    f" axis to be multiples of 128. Got lhs.shape={lhs.shape},"
+                    f" lhs_flatten_axis={lhs_flatten_axis}"
+                )
+                rhs_first, rhs_last = math.prod(rhs.shape[:rhs_flatten_axis]), math.prod(
+                    rhs.shape[rhs_flatten_axis:]
+                )
+                assert rhs_first % 128 == 0 and rhs_last % 128 == 0, (
+                    "MXFP8 + Collective AG/RS requires LHS dimensions before and after the flatten"
+                    f" axis to be multiples of 128. Got rhs.shape={rhs.shape},"
+                    f" rhs_flatten_axis={rhs_flatten_axis}"
+                )
+                # The scale needs to be in good shape for reordering
+                assert lhs_scale_inv.shape[sequence_dim] % tpsp_axis_size() == 0, (
+                    "MXFP8 + Collective AG/RS requires RHS scale inv sequence dimension to be"
+                    f" multiples of tpsp_axis_size. Got lhs_scale_inv.shape={lhs_scale_inv.shape},"
+                    f" tpsp_axis_size={tpsp_axis_size()}, sequence_dim={sequence_dim}"
+                )
+            else:
+                lhs_scale_inv = apply_padding_to_scale_inv(
+                    lhs_scale_inv,
+                    scaling_mode,
+                    lhs.shape,
+                    lhs_transposed,
+                    lhs_flatten_axis,
+                )
+                rhs_scale_inv = apply_padding_to_scale_inv(
+                    rhs_scale_inv, scaling_mode, rhs.shape, not rhs_transposed, rhs_flatten_axis
+                )
 
         # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
         if scaling_mode.is_mxfp8_scaling:
             lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
             rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
+        # Determine if we need to reorder the tensor so that the input/output are in the correct layout for the collective operation
+        need_reorder = not transpose_batch_sequence and not is_outer and not collective_op.is_none
+
         # Alter lhs blocks so that CGEMM RS outputs correctly
+        if need_reorder and collective_op.is_reduce_scatter and lhs.shape[0] != 1:
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            lhs = _reorder_tpsp_leading(lhs, lhs.shape)
+
         if (
-            collective_op.is_reduce_scatter
-            and not transpose_batch_sequence
-            and not is_outer
-            and not lhs.shape[0] == 1
+            need_reorder
+            and (collective_op.is_reduce_scatter or collective_op.is_all_gather)
+            and lhs_scale_inv.shape[0] != 1
+            and scaling_mode.is_1d_block_scaling()
         ):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
-            original_shape = lhs.shape
-            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
-                f"Original_shape[0]={original_shape[0]} is not divisible by"
-                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-            )
-            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
-                f"Original_shape[1]={original_shape[1]} is not divisible by"
-                f" tpsp_axis_size()={tpsp_axis_size()}"
-            )
-            reshaped = lhs.reshape(
-                dp_or_fsdp_axis_size(),
-                int(original_shape[0] / dp_or_fsdp_axis_size()),
-                tpsp_axis_size(),
-                int(original_shape[1] / tpsp_axis_size()),
-                *original_shape[2:],
-            )
-            reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
-            lhs = reordered.reshape(original_shape)
+            lhs_scale_inv = _reorder_tpsp_leading(lhs_scale_inv, lhs_scale_inv.shape)
 
         (output, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
@@ -667,31 +758,9 @@ class GemmPrimitive(BasePrimitive):
             collective_op=collective_op,
         )
         # Alter output blocks for CGEMM AG
-        if (
-            collective_op.is_all_gather
-            and not transpose_batch_sequence
-            and not is_outer
-            and not output.shape[0] == 1
-        ):
+        if need_reorder and collective_op.is_all_gather and output.shape[0] != 1:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
-            original_shape = output.shape
-            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
-                f"Original_shape[0]={original_shape[0]} is not divisible by"
-                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-            )
-            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
-                f"Original_shape[1]={original_shape[1]} is not divisible by"
-                f" tpsp_axis_size()={tpsp_axis_size()}"
-            )
-            reshaped = output.reshape(
-                tpsp_axis_size(),
-                dp_or_fsdp_axis_size(),
-                int(original_shape[0] / dp_or_fsdp_axis_size()),
-                int(original_shape[1] / tpsp_axis_size()),
-                *original_shape[2:],
-            )
-            reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
-            output = reordered.reshape(original_shape)
+            output = _reorder_dp_leading(output, output.shape)
 
         return (output,)
 
@@ -745,13 +814,15 @@ class GemmPrimitive(BasePrimitive):
         is_outer,
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
-        assert GemmPrimitive.outer_primitive is not None
+        if GemmPrimitive.outer_primitive is None:
+            raise RuntimeError("GemmPrimitive.outer_primitive has not been registered")
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
         # Batched GEMM is not supported
-        assert (
-            lhs_bdims is None and rhs_bdims is None
-        ), f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
+        if not (lhs_bdims is None and rhs_bdims is None):
+            raise RuntimeError(
+                f"Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
+            )
         out_bdims = (None,)
 
         return (
@@ -775,6 +846,7 @@ class GemmPrimitive(BasePrimitive):
         contracting_dims,
         transpose_batch_sequence,
         collective_op,
+        scaling_mode,
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
@@ -806,7 +878,8 @@ class GemmPrimitive(BasePrimitive):
         for l in lhs_cspecs:
             for r in rhs_cspecs:
                 if l is not None and l == r:
-                    assert reduce_spec is None, "Multiple reduce dimension is detected!"
+                    if reduce_spec is not None:
+                        raise RuntimeError("Multiple reduce dimension is detected!")
                     reduce_spec = l
 
         sequence_dim = None
@@ -822,18 +895,20 @@ class GemmPrimitive(BasePrimitive):
                     " Please check your sharding configuration."
                 ) from exc
             sequence_dim = tpsp_idx
-            assert (sequence_dim == 1) ^ transpose_batch_sequence, (
-                "CollectiveGEMM supports only (sequence_dim=1 and transpose_batch_sequence=False)"
-                " or (sequence_dim=0 and transpose_batch_sequence=True). Received:"
-                f" sequence_dim={sequence_dim},"
-                f" transpose_batch_sequence={transpose_batch_sequence}."
-            )
+            if not (sequence_dim == 1) ^ transpose_batch_sequence:
+                raise ValueError(
+                    "CollectiveGEMM supports only (sequence_dim=1 and"
+                    " transpose_batch_sequence=False) or (sequence_dim=0 and"
+                    f" transpose_batch_sequence=True). Received: sequence_dim={sequence_dim},"
+                    f" transpose_batch_sequence={transpose_batch_sequence}."
+                )
 
         elif collective_op.is_reduce_scatter:
-            assert reduce_spec == gsr.tpsp_resource, (
-                "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
-                f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
-            )
+            if reduce_spec != gsr.tpsp_resource:
+                raise ValueError(
+                    "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
+                    f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
+                )
             sequence_dim = int(not transpose_batch_sequence)
 
         if reduce_spec is not None:
@@ -886,14 +961,18 @@ class GemmPrimitive(BasePrimitive):
 
         # Only do AG Sequence dim if not Overlap RS
         if collective_op.is_all_gather:
-            assert sequence_dim <= len(
-                lhs_non_cspecs
-            ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
+            if sequence_dim > len(lhs_non_cspecs):
+                raise ValueError(
+                    f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs:"
+                    f" {lhs_non_cspecs}"
+                )
             out_specs = out_specs[:sequence_dim] + (None,) + out_specs[sequence_dim + 1 :]
         elif collective_op.is_reduce_scatter:
-            assert sequence_dim <= len(
-                lhs_non_cspecs
-            ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
+            if sequence_dim > len(lhs_non_cspecs):
+                raise ValueError(
+                    f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs:"
+                    f" {lhs_non_cspecs}"
+                )
             out_specs = (
                 out_specs[:sequence_dim] + (gsr.tpsp_resource,) + out_specs[sequence_dim + 1 :]
             )
@@ -911,11 +990,25 @@ class GemmPrimitive(BasePrimitive):
         # Bias sharding is based on GEMM output before any scatter
         bias_specs = rhs_non_cspecs if arg_infos[4].size > 0 else (None,)  # bias is operand index 4
 
+        # Scale shardings are based on the scaling_mode and collective_op
+        lhs_scale_specs = rhs_scale_specs = (None,)
+        if scaling_mode.is_1d_block_scaling():
+            rhs_scale_specs = rhs_specs
+            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM does not handle
+            # scale collecting yet
+            if collective_op.is_all_gather:
+                lhs_scale_specs = tuple(
+                    None if i == sequence_dim else s for i, s in enumerate(lhs_specs)
+                )
+            else:
+                lhs_scale_specs = lhs_specs
+
         if not collective_op.is_none:
-            assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            if sequence_dim < 0:
+                raise ValueError(f"Invalid sequence_dim. Got sequence_dim={sequence_dim}")
 
         return (
-            (lhs_specs, rhs_specs, bias_specs),
+            (lhs_specs, lhs_scale_specs, rhs_specs, rhs_scale_specs, bias_specs),
             out_specs,
             reduce_spec,
             sequence_dim,
@@ -937,7 +1030,6 @@ class GemmPrimitive(BasePrimitive):
     ):
         del (
             out_dtype,
-            scaling_mode,
             use_split_accumulator,
             result_infos,
             is_outer,
@@ -945,7 +1037,11 @@ class GemmPrimitive(BasePrimitive):
         )
 
         (_, out_specs, *_) = GemmPrimitive._parse_operand_output_specs(
-            arg_infos, contracting_dims, transpose_batch_sequence, collective_op
+            arg_infos,
+            contracting_dims,
+            transpose_batch_sequence,
+            collective_op,
+            scaling_mode,
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -968,7 +1064,7 @@ class GemmPrimitive(BasePrimitive):
         del result_infos, is_outer, sequence_dim
 
         (
-            (lhs_specs, rhs_specs, bias_input_specs),
+            (lhs_specs, lhs_scale_specs, rhs_specs, rhs_scale_specs, bias_input_specs),
             out_specs,
             reduce_spec,
             inferred_sequence_dim,
@@ -977,17 +1073,21 @@ class GemmPrimitive(BasePrimitive):
             contracting_dims,
             transpose_batch_sequence,
             collective_op,
+            scaling_mode,
         )
 
         # Block scale inverses match their operands, but tensor scale inverses are unsharded.
         none_sharding = NamedSharding(mesh, PartitionSpec(None))
         lhs_sharding = NamedSharding(mesh, PartitionSpec(*lhs_specs))
+        lhs_scale_sharding = NamedSharding(mesh, PartitionSpec(*lhs_scale_specs))
         rhs_sharding = NamedSharding(mesh, PartitionSpec(*rhs_specs))
+        rhs_scale_sharding = NamedSharding(mesh, PartitionSpec(*rhs_scale_specs))
+
         arg_shardings = (
             lhs_sharding,
-            lhs_sharding if scaling_mode.is_1d_block_scaling() else none_sharding,
+            lhs_scale_sharding,
             rhs_sharding,
-            rhs_sharding if scaling_mode.is_1d_block_scaling() else none_sharding,
+            rhs_scale_sharding,
         )
 
         # Bias
@@ -1154,10 +1254,11 @@ def _te_gemm(
     lhs_amax = rhs_amax = None
     # Extract GEMM custom op inputs from quantized operands
     if isinstance(lhs_q, ScaledTensor):
-        assert isinstance(rhs_q, ScaledTensor) or rhs_quantizer is not None, (
-            "cuBLAS GEMM with quantized LHS and non-quantized RHS operands requires a valid "
-            "`Quantizer` object to quantize the RHS operand."
-        )
+        if not isinstance(rhs_q, ScaledTensor) and rhs_quantizer is None:
+            raise ValueError(
+                "cuBLAS GEMM with quantized LHS and non-quantized RHS operands requires a valid "
+                "`Quantizer` object to quantize the RHS operand."
+            )
         if isinstance(lhs_q, ScaledTensor2x):
             # Choose the quantization of the contracting dimension(s)
             lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
@@ -1169,21 +1270,23 @@ def _te_gemm(
         lhs_amax = lhs_q.amax
 
     if isinstance(rhs_q, ScaledTensor):
-        assert isinstance(lhs_q, ScaledTensor) or lhs_quantizer is not None, (
-            "cuBLAS GEMM with non-quantized LHS and quantized RHS operands requires a valid "
-            "`Quantizer` object to quantize the LHS operand."
-        )
+        if not isinstance(lhs_q, ScaledTensor) and lhs_quantizer is None:
+            raise ValueError(
+                "cuBLAS GEMM with non-quantized LHS and quantized RHS operands requires a valid "
+                "`Quantizer` object to quantize the LHS operand."
+            )
         if isinstance(rhs_q, ScaledTensor2x):
             # Choose the quantization of the contracting dimension(s)
             rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_transposed else rhs_q.get_colwise_tensor()
-        assert (
+        if not (
             rhs_q.scaling_mode == lhs_q.scaling_mode
             or rhs_q.scaling_mode.is_nvfp4_scaling
             and lhs_q.scaling_mode.is_nvfp4_scaling
-        ), (
-            "cuBLAS GEMM quantized operands have mismatched scaling types, "
-            f"LHS:{lhs_q.scaling_mode} x RHS:{rhs_q.scaling_mode}."
-        )
+        ):
+            raise ValueError(
+                "cuBLAS GEMM quantized operands have mismatched scaling types, "
+                f"LHS:{lhs_q.scaling_mode} x RHS:{rhs_q.scaling_mode}."
+            )
         rhs_data = rhs_q.data
         rhs_scale_inv = rhs_q.scale_inv
         if rhs_q.data_layout == "T":
@@ -1193,10 +1296,17 @@ def _te_gemm(
     alpha = jnp.ones((1,), jnp.float32)
     beta = jnp.zeros((1,), jnp.float32)
     if scaling_mode.is_nvfp4_scaling:
-        assert lhs_amax is not None and rhs_amax is not None
+        if lhs_amax is None or rhs_amax is None:
+            raise ValueError("NVFP4 scaling requires non-None amax for both LHS and RHS operands")
         lhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(lhs_amax)
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs_amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
+
+    if not collective_op.is_none:
+        assert not scaling_mode.is_nvfp4_scaling, (
+            f"Collective GEMM is not yet supported with {scaling_mode} quantization. Only"
+            " DELAYED_TENSOR_SCALING, CURRENT_TENSOR_SCALING, and MXFP8_1D_SCALING are supported."
+        )
 
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
     if bias is None:
@@ -1268,7 +1378,10 @@ class GroupedGemmCopySizesPrimitive(BasePrimitive):
         group_sizes,
         num_gemms,
     ):
-        assert GroupedGemmCopySizesPrimitive.inner_primitive is not None
+        if GroupedGemmCopySizesPrimitive.inner_primitive is None:
+            raise RuntimeError(
+                "GroupedGemmCopySizesPrimitive.inner_primitive has not been registered"
+            )
         out = GroupedGemmCopySizesPrimitive.inner_primitive.bind(
             group_sizes,
             num_gemms=num_gemms,
@@ -1372,23 +1485,20 @@ class GroupedGemmPrimitive(BasePrimitive):
                 shape=(int64_workspace_size,), dtype=jnp.uint8
             )
 
-            assert len(additional_args) == 2, (
-                "Expected additional_args to contain alpha, beta for the graph-safe grouped GEMM"
-                f" primitive, but got {len(additional_args)} arguments."
-            )
+            if len(additional_args) != 2:
+                raise ValueError(
+                    "Expected additional_args to contain alpha, beta for the graph-safe grouped"
+                    f" GEMM primitive, but got {len(additional_args)} arguments."
+                )
             alpha_aval, beta_aval = additional_args
-            assert alpha_aval.shape == (
-                num_groups,
-            ), f"Expected alpha shape {(num_groups,)}, got {alpha_aval.shape}"
-            assert (
-                alpha_aval.dtype == jnp.float32
-            ), f"Expected alpha dtype float32, got {alpha_aval.dtype}"
-            assert beta_aval.shape == (
-                num_groups,
-            ), f"Expected beta shape {(num_groups,)}, got {beta_aval.shape}"
-            assert (
-                beta_aval.dtype == jnp.float32
-            ), f"Expected beta dtype float32, got {beta_aval.dtype}"
+            if alpha_aval.shape != (num_groups,):
+                raise ValueError(f"Expected alpha shape {(num_groups,)}, got {alpha_aval.shape}")
+            if alpha_aval.dtype != jnp.float32:
+                raise ValueError(f"Expected alpha dtype float32, got {alpha_aval.dtype}")
+            if beta_aval.shape != (num_groups,):
+                raise ValueError(f"Expected beta shape {(num_groups,)}, got {beta_aval.shape}")
+            if beta_aval.dtype != jnp.float32:
+                raise ValueError(f"Expected beta dtype float32, got {beta_aval.dtype}")
 
             return (out_aval, cublas_workspace_aval, setup_workspace_aval, int64_workspace_aval)
 
@@ -1498,7 +1608,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         use_async_d2h_group_sizes,
         use_v2_ffi,
     ):
-        assert GroupedGemmPrimitive.inner_primitive is not None
+        if GroupedGemmPrimitive.inner_primitive is None:
+            raise RuntimeError("GroupedGemmPrimitive.inner_primitive has not been registered")
         if use_v2_ffi:
             additional_args = (additional_arg_0, additional_arg_1)
         else:
@@ -1586,30 +1697,37 @@ def _jax_scaled_matmul(
     """
     JAX GEMM for MXFP8 via scaled_matmul
     """
-    assert rhs.scaling_mode in (
+    if rhs.scaling_mode not in (
         ScalingMode.MXFP8_1D_SCALING,
         ScalingMode.NVFP4_1D_SCALING,
         ScalingMode.NVFP4_2D_SCALING,
-    ), f"rhs does not have MXFP8 or NVFP4 scaling mode, got rhs.scaling_mode={rhs.scaling_mode}"
+    ):
+        raise ValueError(
+            "rhs does not have MXFP8 or NVFP4 scaling mode, got"
+            f" rhs.scaling_mode={rhs.scaling_mode}"
+        )
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
 
     expected_lhs_is_colwise = lhs_contract[-1] != lhs.data.ndim - 1
     expected_rhs_is_colwise = rhs_contract[-1] != rhs.data.ndim - 1
-    assert lhs.is_colwise is expected_lhs_is_colwise, (
-        f"LHS with unexpected quantize dimension.\nExpect is_colwise={expected_lhs_is_colwise}, got"
-        f" {lhs.is_colwise}"
-    )
-    assert rhs.is_colwise is expected_rhs_is_colwise, (
-        f"RHS with unexpected quantize dimension.\nExpect is_colwise={expected_rhs_is_colwise}, got"
-        f" {rhs.is_colwise}"
-    )
+    if lhs.is_colwise is not expected_lhs_is_colwise:
+        raise ValueError(
+            f"LHS with unexpected quantize dimension.\nExpect is_colwise={expected_lhs_is_colwise},"
+            f" got {lhs.is_colwise}"
+        )
+    if rhs.is_colwise is not expected_rhs_is_colwise:
+        raise ValueError(
+            f"RHS with unexpected quantize dimension.\nExpect is_colwise={expected_rhs_is_colwise},"
+            f" got {rhs.is_colwise}"
+        )
 
     if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         out_dtype = lhs.dq_dtype
-        assert (
-            lhs.data_layout == "N" and rhs.data_layout == "N"
-        ), f"Got lhs.data_layout={lhs.data_layout}, rhs.data_layout={rhs.data_layout}"
+        if not (lhs.data_layout == "N" and rhs.data_layout == "N"):
+            raise ValueError(
+                f"Got lhs.data_layout={lhs.data_layout}, rhs.data_layout={rhs.data_layout}"
+            )
     else:
         if lhs.data_layout == "T":
             lhs_contract = transpose_dims(
@@ -1641,7 +1759,8 @@ def _jax_scaled_matmul(
         lhs_3d, rhs_3d, lhs_scale_3d, rhs_scale_3d, preferred_element_type=out_dtype
     )
     if lhs.scaling_mode.is_nvfp4_scaling:
-        assert lhs.amax is not None and rhs.amax is not None
+        if lhs.amax is None or rhs.amax is None:
+            raise ValueError("NVFP4 scaling requires non-None amax for both LHS and RHS operands")
         lhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(lhs.amax)
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs.amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
@@ -1674,9 +1793,10 @@ def _jax_gemm(
 
     def _jax_gemm_impl(lhs, rhs):
         if lhs.scaling_mode.is_tensor_scaling():
-            assert (
-                rhs.scaling_mode == lhs.scaling_mode
-            ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
+            if rhs.scaling_mode != lhs.scaling_mode:
+                raise ValueError(
+                    f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
+                )
 
             precision = (
                 jax.lax.Precision.HIGHEST if use_split_accumulator else jax.lax.Precision.DEFAULT
@@ -1760,7 +1880,8 @@ def gemm(
 
     # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
     if not GemmPrimitive.enabled():
-        assert collective_op.is_none, "JAX GEMM does not support collective GEMM"
+        if not collective_op.is_none:
+            raise RuntimeError("JAX GEMM does not support collective GEMM")
         output = _jax_gemm(
             lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer, use_split_accumulator
         )
@@ -1815,6 +1936,11 @@ def _can_use_v2_grouped_gemm(
     if not _v2_grouped_gemm_available:
         return False
 
+    # nvte_grouped_gemm (the v2 kernel) requires SM100+ (Blackwell or newer).
+    # Fall back to the v1 path on SM90 (Hopper) and older architectures.
+    if get_device_compute_capability(0) < 100:
+        return False
+
     return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
 
 
@@ -1857,7 +1983,10 @@ def grouped_gemm(
     del precision
 
     if isinstance(lhs, jnp.ndarray):
-        assert isinstance(rhs, jnp.ndarray)
+        if not isinstance(rhs, jnp.ndarray):
+            raise TypeError(
+                f"Expected rhs to be jnp.ndarray when lhs is jnp.ndarray, but got type={type(rhs)}"
+            )
         out_dtype = lhs.dtype
         lhs_shape = lhs.shape
         rhs_shape = rhs.shape
@@ -1866,7 +1995,11 @@ def grouped_gemm(
         lhs_scale_inv = rhs_scale_inv = jnp.empty((0,), jnp.float32)
         scaling_mode = ScalingMode.NO_SCALING
     elif isinstance(lhs, GroupedScaledTensor1x):
-        assert isinstance(rhs, GroupedScaledTensor1x)
+        if not isinstance(rhs, GroupedScaledTensor1x):
+            raise TypeError(
+                "Expected rhs to be GroupedScaledTensor1x when lhs is GroupedScaledTensor1x, but"
+                f" got type={type(rhs)}"
+            )
         out_dtype = lhs.dq_dtype
         lhs_shape = lhs.original_shape
         rhs_shape = rhs.original_shape
@@ -1874,7 +2007,11 @@ def grouped_gemm(
         rhs_data = rhs.data
         lhs_scale_inv = lhs.scale_inv
         rhs_scale_inv = rhs.scale_inv
-        assert lhs.scaling_mode == rhs.scaling_mode
+        if lhs.scaling_mode != rhs.scaling_mode:
+            raise ValueError(
+                f"Mismatched scaling modes: lhs.scaling_mode={lhs.scaling_mode},"
+                f" rhs.scaling_mode={rhs.scaling_mode}"
+            )
         scaling_mode = lhs.scaling_mode
     else:
         raise TypeError("Unsupported lhs type object!")
@@ -1911,8 +2048,16 @@ def grouped_gemm(
         and not isinstance(rhs, ScaledTensor)
         and quantizer_set != noop_quantizer_set
     ):
-        assert isinstance(quantizer_set.x, GroupedQuantizer)
-        assert type(quantizer_set.x) is type(quantizer_set.kernel)
+        if not isinstance(quantizer_set.x, GroupedQuantizer):
+            raise TypeError(
+                "Expected quantizer_set.x to be GroupedQuantizer, but got"
+                f" type={type(quantizer_set.x)}"
+            )
+        if type(quantizer_set.x) is not type(quantizer_set.kernel):
+            raise TypeError(
+                "Expected quantizer_set.x and quantizer_set.kernel to have the same type, but got"
+                f" {type(quantizer_set.x)} and {type(quantizer_set.kernel)}"
+            )
         scaling_mode = quantizer_set.x.scaling_mode
         if (
             quantizer_set.x.scaling_mode.is_tensor_scaling()
@@ -1939,9 +2084,8 @@ def grouped_gemm(
         lhs_shape = lhs_q.original_shape
         rhs_shape = rhs_q.original_shape
 
-    assert not (
-        lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2
-    ), "FP8 GEMM does not support E5M2 * E5M2"
+    if lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2:
+        raise ValueError("FP8 GEMM does not support E5M2 * E5M2")
 
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
@@ -1954,12 +2098,10 @@ def grouped_gemm(
             rhs_layout_is_T = rhs_q.data_layout == "T"
         # we can't apply _shape_normalization on the grouped input
         # thus we need to ensure that lhs is in N and rhs is in T
-        assert (
-            lhs_is_trans == lhs_layout_is_T
-        ), "lhs input must be transposed before calling grouped_gemm"
-        assert (
-            not rhs_is_trans == rhs_layout_is_T
-        ), "rhs input must be transposed before calling grouped_gemm"
+        if lhs_is_trans != lhs_layout_is_T:
+            raise RuntimeError("lhs input must be transposed before calling grouped_gemm")
+        if (not rhs_is_trans) != rhs_layout_is_T:
+            raise RuntimeError("rhs input must be transposed before calling grouped_gemm")
         lhs_is_trans = False
         rhs_is_trans = True
         lhs_ndim = len(lhs_shape)
@@ -1978,28 +2120,36 @@ def grouped_gemm(
     # Calling GroupedGEMM Custom Call
     K_lhs = math.prod(lhs_shape[i] for i in lhs_contract_dim)
     K_rhs = math.prod(rhs_shape[i] for i in rhs_contract_dim)
-    assert K_lhs == K_rhs
+    if K_lhs != K_rhs:
+        raise ValueError(
+            f"Mismatched contracting dimensions: K_lhs={K_lhs}, K_rhs={K_rhs} (from"
+            f" lhs_shape={lhs_shape}, rhs_shape={rhs_shape})"
+        )
     M = math.prod(_calculate_remaining_shape(lhs_shape, lhs_contract_dim))
     N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim)[1:])  # Exclude G
 
     if is_grouped_dense_wgrad:
         N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim))
     else:
-        assert group_sizes.size == rhs_shape[0]
+        if group_sizes.size != rhs_shape[0]:
+            raise ValueError(
+                "Expected group_sizes.size == rhs_shape[0], but got"
+                f" group_sizes.size={group_sizes.size}, rhs_shape[0]={rhs_shape[0]}"
+            )
 
     has_bias = bias is not None
-    if has_bias:
-        assert bias.shape == (
-            group_sizes.size,
-            N,
-        ), f"bias shape {bias.shape} does not match expected shape {(group_sizes.size, N)}"
+    if has_bias and bias.shape != (group_sizes.size, N):
+        raise ValueError(
+            f"Expected bias.shape=({group_sizes.size}, {N}), but got bias.shape={bias.shape}"
+        )
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
-    assert group_offset is None, (
-        "group_offset is not supported yet and is instead computed"
-        " internally assuming contiguous grouping. Any padding is included in the group_sizes"
-        " and padded with zeros to not affect the result of the MoE block."
-    )
+    if group_offset is not None:
+        raise RuntimeError(
+            "group_offset is not supported yet and is instead computed"
+            " internally assuming contiguous grouping. Any padding is included in the group_sizes"
+            " and padded with zeros to not affect the result of the MoE block."
+        )
 
     use_v2_ffi = _can_use_v2_grouped_gemm(scaling_mode, lhs_data.dtype, has_bias)
     if use_v2_ffi:

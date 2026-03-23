@@ -14,11 +14,9 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 from typing import Optional, Tuple, Dict, Union, Sequence, Type, List
-from functools import reduce, lru_cache
+from functools import reduce
 import operator
-from importlib.metadata import version as get_pkg_version
 import warnings
-from packaging.version import Version as PkgVersion
 
 import jax
 import jax.numpy as jnp
@@ -40,6 +38,7 @@ from transformer_engine.jax.sharding import (
     get_all_mesh_axes,
     with_sharding_constraint,
 )
+from transformer_engine.jax.version_utils import jax_version_meet_requirement
 
 from .metadata import QuantizeMeta
 from .scaling_modes import ScalingMode
@@ -52,6 +51,8 @@ __all__ = [
     "fp8_autocast",
     "is_fp8_available",
     "is_scaling_mode_supported",
+    "is_quantize_recipe_supported",
+    "get_quantization_recipe",
     "get_supported_scaling_modes",
     "get_supported_quantization_recipes",
     "update_collections",
@@ -66,16 +67,6 @@ _reason_for_no_scaling_mode = ""
 Collection = Union[Dict, FrozenDict]
 
 NVTE_FP8_COLLECTION_NAME = "fp8_metas"
-
-
-@lru_cache(maxsize=None)
-def _jax_version_meet_requirement(version: str):
-    """
-    Helper function checking if required JAX version is available
-    """
-    jax_version = PkgVersion(get_pkg_version("jax"))
-    jax_version_required = PkgVersion(version)
-    return jax_version >= jax_version_required
 
 
 def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
@@ -111,7 +102,7 @@ def _check_block_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
         return False, "CublasLt version 12.8.0 or higher required for MXFP8 execution."
     if get_cuda_version() < 12080:
         return False, "Cuda version 12.8 or higher required for MXFP8 execution."
-    if not _jax_version_meet_requirement("0.5.3"):
+    if not jax_version_meet_requirement("0.5.3"):
         return False, "Jax version 0.5.3 or higher required for MXFP8 execution."
     return True, ""
 
@@ -124,7 +115,7 @@ def _check_fp4_support(gpu_arch) -> Tuple[bool, str]:
         return False, "CublasLt version 12.8.0 or higher required for NVFP4 execution."
     if get_cuda_version() < 12080:
         return False, "Cuda version 12.8 or higher required for NVFP4 execution."
-    if not _jax_version_meet_requirement("0.5.3"):
+    if not jax_version_meet_requirement("0.5.3"):
         return False, "Jax version 0.5.3 or higher required for NVFP4 execution."
     return True, ""
 
@@ -171,6 +162,54 @@ def is_scaling_mode_supported(
                 _reason_for_no_scaling_mode[scaling_mode] = msg
                 return ret, msg
     return _is_scaling_mode_supported[scaling_mode], _reason_for_no_scaling_mode[scaling_mode]
+
+
+_RECIPE_NAME_TO_RECIPE = {
+    "DelayedScaling": DelayedScaling,
+    "Float8CurrentScaling": Float8CurrentScaling,
+    "MXFP8BlockScaling": MXFP8BlockScaling,
+    "NVFP4BlockScaling": NVFP4BlockScaling,
+}
+
+
+def get_quantization_recipe(name: str) -> Recipe:
+    """Return a recipe object from a recipe name string.
+
+    Args:
+        name: Recipe name. One of "DelayedScaling", "Float8CurrentScaling",
+            "MXFP8BlockScaling", or "NVFP4BlockScaling".
+
+    Returns:
+        A new instance of the corresponding recipe class.
+
+    Raises:
+        ValueError: If ``name`` does not match any known recipe.
+    """
+    recipe_cls = _RECIPE_NAME_TO_RECIPE.get(name)
+    if recipe_cls is None:
+        valid = list(_RECIPE_NAME_TO_RECIPE)
+        raise ValueError(f"Invalid quantization recipe '{name}'. Valid options: {valid}")
+    return recipe_cls()
+
+
+def is_quantize_recipe_supported(recipe_name: str) -> Tuple[bool, str]:
+    """Check if the given quantization recipe (by name) is supported on the current GPU.
+
+    Args:
+        recipe_name: Name of the recipe, e.g. "DelayedScaling", "Float8CurrentScaling",
+            "MXFP8BlockScaling", "NVFP4BlockScaling".
+
+    Returns:
+        A tuple of (supported: bool, reason: str).
+    """
+    recipe = get_quantization_recipe(recipe_name)
+    config = get_quantize_config_with_recipe(recipe)
+    for tensor_source in TensorSource:
+        scaling_mode = config.get_scaling_mode(tensor_source)
+        is_supported, reason = is_scaling_mode_supported(scaling_mode)
+        if not is_supported:
+            return is_supported, reason
+    return True, None
 
 
 def is_fp8_available(
@@ -927,6 +966,7 @@ def apply_padding_to_scale_inv(
     unpadded_scale_shape = scaling_mode.get_scale_shape(
         data_shape, is_colwise=is_colwise, is_padded=False, flatten_axis=flatten_axis
     )
+
     assert scale_inv.shape == unpadded_scale_shape, (
         f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} but got "
         f"{scale_inv.shape}."

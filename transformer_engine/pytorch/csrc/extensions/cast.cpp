@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <tuple>
 #include <utility>
@@ -997,6 +998,10 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   // Enable NVFP4 kernels to use math operations that sacrifice
   // accuracy for performance. These optimizations are experimental
   // and inconsistently implemented.
+  // What math is accelerated? Only the high precision math, so numerical impact is minimal
+  // 1. replace 1 / x by reciprocal_approximate_ftz(x)
+  // 2. when RHT cast fusion is available, fusion allows cast to be performed on FP32 data,
+  //    this will essentially remove a round trip between FP32 to BF16 then FP32
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
   if (use_fast_math) {
     for (auto &config : quant_config_list) {
@@ -1355,9 +1360,19 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       for (auto &quantizer : quantizer_cpp_list) {
         nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
       }
-      bool contiguous_data_and_scale;
+      bool contiguous_data_and_scale = false;
       std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
+      if (!input_shape.empty() && input_shape.back() % 128 != 0) {
+        static std::once_flag once_unfused_nvfp4_fallback_warning;
+        std::call_once(once_unfused_nvfp4_fallback_warning, []() {
+          NVTE_WARN(
+              "Unfused NVFP4 quantization fallback is triggered because the input tensor inner "
+              "dimension is not a multiple of 128, disabling NVFP4 grouped kernel fusion. "
+              "NVFP4 might bring performance regressions for this input tensor shape.");
+        });
+        quantization_method = QuantizationMethod::UNFUSED;
+      }
       if (!contiguous_data_and_scale) {
         // Avoid fused quantize kernel if data is not contiguous
         quantization_method = QuantizationMethod::UNFUSED;

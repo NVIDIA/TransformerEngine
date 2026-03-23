@@ -70,14 +70,36 @@ def _setup():
     return world_size, local_rank, device
 
 
-def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None):
-    """Build a Sequential of TransformerLayers, optionally with FP8 init."""
+def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None, use_meta_device=True):
+    """Build a Sequential of TransformerLayers, optionally with FP8 init.
+
+    When fp8_init=True and use_meta_device=True (the default), the model is
+    created on the meta device to avoid FSDP2 incompatibility with
+    QuantizedTensor wrapper subclasses (e.g. MXFP8Tensor) whose storage is
+    inaccessible via data_ptr().  Parameters are materialized after FSDP2
+    sharding via reset_parameters() in _shard_model().
+
+    When use_meta_device=False, the model is created directly on CUDA.
+    This is the legacy path that does NOT work for block-scaling quantized
+    tensors (MXFP8, Float8Blockwise, NVFP4) because FSDP2's
+    reset_sharded_param() crashes on wrapper subclass tensors with
+    data_ptr() == 0.
+    """
     if fp8_init:
         ctx = te.quantized_model_init(enabled=True, recipe=recipe)
     else:
         from contextlib import nullcontext
 
         ctx = nullcontext()
+    kwargs = dict(
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+        fuse_qkv_params=True,
+        params_dtype=torch.bfloat16,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+    )
+    if fp8_init and use_meta_device:
+        kwargs["device"] = "meta"
     with ctx:
         model = torch.nn.Sequential(
             *[
@@ -85,11 +107,7 @@ def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None):
                     HIDDEN_SIZE,
                     FFN_HIDDEN_SIZE,
                     NUM_ATTENTION_HEADS,
-                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
-                    fuse_qkv_params=True,
-                    params_dtype=torch.bfloat16,
-                    hidden_dropout=0.0,
-                    attention_dropout=0.0,
+                    **kwargs,
                 )
                 for _ in range(NUM_LAYERS)
             ]
@@ -98,12 +116,29 @@ def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None):
 
 
 def _shard_model(model, world_size):
-    """Apply FSDP2 sharding with save/restore custom attrs."""
+    """Apply FSDP2 sharding with save/restore custom attrs.
+
+    If the model was created on the meta device (e.g. for FP8 init),
+    parameters are materialized after sharding via reset_parameters().
+
+    restore_custom_attrs is called last so it applies to the final parameter
+    objects. For meta-device models, reset_parameters() replaces params via
+    module_setattr (base.py:1336-1339), so attrs must be restored afterward.
+    """
+    has_meta_params = any(p.is_meta for p in model.parameters())
     custom_attrs = save_custom_attrs(model)
     mesh = DeviceMesh("cuda", list(range(world_size)))
     for child in model.children():
         fully_shard(child, mesh=mesh)
     fully_shard(model, mesh=mesh)
+    if has_meta_params:
+        for module in model.modules():
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+    # Restore after reset_parameters so attrs land on the final param objects.
+    # save_custom_attrs skips private attrs (_*) on QuantizedTensor params;
+    # reset_parameters fully reinitializes quantizer state from
+    # self.param_init_meta, so no private attrs need restoring.
     restore_custom_attrs(model, custom_attrs)
     return model
 
@@ -119,18 +154,11 @@ def test_fused_adam_fp8_master_weights(recipe=None):
     world_size, _, device = _setup()
 
     model = _build_model(fp8_init=True, recipe=recipe)
-
-    # Verify FP8 params created
-    qt_count = sum(1 for _, p in model.named_parameters() if isinstance(p, QuantizedTensor))
-    assert qt_count > 0, "No QuantizedTensor local tensors before training"
-
     model = _shard_model(model, world_size)
 
-    # Verify params are DTensors
+    # Verify params are DTensors with QuantizedTensor local shards
     for name, param in model.named_parameters():
         assert isinstance(param, DTensor), f"{name} is not DTensor"
-
-    # Verify FP8 params after sharding
     qt_count = sum(
         1
         for _, p in model.named_parameters()
@@ -177,6 +205,42 @@ def test_fused_adam_fp8_master_weights(recipe=None):
         if isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
     )
     assert qt_count > 0, "No QuantizedTensor local tensors after training"
+
+    dist.destroy_process_group()
+
+
+def test_fused_adam_fp8_master_weights_no_meta(recipe=None):
+    """FusedAdam with master_weights + FSDP2 + quantized_model_init WITHOUT meta device.
+
+    This is the legacy path that creates quantized params directly on CUDA.
+    FSDP2's reset_sharded_param() crashes on block-scaling QuantizedTensor
+    wrapper subclasses (data_ptr() == 0). This test documents that failure.
+
+    For per-tensor FP8 (DelayedScaling, Float8CurrentScaling) this works
+    because Float8Tensor's storage is accessible via data_ptr().
+    """
+    world_size, _, device = _setup()
+
+    model = _build_model(fp8_init=True, recipe=recipe, use_meta_device=False)
+    model = _shard_model(model, world_size)
+
+    optimizer = te.optimizers.FusedAdam(
+        model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    for step in range(NUM_STEPS):
+        optimizer.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            output = model(x)
+        loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
 
     dist.destroy_process_group()
 
@@ -506,17 +570,13 @@ def test_dcp_output_parity(recipe=None, async_save=False):
     else:
         model_state = model.state_dict()
 
+    save_state = {"model": model_state, "optimizer": optimizer.state_dict()}
+
     if not async_save:
-        dcp.save(
-            {"model": model_state, "optimizer": optimizer.state_dict()},
-            checkpoint_id=checkpoint_dir,
-        )
-        future = None
+        dcp.save(save_state, checkpoint_id=checkpoint_dir)
     else:
-        future = dcp.async_save(
-            {"model": model_state, "optimizer": optimizer.state_dict()},
-            checkpoint_id=checkpoint_dir,
-        )
+        future = dcp.async_save(save_state, checkpoint_id=checkpoint_dir)
+        future.result()  # Block on async save completion
 
     # ── Build a fresh model and load the checkpoint ──────────────────
     model2 = _build_model(fp8_init=True, recipe=recipe)
@@ -545,9 +605,6 @@ def test_dcp_output_parity(recipe=None, async_save=False):
 
     state_to_load = {"model": model2_state, "optimizer": optimizer2.state_dict()}
 
-    if async_save:
-        future.result()  # Block on async save completion
-
     dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
     model2.load_state_dict(
         state_to_load["model"],
@@ -572,7 +629,7 @@ def test_dcp_output_parity(recipe=None, async_save=False):
             ref_output,
             rtol=0.05,
             atol=0.1,
-            msg="Fresh model loaded from DCP checkpoint produces different output",
+            msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
         )
     else:
         torch.testing.assert_close(
@@ -580,7 +637,7 @@ def test_dcp_output_parity(recipe=None, async_save=False):
             ref_output,
             rtol=0,
             atol=0,
-            msg="Fresh model loaded from DCP checkpoint produces different output",
+            msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
         )
 
     # ── Verify one more training step produces identical results ─────
@@ -622,6 +679,7 @@ def test_dcp_output_parity(recipe=None, async_save=False):
 
 TESTS = {
     "fused_adam_fp8_master_weights": test_fused_adam_fp8_master_weights,
+    "fused_adam_fp8_master_weights_no_meta": test_fused_adam_fp8_master_weights_no_meta,
     "fused_adam_bf16": test_fused_adam_bf16,
     "fused_adam_fp8_no_master": test_fused_adam_fp8_no_master,
     "fused_adam_bf16_store_param_remainders": test_fused_adam_bf16_store_param_remainders,

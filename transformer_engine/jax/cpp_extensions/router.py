@@ -73,7 +73,9 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         i_shape = logits_aval.shape
         probs_aval = logits_aval.update(shape=i_shape, dtype=i_dtype)
         routing_map_aval = logits_aval.update(shape=i_shape, dtype=jnp.bool_)
-        intermediate_aval = logits_aval.update(shape=i_shape, dtype=i_dtype)
+        # The CUDA kernel always uses float32 (CompType) for intermediate
+        # computations (softmax/sigmoid values saved for backward).
+        intermediate_aval = logits_aval.update(shape=i_shape, dtype=jnp.float32)
         return probs_aval, routing_map_aval, intermediate_aval
 
     @staticmethod
@@ -115,7 +117,10 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         score_function,
         compute_aux_scores,
     ):
-        assert FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive is not None
+        if FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive is None:
+            raise RuntimeError(
+                "FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive has not been registered"
+            )
         return FusedTopkWithScoreFunctionFwdPrimitive.inner_primitive.bind(
             logits,
             expert_bias,
@@ -141,7 +146,10 @@ class FusedTopkWithScoreFunctionFwdPrimitive(BasePrimitive):
         score_function,
         compute_aux_scores,
     ):
-        assert FusedTopkWithScoreFunctionFwdPrimitive.outer_primitive is not None
+        if FusedTopkWithScoreFunctionFwdPrimitive.outer_primitive is None:
+            raise RuntimeError(
+                "FusedTopkWithScoreFunctionFwdPrimitive.outer_primitive has not been registered"
+            )
         logits, expert_bias = batched_args
         logits_bdim, _ = batch_dims
         return (
@@ -284,7 +292,10 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         score_function,
         compute_aux_scores,
     ):
-        assert FusedTopkWithScoreFunctionBwdPrimitive.inner_primitive is not None
+        if FusedTopkWithScoreFunctionBwdPrimitive.inner_primitive is None:
+            raise RuntimeError(
+                "FusedTopkWithScoreFunctionBwdPrimitive.inner_primitive has not been registered"
+            )
         return FusedTopkWithScoreFunctionBwdPrimitive.inner_primitive.bind(
             routing_map,
             intermediate,
@@ -307,7 +318,10 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         score_function,
         compute_aux_scores,
     ):
-        assert FusedTopkWithScoreFunctionBwdPrimitive.outer_primitive is not None
+        if FusedTopkWithScoreFunctionBwdPrimitive.outer_primitive is None:
+            raise RuntimeError(
+                "FusedTopkWithScoreFunctionBwdPrimitive.outer_primitive has not been registered"
+            )
         routing_map, intermediate, grad_probs = batched_args
         _, _, grad_probs_bdim = batch_dims
         return (
@@ -402,7 +416,10 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def impl(probs, tokens_per_expert, topk, coeff):
-        assert FusedMoEAuxLossFwdPrimitive.inner_primitive is not None
+        if FusedMoEAuxLossFwdPrimitive.inner_primitive is None:
+            raise RuntimeError(
+                "FusedMoEAuxLossFwdPrimitive.inner_primitive has not been registered"
+            )
         return FusedMoEAuxLossFwdPrimitive.inner_primitive.bind(
             probs,
             tokens_per_expert,
@@ -412,7 +429,10 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, topk, coeff):
-        assert FusedMoEAuxLossFwdPrimitive.outer_primitive is not None
+        if FusedMoEAuxLossFwdPrimitive.outer_primitive is None:
+            raise RuntimeError(
+                "FusedMoEAuxLossFwdPrimitive.outer_primitive has not been registered"
+            )
         probs, tokens_per_expert = batched_args
         probs_bdim, _ = batch_dims
         return (
@@ -490,7 +510,10 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def impl(const_buf, tokens_per_expert, grad_aux_loss, num_tokens):
-        assert FusedMoEAuxLossBwdPrimitive.inner_primitive is not None
+        if FusedMoEAuxLossBwdPrimitive.inner_primitive is None:
+            raise RuntimeError(
+                "FusedMoEAuxLossBwdPrimitive.inner_primitive has not been registered"
+            )
         return FusedMoEAuxLossBwdPrimitive.inner_primitive.bind(
             const_buf,
             tokens_per_expert,
@@ -500,7 +523,10 @@ class FusedMoEAuxLossBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def batcher(batched_args, batch_dims, *, num_tokens):
-        assert FusedMoEAuxLossBwdPrimitive.outer_primitive is not None
+        if FusedMoEAuxLossBwdPrimitive.outer_primitive is None:
+            raise RuntimeError(
+                "FusedMoEAuxLossBwdPrimitive.outer_primitive has not been registered"
+            )
         const_buf, tokens_per_expert, grad_aux_loss = batched_args
         _, _, grad_bdim = batch_dims
         return (

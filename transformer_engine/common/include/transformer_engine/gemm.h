@@ -84,6 +84,8 @@ enum NVTEGroupedMatmulConfigAttribute {
   kNVTEGroupedMatmulConfigAvgK = 2,
   /*! Number of streaming multiprocessors to use in GEMM kernel. */
   kNVTEGroupedMatmulConfigSMCount = 3,
+  /*! Split accumulator mode. Only taken into account on Hopper. Default: true. */
+  kNVTEGroupedMatmulConfigUseSplitAccumulator = 4,
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
@@ -360,6 +362,51 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                        NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
                        cudaStream_t stream);
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Grouped matrix multiplication with discrete A input tensors.
+ *
+ * Identical to nvte_grouped_gemm, but A is provided as a list of tensors
+ * instead of NVTEGroupedTensor. This enables discrete per-expert weights as inputA
+ * for Grouped GEMM.
+ *
+ *  \param[in]  A_list           List of A tensors (length = num_tensors).
+ *  \param[in]  num_a_tensors    Number of tensors in A_list.
+ */
+void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
+                                            int transa, const NVTEGroupedTensor B, int transb,
+                                            const NVTEGroupedTensor C, NVTEGroupedTensor D,
+                                            const NVTETensor alpha, const NVTETensor beta,
+                                            NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                            NVTEGroupedMatmulConfig config, cudaStream_t stream);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Grouped matrix multiplication with discrete output tensors.
+*
+* Identical to nvte_grouped_gemm, but C and D are provided as lists of tensors
+* instead of NVTEGroupedTensor. This enables accumulation into non-contiguous
+* per-expert buffers (for wgrads).
+*
+*  \param[in]  C_list           Optional list of C tensors (length = num_tensors).
+*  \param[in]  num_c_tensors    Number of tensors in C_list (Can be 0 if C is not provided).
+*  \param[out] D_list           List of D tensors (length = num_tensors).
+*  \param[in]  num_d_tensors    Number of tensors in D_list.
+*  \note  All tensors in C_list and D_list must share the same dtype.
+*/
+void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
+                                         const NVTEGroupedTensor B, int transb,
+                                         const NVTETensor *C_list, size_t num_c_tensors,
+                                         NVTETensor *D_list, size_t num_d_tensors,
+                                         const NVTETensor alpha, const NVTETensor beta,
+                                         NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                         NVTEGroupedMatmulConfig config, cudaStream_t stream);
+
+/*! \brief Grouped bias add for grouped GEMM outputs.
+*
+* Requires uniform last-dimension across all output tensors and bias tensors.
+*/
+void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                           cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus
@@ -520,6 +567,13 @@ class GroupedMatmulConfigWrapper {
   void set_sm_count(int sm_count) {
     nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigSMCount, &sm_count,
                                              sizeof(int));
+  }
+
+  /*! \brief Set split accumulator mode. Only taken into account on Hopper. */
+  void set_use_split_accumulator(bool use_split_accumulator) {
+    const auto val = static_cast<uint8_t>(use_split_accumulator);
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigUseSplitAccumulator,
+                                             &val, sizeof(val));
   }
 
  private:
