@@ -698,8 +698,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         if out is not None:
             out._rowwise_data = rowwise_data
             out._rowwise_scale_inv = rowwise_scale_inv
-            out._columnwise_data = None
-            out._columnwise_scale_inv = None
         else:
             out = Float8BlockwiseQTensor(
                 shape=data_shape,
