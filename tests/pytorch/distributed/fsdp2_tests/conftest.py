@@ -2,24 +2,20 @@
 #
 # See LICENSE for license information.
 
-"""Shared pytest fixtures and utilities for FSDP2 distributed tests.
+"""Shared pytest fixtures for FSDP2 distributed tests.
 
 Fixtures defined here (dist_init, _cleanup, recipe_name) are auto-discovered
-by pytest for every test module in this directory.  Utility functions
-(get_recipe_from_string, save_custom_attrs, restore_custom_attrs) can be
-imported normally: ``from conftest import get_recipe_from_string``.
+by pytest for every test module in this directory.  Utility functions live in
+``fsdp2_utils.py`` so that test/runner scripts can import them without
+triggering a duplicate import of this conftest module.
 """
 
 import gc
 import os
-
 import pytest
-
 import torch
 import torch.distributed as dist
-
-from transformer_engine.pytorch import fp8, QuantizedTensor
-import transformer_engine.common.recipe
+from transformer_engine.pytorch import fp8
 
 
 # ── FP8 recipe parametrization ──────────────────────────────────────
@@ -74,6 +70,8 @@ def dist_init():
 def _cleanup():
     """Release GPU memory and stale NCCL state between tests."""
     yield
+    if dist.is_initialized():
+        dist.barrier()
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -83,25 +81,3 @@ def recipe_name(request):
     return request.param
 
 
-# ── Other Shared helpers ───────────────────────────────────────────────────
-def get_recipe_from_string(recipe):
-    return getattr(transformer_engine.common.recipe, recipe)()
-
-
-def save_custom_attrs(module):
-    custom_attrs = {}
-    for name, param in module.named_parameters():
-        if isinstance(param, QuantizedTensor):
-            ignore_keys = [key for key in param.__dict__.keys() if key.startswith("_")]
-        else:
-            ignore_keys = []
-        attrs = vars(param)
-        custom_attrs[name] = {k: v for k, v in attrs.items() if k not in ignore_keys}
-    return custom_attrs
-
-
-def restore_custom_attrs(module, custom_attrs):
-    for name, param in module.named_parameters():
-        if name in custom_attrs:
-            for attr_name, attr_value in custom_attrs[name].items():
-                setattr(param, attr_name, attr_value)

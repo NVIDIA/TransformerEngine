@@ -26,8 +26,7 @@ Available --recipe values:
 import argparse
 import functools
 import os
-import pathlib
-import sys
+import shutil
 import pytest
 
 import torch
@@ -41,8 +40,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch import QuantizedTensor
 import transformer_engine.common.recipe
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from conftest import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
+from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
 
 HIDDEN_SIZE = 256
@@ -506,33 +504,35 @@ def test_safetensors_fp32_export(recipe_name):
     full_opt_state = get_optimizer_state_dict(model, optimizer, options=full_opts)
 
     rank = int(os.environ.get("RANK", "0"))
-    save_path = "/tmp/te_test_fsdp2_model_fp32.safetensors"
+    save_path = f"/tmp/te_test_fsdp2_model_fp32_{recipe_name}.safetensors"
 
     if rank == 0:
-        # Build FP32 state dict from optimizer master weights.
-        fp32_state = {}
-        opt_param_states = full_opt_state.get("state", {})
+        if os.path.exists(save_path):
+            os.remove(save_path)
 
-        for key, value in full_model_state.items():
-            if key in opt_param_states and "master_param" in opt_param_states[key]:
-                fp32_state[key] = opt_param_states[key]["master_param"].float()
-            else:
-                fp32_state[key] = value.float()
+        try:
+            fp32_state = {}
+            opt_param_states = full_opt_state.get("state", {})
 
-        assert len(fp32_state) > 0, "FP32 state dict is empty"
+            for key, value in full_model_state.items():
+                if key in opt_param_states and "master_param" in opt_param_states[key]:
+                    fp32_state[key] = opt_param_states[key]["master_param"].float()
+                else:
+                    fp32_state[key] = value.float()
 
-        # Save and verify.
-        save_file(fp32_state, save_path)
-        loaded = load_file(save_path)
+            assert len(fp32_state) > 0, "FP32 state dict is empty"
 
-        assert len(loaded) == len(
-            fp32_state
-        ), f"Loaded {len(loaded)} tensors, expected {len(fp32_state)}"
-        for k, v in loaded.items():
-            assert v.dtype == torch.float32, f"{k}: expected float32, got {v.dtype}"
+            save_file(fp32_state, save_path)
+            loaded = load_file(save_path)
 
-        # Clean up.
-        os.remove(save_path)
+            assert len(loaded) == len(
+                fp32_state
+            ), f"Loaded {len(loaded)} tensors, expected {len(fp32_state)}"
+            for k, v in loaded.items():
+                assert v.dtype == torch.float32, f"{k}: expected float32, got {v.dtype}"
+        finally:
+            if os.path.exists(save_path):
+                os.remove(save_path)
 
 
 @pytest.mark.parametrize("async_save", [False, True], ids=["sync", "async"])
@@ -586,151 +586,162 @@ def test_dcp_output_parity(recipe_name, async_save):
     import torch.distributed.checkpoint as dcp
 
     world_size, device = _get_dist_info()
+    rank = int(os.environ.get("RANK", "0"))
+    save_mode = "async" if async_save else "sync"
+    checkpoint_dir = f"/tmp/te_test_fsdp2_dcp_parity_{recipe_name}_{save_mode}"
 
-    # ── Build and train the original model ───────────────────────────
-    model = _build_model(fp8_init=True, recipe=recipe)
-    model = _shard_model(model, world_size)
+    if rank == 0:
+        shutil.rmtree(checkpoint_dir, ignore_errors=True)
+    dist.barrier()
 
-    optimizer = te.optimizers.FusedAdam(
-        model.parameters(),
-        lr=1e-3,
-        master_weights=True,
-        master_weight_dtype=torch.float32,
-    )
+    try:
+        # ── Build and train the original model ───────────────────────────
+        model = _build_model(fp8_init=True, recipe=recipe)
+        model = _shard_model(model, world_size)
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
-    target = torch.randn_like(x)
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
 
-    for _ in range(NUM_STEPS):
+        x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+        target = torch.randn_like(x)
+
+        for _ in range(NUM_STEPS):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=recipe):
+                output = model(x)
+            loss = F.mse_loss(output, target)
+            loss.backward()
+            optimizer.step()
+
+        # Record reference output from the trained model.
+        with torch.no_grad():
+            with te.autocast(enabled=True, recipe=recipe):
+                ref_output = model(x).clone()
+
+        # ── Save checkpoint ──────────────────────────────────────────────
+        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            # We need to remove the _extra_state keys from the model state dict for
+            # DelayedScaling, since otherwise we'll run into an error that the tensor
+            # sizes are different. The alternative is a LoadPlanner that dynamically
+            # re-sizes the input tensors, see NVIDIA/TransformerEngine#1860 for more
+            # details.
+            model_state = {
+                k: v for k, v in model.state_dict().items() if not k.endswith("_extra_state")
+            }
+        else:
+            model_state = model.state_dict()
+
+        save_state = {"model": model_state, "optimizer": optimizer.state_dict()}
+
+        if not async_save:
+            dcp.save(save_state, checkpoint_id=checkpoint_dir)
+        else:
+            future = dcp.async_save(save_state, checkpoint_id=checkpoint_dir)
+            future.result()
+
+        # ── Build a fresh model and load the checkpoint ──────────────────
+        model2 = _build_model(fp8_init=True, recipe=recipe)
+        model2 = _shard_model(model2, world_size)
+
+        optimizer2 = te.optimizers.FusedAdam(
+            model2.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        # Populate optimizer state so load_state_dict has matching structure.
+        optimizer2.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            out_tmp = model2(x)
+        F.mse_loss(out_tmp, target).backward()
+        optimizer2.step()
+
+        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            model2_state = {
+                k: v for k, v in model2.state_dict().items() if not k.endswith("_extra_state")
+            }
+        else:
+            model2_state = model2.state_dict()
+
+        state_to_load = {"model": model2_state, "optimizer": optimizer2.state_dict()}
+
+        dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
+        model2.load_state_dict(
+            state_to_load["model"],
+            strict=(
+                False
+                if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling)
+                else True
+            ),
+        )
+        optimizer2.load_state_dict(state_to_load["optimizer"])
+
+        # ── Verify identical forward-pass output ─────────────────────────
+        with torch.no_grad():
+            with te.autocast(enabled=True, recipe=recipe):
+                loaded_output = model2(x)
+
+        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            # DelayedScaling stores amax history and scaling factors in _extra_state,
+            # which cannot be saved via DCP due to non-deterministic pickle sizes
+            # across ranks. The fresh model therefore uses default scaling factors,
+            # producing small numerical differences from FP8 re-quantization.
+            torch.testing.assert_close(
+                loaded_output,
+                ref_output,
+                rtol=0.05,
+                atol=0.1,
+                msg=lambda x: (
+                    f"Fresh model loaded from DCP checkpoint produces different output: {x}"
+                ),
+            )
+        else:
+            torch.testing.assert_close(
+                loaded_output,
+                ref_output,
+                rtol=0,
+                atol=0,
+                msg=lambda x: (
+                    f"Fresh model loaded from DCP checkpoint produces different output: {x}"
+                ),
+            )
+
+        # ── Verify one more training step produces identical results ─────
         optimizer.zero_grad(set_to_none=True)
         with te.autocast(enabled=True, recipe=recipe):
-            output = model(x)
-        loss = F.mse_loss(output, target)
-        loss.backward()
+            out1 = model(x)
+        loss1 = F.mse_loss(out1, target)
+        loss1.backward()
         optimizer.step()
 
-    # Record reference output from the trained model.
-    with torch.no_grad():
+        optimizer2.zero_grad(set_to_none=True)
         with te.autocast(enabled=True, recipe=recipe):
-            ref_output = model(x).clone()
+            out2 = model2(x)
+        loss2 = F.mse_loss(out2, target)
+        loss2.backward()
+        optimizer2.step()
 
-    # ── Save checkpoint ──────────────────────────────────────────────
-    checkpoint_dir = "/tmp/te_test_fsdp2_dcp_parity"
-
-    if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-        # We need to remove the _extra_state keys from the model state dict for DelayedScaling,
-        # since otherwise we'll run into an error that the tensor sizes are different. The
-        # alternative is a LoadPlanner that dynamically re-sizes the input tensors, see
-        # NVIDIA/TransformerEngine#1860 for more details.
-        model_state = {
-            k: v for k, v in model.state_dict().items() if not k.endswith("_extra_state")
-        }
-    else:
-        model_state = model.state_dict()
-
-    save_state = {"model": model_state, "optimizer": optimizer.state_dict()}
-
-    if not async_save:
-        dcp.save(save_state, checkpoint_id=checkpoint_dir)
-    else:
-        future = dcp.async_save(save_state, checkpoint_id=checkpoint_dir)
-        future.result()  # Block on async save completion
-
-    # ── Build a fresh model and load the checkpoint ──────────────────
-    model2 = _build_model(fp8_init=True, recipe=recipe)
-    model2 = _shard_model(model2, world_size)
-
-    optimizer2 = te.optimizers.FusedAdam(
-        model2.parameters(),
-        lr=1e-3,
-        master_weights=True,
-        master_weight_dtype=torch.float32,
-    )
-
-    # Populate optimizer state so load_state_dict has matching structure.
-    optimizer2.zero_grad(set_to_none=True)
-    with te.autocast(enabled=True, recipe=recipe):
-        out_tmp = model2(x)
-    F.mse_loss(out_tmp, target).backward()
-    optimizer2.step()
-
-    if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-        model2_state = {
-            k: v for k, v in model2.state_dict().items() if not k.endswith("_extra_state")
-        }
-    else:
-        model2_state = model2.state_dict()
-
-    state_to_load = {"model": model2_state, "optimizer": optimizer2.state_dict()}
-
-    dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
-    model2.load_state_dict(
-        state_to_load["model"],
-        strict=(
-            False if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling) else True
-        ),
-    )
-    optimizer2.load_state_dict(state_to_load["optimizer"])
-
-    # ── Verify identical forward-pass output ─────────────────────────
-    with torch.no_grad():
-        with te.autocast(enabled=True, recipe=recipe):
-            loaded_output = model2(x)
-
-    if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-        # DelayedScaling stores amax history and scaling factors in _extra_state,
-        # which cannot be saved via DCP due to non-deterministic pickle sizes
-        # across ranks. The fresh model therefore uses default scaling factors,
-        # producing small numerical differences from FP8 re-quantization.
-        torch.testing.assert_close(
-            loaded_output,
-            ref_output,
-            rtol=0.05,
-            atol=0.1,
-            msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
-        )
-    else:
-        torch.testing.assert_close(
-            loaded_output,
-            ref_output,
-            rtol=0,
-            atol=0,
-            msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
-        )
-
-    # ── Verify one more training step produces identical results ─────
-    optimizer.zero_grad(set_to_none=True)
-    with te.autocast(enabled=True, recipe=recipe):
-        out1 = model(x)
-    loss1 = F.mse_loss(out1, target)
-    loss1.backward()
-    optimizer.step()
-
-    optimizer2.zero_grad(set_to_none=True)
-    with te.autocast(enabled=True, recipe=recipe):
-        out2 = model2(x)
-    loss2 = F.mse_loss(out2, target)
-    loss2.backward()
-    optimizer2.step()
-
-    if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-        torch.testing.assert_close(
-            out2,
-            out1,
-            rtol=0.05,
-            atol=0.1,
-            msg="Training step after DCP load produces different output",
-        )
-    else:
-        torch.testing.assert_close(
-            out2, out1, msg="Training step after DCP load produces different output"
-        )
-
-    # ── Cleanup ──────────────────────────────────────────────────────
-    import shutil
-
-    if int(os.environ.get("RANK", "0")) == 0:
-        shutil.rmtree(checkpoint_dir, ignore_errors=True)
+        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            torch.testing.assert_close(
+                out2,
+                out1,
+                rtol=0.05,
+                atol=0.1,
+                msg="Training step after DCP load produces different output",
+            )
+        else:
+            torch.testing.assert_close(
+                out2, out1, msg="Training step after DCP load produces different output"
+            )
+    finally:
+        dist.barrier()
+        if rank == 0:
+            shutil.rmtree(checkpoint_dir, ignore_errors=True)
 
 
 TESTS = {

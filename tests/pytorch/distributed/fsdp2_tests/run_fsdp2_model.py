@@ -28,7 +28,6 @@ Other options:
 
 import gc
 import os
-import pathlib
 import sys
 import argparse
 from types import SimpleNamespace
@@ -48,8 +47,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from conftest import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
+from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
 
 def dist_print(msg):
