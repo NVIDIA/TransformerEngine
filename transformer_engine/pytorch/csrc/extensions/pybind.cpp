@@ -276,6 +276,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false);
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
+  m.def("te_general_grouped_gemm_for_grouped_tensor",
+        &transformer_engine::pytorch::te_general_grouped_gemm_for_grouped_tensor,
+        "Grouped GEMM for GroupedTensor");
+  m.def("te_general_grouped_gemm_for_discrete_in",
+        &transformer_engine::pytorch::te_general_grouped_gemm_for_discrete_in,
+        "Grouped GEMM for discrete A input list");
+  m.def("te_general_grouped_gemm_for_discrete_out",
+        &transformer_engine::pytorch::te_general_grouped_gemm_for_discrete_out,
+        "Grouped GEMM for discrete output list");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
@@ -445,6 +454,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
+  m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
+        "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
+        py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
 
@@ -490,6 +502,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // multi-tensor functions
   m.def("multi_tensor_scale", &transformer_engine::pytorch::multi_tensor_scale_cuda,
         "Fused overflow check + scale for a list of contiguous tensors",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_scale_tensor", &transformer_engine::pytorch::multi_tensor_scale_tensor_cuda,
+        "Fused overflow check + scale for a list of contiguous tensors with scale passed as tensor",
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_l2norm", &transformer_engine::pytorch::multi_tensor_l2norm_cuda,
         "Computes L2 norm for a list of contiguous tensors",
