@@ -1517,27 +1517,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def forward(self):
         """Needs override."""
 
-    def get_weight_workspace(self, **kwargs) -> "QuantizedTensor":
-        """Get workspace buffer for weights and maybe update its values.
-
-        Thin wrapper around :func:`quantize_weight` that manages the
-        ``_fp8_workspaces`` cache on the module.
-
-        See :func:`quantize_weight` for the full parameter list. The only
-        difference is that *cache_name* controls lookup/storage in
-        ``self._fp8_workspaces``.
-        """
-        cache_name = kwargs.pop("cache_name", None)
-        workspace = self._fp8_workspaces.get(cache_name) if cache_name is not None else None
-        result, new_workspace = quantize_weight(
-            workspace=workspace,
-            cache=cache_name is not None,
-            **kwargs,
-        )
-        if new_workspace is not None and cache_name is not None:
-            self._fp8_workspaces[cache_name] = new_workspace
-        return result
-
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):
