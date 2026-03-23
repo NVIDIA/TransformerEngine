@@ -70,7 +70,7 @@ class _GroupedLinear(torch.autograd.Function):
         inp: torch.Tensor,
         non_tensor_args: Tuple,
         *weights_and_biases,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, list]:
         # pylint: disable=missing-function-docstring
 
         # Reduce number of arguments to autograd function in order
@@ -94,7 +94,6 @@ class _GroupedLinear(torch.autograd.Function):
             activation_dtype,
             is_grad_enabled,
             weight_workspaces,
-            new_workspaces_out,
             cache_weight,
             skip_fp8_weight_update,
             save_original_input,
@@ -169,11 +168,12 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Initialize weights
         weights_fp8: list
+        new_workspaces = [None] * num_gemms
         if fp8 or debug:
             weights_fp8 = []
             update_ws = is_first_microbatch is None or is_first_microbatch
             for i in range(num_gemms):
-                weight_fp8, new_ws = quantize_weight(
+                weight_fp8, new_workspaces[i] = quantize_weight(
                     tensor=weights[i],
                     quantizer=weight_quantizers[i],
                     workspace=weight_workspaces[i] if weight_workspaces else None,
@@ -183,8 +183,6 @@ class _GroupedLinear(torch.autograd.Function):
                     cache=cache_weight,
                 )
                 weights_fp8.append(weight_fp8)
-                if new_workspaces_out is not None:
-                    new_workspaces_out[i] = new_ws
 
         else:
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
@@ -315,10 +313,10 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.input_quantizers = input_quantizers
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        return out.view(-1, *inp.shape[1:-1], out.shape[-1])
+        return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, grad_output: torch.Tensor, _grad_workspaces) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         with get_nvtx_range_context("_GroupedLinear_backward"):
             saved_tensors = restore_from_func_ctx(ctx)
@@ -998,7 +996,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(f"weight{i}") if cache_weight else None
                 for i in range(num_gemms)
             ]
-            new_workspaces_out = [None] * num_gemms if cache_weight else None
 
             non_tensor_args = (
                 m_splits,
@@ -1019,16 +1016,17 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 is_grad_enabled,
                 weight_workspaces,
-                new_workspaces_out,
                 cache_weight,
                 None,  # skip_fp8_weight_update
                 self.save_original_input,
                 debug,
             )
-            out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
+            out, new_workspaces = linear_fn(
+                *autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors
+            )
 
-            if new_workspaces_out is not None:
-                for i, ws in enumerate(new_workspaces_out):
+            if cache_weight:
+                for i, ws in enumerate(new_workspaces):
                     if ws is not None:
                         self._fp8_workspaces[f"weight{i}"] = ws
 
