@@ -5,9 +5,7 @@
 """Shared pytest fixtures for FSDP2 distributed tests.
 
 Fixtures defined here (dist_init, _cleanup, recipe_name) are auto-discovered
-by pytest for every test module in this directory.  Utility functions live in
-``fsdp2_utils.py`` so that test/runner scripts can import them without
-triggering a duplicate import of this conftest module.
+by pytest for every test module in this directory.
 """
 
 import gc

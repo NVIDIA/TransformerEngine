@@ -3,12 +3,6 @@
 # See LICENSE for license information.
 
 """Shared utility functions for FSDP2 distributed tests.
-
-This module holds helpers that are used by both conftest.py (for fixture
-parametrization) and the individual test/runner scripts.  Keeping them
-here avoids the double-import problem that arises when test modules
-``sys.path.insert`` + ``from conftest import …`` alongside pytest's own
-conftest auto-discovery.
 """
 
 import transformer_engine.common.recipe
