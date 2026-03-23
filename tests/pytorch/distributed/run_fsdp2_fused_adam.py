@@ -38,7 +38,6 @@ BATCH_PER_RANK = 2
 NUM_STEPS = 3
 
 
-
 def save_custom_attrs(module):
     custom_attrs = {}
     for name, param in module.named_parameters():
