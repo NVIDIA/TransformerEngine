@@ -16,7 +16,9 @@ from transformer_engine.common.triton.mhc import (
     _mhc_projection_fwd_fused,
     _mhc_projection_bwd_fused,
     _mhc_sinkhorn_knopp_fwd_fused,
+    _mhc_sinkhorn_knopp_fwd_fused_recompute,
     _mhc_sinkhorn_knopp_bwd_fused,
+    _mhc_sinkhorn_knopp_bwd_fused_recompute,
 )
 
 
@@ -345,7 +347,7 @@ class mHCElementwiseOp(torch.autograd.Function):
 class mHCSinkhornOp(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, H_res, n=4, iters=20):
+    def forward(ctx, H_res, n=4, recompute_hist=True, iters=20):
         """
         H_res: (B, T, n, n)
         """
@@ -357,28 +359,47 @@ class mHCSinkhornOp(torch.autograd.Function):
         H_res = H_res.contiguous().clone().view(B * T, n * n)  # (B*T, n*n)
         assert n == 4, "This implementation only supports n=4 for now due to BLOCK_SIZE constraints"
 
-        # History buffers: (iters+1, B, T, n)
-        hist_f = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
-        hist_g = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
+        hist_f, hist_g = None, None
+        if not recompute_hist:
+            # History buffers: (iters+1, B, T, n)
+            hist_f = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
+            hist_g = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
         H_res_out = torch.zeros_like(H_res)  # (B*T, n*n)
 
         grid = lambda meta: (triton.cdiv(B * T * n * n, meta["BLOCK_SIZE"]),)
 
-        _mhc_sinkhorn_knopp_fwd_fused[grid](
-            x_ptr=H_res,
-            output_ptr=H_res_out,
-            hist_f_ptr=hist_f,
-            hist_g_ptr=hist_g,
-            stride_xm=n * n,
-            stride_xn=1,
-            stride_out_m=n * n,
-            stride_out_n=1,
-            M=B * T,
-            n=n,
-            iters=iters,
-        )
-
-        ctx.save_for_backward(H_res, H_res_out, hist_f, hist_g)
+        if recompute_hist:
+            _mhc_sinkhorn_knopp_fwd_fused_recompute[grid](
+                x_ptr=H_res,
+                output_ptr=H_res_out,
+                stride_xm=n * n,
+                stride_xn=1,
+                stride_out_m=n * n,
+                stride_out_n=1,
+                M=B * T,
+                n=n,
+                iters=iters,
+            )
+        else:
+            _mhc_sinkhorn_knopp_fwd_fused[grid](
+                x_ptr=H_res,
+                output_ptr=H_res_out,
+                hist_f_ptr=hist_f,
+                hist_g_ptr=hist_g,
+                stride_xm=n * n,
+                stride_xn=1,
+                stride_out_m=n * n,
+                stride_out_n=1,
+                M=B * T,
+                n=n,
+                iters=iters,
+            )
+        
+        if recompute_hist:
+            ctx.save_for_backward(H_res, H_res_out)
+        else:
+            ctx.save_for_backward(H_res, H_res_out, hist_f, hist_g)
+        ctx.recompute_hist = recompute_hist
         ctx.iters = iters
         ctx.n = n
 
@@ -387,12 +408,22 @@ class mHCSinkhornOp(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out):
-        H_res, H_res_out, hist_f, hist_g = ctx.saved_tensors
+
+        B, T, n, _ = grad_out.shape
+        M = B * T
+
+        hist_f, hist_g = None, None
+        recompute_hist = ctx.recompute_hist
+        iters = ctx.iters
+        if recompute_hist:
+            H_res, H_res_out = ctx.saved_tensors
+            hist_f = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
+            hist_g = torch.zeros((iters + 1, B, T, n), device=H_res.device, dtype=H_res.dtype)
+        else:
+            H_res, H_res_out, hist_f, hist_g = ctx.saved_tensors
+
         iters = ctx.iters
         n = ctx.n
-
-        B, T, _, _ = grad_out.shape
-        M = B * T
 
         grad_res_out = grad_out.clone().contiguous().view(M, n * n)
 
@@ -400,29 +431,50 @@ class mHCSinkhornOp(torch.autograd.Function):
 
         grid = lambda meta: (triton.cdiv(M * n * n, meta["BLOCK_SIZE"]),)
 
-        _mhc_sinkhorn_knopp_bwd_fused[grid](
-            grad_out_ptr=grad_res_out,
-            output_ptr=H_res_out,
-            grad_x_ptr=grad_res,
-            x_ptr=H_res,
-            hist_f_ptr=hist_f,
-            hist_g_ptr=hist_g,
-            stride_grad_out_m=n * n,
-            stride_grad_out_n=1,
-            stride_out_m=n * n,
-            stride_out_n=1,
-            stride_grad_xm=n * n,
-            stride_grad_xn=1,
-            stride_xm=n * n,
-            stride_xn=1,
-            M=M,
-            n=n,
-            iters=iters,
-        )
+        if recompute_hist:
+            _mhc_sinkhorn_knopp_bwd_fused_recompute[grid](
+                grad_out_ptr=grad_res_out,
+                output_ptr=H_res_out,
+                grad_x_ptr=grad_res,
+                x_ptr=H_res,
+                hist_f_ptr=hist_f,
+                hist_g_ptr=hist_g,
+                stride_grad_out_m=n * n,
+                stride_grad_out_n=1,
+                stride_out_m=n * n,
+                stride_out_n=1,
+                stride_grad_xm=n * n,
+                stride_grad_xn=1,
+                stride_xm=n * n,
+                stride_xn=1,
+                M=M,
+                n=n,
+                iters=iters,
+            )
+        else:
+            _mhc_sinkhorn_knopp_bwd_fused[grid](
+                grad_out_ptr=grad_res_out,
+                output_ptr=H_res_out,
+                grad_x_ptr=grad_res,
+                x_ptr=H_res,
+                hist_f_ptr=hist_f,
+                hist_g_ptr=hist_g,
+                stride_grad_out_m=n * n,
+                stride_grad_out_n=1,
+                stride_out_m=n * n,
+                stride_out_n=1,
+                stride_grad_xm=n * n,
+                stride_grad_xn=1,
+                stride_xm=n * n,
+                stride_xn=1,
+                M=M,
+                n=n,
+                iters=iters,
+            )
 
         grad_res = grad_res.view(B, T, n, n)
 
-        return grad_res.to(ctx.dtype), None, None
+        return grad_res.to(ctx.dtype), None, None, None
 
 
 class mHCPreOp(torch.autograd.Function):

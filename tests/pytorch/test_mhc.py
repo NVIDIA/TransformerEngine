@@ -403,9 +403,28 @@ def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype):
     x_ref = x.detach().clone().requires_grad_(True)
 
     ref_out = mHCSinkhornRef(x_ref, n)
-    fused_out = mHCSinkhornOp.apply(x, n)
+    fused_out = mHCSinkhornOp.apply(x, n, False)
 
-    print(f"ref_out.dtype: {ref_out.dtype}, fused_out.dtype: {fused_out.dtype}")  # --- IGNORE ---
+    torch.testing.assert_close(fused_out, ref_out, **tols)
+
+    ref_out.sum().backward()
+    fused_out.sum().backward()
+
+    torch.testing.assert_close(x.grad, x_ref.grad, **tols)
+
+@pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_mhc_sinkhorn_knopp_recompute(cfg: MHCConfig, dtype):
+    B, T, C, n = cfg.B, cfg.T, cfg.C, cfg.n
+
+    tols = get_tols(dtype)
+
+    x = torch.randn(B, T, n, n, device="cuda", requires_grad=True, dtype=dtype)
+
+    x_ref = x.detach().clone().requires_grad_(True)
+
+    ref_out = mHCSinkhornRef(x_ref, n)
+    fused_out = mHCSinkhornOp.apply(x, n)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 
