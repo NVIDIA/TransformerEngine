@@ -852,13 +852,13 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     const Tensor *input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    const Tensor *input_dO_f16 = nullptr;
-    if (input_dO->scaling_mode == NVTE_MXFP8_1D_SCALING) {
-      input_dO_f16 = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    }
     const Tensor *input_SoftmaxOffset = nullptr;
     if (softmax_type != NVTE_VANILLA_SOFTMAX) {
       input_SoftmaxOffset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    }
+    const Tensor *input_dO_f16 = nullptr;
+    if (input_dO->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      input_dO_f16 = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }
     fused_attn_fp8_bwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, attn_scale, dropout,
                        qkv_layout, o_format, d_out_format, dqkv_layout, bias_type, attn_mask_type,

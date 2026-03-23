@@ -1818,14 +1818,18 @@ model_configs_fp8_vs_f16 = {
     ),
     "fp8_10": ModelConfig(2, 8192, 32, 128, num_gqa_groups=4, attn_mask_type=attn_mask_type),
     "fp8_11": ModelConfig(2, 8192, 32, 128, attn_mask_type=attn_mask_type, window_size=(128, 0)),
-    "fp8_12": ModelConfig(2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type=attn_mask_type),
-    "fp8_13": ModelConfig(2, 8192, 64, 64, attn_mask_type=attn_mask_type, window_size=(128, 0)),
-    # "fp8_14": ModelConfig(
-    #     2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
-    # ),
-    # "fp8_15": ModelConfig(
-    #     2, 8192, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
-    # ),
+    "fp8_12": ModelConfig(
+        2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type=attn_mask_type
+    ),
+    "fp8_13": ModelConfig(
+        2, 8192, 64, 64, attn_mask_type=attn_mask_type, window_size=(128, 0)
+    ),
+    "fp8_14": ModelConfig(
+        2, 8192, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
+    ),
+    "fp8_15": ModelConfig(
+        2, 8192, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
+    ),
     # "fp8_15": ModelConfig(2, 2048, 16, 128, attn_mask_type="padding"),
     # "fp8_16": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="padding"),
     # "fp8_17": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="padding"),
@@ -2212,7 +2216,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     atol = 5e-1
     rtol = 5e-2
     rmse_tol = 0.11
-    bwd_names = ["dq", "dk", "dv"]
+    bwd_names = ["dq", "dk", "dv", "d_softmax_offset"]
     if flash_attn_supported and fused_attn_supported_f16:
         logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
         logging.debug("========== {:^25s} ==========".format("forward output"))
@@ -2414,10 +2418,13 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
         )
     if is_training:
         out.backward(out_grad)
+    d_softmax_offset = None
+    if is_training and config.softmax_type != "vanilla":
+        d_softmax_offset = dpa.softmax_offset.grad
 
     if is_training:
-        return out, (inp[0].grad, inp[1].grad, inp[2].grad)
-    return out, (None, None, None)
+        return out, (inp[0].grad, inp[1].grad, inp[2].grad, d_softmax_offset)
+    return out, (None, None, None, d_softmax_offset)
 
 
 model_configs_fp8 = {

@@ -1920,7 +1920,7 @@ void fused_attn_fp8_fwd_impl_v1(
                                                .set_dim({1, h, 1, 1})
                                                .set_stride({h, 1, 1, 1})
                                                .set_data_type(fe::DataType_t::FLOAT));
-        // sdpa_options.set_sink_token(softmax_offset);
+        sdpa_options.set_sink_token(softmax_offset);
       }
 
       std::shared_ptr<fe::graph::Tensor_attributes> O, Stats, amax_s, amax_o;
@@ -2491,13 +2491,13 @@ void fused_attn_fp8_bwd_impl_v1(
                                                .set_dim({1, h, 1, 1})
                                                .set_stride({h, 1, 1, 1})
                                                .set_data_type(fe::DataType_t::FLOAT));
-        // sdpa_backward_options.set_sink_token(softmax_offset);
+        sdpa_backward_options.set_sink_token(softmax_offset);
         d_softmax_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
                                                  .set_name("d_softmax_offset")
                                                  .set_dim({1, h, 1, 1})
                                                  .set_stride({h, 1, 1, 1})
                                                  .set_data_type(fe::DataType_t::FLOAT));
-        // sdpa_backward_options.set_dsink_token(d_softmax_offset);
+        sdpa_backward_options.set_dsink_token(d_softmax_offset);
       }
 
       std::shared_ptr<fe::graph::Tensor_attributes> dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP;
