@@ -107,6 +107,7 @@ def _make_tagged_qfactory(tag: str):
         )
         q._tag = f"{tag}:{role}"
         return q
+
     return qfactory
 
 
