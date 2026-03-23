@@ -16,6 +16,7 @@ import warnings
 import torch
 from torch.cuda import _lazy_call, _lazy_init
 from torch.utils.checkpoint import detach_variable, noop_context_fn
+from torch.distributed.tensor import DTensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
@@ -1990,6 +1991,89 @@ def _get_module_fsdp_state(module):
         # the closest parent fsdp module.
         module._te_cached_parent_fsdp_state = fsdp_state
     return fsdp_state
+
+
+def _convert_param_to_dtensor_param(
+    param: torch.nn.Parameter,
+    device_mesh: torch.distributed.DeviceMesh,
+    placements: Tuple[torch.distributed.tensor.placement_types.Placement],
+    shape: Optional[torch.Size] = None,
+    stride: Optional[Tuple[int]] = None,
+):
+    """Convert the parameter into a DTensor."""
+    # If the parameter is already a DTensor, extract local Tensor.
+    # We overwrite the original DTensor's distributed configuration.
+    param_tensor = param
+    if isinstance(param, DTensor):
+        param_tensor = param._local_tensor
+    # Convert the parameter to a DTensor.
+    new_param = torch.nn.Parameter(
+        DTensor.from_local(
+            param_tensor,
+            device_mesh,
+            placements=placements,
+            shape=shape,
+            stride=stride,
+        )
+    )
+    # Inherit attributes of the original Parameter.
+    # For example, "param_init_meta" or "tensor_model_parallel".
+    for key, val in param.__dict__.items():
+        if not hasattr(new_param, key):
+            # Set the original attribute.
+            setattr(new_param, key, val)
+    return new_param
+
+
+class _ToLocalIdentity(torch.autograd.Function):
+    """Extract the local tensor from a DTensor, preserving object identity.
+
+    Unlike DTensor.to_local(), this returns the exact same _local_tensor
+    object so that FSDP2's in-place attribute updates (e.g. after all-gather)
+    remain visible through any reference stored elsewhere (e.g. in ctx).
+    """
+
+    @staticmethod
+    def forward(ctx, dtensor_param: DTensor) -> torch.Tensor:
+        """
+        Forward implementation for DTensor.to_local().
+        For quantized parameters, does not shallow copy
+        the local Tensor.
+        """
+        ctx.device_mesh = dtensor_param.device_mesh
+        ctx.placements = dtensor_param.placements
+        ctx.set_materialize_grads(False)
+        return dtensor_param._local_tensor
+
+    @staticmethod
+    def backward(ctx, grad_local):
+        """
+        Backward implementation for DTensor.to_local().
+        Converts Tensor gradients to DTensor.
+        """
+        if grad_local is None:
+            return None
+        return DTensor.from_local(
+            grad_local,
+            device_mesh=ctx.device_mesh,
+            placements=ctx.placements,
+            run_check=False,
+        )
+
+
+def _extract_trainable_tensor_from_dtensor(dtensor_param: DTensor) -> torch.Tensor:
+    """
+    Retrieves the local Tensor from a trainable DTensor Parameter.
+
+    Uses _ToLocalIdentity to preserve object identity between the returned
+    tensor and DTensor._local_tensor, ensuring FSDP2's in-place updates
+    remain visible. Sets `requires_grad_(DTensor.requires_grad)` to inherit
+    `requires_grad` from the DTensor parameter, since DTensor.from_local()
+    resets it on the local Tensor.
+    """
+    compute_param = _ToLocalIdentity.apply(dtensor_param)
+    compute_param.requires_grad_(dtensor_param.requires_grad)
+    return compute_param
 
 
 def _fsdp_scatter_tensors(

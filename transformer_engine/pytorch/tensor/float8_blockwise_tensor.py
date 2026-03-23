@@ -10,6 +10,7 @@ import warnings
 from typing import Any, Optional, Tuple, Union
 
 import torch
+from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
@@ -403,7 +404,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         data = self._rowwise_data if self._rowwise_data is not None else self._columnwise_data
         if data is not None:
             return data.untyped_storage()
-        return torch.UntypedStorage(0, device=self.device)
+        return self._default_storage
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
@@ -725,6 +726,11 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         else:
             # columnwise_data is (K, full_M), logical shape is (full_M, K)
             data_shape = (columnwise_data.shape[1], columnwise_data.shape[0])
+
+        if isinstance(out, DTensor):
+            # out.to_local() is not supported with Torch Dispatch,
+            # for quantized tensors with _transpose usage.
+            out = out._local_tensor
 
         if out is not None:
             # Update existing tensor in-place (subsequent iterations)

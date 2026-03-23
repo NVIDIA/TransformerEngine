@@ -35,6 +35,8 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
     _rowwise_scale_inv: Optional[torch.Tensor]
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
+    # Default storage of 1 byte.
+    _default_storage: torch.UntypedStorage
 
     def __new__(
         cls,
@@ -61,6 +63,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
+        instance._default_storage = torch.UntypedStorage(1, device=torch.cuda.current_device())
 
         return instance
 
