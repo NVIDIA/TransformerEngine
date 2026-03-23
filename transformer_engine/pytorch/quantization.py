@@ -576,7 +576,7 @@ class FP8GlobalStateManager:
         training session.
         """
         return str(
-            (id(recipe) if recipe is not None else None, id(group) if group is not None else None)
+            (str(recipe), id(group) if group is not None else None)
         )
 
     @classmethod
