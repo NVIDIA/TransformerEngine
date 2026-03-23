@@ -2416,6 +2416,8 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
         out.backward(out_grad)
     d_softmax_offset = None
     if is_training and config.softmax_type != "vanilla":
+        print(f"softmax_offset: {dpa.softmax_offset}")
+        print(f"d_softmax_offset: {dpa.softmax_offset.grad}")
         d_softmax_offset = dpa.softmax_offset.grad
 
     if is_training:
