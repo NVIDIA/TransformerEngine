@@ -36,6 +36,12 @@ NUM_LAYERS = 2
 SEQ_LEN = 32
 BATCH_PER_RANK = 2
 NUM_STEPS = 3
+LOCAL_RANK = None
+
+
+def dist_print(msg):
+    if LOCAL_RANK == 0:
+        print(msg)
 
 
 def save_custom_attrs(module):
@@ -151,6 +157,8 @@ def test_fused_adam_fp8_master_weights(recipe=None):
     - Training loop completes without error
     - DTensor wrapping and QuantizedTensor local tensors are preserved
     """
+    global LOCAL_RANK
+    LOCAL_RANK = int(os.environ["LOCAL_RANK"])
     world_size, _, device = _setup()
 
     model = _build_model(fp8_init=True, recipe=recipe)
@@ -183,7 +191,7 @@ def test_fused_adam_fp8_master_weights(recipe=None):
         loss = F.mse_loss(output, target)
         loss.backward()
         optimizer.step()
-
+        dist_print(f"Step {step} completed with loss {loss.item()}")
     # Verify optimizer states
     for param in model.parameters():
         state = optimizer.state[param]
@@ -677,6 +685,98 @@ def test_dcp_output_parity(recipe=None, async_save=False):
     dist.destroy_process_group()
 
 
+def test_benchmark_optimizer_step(recipe=None):
+    """Benchmark per-iteration timings for FusedAdam + FSDP2 + MXFP8.
+
+    Reports forward, backward, and optimizer.step() times separately
+    using CUDA events for accurate GPU measurement.
+    """
+    global LOCAL_RANK
+    LOCAL_RANK = int(os.environ["LOCAL_RANK"])
+    world_size, _, device = _setup()
+
+    WARMUP_STEPS = 5
+    BENCH_STEPS = 200
+
+    model = _build_model(fp8_init=True, recipe=recipe)
+    model = _shard_model(model, world_size)
+
+    optimizer = te.optimizers.FusedAdam(
+        model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    fwd_times = []
+    bwd_times = []
+    opt_times = []
+    total_times = []
+
+    for step in range(WARMUP_STEPS + BENCH_STEPS):
+        evt_start = torch.cuda.Event(enable_timing=True)
+        evt_fwd = torch.cuda.Event(enable_timing=True)
+        evt_bwd = torch.cuda.Event(enable_timing=True)
+        evt_opt = torch.cuda.Event(enable_timing=True)
+
+        torch.cuda.synchronize()
+        evt_start.record()
+
+        optimizer.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            output = model(x)
+        loss = F.mse_loss(output, target)
+        evt_fwd.record()
+
+        loss.backward()
+        evt_bwd.record()
+
+        optimizer.step()
+        evt_opt.record()
+
+        torch.cuda.synchronize()
+
+        if step >= WARMUP_STEPS:
+            fwd_times.append(evt_start.elapsed_time(evt_fwd))
+            bwd_times.append(evt_fwd.elapsed_time(evt_bwd))
+            opt_times.append(evt_bwd.elapsed_time(evt_opt))
+            total_times.append(evt_start.elapsed_time(evt_opt))
+
+    if LOCAL_RANK == 0:
+        import statistics
+
+        def _stats(name, times):
+            avg = statistics.mean(times)
+            med = statistics.median(times)
+            mn = min(times)
+            mx = max(times)
+            std = statistics.stdev(times) if len(times) > 1 else 0.0
+            print(
+                f"  {name:12s}:  avg={avg:8.3f}ms  med={med:8.3f}ms  "
+                f"min={mn:8.3f}ms  max={mx:8.3f}ms  std={std:7.3f}ms"
+            )
+
+        print(f"\n{'=' * 72}")
+        print(f"Benchmark: {BENCH_STEPS} iterations (after {WARMUP_STEPS} warmup)")
+        print(
+            f"Model: TransformerLayer(h={HIDDEN_SIZE}, ffn={FFN_HIDDEN_SIZE}, "
+            f"heads={NUM_ATTENTION_HEADS}) x {NUM_LAYERS}"
+        )
+        print(f"Recipe: {type(recipe).__name__}")
+        print(f"World size: {world_size}")
+        print(f"{'=' * 72}")
+        _stats("Forward", fwd_times)
+        _stats("Backward", bwd_times)
+        _stats("Optim step", opt_times)
+        _stats("Total", total_times)
+        print(f"{'=' * 72}\n")
+
+    dist.destroy_process_group()
+
+
 TESTS = {
     "fused_adam_fp8_master_weights": test_fused_adam_fp8_master_weights,
     "fused_adam_fp8_master_weights_no_meta": test_fused_adam_fp8_master_weights_no_meta,
@@ -687,6 +787,7 @@ TESTS = {
     "dcp_output_parity": functools.partial(test_dcp_output_parity, async_save=False),
     "dcp_output_parity_async": functools.partial(test_dcp_output_parity, async_save=True),
     "safetensors_fp32_export": test_safetensors_fp32_export,
+    "benchmark_optimizer_step": test_benchmark_optimizer_step,
 }
 
 

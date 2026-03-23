@@ -200,6 +200,16 @@ class Tensor {
     return tensor_.get_columnwise_data().data_ptr;
   }
 
+  void *rowwise_scale_inv_dptr() const {
+    NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
+    return tensor_.get_rowwise_scale_inv().data_ptr;
+  }
+
+  void *columnwise_scale_inv_dptr() const {
+    NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
+    return tensor_.get_columnwise_scale_inv().data_ptr;
+  }
+
   template <typename T>
   T *rowwise_cpu_dptr() const {
     NVTE_CHECK(TypeInfo<T>::dtype == tensor_.dtype(), "Invalid type!");

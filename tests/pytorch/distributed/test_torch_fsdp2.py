@@ -167,6 +167,12 @@ def test_fsdp2_fused_adam_bf16_store_param_remainders(fp_recipe):
 
 
 @pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
+def test_fsdp2_benchmark_optimizer_step(fp_recipe):
+    """Benchmark per-iteration timings for FusedAdam + FSDP2."""
+    _run_fused_adam_test("benchmark_optimizer_step", fp_recipe)
+
+
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
 def test_fsdp2_dcp_output_parity(fp_recipe):
     """DCP save/load round-trip into a fresh model produces identical outputs."""
     if fp_recipe == "MXFP8BlockScaling":

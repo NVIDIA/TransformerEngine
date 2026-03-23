@@ -517,6 +517,12 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
                                 const int step, const int mode, const int bias_correction,
                                 const float weight_decay, DType fp8_dtype);
 
+void multi_tensor_adam_mxfp8_cuda(int chunk_size, at::Tensor noop_flag,
+                                  std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
+                                  const float beta1, const float beta2, const float epsilon,
+                                  const int step, const int mode, const int bias_correction,
+                                  const float weight_decay, DType fp8_dtype);
+
 void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
                                        std::vector<std::vector<at::Tensor>> tensor_lists,
                                        at::Tensor lr, const float beta1, const float beta2,
