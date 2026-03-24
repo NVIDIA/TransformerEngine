@@ -152,9 +152,10 @@ std::vector<py::object> fused_attn_fwd(
   auto o_shape_tmp = std::vector<size_t>{q_shape.begin(), q_shape.end()};
   o_shape_tmp[o_shape_tmp.size() - 1] = v_shape[v_shape.size() - 1];
   auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
-  size_t h=0, d=0;
+  size_t h = 0, d = 0;
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-  nvte_convert_qkv_format(q_format, o_shape_tmp, o_format, o_shape, nullptr, &h, nullptr, &d, nullptr);
+  nvte_convert_qkv_format(q_format, o_shape_tmp, o_format, o_shape, nullptr, &h, nullptr, &d,
+                          nullptr);
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   std::tie(te_O, py_O) = quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
@@ -369,9 +370,12 @@ std::vector<py::object> fused_attn_bwd(
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
   NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
-  nvte_convert_qkv_format(q_format, q_shape, dq_format, dQ_shape, nullptr, &h_q, nullptr, &d_qk, nullptr);
-  nvte_convert_qkv_format(kv_format, k_shape, dkv_format, dK_shape, nullptr, &h_kv, nullptr, nullptr, nullptr);
-  nvte_convert_qkv_format(kv_format, v_shape, dkv_format, dV_shape, nullptr, nullptr, nullptr, &d_v, nullptr);
+  nvte_convert_qkv_format(q_format, q_shape, dq_format, dQ_shape, nullptr, &h_q, nullptr, &d_qk,
+                          nullptr);
+  nvte_convert_qkv_format(kv_format, k_shape, dkv_format, dK_shape, nullptr, &h_kv, nullptr,
+                          nullptr, nullptr);
+  nvte_convert_qkv_format(kv_format, v_shape, dkv_format, dV_shape, nullptr, nullptr, nullptr, &d_v,
+                          nullptr);
   at::Tensor dQ, dK, dV, dQKV, dKV;
   // FP16/BF16: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
   // FP8DS: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.uint8
@@ -464,8 +468,9 @@ std::vector<py::object> fused_attn_bwd(
   if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     // FP8
     if (set_zero && (nvte_get_qkv_format(dqkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      if (((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) && ((h_kv * d_v) % block_size == 0) &&
-          dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous()) {
+      if (((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) &&
+          ((h_kv * d_v) % block_size == 0) && dQ.is_contiguous() && dK.is_contiguous() &&
+          dV.is_contiguous()) {
         mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
         mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
         mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
@@ -475,8 +480,9 @@ std::vector<py::object> fused_attn_bwd(
         dV.fill_(0);
       }
     }
-  } else if (dqkv_quantizer.is_none() || detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr()) ||
-      detail::IsMXFP8Quantizers(dqkv_quantizer.ptr())) {
+  } else if (dqkv_quantizer.is_none() ||
+             detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr()) ||
+             detail::IsMXFP8Quantizers(dqkv_quantizer.ptr())) {
     if (nvte_get_qkv_format(dqkv_layout) == NVTE_QKV_Format::NVTE_THD) {
       dQ.fill_(0);
       dK.fill_(0);
