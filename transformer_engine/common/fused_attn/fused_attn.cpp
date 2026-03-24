@@ -310,7 +310,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // architecture
         ((cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90)) ||
          (cudnn_runtime_version >= 8903 && sm_arch_ >= 80 && sm_arch_ < 100) ||
-         (cudnn_runtime_version >= 90700 && sm_arch_ >= 80)) &&
+         (cudnn_runtime_version >= 90700 && sm_arch_ >= 100)) &&
         // sequence length
         ((cudnn_runtime_version < 90000 && max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0) ||
          (cudnn_runtime_version >= 90000)) &&
