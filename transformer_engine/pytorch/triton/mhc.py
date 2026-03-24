@@ -139,8 +139,12 @@ class mHCProjectionOp(torch.autograd.Function):
         N = phi.shape[0]
 
         grad_H = grad_H.contiguous().view(M, -1)
-        grad_r = grad_r.contiguous().view(M,)
-        r = r.contiguous().view(M,)
+        grad_r = grad_r.contiguous().view(
+            M,
+        )
+        r = r.contiguous().view(
+            M,
+        )
 
         grad_x = torch.zeros((M, K), device=device, dtype=x.dtype)
         grad_phi = (grad_H[:, :N].T @ x).to(
