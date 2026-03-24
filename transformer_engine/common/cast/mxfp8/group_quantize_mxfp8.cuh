@@ -633,9 +633,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t global_offset_X = block_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
       uint64_t *barrier = &IN_buff_readable_mbar[buff];
-      prefetch_input_stage<IType, IS_DACT>(sIn_ptr, sActIn_ptr, tensor_map_input, tensor_map_act_input,
-                                           global_offset_X, global_offset_Y, buff_offset,
-                                           shmem_buff_size, barrier, leading_thread);
+      prefetch_input_stage<IType, IS_DACT>(sIn_ptr, sActIn_ptr, tensor_map_input,
+                                           tensor_map_act_input, global_offset_X, global_offset_Y,
+                                           buff_offset, shmem_buff_size, barrier, leading_thread);
     }
 
     float partial_dbias_colwise = 0.0f;
@@ -702,8 +702,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t global_offset_X = block_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
       store_output_stage<OType, ROWWISE_SCALING, COLWISE_SCALING>(
-          sOutRowwise_ptr, sOutColwise_ptr, tensor_map_output_rowwise,
-          tensor_map_output_colwise, global_offset_X, global_offset_Y, buff_offset, leading_thread);
+          sOutRowwise_ptr, sOutColwise_ptr, tensor_map_output_rowwise, tensor_map_output_colwise,
+          global_offset_X, global_offset_Y, buff_offset, leading_thread);
 
       buff_in = (buff_in + 1) % BUFFS_NUM;
     }
