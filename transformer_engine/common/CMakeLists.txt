@@ -4,6 +4,8 @@
 
 cmake_minimum_required(VERSION 3.21)
 
+include(FetchContent)
+
 # Language options
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
@@ -97,6 +99,21 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(pybind11 CONFIG REQUIRED)
+
+option(NVTE_USE_SYSTEM_DLPACK "Whether to use a system-installed dlpack package" OFF)
+if(NVTE_USE_SYSTEM_DLPACK)
+  find_package(dlpack REQUIRED)
+  set(NVTE_DLPACK_TARGET dlpack::dlpack)
+else()
+  FetchContent_Declare(
+    dlpack
+    GIT_REPOSITORY https://github.com/dmlc/dlpack
+    GIT_TAG v1.1
+  )
+  FetchContent_MakeAvailable(dlpack)
+  set(NVTE_DLPACK_TARGET dlpack)
+endif()
 
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
@@ -259,6 +276,8 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+target_link_libraries(transformer_engine PRIVATE Python::Module pybind11::headers)
+target_link_libraries(transformer_engine PRIVATE ${NVTE_DLPACK_TARGET})
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -268,6 +287,9 @@ target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_
 target_include_directories(transformer_engine PRIVATE
                           ${CUTLASS_INCLUDE_DIR}
                           ${CUTLASS_TOOLS_INCLUDE_DIR})
+target_include_directories(transformer_engine PRIVATE
+                          ${Python_INCLUDE_DIRS}
+                          "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/python/pygraph")
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)

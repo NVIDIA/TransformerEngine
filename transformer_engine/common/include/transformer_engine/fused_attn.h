@@ -280,22 +280,22 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
  *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
+ *  \param[in]     score_mod                 Opaque pointer to a score modifier callback.
+ *  \param[in]     score_mod_tensors         Opaque pointer to a mapping of extra score modifier tensors.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
-                         const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
-                         NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-                         const NVTETensor cu_seqlens_q_padded,
-                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
-                         const NVTETensor page_table_v, const NVTETensor rng_state,
-                         size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
-                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                         int64_t window_size_left, int64_t window_size_right,
-                         bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
+void nvte_fused_attn_fwd(
+    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
+    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
+    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
+    const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
+    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
+    bool cuda_graph, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    void *score_mod, void *score_mod_tensors, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -355,6 +355,10 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
  *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
+ *  \param[in]     score_mod                 Opaque pointer to a score modifier callback.
+ *  \param[in]     score_mod_bprop           Opaque pointer to a score modifier backward callback.
+ *  \param[in]     score_mod_tensors         Opaque pointer to a mapping of extra score modifier tensors.
+ *  \param[in]     score_mod_bprop_tensors   Opaque pointer to a mapping of extra score modifier backward tensors.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
@@ -370,7 +374,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
-                         NVTETensor workspace, cudaStream_t stream);
+                         void *score_mod, void *score_mod_bprop, void *score_mod_tensors,
+                         void *score_mod_bprop_tensors, NVTETensor workspace, cudaStream_t stream);
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *

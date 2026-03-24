@@ -192,8 +192,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
         ragged_offset_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
         dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, false,
         scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
-        window_size_left, window_size_right, bottom_right_diagonal, query_workspace_tensor.data(),
-        nullptr);
+        window_size_left, window_size_right, bottom_right_diagonal, nullptr, nullptr,
+        query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
@@ -322,14 +322,15 @@ static void FusedAttnForwardImpl(
   auto k_tensor = TensorWrapper(k_ptr, k_shape, dtype);
   auto v_tensor = TensorWrapper(v_ptr, v_shape, dtype);
 
-  nvte_fused_attn_fwd(
-      q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
-      softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(), &aux_output_tensors,
-      q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(),
-      k_seq_offsets_tensor.data(), dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
-      rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false, false,
-      scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
-      window_size_left, window_size_right, bottom_right_diagonal, workspace_tensor.data(), stream);
+  nvte_fused_attn_fwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(),
+                      softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(),
+                      &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+                      q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(),
+                      dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
+                      rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, false,
+                      false, scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
+                      softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
+                      nullptr, nullptr, workspace_tensor.data(), stream);
 
   nvte_tensor_pack_destroy(&aux_output_tensors);
 }
@@ -479,8 +480,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
                         dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(),
                         q_max_seqlen, kv_max_seqlen, scaling_factor, dropout_probability,
                         qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
-                        window_size_right, bottom_right_diagonal, deterministic, false,
-                        query_workspace_tensor.data(), nullptr);
+                        window_size_right, bottom_right_diagonal, deterministic, false, nullptr,
+                        nullptr, nullptr, nullptr, query_workspace_tensor.data(), nullptr);
   }
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
@@ -596,17 +597,17 @@ static void FusedAttnBackwardImpl(
     }
   }
 
-  nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
-                      doutput_tensor.data(),
-                      s_tensor.data(),  // not used for F16
-                      s_tensor.data(),  // not used for F16
-                      &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
-                      dbias_tensor.data(), dsoftmax_offset_tensor.data(),
-                      q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
-                      q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(), q_max_seqlen,
-                      kv_max_seqlen, scaling_factor, dropout_probability, qkv_layout, bias_type,
-                      mask_type, softmax_type, window_size_left, window_size_right,
-                      bottom_right_diagonal, deterministic, false, workspace_tensor.data(), stream);
+  nvte_fused_attn_bwd(
+      q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
+      doutput_tensor.data(),
+      s_tensor.data(),  // not used for F16
+      s_tensor.data(),  // not used for F16
+      &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(), dbias_tensor.data(),
+      dsoftmax_offset_tensor.data(), q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
+      q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(), q_max_seqlen, kv_max_seqlen,
+      scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
+      window_size_left, window_size_right, bottom_right_diagonal, deterministic, false, nullptr,
+      nullptr, nullptr, nullptr, workspace_tensor.data(), stream);
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
 }

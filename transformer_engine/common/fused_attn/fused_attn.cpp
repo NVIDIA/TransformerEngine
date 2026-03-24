@@ -552,19 +552,17 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 }
 
 // NVTE fused attention FWD with separate Q, K and V
-void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
-                         const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
-                         NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-                         const NVTETensor cu_seqlens_q_padded,
-                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
-                         const NVTETensor page_table_v, const NVTETensor rng_state,
-                         size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
-                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                         int64_t window_size_left, int64_t window_size_right,
-                         bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream) {
+void nvte_fused_attn_fwd(
+    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
+    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
+    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
+    const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
+    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
+    bool cuda_graph, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    void *score_mod, void *score_mod_tensors, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -652,10 +650,11 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, num_pages_k, num_pages_v,
         page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training,
         return_max_logit, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-        window_size_left, window_size_right, bottom_right_diagonal, input_Q, input_K, input_V,
-        input_Bias, input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
-        input_cu_seqlens_kv, input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded,
-        input_page_table_k, input_page_table_v, input_rng_state, wkspace, stream, handle);
+        window_size_left, window_size_right, bottom_right_diagonal, score_mod, score_mod_tensors,
+        input_Q, input_K, input_V, input_Bias, input_SoftmaxOffset, output_O, Aux_CTX_Tensors,
+        input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
+        input_cu_seqlens_kv_padded, input_page_table_k, input_page_table_v, input_rng_state,
+        wkspace, stream, handle);
 #else
     NVTE_ERROR(
         "cuDNN 8.9.0 is required for BF16/FP16 fused attention with arbitrary sequence length. "
@@ -687,7 +686,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
-                         NVTETensor workspace, cudaStream_t stream) {
+                         void *score_mod, void *score_mod_bprop, void *score_mod_tensors,
+                         void *score_mod_bprop_tensors, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -760,8 +760,9 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     fused_attn_arbitrary_seqlen_bwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, attn_scale, dropout,
         qkv_layout, bias_type, attn_mask_type, softmax_type, window_size_left, window_size_right,
-        bottom_right_diagonal, deterministic, input_Q, input_K, input_V, input_O, input_dO,
-        input_Bias, input_SoftmaxOffset, output_S, output_dQ, output_dK, output_dV, output_dBias,
+        bottom_right_diagonal, deterministic, score_mod, score_mod_bprop, score_mod_tensors,
+        score_mod_bprop_tensors, input_Q, input_K, input_V, input_O, input_dO, input_Bias,
+        input_SoftmaxOffset, output_S, output_dQ, output_dK, output_dV, output_dBias,
         output_dSoftmaxOffset, input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
         input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream, handle);
 #else
