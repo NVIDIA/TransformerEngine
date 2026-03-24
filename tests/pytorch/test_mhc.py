@@ -412,6 +412,7 @@ def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype):
 
     torch.testing.assert_close(x.grad, x_ref.grad, **tols)
 
+
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_mhc_sinkhorn_knopp_recompute(cfg: MHCConfig, dtype):

@@ -436,6 +436,7 @@ def sinkhorn_config():
         configs = configs[:1]
     return configs
 
+
 @triton.autotune(
     configs=sinkhorn_config(),
     key=["M"],

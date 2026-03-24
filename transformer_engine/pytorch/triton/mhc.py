@@ -392,7 +392,7 @@ class mHCSinkhornOp(torch.autograd.Function):
                 n=n,
                 iters=iters,
             )
-        
+
         if recompute_hist:
             ctx.save_for_backward(H_res, H_res_out)
         else:
