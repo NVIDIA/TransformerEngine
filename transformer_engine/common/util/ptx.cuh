@@ -347,6 +347,7 @@ __device__ __forceinline__ float exp2f_rcp<float>(e8m0_t biased_exp) {
 
 template <>
 __device__ __forceinline__ bf16 exp2f_rcp<bf16>(e8m0_t biased_exp) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   // Handle the special case of NaN.
   if (biased_exp == 255) return __ushort_as_bfloat16(0x7fff);
   // Handle the special case where the unbiased exponent is 127, so the reciprocal is 2^-127 which needs the first bit of
@@ -354,6 +355,9 @@ __device__ __forceinline__ bf16 exp2f_rcp<bf16>(e8m0_t biased_exp) {
   if (biased_exp == 254) return __ushort_as_bfloat16(0x0040);
   // Fast calculation when the unbiased exp is in [-126, 126], and only the exponent part is used to express the reciprocal.
   return __ushort_as_bfloat16((254 - biased_exp) << BF16_MANTISSA_BITS);
+#else
+  NVTE_DEVICE_ERROR("exp2f_rcp<bf16> is only supported on SM 9.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
