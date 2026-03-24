@@ -2074,7 +2074,7 @@ void fused_attn_fp8_fwd_impl_v1(
 void fused_attn_fp8_bwd_impl_v1(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d_qk, int64_t d_v,
     float scaling_factor, float dropout_probability, NVTE_QKV_Layout qkv_layout,
-    NVTE_QKV_Format o_format, NVTE_QKV_Format d_out_format, NVTE_QKV_Layout dqkv_layout,
+    NVTE_QKV_Format o_format, NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
     bool deterministic, void* devPtrQ, void* devPtrK, void* devPtrV, void* devPtrM,
@@ -2242,7 +2242,7 @@ void fused_attn_fp8_bwd_impl_v1(
       generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(),
                                       k_strides.data(), v_strides.data(), qkv_layout);
       generateMatrixStridesWithFormat(b, h, s_q, d_v, o_strides.data(), o_format);
-      generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_strides.data(), d_out_format);
+      generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_strides.data(), do_format);
       Q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                 .set_name("Q")
                                 .set_dim({b, h, s_q, d_qk})
@@ -2319,7 +2319,7 @@ void fused_attn_fp8_bwd_impl_v1(
         std::vector<int64_t> dO_t_strides(4);
         generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_t_strides.data(), q_format);
         generateMatrixStridesWithFormat(b, hg, s_kv, d_qk, k_t_strides.data(), kv_format);
-        generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_t_strides.data(), d_out_format);
+        generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_t_strides.data(), do_format);
         Q_t = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("Q_t")
                                     .set_dim({b, h, s_q, d_qk})
@@ -2360,9 +2360,9 @@ void fused_attn_fp8_bwd_impl_v1(
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_v_scale_padded,
                                         v_scale_strides.data(), kv_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_v_scale_padded,
-                                        dO_scale_strides.data(), d_out_format);
+                                        dO_scale_strides.data(), do_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_v_padded,
-                                        dO_t_scale_strides.data(), d_out_format);
+                                        dO_t_scale_strides.data(), do_format);
         descale_q =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Descale_q")
@@ -2855,7 +2855,7 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
 void fused_attn_fp8_bwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float attn_scale, float p_dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format d_out_format,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
     NVTE_QKV_Layout dqkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, size_t window_size_left, size_t window_size_right,
     bool bottom_right_diagonal, bool deterministic, const Tensor* input_Q, const Tensor* input_K,
@@ -2941,7 +2941,7 @@ void fused_attn_fp8_bwd(
       (dqkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
     fused_attn::fused_attn_fp8_bwd_impl_v1(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
-        attn_scale, p_dropout, qkv_layout, o_format, d_out_format, dqkv_layout, bias_type,
+        attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type,
         mask_type, softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
         deterministic, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv, devPtrO, devPtrdO,
         devPtrSoftmaxOffset, devPtrdQ, devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ,

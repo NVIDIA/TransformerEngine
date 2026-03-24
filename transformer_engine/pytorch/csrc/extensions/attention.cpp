@@ -330,7 +330,7 @@ std::vector<py::object> fused_attn_fwd(
 // fused attention BWD with separate Q, K and V
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
-    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format d_out_format,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
     NVTE_QKV_Layout dqkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
     bool bottom_right_diagonal, bool deterministic, const at::Tensor cu_seqlens_q,
@@ -575,7 +575,7 @@ std::vector<py::object> fused_attn_bwd(
         &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(), te_dBias.data(),
         te_dSoftmaxOffset.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv,
-        attn_scale, p_dropout, qkv_layout, o_format, d_out_format, dqkv_layout, bias_type,
+        attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type,
         attn_mask_type, softmax_type, window_size[0], window_size[1], bottom_right_diagonal,
         deterministic, cuda_graph, workspace.data(), at::cuda::getCurrentCUDAStream());
   });
@@ -592,7 +592,7 @@ std::vector<py::object> fused_attn_bwd(
         &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(), te_dBias.data(),
         te_dSoftmaxOffset.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv,
-        attn_scale, p_dropout, qkv_layout, o_format, d_out_format, dqkv_layout, bias_type,
+        attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type,
         attn_mask_type, softmax_type, window_size[0], window_size[1], bottom_right_diagonal,
         deterministic, cuda_graph, workspace.data(), at::cuda::getCurrentCUDAStream());
   });

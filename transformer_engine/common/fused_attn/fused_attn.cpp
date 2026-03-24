@@ -761,7 +761,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
                          size_t max_seqlen_kv, float attn_scale, float dropout,
                          NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-                         NVTE_QKV_Format d_out_format, NVTE_QKV_Layout dqkv_layout,
+                         NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
                          NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
                          NVTE_Softmax_Type softmax_type, int64_t window_size_left,
                          int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
@@ -861,7 +861,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       input_dO_f16 = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     }
     fused_attn_fp8_bwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, attn_scale, dropout,
-                       qkv_layout, o_format, d_out_format, dqkv_layout, bias_type, attn_mask_type,
+                       qkv_layout, o_format, do_format, dqkv_layout, bias_type, attn_mask_type,
                        softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
                        deterministic, input_Q, input_K, input_V, input_O, input_dO, input_dO_f16,
                        input_M, input_ZInv, input_S, input_SoftmaxOffset, input_output_dP,
