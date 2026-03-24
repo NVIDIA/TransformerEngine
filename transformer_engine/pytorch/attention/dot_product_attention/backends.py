@@ -185,7 +185,7 @@ class FP8EmulationFunc(torch.autograd.Function):
             query_layer, key_layer, value_layer = [
                 x.contiguous() for x in [tensor1, tensor2, tensor3]
             ]
-            # sbhd_sbhd_sbhd should always be the shape at this point
+            # always in sbhd_sbhd_sbhd shape at this point
             q_fp8, k_fp8, v_fp8, qkv_layout = combine_and_quantize(
                 qkv_layout, query_layer, key_layer, value_layer, quantizer
             )
@@ -193,8 +193,7 @@ class FP8EmulationFunc(torch.autograd.Function):
                 qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=query_layer.dtype
             )
             if isinstance(quantizer, MXFP8Quantizer):
-                # bhsd_bhsd_bhsd should always be the shape at this point
-                # permute back to sbhd_sbhd_sbhd
+                # always in bhsd_bhsd_bhsd shape at this point; permute it back to sbhd_sbhd_sbhd
                 tensors = [x.permute(2, 0, 1, 3).contiguous() for x in tensors]
         elif quantizer_name in ["S_quantizer", "O_quantizer"]:
             if quantizer is not None:
@@ -220,15 +219,15 @@ class FP8EmulationFunc(torch.autograd.Function):
                 tensors = grad1, grad2, grad3
         elif ctx.quantizer_name == "dQKV_quantizer":
             query_grad, key_grad, value_grad = [x.contiguous() for x in [grad1, grad2, grad3]]
-            dq_fp8, dk_fp8, dv_fp8, ctx.qkv_layout = combine_and_quantize(
+            # always in sbhd_sbhd_sbhd shape at this point
+            dq_fp8, dk_fp8, dv_fp8, new_qkv_layout = combine_and_quantize(
                 ctx.qkv_layout, query_grad, key_grad, value_grad, ctx.quantizer
             )
             tensors = combine_and_dequantize(
-                ctx.qkv_layout, dq_fp8, dk_fp8, dv_fp8, src_nominal_dtype=query_grad.dtype
+                new_qkv_layout, dq_fp8, dk_fp8, dv_fp8, src_nominal_dtype=query_grad.dtype
             )
             if isinstance(ctx.quantizer, MXFP8Quantizer):
-                # bhsd_bhsd_bhsd should always be the shape at this point
-                # permute back to sbhd_sbhd_sbhd
+                # always in bhsd_bhsd_bhsd shape at this point; permute it back to sbhd_sbhd_sbhd
                 tensors = [x.permute(2, 0, 1, 3).contiguous() for x in tensors]
         else:
             tensors = grad1, grad2, grad3
@@ -406,7 +405,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer.shape[0],
             key_layer.shape[0],
         )
-        apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
 
         if "padding" in attn_mask_type and attention_mask is None:
             attention_mask = dpa_utils.get_padding_mask(
@@ -432,6 +430,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 ),
             )
         )
+
+        apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
 
         # [b, h, sq, sk]
         output_size = (
@@ -483,7 +483,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     fp8_dtype=dP_quantizer.dtype, device="cuda"
                 )
             # disable swizzle for MXFP8Quantizer
-            for q in [
+            for quantizer in [
                 QKV_quantizer,
                 O_quantizer,
                 S_quantizer,
@@ -491,9 +491,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 dO_quantizer,
                 dP_quantizer,
             ]:
-                if isinstance(q, MXFP8Quantizer):
-                    q.optimize_for_gemm = False
-                    q.internal = False
+                if isinstance(quantizer, MXFP8Quantizer):
+                    quantizer.optimize_for_gemm = False
+                    quantizer.internal = False
 
             # q, k, v are in sbhd after previous reshaping
             # quantize and dequantize QKV to emulate FP8
@@ -1245,7 +1245,7 @@ class FusedAttnFunc(torch.autograd.Function):
             fp8_recipe = fp8_meta["local_recipes"][0]
 
         # qkv_layout may change due to MXFP8 quantization
-        # o_format should stay the same as original qkv_format
+        # o_format should stay the same as original q_format
         original_qkv_layout = qkv_layout
         _, o_format, _ = dpa_utils.get_qkv_format(qkv_layout)
 
