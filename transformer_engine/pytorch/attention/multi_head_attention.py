@@ -801,7 +801,12 @@ class MultiheadAttention(torch.nn.Module):
             fp8_mha = _dpa_fp8_recipe_mha
             float8_current_scaling = _dpa_fp8_recipe == "Float8CurrentScaling"
             mxfp8_scaling = _dpa_fp8_recipe == "MXFP8BlockScaling"
-        # QKV Gemm: do not produce FP8 output when in Float8CurrentScaling or MXFP8BlockScaling recipe
+
+        # QKV Gemm: do not produce FP8 output when fp8_mha = True if
+        # 1. RoPE is on: RoPE is only implemented in F16 currently
+        # 2. FP8CS recipe: due to cuBLAS limitation, FP8CS Gemms can not produce FP8 output
+        # 3. MXFP8 recipe: QKV Gemm produces QKV in bs(hd), sb(hd), t(hd) shapes, quantization of which would be along
+        # s/b/t and (hd) dimensions, whereas MXFP8 attention requires quantization along s and d, e.g. bhsd, sbhd, thd
         qkv_fp8_output = (
             fp8
             and fp8_mha
@@ -809,9 +814,12 @@ class MultiheadAttention(torch.nn.Module):
             and not float8_current_scaling
             and not mxfp8_scaling
         )
-        # DPA: produce FP8 output when fp8=True to take advantage of the O amax except for MXFP8BlockScaling
+        # DPA: produce FP8 output to take advantage of O amax from DPA; Projection Gemm can take FP8 or F16 inputs
+        # 1. FP8DS/FP8CS recipe: produce FP8 output
+        # 2. MXFP8 recipe: produce F16 output; again, due to quantization dimensions mismatch
         dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha) and not mxfp8_scaling
-        # Proj Gemm: match DPA output except for Float8CurrentScaling
+        # Projection Gemm: match DPA output except
+        # 1. FP8CS recipe: produce F16 grads; again, due to cuBLAS limitation
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
 
         layernorm_output = None
