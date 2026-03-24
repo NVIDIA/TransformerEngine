@@ -516,7 +516,7 @@ __device__ __forceinline__ float process_colwise_stage(
 
   if constexpr (BF16_CAST_ONLY) {
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < BUFF_DIM_Y; i += 4) {
       const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
       const uint32_t src_smem_ptr = __cvta_generic_to_shared(&in_sh[shmem_offset_colwise]);
@@ -560,7 +560,7 @@ __device__ __forceinline__ float process_colwise_stage(
     }
     thread_amax = static_cast<float>(thread_amax_f16);
   } else {
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < BUFF_DIM_Y; ++i) {
       const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
 
@@ -610,7 +610,7 @@ __device__ __forceinline__ float process_colwise_stage(
   if constexpr (BF16_CAST_ONLY) {
     const bf16 block_scale_inverse = ptx::exp2f_rcp<bf16>(biased_exponent);
     const ptx::bf16x2 block_scale_inverse_bf16_x2 = {block_scale_inverse, block_scale_inverse};
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < SCALE_DIM_Y; i += 4) {
       OType4 out;
       ptx::mul_cvt_4x(out, rIn4x[i / 4], block_scale_inverse_bf16_x2);
@@ -640,7 +640,7 @@ __device__ __forceinline__ float process_colwise_stage(
     }
   } else {
     const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < SCALE_DIM_Y; ++i) {
       float in;
       if constexpr (FP16_CAST_ONLY) {
@@ -687,7 +687,7 @@ __device__ __forceinline__ float process_rowwise_stage(
 
   if constexpr (NON_FP32_CAST_ONLY) {
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-    #pragma unroll
+#pragma unroll
     for (int w = 0; w < WAVES; ++w) {
       const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
       const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
@@ -708,7 +708,7 @@ __device__ __forceinline__ float process_rowwise_stage(
             : "r"(src_smem_ptr));
       } else {
         rIn[w].load_from(&in_sh[shmem_offset_rowwise]);
-        #pragma unroll
+#pragma unroll
         for (int e = 0; e < PACK_SIZE / 2; ++e) {
           ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, rIn[w].data.elt[e]);
         }
@@ -718,19 +718,19 @@ __device__ __forceinline__ float process_rowwise_stage(
   } else if constexpr (IS_CACHED_ACT_OP) {
     __syncthreads();
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-    #pragma unroll
+#pragma unroll
     for (int w = 0; w < WAVES; ++w) {
       const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
       const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
       const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
       rInCached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
       if constexpr (std::is_same_v<IType, float>) {
-        #pragma unroll
+#pragma unroll
         for (int e = 0; e < PACK_SIZE; ++e) {
           thread_amax = fmaxf(thread_amax, fabsf(rInCached[w].data.elt[e]));
         }
       } else {
-        #pragma unroll
+#pragma unroll
         for (int e = 0; e < PACK_SIZE; e += 2) {
           const IType2 in_cached_2x = {rInCached[w].data.elt[e], rInCached[w].data.elt[e + 1]};
           ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
@@ -741,7 +741,7 @@ __device__ __forceinline__ float process_rowwise_stage(
       thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
     }
   } else {
-    #pragma unroll
+#pragma unroll
     for (int w = 0; w < WAVES; ++w) {
       const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
       const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
@@ -754,7 +754,7 @@ __device__ __forceinline__ float process_rowwise_stage(
       if constexpr (IS_DACT) {
         act_in.load_from(&act_in_sh[shmem_offset_rowwise]);
       }
-      #pragma unroll
+#pragma unroll
       for (int e = 0; e < PACK_SIZE; ++e) {
         const int j = w * PACK_SIZE + e;
         float elt = static_cast<float>(in.data.elt[e]);
@@ -795,11 +795,12 @@ __device__ __forceinline__ float process_rowwise_stage(
   }
 
   const bf16 block_scale_inverse_bf16 = ptx::exp2f_rcp<bf16>(biased_exponent);
-  const ptx::bf16x2 block_scale_inverse_bf16_x2 = {block_scale_inverse_bf16, block_scale_inverse_bf16};
+  const ptx::bf16x2 block_scale_inverse_bf16_x2 = {block_scale_inverse_bf16,
+                                                   block_scale_inverse_bf16};
   const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
   const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
-  
-  #pragma unroll
+
+#pragma unroll
   for (int w = 0; w < WAVES; ++w) {
     const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
     const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
@@ -815,7 +816,7 @@ __device__ __forceinline__ float process_rowwise_stage(
       asm volatile("st.shared.b32 [%0], %1;" : : "r"(dst_smem_ptr), "r"(out_4x));
     } else {
       Vec<OType2, PACK_SIZE / 2> out;
-      #pragma unroll
+#pragma unroll
       for (int e = 0; e < PACK_SIZE / 2; ++e) {
         IType2 in;
         OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
@@ -1021,8 +1022,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
     int buff_in = 0;
 
-    // Prime the pipeline with the first PREFETCH_STAGES slices of the current block.
-    #pragma unroll
+// Prime the pipeline with the first PREFETCH_STAGES slices of the current block.
+#pragma unroll
     for (int stage = 0; stage < PREFETCH_STAGES; ++stage) {
       const size_t buff = stage;
       const size_t stage_offset_Y = stage * BUFF_DIM_Y;
@@ -1038,14 +1039,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     float partial_dbias_colwise = 0.0f;
     float thread_dbias_rowwise[SCALE_DIM_X];
     if constexpr (IS_DBIAS) {
-      #pragma unroll
+#pragma unroll
       for (int j = 0; j < SCALE_DIM_X; ++j) {
         thread_dbias_rowwise[j] = 0.0f;
       }
     }
 
-    // Process one [CHUNK_DIM_Y x CHUNK_DIM_X] block in STAGES slices (32 rows each).
-    #pragma unroll
+// Process one [CHUNK_DIM_Y x CHUNK_DIM_X] block in STAGES slices (32 rows each).
+#pragma unroll
     for (int stage = 0; stage < STAGES; ++stage) {
       const size_t stage_offset_Y = stage * BUFF_DIM_Y;
       if (stage < STAGES - PREFETCH_STAGES) {
@@ -1071,22 +1072,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t buff = buff_in;
       float thread_amax = 0.0f;
       if constexpr (COLWISE_SCALING) {
-        thread_amax =
-            process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                  ROWWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
-                buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
-                scale_stride_colwise, tensor_base_for_scales, rows, cols, in_sh, act_in_sh,
-                cached_act_sh, out_colwise_data_sh, scales_colwise, partial_dbias_colwise);
+        thread_amax = process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                            ROWWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
+            buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
+            scale_stride_colwise, tensor_base_for_scales, rows, cols, in_sh, act_in_sh,
+            cached_act_sh, out_colwise_data_sh, scales_colwise, partial_dbias_colwise);
       }
 
       if constexpr (ROWWISE_SCALING) {
-        thread_amax =
-            process_rowwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                  COLWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
-                buff, stage_offset_Y, thread_offset_Y_rowwise, thread_offset_X_rowwise, bank_group,
-                scales_offset_Y_rowwise, scales_offset_X_rowwise, scale_stride_rowwise,
-                rowwise_scale_is_within_bounds, cols, in_sh, act_in_sh, cached_act_sh,
-                out_rowwise_data_sh, scales_rowwise, thread_dbias_rowwise);
+        thread_amax = process_rowwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                            COLWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
+            buff, stage_offset_Y, thread_offset_Y_rowwise, thread_offset_X_rowwise, bank_group,
+            scales_offset_Y_rowwise, scales_offset_X_rowwise, scale_stride_rowwise,
+            rowwise_scale_is_within_bounds, cols, in_sh, act_in_sh, cached_act_sh,
+            out_rowwise_data_sh, scales_rowwise, thread_dbias_rowwise);
       }
 
       __builtin_assume(block_amax >= 0);
@@ -1119,11 +1118,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
           const size_t shmem_thread_offset =
               tid_Y_rowwise * DBIAS_BUFF_WIDTH + tid_X_rowwise * (SCALE_DIM_X + 1);
-          #pragma unroll
+#pragma unroll
           for (int w = 0; w < WAVES; ++w) {
             const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
             const size_t swizzled_group_offset = shmem_thread_offset + swizzled_group_idx;
-            #pragma unroll
+#pragma unroll
             for (int e = 0; e < PACK_SIZE; ++e) {
               const size_t j = w * PACK_SIZE + e;
               const size_t shmem_elt_idx = swizzled_group_offset + e;
@@ -1131,7 +1130,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
             }
           }
           __syncthreads();
-          #pragma unroll
+#pragma unroll
           for (int i = 0; i < THREADS_Y; ++i) {
             const int scaling_block = threadIdx.x / SCALE_DIM_X;
             thread_partial_dbias +=
@@ -1313,28 +1312,28 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                         constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
 
                         create_2D_tensor_map(tensor_map_input, input->data, first_logical_dim,
-                                              last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X,
-                                              last_logical_dim, 0, input_type_bit_size);
+                                             last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X,
+                                             last_logical_dim, 0, input_type_bit_size);
 
                         if constexpr (IS_DACT) {
                           create_2D_tensor_map(tensor_map_act_input, activations->data,
-                                                first_logical_dim, last_logical_dim, BUFF_DIM_Y,
-                                                BUFF_DIM_X, last_logical_dim, 0,
-                                                input_type_bit_size);
+                                               first_logical_dim, last_logical_dim, BUFF_DIM_Y,
+                                               BUFF_DIM_X, last_logical_dim, 0,
+                                               input_type_bit_size);
                         }
 
                         if (use_rowwise_scaling) {
                           create_2D_tensor_map(tensor_map_output_rowwise, output->data,
-                                                first_logical_dim, last_logical_dim, BUFF_DIM_Y,
-                                                BUFF_DIM_X, last_logical_dim, 0,
-                                                output_type_bit_size);
+                                               first_logical_dim, last_logical_dim, BUFF_DIM_Y,
+                                               BUFF_DIM_X, last_logical_dim, 0,
+                                               output_type_bit_size);
                         }
 
                         if (use_colwise_scaling) {
-                          create_2D_tensor_map(tensor_map_output_colwise,
-                                                output->columnwise_data, first_logical_dim,
-                                                last_logical_dim, BUFF_DIM_Y, BUFF_DIM_X,
-                                                last_logical_dim, 0, output_type_bit_size);
+                          create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data,
+                                               first_logical_dim, last_logical_dim, BUFF_DIM_Y,
+                                               BUFF_DIM_X, last_logical_dim, 0,
+                                               output_type_bit_size);
                         }
 
                         constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
@@ -1385,9 +1384,10 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                               last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
                         }
 
-                        auto kernel = group_quantize_mxfp8_kernel<
-                            IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, SCALING_TYPE,
-                            WITH_GEMM_SWIZZLED_SCALES, SHAPE_REP>;
+                        auto kernel =
+                            group_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
+                                                        IType, OType, SCALING_TYPE,
+                                                        WITH_GEMM_SWIZZLED_SCALES, SHAPE_REP>;
 
                         NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
@@ -1407,12 +1407,11 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                         }
 
                         NVTE_CHECK_CUDA(cudaGetLastError());
-                      }
-                  );  // NOLINT(*)
-              );      // NOLINT(*)
-          );          // NOLINT(*)
-      );              // NOLINT(*)
-  );                  // NOLINT(*)
+                      });  // NOLINT(*)
+              );           // NOLINT(*)
+          );               // NOLINT(*)
+      );                   // NOLINT(*)
+  );                       // NOLINT(*)
 }
 
 }  // namespace mxfp8
