@@ -493,8 +493,8 @@ __global__ void __launch_bounds__(1)
   if (tensor_id < num_tensors) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
-      modify_base_tensor_map(base_tensor_map_input, &g_tensor_map_input[tensor_id],
-                             global_data_ptr, rows, cols, sizeof(IType));
+      modify_base_tensor_map(base_tensor_map_input, &g_tensor_map_input[tensor_id], global_data_ptr,
+                             rows, cols, sizeof(IType));
     }
     if (compute_dactivations) {
       const uintptr_t global_data_ptr =

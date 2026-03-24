@@ -537,9 +537,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   // Main work loop: decode current job, prime its pipeline, then process all 32-row stages.
   while (!job_finished) {
     // Decode CTA assignment into logical tensor coordinates and validate bounds.
-    const JobDescriptor current_job =
-        decode_job<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(num_tensors, first_logical_dim, last_logical_dim, work_blocks_X,
-                              ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
+    const JobDescriptor current_job = decode_job<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(
+        num_tensors, first_logical_dim, last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y,
+        offsets_ptr, first_dims_ptr, last_dims_ptr);
     const bool current_job_is_valid =
         is_job_valid<SHAPE_REP>(current_job, total_work_blocks, offsets_ptr);
     if (!current_job_is_valid) {
@@ -547,15 +547,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
     if (!job_has_work(current_job)) {
       // Zero-sized tensors are valid grouped-tensor entries; skip them and keep scheduling work.
-      advance_to_next_job<PERSISTENT>(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
-                          total_work_blocks, work_blocks_X);
+      advance_to_next_job<PERSISTENT>(job_finished, ctaid_X, ctaid_Y, static_next_block_id,
+                                      static_block_stride, total_work_blocks, work_blocks_X);
       continue;
     }
 
     const size_t tensor_id = current_job.tensor_id;
     const size_t rows = current_job.rows;
     const size_t cols = current_job.cols;
-    const BlockDescriptor current_block = decode_block<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(current_job, offsets_ptr);
+    const BlockDescriptor current_block =
+        decode_block<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(current_job, offsets_ptr);
 
     const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
     const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
@@ -741,8 +742,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
     }
 
-    advance_to_next_job<PERSISTENT>(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
-                        total_work_blocks, work_blocks_X);
+    advance_to_next_job<PERSISTENT>(job_finished, ctaid_X, ctaid_Y, static_next_block_id,
+                                    static_block_stride, total_work_blocks, work_blocks_X);
   }
 
   if (amax_ptr != nullptr) {
