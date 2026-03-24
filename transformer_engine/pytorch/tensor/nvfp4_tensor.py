@@ -733,8 +733,10 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             start = args[2] if len(args) > 2 else None
             end = args[3] if len(args) > 3 else None
             step = args[4] if len(args) > 4 else 1
-            if step == 1 and (start is None or start == 0) and (
-                end is None or end >= tensor.size(dim)
+            if (
+                step == 1
+                and (start is None or start == 0)
+                and (end is None or end >= tensor.size(dim))
             ):
                 return NVFP4Tensor.make_like(tensor)
 
