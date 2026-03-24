@@ -426,7 +426,7 @@ class FusedAdam(torch.optim.Optimizer):
             self.state[param][state_name].quantize_(data.float())
         else:
             self.state[param][state_name] = data
-        
+
         # If the original Parameter was a DTensor, re-wrap the state
         # into DTensor to support Torch DCP checkpointing.
         if isinstance(param, DTensor):
