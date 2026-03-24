@@ -152,12 +152,9 @@ std::vector<py::object> fused_attn_fwd(
   auto o_shape_tmp = std::vector<size_t>{q_shape.begin(), q_shape.end()};
   o_shape_tmp[o_shape_tmp.size() - 1] = v_shape[v_shape.size() - 1];
   auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
-  size_t b = 0, h = 0, s = 0, d = 0, t = 0;
+  size_t h=0, d=0;
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-  nvte_convert_qkv_format(q_format, o_shape_tmp, o_format, o_shape, &b, &h, &s, &d, &t);
-  if (q_format == NVTE_QKV_Format::NVTE_THD) {
-    b = cu_seqlens_q.size(0) - 1;
-  }
+  nvte_convert_qkv_format(q_format, o_shape_tmp, o_format, o_shape, nullptr, &h, nullptr, &d, nullptr);
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   std::tie(te_O, py_O) = quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
@@ -364,35 +361,26 @@ std::vector<py::object> fused_attn_bwd(
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> k_shape = convertShape(te_K.shape());
   std::vector<size_t> v_shape = convertShape(te_V.shape());
-  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
-  size_t b = 0, h_q = 0, h_kv = 0, s_q = 0, s_kv = 0, d_qk = 0, d_v = 0, t_q = 0, t_kv = 0;
+  const DType dqkv_fake_dtype = GetTransformerEngineDType(fake_dtype);
+  size_t h_q = 0, h_kv = 0, d_qk = 0, d_v = 0;
   size_t ndim = q_shape.size();
   std::vector<size_t> dQ_shape(ndim), dK_shape(ndim), dV_shape(ndim);
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
   NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
-  nvte_convert_qkv_format(q_format, q_shape, dq_format, dQ_shape, &b, &h_q, &s_q, &d_qk, &t_q);
-  nvte_convert_qkv_format(kv_format, k_shape, dkv_format, dK_shape, &b, &h_kv, &s_kv, &d_qk, &t_kv);
-  nvte_convert_qkv_format(kv_format, v_shape, dkv_format, dV_shape, &b, &h_kv, &s_kv, &d_v, &t_kv);
-  if (dq_format == NVTE_QKV_Format::NVTE_THD) {
-    b = cu_seqlens_q.size(0) - 1;
-  } else if (dkv_format == NVTE_QKV_Format::NVTE_THD) {
-    b = cu_seqlens_kv.size(0) - 1;
-  }
+  nvte_convert_qkv_format(q_format, q_shape, dq_format, dQ_shape, nullptr, &h_q, nullptr, &d_qk, nullptr);
+  nvte_convert_qkv_format(kv_format, k_shape, dkv_format, dK_shape, nullptr, &h_kv, nullptr, nullptr, nullptr);
+  nvte_convert_qkv_format(kv_format, v_shape, dkv_format, dV_shape, nullptr, nullptr, nullptr, &d_v, nullptr);
   at::Tensor dQ, dK, dV, dQKV, dKV;
-  DType dqkv_type = fake_dtype_te;
-  if (!dqkv_quantizer.is_none()) {
-    dqkv_type = dqkv_quantizer.attr("dtype").cast<DType>();
-  }
-  auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
-  if (dqkv_type == DType::kFloat8E4M3 || dqkv_type == DType::kFloat8E5M2) {
+  // FP16/BF16: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
+  // FP8DS: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.uint8
+  // FP8CS/MXFP8: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
+  auto options = torch::TensorOptions().dtype(fake_dtype).device(torch::kCUDA);
+  if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     options = options.dtype(torch::kUInt8);
   }
-  if (detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr()) ||
-      detail::IsMXFP8Quantizers(dqkv_quantizer.ptr())) {
-    options = options.dtype(fake_dtype);
-  }
+
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(dqkv_layout);
   std::vector<int64_t> tmp_shape;
   switch (layout_group) {
@@ -468,15 +456,15 @@ std::vector<py::object> fused_attn_bwd(
       NVTE_ERROR("QKV layout not supported!");
   }
 
-  std::tie(te_dQ, py_dQ) = quantizer_helper(dqkv_quantizer, dQ_shape, fake_dtype_te, true, dQ);
-  std::tie(te_dK, py_dK) = quantizer_helper(dqkv_quantizer, dK_shape, fake_dtype_te, true, dK);
-  std::tie(te_dV, py_dV) = quantizer_helper(dqkv_quantizer, dV_shape, fake_dtype_te, true, dV);
+  std::tie(te_dQ, py_dQ) = quantizer_helper(dqkv_quantizer, dQ_shape, dqkv_fake_dtype, true, dQ);
+  std::tie(te_dK, py_dK) = quantizer_helper(dqkv_quantizer, dK_shape, dqkv_fake_dtype, true, dK);
+  std::tie(te_dV, py_dV) = quantizer_helper(dqkv_quantizer, dV_shape, dqkv_fake_dtype, true, dV);
 
   // construct NVTE tensors
-  if (dqkv_type == DType::kFloat8E4M3 || dqkv_type == DType::kFloat8E5M2) {
+  if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     // FP8
     if (set_zero && (nvte_get_qkv_format(dqkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      if (((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) &&
+      if (((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) && ((h_kv * d_v) % block_size == 0) &&
           dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous()) {
         mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
         mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
@@ -487,7 +475,8 @@ std::vector<py::object> fused_attn_bwd(
         dV.fill_(0);
       }
     }
-  } else if (dqkv_type == DType::kBFloat16 || dqkv_type == DType::kFloat16) {
+  } else if (dqkv_quantizer.is_none() || detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr()) ||
+      detail::IsMXFP8Quantizers(dqkv_quantizer.ptr())) {
     if (nvte_get_qkv_format(dqkv_layout) == NVTE_QKV_Format::NVTE_THD) {
       dQ.fill_(0);
       dK.fill_(0);
