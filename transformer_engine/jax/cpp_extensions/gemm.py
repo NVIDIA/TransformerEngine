@@ -2299,7 +2299,12 @@ def grouped_gemm(
     else:
         lhs_non_contracting = lhs_shape[:lhs_axis_boundary]
     if rhs_is_trans:
-        rhs_non_contracting = tuple(rhs_shape[d] for d in range(rhs_axis_boundary) if d != 0)
+        if rhs_first_dims.size > 0 or rhs_last_dims.size > 0:
+            # wgrad: rhs (e.g. grad_T of shape (N, M)) has no G batch dim; include all dims
+            rhs_non_contracting = tuple(rhs_shape[d] for d in range(rhs_axis_boundary))
+        else:
+            # fwd/dgrad: rhs (e.g. kernel_T of shape (G, N, K)) has G batch dim at dim 0; skip it
+            rhs_non_contracting = tuple(rhs_shape[d] for d in range(rhs_axis_boundary) if d != 0)
     else:
         rhs_non_contracting = rhs_shape[rhs_axis_boundary:]
     if rhs_first_dims.size > 0 or rhs_last_dims.size > 0:
