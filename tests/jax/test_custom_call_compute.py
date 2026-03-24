@@ -43,6 +43,7 @@ from transformer_engine.jax.quantize import (
     noop_quantizer_set,
     QuantizeMetaSet,
     QuantizeMeta,
+    get_device_compute_capability,
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
@@ -76,6 +77,9 @@ supported_scaling_modes = helper.get_supported_scaling_modes()
 non_fp4_supported_scaling_modes = [s for s in supported_scaling_modes if not s.is_nvfp4_scaling]
 supported_recipes = helper.get_supported_quantization_recipes()
 supported_recipes = [pytest.param(r, id=r.__class__.__name__) for r in supported_recipes]
+
+is_v2_grouped_gemm_supported = get_device_compute_capability(0) >= 100
+v2_grouped_gemm_unsupported_reason = "V2 grouped GEMM requires SM100+ (Blackwell or newer)"
 
 
 def is_shape_supported_by_mxfp8(input_shape):
@@ -2013,10 +2017,10 @@ class TestGroupedDenseMXFP8KernelSelection:
             n_groups=input_shape[0],
         )
         lhs_tensor = GroupedNoScaleTensor(
-            data=lhs, first_dims=group_sizes, last_dims=None, group_axis=0, original_shape=lhs.shape
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
         )
         rhs_tensor = GroupedNoScaleTensor(
-            data=rhs, first_dims=None, last_dims=None, group_axis=0, original_shape=rhs.shape
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
         )
         # Reference: unquantized grouped GEMM
         n_groups = input_shape[0]
@@ -2054,10 +2058,10 @@ class TestGroupedDenseMXFP8KernelSelection:
             n_groups=input_shape[0],
         )
         lhs_tensor = GroupedNoScaleTensor(
-            data=lhs, first_dims=group_sizes, last_dims=None, group_axis=0, original_shape=lhs.shape
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
         )
         rhs_tensor = GroupedNoScaleTensor(
-            data=rhs, first_dims=None, last_dims=None, group_axis=0, original_shape=rhs.shape
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
         )
         n_groups = input_shape[0]
         lhs_splits = jnp.split(lhs, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
@@ -2126,6 +2130,116 @@ class TestGroupedDenseMXFP8KernelSelection:
         assert_allclose(prim_val, ref_val, dtype=fwd_dtype)
         assert_allclose(prim_dx, ref_dx, dtype=bwd_dtype)
         assert_allclose(prim_dk, ref_dk, dtype=bwd_dtype)
+
+
+# BF16 grouped GEMM V1/V2 shapes: no special shape alignment needed for BF16 GEMM.
+# V2 is selected based solely on hardware (SM100+), not shape.
+GROUPED_DENSE_BF16_INPUT_SHAPES = [
+    # (n_groups, m, n, k)
+    (8, 8, 128, 128),
+    (4, 4, 64, 256),
+]
+
+
+@pytest.mark.skipif(
+    not is_v2_grouped_gemm_supported, reason=v2_grouped_gemm_unsupported_reason
+)
+class TestGroupedDenseBF16V2GEMM:
+    """Tests that explicitly verify V2 BF16 grouped GEMM on SM100+ hardware.
+
+    For BF16, the V2 (CUDA-graph-safe) grouped GEMM is selected when:
+      - The device compute capability is >= 100 (Blackwell or newer)
+      - The cuBLAS version supports it
+    V1 (nvte_multi_tensor_gemm) is the fallback on older hardware.
+
+    V1 BF16 grouped GEMM is tested by TestGroupedDense.test_grouped_gemm_fp16
+    (using use_async_d2h_group_sizes=True).
+    """
+
+    def _generate_bf16_input(self, input_shape, group_size_multiplier=32):
+        key = jax.random.PRNGKey(7)
+        subkeys = jax.random.split(key, 3)
+        n_groups, m, n, k = input_shape
+
+        group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
+        group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
+        group_sizes = jnp.diff(group_sizes)
+        group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1])
+        group_sizes = group_sizes.at[1].set(0)
+        group_sizes = group_sizes * group_size_multiplier
+        m_total = m * group_size_multiplier
+
+        lhs = jax.random.uniform(subkeys[1], (m_total, k), dtype=jnp.bfloat16)
+        rhs = jax.random.uniform(subkeys[2], (n_groups, k, n), dtype=jnp.bfloat16)
+        return lhs, rhs, group_sizes
+
+    @pytest.mark.parametrize(
+        "input_shape",
+        GROUPED_DENSE_BF16_INPUT_SHAPES,
+        ids=[f"bf16_v2_{s}" for s in GROUPED_DENSE_BF16_INPUT_SHAPES],
+    )
+    def test_grouped_gemm_bf16_v2(self, input_shape):
+        """BF16 grouped GEMM using the V2 (CUDA-graph-safe) kernel on SM100+."""
+        lhs, rhs, group_sizes = self._generate_bf16_input(input_shape)
+        n_groups = input_shape[0]
+
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
+
+        lhs_splits = jnp.split(lhs, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
+        rhs_splits = jnp.split(rhs, n_groups, axis=0)
+        ref_out = jnp.concatenate(
+            [jnp.squeeze(lhs_i @ rhs_i, axis=0) for lhs_i, rhs_i in zip(lhs_splits, rhs_splits)],
+            axis=0,
+        )
+
+        prim_out = jax.jit(
+            tex.grouped_gemm, static_argnames=("contracting_dims",)
+        )(
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=((1,), (1,)),
+        )
+
+        assert prim_out.shape == ref_out.shape
+        assert prim_out.dtype == jnp.bfloat16
+        assert_allclose(prim_out, ref_out, dtype=jnp.bfloat16)
+
+    @pytest.mark.parametrize(
+        "input_shape",
+        GROUPED_DENSE_BF16_INPUT_SHAPES,
+        ids=[f"bf16_v2_grad_{s}" for s in GROUPED_DENSE_BF16_INPUT_SHAPES],
+    )
+    def test_grouped_dense_grad_bf16_v2(self, input_shape):
+        """BF16 grouped GEMM gradient test (fwd + dgrad + wgrad) using V2 on SM100+."""
+        lhs, rhs, group_sizes = self._generate_bf16_input(input_shape)
+        n_groups = input_shape[0]
+        contracting_dims = ((1,), (1,))
+
+        def _ref_sum(x, kernel, group_sizes):
+            lhs_splits = jnp.split(x, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
+            rhs_splits = jnp.split(kernel, n_groups, axis=0)
+            out = jnp.concatenate(
+                [jnp.squeeze(li @ ri, axis=0) for li, ri in zip(lhs_splits, rhs_splits)], axis=0
+            )
+            return jnp.sum(out) / jnp.sqrt(x.size)
+
+        def _prim_sum(x, kernel, group_sizes):
+            out = grouped_dense(x, kernel, group_sizes, contracting_dims, bias=None)
+            return jnp.sum(jnp.asarray(out)) / jnp.sqrt(x.size)
+
+        ref_val, (ref_dx, ref_dk) = value_and_grad(_ref_sum, (0, 1))(lhs, rhs, group_sizes)
+        prim_val, (prim_dx, prim_dk) = jit(value_and_grad(_prim_sum, (0, 1)), static_argnums=())(
+            lhs, rhs, group_sizes
+        )
+
+        assert_allclose(prim_val, ref_val, dtype=jnp.bfloat16)
+        assert_allclose(prim_dx, ref_dx, dtype=jnp.bfloat16)
+        assert_allclose(prim_dk, ref_dk, dtype=jnp.bfloat16)
 
 
 class TestDebugInspectFFI:

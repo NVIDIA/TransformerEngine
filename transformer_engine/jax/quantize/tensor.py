@@ -418,7 +418,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         """
         if self.first_dims is not None and self.first_dims.size > 0:
             return self.first_dims
-        return jnp.ones((self.original_shape[self.group_axis],), dtype=jnp.int32)
+        return jnp.ones((self.original_shape[0],), dtype=jnp.int32)
 
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
@@ -690,11 +690,7 @@ class ScaledTensorFactory:
 
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
 
-        if (
-            first_dims is not None
-            or last_dims is not None
-            or (original_shape is not None and group_axis is not None)
-        ):
+        if first_dims is not None or last_dims is not None or original_shape is not None:
             assert (
                 original_shape is not None
             ), "original_shape is not given for GroupedScaledTensor1x"
