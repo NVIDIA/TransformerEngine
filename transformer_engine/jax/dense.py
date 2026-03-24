@@ -422,9 +422,7 @@ def _grouped_dense_fwd_rule(
         flatten_axis=flatten_axis_x,
     )
 
-    casted_kernel = tex.grouped_quantize(
-        kernel, quantizer_set.kernel, flatten_axis=flatten_axis_k
-    )
+    casted_kernel = tex.grouped_quantize(kernel, quantizer_set.kernel, flatten_axis=flatten_axis_k)
     contracting_dims = (x_contracting_dims, k_contracting_dims)
 
     # For x_contracting_dims == (1,) and k_contracting_dims == (1,), we should have
