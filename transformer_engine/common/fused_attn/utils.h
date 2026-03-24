@@ -111,6 +111,8 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
   constexpr int h_dim = 1;
   constexpr int s_dim = 2;
   constexpr int d_dim = 3;
+  const NVTE_QKV_Format q_format = nvte_get_q_format(layout);
+  const NVTE_QKV_Format kv_format = nvte_get_kv_format(layout);
 
   switch (layout) {
     case NVTE_QKV_Layout::NVTE_SB3HD:
@@ -132,10 +134,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       }
       break;
     case NVTE_QKV_Layout::NVTE_SBHD_SB2HD:
-      q_strides[b_dim] = h * d_qk;
-      q_strides[h_dim] = d_qk;
-      q_strides[s_dim] = b * h * d_qk;
-      q_strides[d_dim] = 1;
+      generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_strides, q_format);
       k_strides[b_dim] = 2 * hg * d_qk;
       k_strides[h_dim] = d_qk;
       k_strides[s_dim] = b * 2 * hg * d_qk;
@@ -145,10 +144,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       }
       break;
     case NVTE_QKV_Layout::NVTE_SBHD_SBH2D:
-      q_strides[b_dim] = h * d_qk;
-      q_strides[h_dim] = d_qk;
-      q_strides[s_dim] = b * h * d_qk;
-      q_strides[d_dim] = 1;
+      generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_strides, q_format);
       k_strides[b_dim] = 2 * hg * d_qk;
       k_strides[h_dim] = 2 * d_qk;
       k_strides[s_dim] = b * 2 * hg * d_qk;
@@ -156,21 +152,6 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       for (int i = 0; i < 4; i++) {
         v_strides[i] = k_strides[i];
       }
-      break;
-    case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
-    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD:
-      q_strides[b_dim] = h * d_qk;
-      q_strides[h_dim] = d_qk;
-      q_strides[s_dim] = b * h * d_qk;
-      q_strides[d_dim] = 1;
-      k_strides[b_dim] = hg * d_qk;
-      k_strides[h_dim] = d_qk;
-      k_strides[s_dim] = b * hg * d_qk;
-      k_strides[d_dim] = 1;
-      v_strides[b_dim] = hg * d_v;
-      v_strides[h_dim] = d_v;
-      v_strides[s_dim] = b * hg * d_v;
-      v_strides[d_dim] = 1;
       break;
     case NVTE_QKV_Layout::NVTE_BS3HD:
     case NVTE_QKV_Layout::NVTE_T3HD:
@@ -194,10 +175,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       break;
     case NVTE_QKV_Layout::NVTE_BSHD_BS2HD:
     case NVTE_QKV_Layout::NVTE_THD_T2HD:
-      q_strides[b_dim] = s_q * h * d_qk;
-      q_strides[h_dim] = d_qk;
-      q_strides[s_dim] = h * d_qk;
-      q_strides[d_dim] = 1;
+      generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_strides, q_format);
       k_strides[b_dim] = s_kv * 2 * hg * d_qk;
       k_strides[h_dim] = d_qk;
       k_strides[s_dim] = 2 * hg * d_qk;
@@ -208,10 +186,7 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
       break;
     case NVTE_QKV_Layout::NVTE_BSHD_BSH2D:
     case NVTE_QKV_Layout::NVTE_THD_TH2D:
-      q_strides[b_dim] = s_q * h * d_qk;
-      q_strides[h_dim] = d_qk;
-      q_strides[s_dim] = h * d_qk;
-      q_strides[d_dim] = 1;
+      generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_strides, q_format);
       k_strides[b_dim] = s_kv * 2 * hg * d_qk;
       k_strides[h_dim] = 2 * d_qk;
       k_strides[s_dim] = 2 * hg * d_qk;
@@ -220,69 +195,23 @@ inline void generateMatrixStridesWithLayout(int64_t b, int64_t h, int64_t hg, in
         v_strides[i] = k_strides[i];
       }
       break;
+    case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
     case NVTE_QKV_Layout::NVTE_THD_THD_THD:
     case NVTE_QKV_Layout::NVTE_THD_BSHD_BSHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_BSHD_BSHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD:
-      q_strides[b_dim] = s_q * h * d_qk;
-      q_strides[h_dim] = d_qk;
-      q_strides[s_dim] = h * d_qk;
-      q_strides[d_dim] = 1;
-      k_strides[b_dim] = s_kv * hg * d_qk;
-      k_strides[h_dim] = d_qk;
-      k_strides[s_dim] = hg * d_qk;
-      k_strides[d_dim] = 1;
-      v_strides[b_dim] = s_kv * hg * d_v;
-      v_strides[h_dim] = d_v;
-      v_strides[s_dim] = hg * d_v;
-      v_strides[d_dim] = 1;
-      break;
     case NVTE_QKV_Layout::NVTE_SBHD_BSHD_BSHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_BSHD_BSHD:
-      q_strides[b_dim] = h * d_qk;
-      q_strides[h_dim] = d_qk;
-      q_strides[s_dim] = b * h * d_qk;
-      q_strides[d_dim] = 1;
-      k_strides[b_dim] = s_kv * hg * d_qk;
-      k_strides[h_dim] = d_qk;
-      k_strides[s_dim] = hg * d_qk;
-      k_strides[d_dim] = 1;
-      v_strides[b_dim] = s_kv * hg * d_v;
-      v_strides[h_dim] = d_v;
-      v_strides[s_dim] = hg * d_v;
-      v_strides[d_dim] = 1;
-      break;
     case NVTE_QKV_Layout::NVTE_BSHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_THD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD:
-      q_strides[b_dim] = s_q * h * d_qk;
-      q_strides[h_dim] = d_qk;
-      q_strides[s_dim] = h * d_qk;
-      q_strides[d_dim] = 1;
-      k_strides[b_dim] = hg * d_qk;
-      k_strides[h_dim] = d_qk;
-      k_strides[s_dim] = b * hg * d_qk;
-      k_strides[d_dim] = 1;
-      v_strides[b_dim] = hg * d_v;
-      v_strides[h_dim] = d_v;
-      v_strides[s_dim] = b * hg * d_v;
-      v_strides[d_dim] = 1;
-      break;
     case NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD:
-      q_strides[b_dim] = h * s_q * d_qk;
-      q_strides[h_dim] = s_q * d_qk;
-      q_strides[s_dim] = d_qk;
-      q_strides[d_dim] = 1;
-      k_strides[b_dim] = hg * s_kv * d_qk;
-      k_strides[h_dim] = s_kv * d_qk;
-      k_strides[s_dim] = d_qk;
-      k_strides[d_dim] = 1;
-      v_strides[b_dim] = hg * s_kv * d_v;
-      v_strides[h_dim] = s_kv * d_v;
-      v_strides[s_dim] = d_v;
-      v_strides[d_dim] = 1;
+      generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_strides, q_format);
+      generateMatrixStridesWithFormat(b, hg, s_kv, d_qk, k_strides, kv_format);
+      generateMatrixStridesWithFormat(b, hg, s_kv, d_v, v_strides, kv_format);
       break;
     default:
       NVTE_CHECK(false, "Invalid layout.");
