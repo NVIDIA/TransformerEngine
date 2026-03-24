@@ -357,12 +357,21 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) ||
-       // 9.21: mxfp8, d_qk=128, d_v=192
-       (cudnn_runtime_version >= 92100 && head_dim_qk <= 192 && head_dim_v <= 128)) &&
+       // 9.21: d_qk=192, d_v=128
+       (cudnn_runtime_version >= 92100 && sm_arch_ >= 100 &&
+        head_dim_qk <= 192 && head_dim_v <= 128 &&
+        head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
+        (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+          attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+          attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK))) &&
+      // pre-9.21: {bshd, sbhd}, {vanilla}
+      // 9.21+: {bshd, sbhd, bhsd}, {vanilla, off-by-one, learnable}
+      ((cudnn_runtime_version < 92100 &&
+        (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
+        softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) ||
+       (cudnn_runtime_version >= 92100 &&
+        (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BHSD))) &&
       !requires_64bit_ragged_offset &&
-      // pre-9.21: softmax_type=vanilla, 9.21+: softmax_type={vanilla, off-by-one, learnable}
-      ((cudnn_runtime_version < 92100 && softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) ||
-       cudnn_runtime_version >= 92100) &&
       // 9.10.0: known bugs with SDPA FP8
       (cudnn_runtime_version != 91000) && !return_max_logit) {
     if (cudnn_runtime_version >= 8900) {
@@ -520,8 +529,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (cudnn_runtime_version >= 90200 &&
           ((window_size_left == -1 && window_size_right == -1 &&
             attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK) ||
-           ((window_size_left == -1 || window_size_left >= 0) &&
-            (window_size_right == -1 || window_size_right >= 0) &&
+           ((window_size_left == -1 || window_size_left >= 0) && window_size_right == 0 &&
             (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
              attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
              (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
