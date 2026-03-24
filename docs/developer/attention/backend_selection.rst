@@ -16,19 +16,22 @@ Selection Flow
 --------------
 
 The backend is selected at the start of each ``DotProductAttention.forward()`` call.
-The logic (in ``transformer_engine/pytorch/attention/dot_product_attention/``) follows
-a priority order:
+The selection result is **cached** — if the attention parameters haven't changed since the
+last call, the cached backend is reused without re-running the selection logic (see
+``_attention_backends`` in ``dot_product_attention.py``).
+
+The selection logic lives in ``get_attention_backend()`` in
+``transformer_engine/pytorch/attention/dot_product_attention/utils.py``. It filters
+backends by compatibility (head dimension, sequence length, mask type, dropout, GQA
+groups, etc.) and then applies a priority order:
 
 .. code-block:: text
 
-   1. Check user override (env vars, constructor args)
-   2. Check FP8 — if FP8 enabled, try cuDNN FP8 fused
-   3. Check cuDNN F16 fused — if supported by config
-   4. Check FlashAttention — if installed and supported
-   5. Fall back to unfused attention
+   On Hopper+ (sm90):  FusedAttention > FlashAttention > Unfused
+   On pre-Hopper:      FlashAttention > FusedAttention > Unfused
 
-At each step, the logic checks whether the backend supports the current configuration:
-head dimension, sequence length, mask type, dropout, GQA groups, etc.
+FusedAttention is preferred on Hopper+ for performance reasons. On pre-Hopper hardware,
+FlashAttention takes priority when both are available.
 
 Environment Variables
 ---------------------
@@ -44,9 +47,9 @@ Environment Variables
    * - ``NVTE_FLASH_ATTN``
      - ``0`` to disable FlashAttention, ``1`` to enable (default: ``1``)
    * - ``NVTE_FUSED_ATTN_BACKEND``
-     - Force a specific cuDNN fused attention sub-backend (integer ID)
-   * - ``NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT``
-     - Force workspace optimization for fused attention
+     - Force a specific cuDNN fused attention sub-backend by integer ID:
+       ``0`` = F16 max512, ``1`` = F16 arbitrary seqlen, ``2`` = FP8.
+       These correspond to the ``NVTE_Fused_Attn_Backend`` enum in ``fused_attn.h``.
 
 Constructor Override
 --------------------
@@ -87,7 +90,7 @@ Not all backends support all features. Key restrictions:
      - Yes
      - Yes
    * - Sliding window
-     - No
+     - Yes (via arbitrary mask)
      - Yes
      - Yes
      - Yes
@@ -124,9 +127,12 @@ To see which backend was selected, set:
 
 .. code-block:: bash
 
-   NVTE_DEBUG=1
+   NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1
 
-This logs the backend selection decision and the reason for any fallbacks.
+``NVTE_DEBUG_LEVEL`` controls verbosity: ``1`` logs the selected backend (INFO level),
+``2`` logs the full selection process including each filter step and why backends were
+disabled (DEBUG level). Output goes through Python's ``logging`` module under the
+``DotProductAttention`` logger name.
 
 See Also
 --------

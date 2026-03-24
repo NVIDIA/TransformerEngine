@@ -20,8 +20,9 @@ How to Use This Guide
 
 - **New contributors**: Start with :doc:`architecture_overview` for the big picture,
   then read :doc:`linear_walkthrough` for an end-to-end trace through a concrete PyTorch
-  module. For building from source, see :doc:`/installation`. For running tests and
-  contributing guidelines, see ``CONTRIBUTING.rst`` at the repository root.
+  module. For building from source, see :doc:`/installation`. For running tests, see
+  :doc:`testing`. For contributing guidelines, see ``CONTRIBUTING.rst`` at the repository
+  root.
 - **Working on new quantization recipe**: See :doc:`quantization/index` for the 
   Quantizer/Storage/Tensor design and :doc:`cpp_core/type_system` for the underlying C/C++ types.
 - **Working on attention**: See :doc:`attention/index` for backend selection and kernel
@@ -37,6 +38,7 @@ How to Use This Guide
 
    architecture_overview
    linear_walkthrough
+   testing
    cpp_core/index
    quantization/index
    pytorch_frontend/index

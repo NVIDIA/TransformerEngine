@@ -8,19 +8,18 @@
 Type System
 ===========
 
-Transformer Engine maintains two parallel type systems: a C type system for the public
-API and a C++ type system for internal use.
+Transformer Engine maintains three layers of types: a C API for ABI stability, C++
+wrappers for external consumers, and C++ internal types for the core implementation.
 
 The C++ core exposes a **C API** (not C++) for ABI stability. Framework bindings interact
-with opaque ``NVTETensor`` handles rather than C++ objects directly. The C++ ``Tensor``
-and ``SimpleTensor`` structs in ``common.h`` are internal implementation details —
-they are never exposed across the API boundary.
+with opaque ``NVTETensor`` handles rather than C++ objects directly. The same header
+(``transformer_engine.h``) also provides C++ wrapper types (``DType``,
+``TensorWrapper``) that add type safety and convenience around the C API. These wrappers
+are intended for use by framework bindings (pybind11 code, tests) — they wrap the C API
+but do not expose internal implementation details.
 
-This follows the standard pattern of having a pure C API with corresponding C++ wrappers
-that add type safety and convenience. There are two dtype enums (``NVTEDType`` in C,
-``DType`` in C++) and two tensor abstractions (``NVTEBasicTensor`` in C, ``SimpleTensor``
-in C++). They have identical numeric values and ``SimpleTensor`` provides implicit
-conversion operators, so crossing the boundary is straightforward.
+Separately, ``common.h`` defines internal C++ types (``SimpleTensor``, ``Tensor``) used
+only within the core library. These are never exposed across the API boundary.
 
 C Types (Public API)
 --------------------
@@ -97,15 +96,17 @@ for current scaling and for high-precision (unquantized) tensors. The C++ core
 distinguishes these cases by checking the data dtype (FP8 vs high-precision) and whether
 the amax field is populated.
 
-C++ Types (Internal)
---------------------
+C++ Wrappers (External)
+-----------------------
 
-Defined in ``transformer_engine/common/common.h``.
+Defined in ``transformer_engine/common/include/transformer_engine/transformer_engine.h``,
+within the ``transformer_engine`` C++ namespace. These wrap the C API with type safety and
+RAII semantics, and are intended for use by framework bindings (pybind11 code) and tests.
 
 DType
 ^^^^^
 
-A C++ ``enum class`` in the ``transformer_engine`` namespace, mirroring ``NVTEDType``:
+A C++ ``enum class`` mirroring ``NVTEDType``:
 
 .. code-block:: cpp
 
@@ -121,13 +122,53 @@ A C++ ``enum class`` in the ``transformer_engine`` namespace, mirroring ``NVTEDT
 .. warning::
 
    ``DType`` and ``NVTEDType`` have the same numeric values but are **not** implicitly
-   convertible. Use ``static_cast`` for conversions.
+   convertible to each other (no implicit construction or assignment). Use ``static_cast``
+   for conversions. However, comparison operators (``==``, ``!=``) are overloaded to work
+   across the two types — see :ref:`dtype-conversion-patterns` below.
+
+The header also provides inline helpers that accept ``DType``: ``is_fp8_dtype()``,
+``is_fp4_dtype()``, ``is_high_precision_dtype()``.
+
+TensorWrapper
+^^^^^^^^^^^^^
+
+A C++ RAII wrapper around the opaque ``NVTETensor`` handle. It manages the lifecycle of
+the underlying C tensor (``nvte_create_tensor`` / ``nvte_destroy_tensor``) and provides
+constructors that populate the tensor's fields via the C API:
+
+.. code-block:: cpp
+
+   class TensorWrapper {
+   public:
+       // Construct with data, shape, dtype, and optional scale/amax pointers
+       TensorWrapper(void *dptr, const NVTEShape &shape, const DType dtype,
+                     float *amax_dptr = nullptr, float *scale_dptr = nullptr,
+                     float *scale_inv_dptr = nullptr,
+                     NVTEShape scale_inv_shape = defaultShape,
+                     const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
+
+       // Construct empty tensor
+       explicit TensorWrapper(const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
+
+       ~TensorWrapper();  // Calls nvte_destroy_tensor
+
+       NVTETensor data();  // Returns the underlying opaque handle
+   };
+
+``TensorWrapper`` is the primary way framework bindings create ``NVTETensor`` handles to
+pass into C API functions. It does not own the data memory — it only owns the pool entry.
+
+C++ Types (Internal)
+--------------------
+
+Defined in ``transformer_engine/common/common.h``. These types are used exclusively within
+the core library and are never exposed across the API boundary.
 
 SimpleTensor
 ^^^^^^^^^^^^
 
-A C++ wrapper around ``NVTEBasicTensor`` that provides constructors, implicit conversions,
-and utility methods:
+A lightweight internal tensor descriptor with implicit conversion to/from
+``NVTEBasicTensor``:
 
 .. code-block:: cpp
 
@@ -203,6 +244,8 @@ dtypes. ``scale_inv`` has shape ``[1]`` for tensor scaling but a multi-element s
 block scaling modes. ``columnwise_data`` and ``columnwise_scale_inv`` are only populated
 when the tensor was quantized with columnwise usage enabled. Validation functions in
 ``transformer_engine.cpp`` (e.g., ``CheckScaleTensorShape``) enforce these constraints.
+
+.. _dtype-conversion-patterns:
 
 DType / NVTEDType Conversion Patterns
 --------------------------------------

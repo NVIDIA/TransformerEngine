@@ -121,7 +121,6 @@ model_configs_base = {
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])
-@pytest.mark.parametrize("workspace_opt", [True, False])
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
@@ -130,7 +129,6 @@ def test_dot_product_attention(
     model_configs,
     model,
     ckpt_attn,
-    workspace_opt,
     qkv_layout,
     swa,
     pad_between_seqs,
@@ -220,7 +218,6 @@ def test_dot_product_attention(
             "UnfusedDotProductAttention",
             ckpt_attn,
             qkv_layout,
-            workspace_opt,
             pad_between_seqs,
             is_training,
         )
@@ -234,7 +231,6 @@ def test_dot_product_attention(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -246,7 +242,6 @@ def test_dot_product_attention(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -257,7 +252,6 @@ def test_dot_product_attention(
                 "FusedAttention",
                 ckpt_attn,
                 qkv_layout,
-                workspace_opt,
                 pad_between_seqs,
                 is_training,
             )
@@ -270,7 +264,6 @@ def test_dot_product_attention(
             "FlashAttention",
             ckpt_attn,
             qkv_layout,
-            workspace_opt,
             pad_between_seqs,
             is_training,
         )
@@ -910,7 +903,6 @@ def _run_dot_product_attention(
     backend: str,
     ckpt_attn: bool,
     qkv_layout: str,
-    workspace_opt: bool,
     pad_between_seqs: bool,
     is_training: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -924,7 +916,6 @@ def _run_dot_product_attention(
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
     if backend == "UnfusedDotProductAttention":
         os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
@@ -1323,7 +1314,6 @@ def test_transformer_layer(
     # Get configs
     config = model_configs[model]
     tols = dict(atol=5e-2, rtol=5e-2)
-    workspace_opt = True
 
     # Test backend availability
     is_training = True
@@ -1367,7 +1357,6 @@ def test_transformer_layer(
             "UnfusedDotProductAttention",
             ckpt_attn,
             qkv_format,
-            workspace_opt,
             fused_qkv_params,
             RoPE,
             is_training,
@@ -1381,7 +1370,6 @@ def test_transformer_layer(
             "FusedAttention",
             ckpt_attn,
             qkv_format,
-            workspace_opt,
             fused_qkv_params,
             RoPE,
             is_training,
@@ -1395,7 +1383,6 @@ def test_transformer_layer(
             "FlashAttention",
             ckpt_attn,
             qkv_format,
-            workspace_opt,
             fused_qkv_params,
             RoPE,
             is_training,
@@ -1465,7 +1452,6 @@ def _run_transformer_layer(
     backend: str,
     ckpt_attn: bool,
     qkv_format: str,
-    workspace_opt: bool,
     fused_qkv_params: bool,
     RoPE: bool,
     is_training: bool,

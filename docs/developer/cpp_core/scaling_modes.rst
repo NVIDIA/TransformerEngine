@@ -125,7 +125,8 @@ C++ helper:
 .. code-block:: cpp
 
    bool is_block_scaling(const NVTEScalingMode &mode);
-   // Returns true for both 1D and 2D block scaling
+   // Returns true for all non-tensor-scaling modes (MXFP8, block 1D/2D, NVFP4).
+   // For finer discrimination, use is_mxfp8_scaling() or is_nvfp4_scaling().
 
 NVFP4 1D Scaling (``NVTE_NVFP4_1D_SCALING``)
 ----------------------------------------------

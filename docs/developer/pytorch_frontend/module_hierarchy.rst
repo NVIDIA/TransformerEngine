@@ -23,13 +23,14 @@ FP8 state management, quantizer lifecycle, and distributed training hooks.
    Below it, two branches:
    Branch 1: TransformerEngineBaseModule, with children:
      ├── Linear
-     ├── LayerNorm
-     ├── RMSNorm
      ├── LayerNormLinear
      ├── LayerNormMLP
      ├── GroupedLinear
      └── DotProductAttention
-   Branch 2: Directly from torch.nn.Module:
+   Branch 2: BasicOperation (ops framework), with children:
+     ├── LayerNorm (via _LayerNormOp)
+     └── RMSNorm (via _RMSNormOp)
+   Branch 3: Directly from torch.nn.Module:
      ├── MultiheadAttention (composes DotProductAttention + Linear projections)
      ├── TransformerLayer (composes the above modules)
      ├── Fp8Padding
@@ -47,9 +48,9 @@ TE modules that support FP8 quantization. Key responsibilities:
 
 - ``init_fp8_metadata()``: Creates quantizer instances and amax history buffers based on
   the active recipe.
-- ``pre_forward()``: Called at the start of each forward pass to update FP8 state (refresh
-  scales from amax history, check if FP8 is enabled).
-- ``post_forward()``: Called after forward to record amax values.
+- ``prepare_forward()``: Called at the start of each forward pass to update FP8 state
+  (refresh scales from amax history, check if FP8 is enabled).
+- ``end_forward()``: Called after forward to record amax values.
 - FP8 metadata is registered as module buffers for serialization.
 
 **Quantizer Access**
@@ -61,7 +62,8 @@ TE modules that support FP8 quantization. Key responsibilities:
 **Distributed Hooks**
 
 - ``set_tensor_parallel_group()``: Configure TP process group.
-- ``set_sequence_parallel()``: Enable sequence parallelism.
+- ``sequence_parallel``: A plain boolean attribute (set in ``__init__``, no dedicated
+  setter method).
 - Manages all-reduce of amax values across distributed ranks.
 
 **Weight Caching**
@@ -82,13 +84,13 @@ A typical forward pass through a TE module:
 
    1. autocast() sets global FP8 state
    2. module.forward() called
-      a. pre_forward() — refresh FP8 scales, create quantizers
+      a. prepare_forward() — refresh FP8 scales, create quantizers
       b. Quantize input via input_quantizer(input)
       c. Get quantized weight (cached or quantize via weight_quantizer)
       d. Call the module's custom autograd function
          i.  general_gemm(quantized_input, quantized_weight)
          ii. Save tensors for backward
-      e. post_forward() — record amax values
+      e. end_forward() — record amax values
    3. Return output
 
 See :doc:`autograd_integration` for details on step (d).

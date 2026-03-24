@@ -20,7 +20,6 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
 )
-from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.quantization import (
     get_fp8_te_dtype,
     FP8GlobalStateManager,
@@ -403,25 +402,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
             or torch.are_deterministic_algorithms_enabled()
         )
-        # To use the workspace optimization path for determinism, please
-        # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
-        # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 for cuDNN >=9.0.0.
-        cudnn_version = get_cudnn_version()
-        if (8, 9, 5) <= cudnn_version < (9, 0, 0):
-            if self.deterministic:
-                os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
-
-            # CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT
-            # - unset:       enables workspace optimization when required workspace is <= 256MB
-            #                or when bias gradient needs to be computed
-            # - n:           enables workspace optimization when required workspace is <= n bytes
-            # - -1:          enables workspace optimization always
-            # - 0:           disables workspace optimization always
-            if "NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT" in os.environ:
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "0":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "0"
-                if os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] == "1":
-                    os.environ["CUDNN_FRONTEND_ATTN_DP_WORKSPACE_LIMIT"] = "-1"
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
 
@@ -857,11 +837,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of
-            flash-attn and FusedAttention. Further, :attr:`NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT`
-            can be used to enable (:attr:`1`) or disable (:attr:`0`) the workspace related
-            optimizations in FusedAttention. When unset, Transformer Engine determines the code path
-            based on its internal logic. These optimizations trade memory for performance
-            and should be used with care.
+            flash-attn and FusedAttention.
 
         .. note::
             .. _cu_seqlens note:

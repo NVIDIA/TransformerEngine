@@ -32,7 +32,7 @@ quantization, GEMM, distributed communication, and autograd.
      2. "grad_output_quantizer(grad)" →
      3. "Dgrad GEMM: general_gemm(grad, weight)" producing "grad_input" →
      4. "Wgrad GEMM: general_gemm(input_columnwise, grad_columnwise)" producing "grad_weight" →
-     5. "Reduce-scatter (if row-parallel + SP) or All-reduce (if row-parallel)grad_input"
+     5. "Reduce-scatter (if row-parallel + SP) or All-reduce (if row-parallel) grad_input"
    Dotted arrows from forward boxes 3→backward box 4 labeled "saved columnwise input"
    and forward weight→backward box 3 labeled "saved weight".
 
@@ -113,7 +113,8 @@ that actually perform casts.
    - ``output_quantizer`` — for the forward output (optional, when ``fp8_output=True``)
    - ``grad_output_quantizer`` — for the backward gradient
    - ``grad_input_quantizer`` — for the backward gradient input (optional, when ``fp8_grad=True``)
-   - ``grad_weight_quantizer`` — for the backward weight gradient (currently unused)
+   - ``grad_weight_quantizer`` — for the backward weight gradient (placeholder for future
+     use; allocated for API completeness but not consumed by any current code path)
 
    All six are created here because the backward pass executes outside the
    ``autocast`` context and therefore no longer has access to the recipe
@@ -276,7 +277,8 @@ The call traverses four layers, matching the :doc:`architecture_overview`:
 accumulators, trading some performance for numerical accuracy. This is controlled by the
 recipe and defaults to ``False`` for the forward pass (where some accumulation error is
 acceptable) and ``True`` for backward (where gradient accuracy matters more). This setting
-is Hopper-specific and is a no-op on Blackwell.
+is Hopper-specific and is a no-op on Blackwell (see the compute capability checks in
+``transformer_engine/common/gemm/`` for the architecture dispatch logic).
 
 Phase 5: _Linear.forward() — Output Communication
 ----------------------------------------------------

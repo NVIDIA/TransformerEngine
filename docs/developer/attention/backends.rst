@@ -21,60 +21,18 @@ hardware, precision, and feature combinations.
    Diagram description for ``attention_backends.svg``:
    Tree/taxonomy diagram:
    "Attention Backends"
-     ├── "Unfused" (FlashAttention via torch)
-     │     └── Any GPU, no FP8, fallback
-     ├── "Flash Attention" (Tri Dao's FlashAttention)
-     │     └── Ampere+, BF16/FP16, fastest for non-FP8
-     └── "Fused Attention" (cuDNN-based)
-           ├── "F16 Fused" — cuDNN with BF16/FP16
-           │     └── Ampere+, supports arbitrary seq len
-           ├── "FP8 Fused" — cuDNN with FP8
-           │     └── Hopper+, best perf with FP8 training
-           └── "Custom" — TE's own CUDA kernels
-                 └── Legacy, limited feature support
+     ├── "Unfused" — PyTorch native ops (manual QK^TV)
+     │     └── Any GPU, BF16/FP16, no cuDNN required, fallback
+     ├── "FlashAttention" — Tri Dao's flash-attn package (external)
+     │     └── Ampere+, BF16/FP16, no cuDNN required
+     └── "FusedAttention" — cuDNN graph API
+           ├── Sub-backend 0: "F16 max512" — seqlen ≤ 512, Ampere+
+           ├── Sub-backend 1: "F16 arbitrary" — any seqlen, Ampere+
+           └── Sub-backend 2: "FP8" — FP8 Q/K/V, Hopper+
 
-Overview
---------
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 15 15 15 35
-
-   * - Backend
-     - Precision
-     - Min Arch
-     - cuDNN Required
-     - Notes
-   * - Unfused
-     - BF16/FP16
-     - Any
-     - No
-     - Fallback; uses PyTorch's native attention or manual QK^TV
-   * - FlashAttention
-     - BF16/FP16
-     - Ampere
-     - No
-     - Tri Dao's FlashAttention; fast, memory-efficient
-   * - Fused F16 (max512)
-     - BF16/FP16
-     - Ampere
-     - Yes
-     - cuDNN graph-based; sequence length ≤ 512
-   * - Fused F16 (arbitrary)
-     - BF16/FP16
-     - Ampere
-     - Yes
-     - cuDNN graph-based; arbitrary sequence length, supports all mask types
-   * - Fused (FP8)
-     - FP8
-     - Hopper
-     - Yes
-     - FP8 Q/K/V with cuDNN; sequence length ≤ 512; best throughput for FP8 training
-   * - Custom/THD
-     - BF16/FP16
-     - Hopper
-     - No
-     - TE custom kernels; used for specific context-parallel patterns
+There are exactly three backends (Unfused, FlashAttention, FusedAttention).
+FusedAttention has three cuDNN sub-backends selected automatically based on precision
+and sequence length.
 
 Backend Details
 ---------------
@@ -82,50 +40,85 @@ Backend Details
 Unfused Attention
 ^^^^^^^^^^^^^^^^^
 
-The simplest backend. Computes attention as separate matrix multiplications:
+**Class**: ``UnfusedDotProductAttention`` in
+``transformer_engine/pytorch/attention/dot_product_attention/backends.py``
 
-.. code-block:: text
-
-   scores = Q @ K^T / sqrt(d)
-   scores = mask(scores)
-   weights = softmax(scores)
-   output = weights @ V
-
+Computes attention as separate PyTorch operations (``torch.baddbmm`` for QK^T,
+``FusedScaleMaskSoftmax`` for masking + softmax, ``torch.bmm`` for the V multiply).
 Used as a fallback when no fused backend supports the requested configuration. Also
-useful for debugging (produces identical numerics to textbook attention).
+useful for debugging since it produces identical numerics to textbook attention.
+
+Sliding window is supported by converting the window specification into an ``arbitrary``
+attention mask (see ``get_full_mask()`` in ``utils.py``).
 
 FlashAttention
 ^^^^^^^^^^^^^^
 
-Uses Tri Dao's FlashAttention algorithm, which tiles the computation to avoid
-materializing the full attention matrix. Key properties:
+**Class**: ``FlashAttention`` in
+``transformer_engine/pytorch/attention/dot_product_attention/backends.py``
 
-- O(N) memory instead of O(N²) for the attention matrix.
-- IO-aware: optimized for GPU memory hierarchy.
-- Supports causal masks, variable-length sequences.
-- No FP8 support (BF16/FP16 only).
+Integrates Tri Dao's `flash-attn <https://github.com/Dao-AILab/flash-attention>`_
+package as an external dependency (not bundled). The integration imports from
+``flash_attn.flash_attn_interface`` (FA2) and ``flash_attn_3.flash_attn_interface``
+(FA3). Version constraints are managed in ``FlashAttentionUtils`` in ``utils.py``.
+
+Code flow:
+
+1. ``FlashAttention.forward()`` converts TE's tensor layouts (sbhd/thd) to FlashAttention's
+   expected bshd format.
+2. Selects between ``flash_attn_func`` (dense), ``flash_attn_varlen_func``
+   (variable-length), or ``flash_attn_with_kvcache`` (inference) based on the
+   configuration.
+3. For context parallelism, wraps the call via ``attn_forward_func_with_cp()``.
+
+To modify FlashAttention integration: start with ``FlashAttention.forward()`` in
+``backends.py`` for the Python wrapper, and ``FlashAttentionUtils`` in ``utils.py`` for
+version and feature compatibility checks.
 
 cuDNN Fused Attention (F16 and FP8)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Uses cuDNN's graph API to fuse the entire attention computation (QK^T, scaling, masking,
-softmax, dropout, V multiply) into a single cuDNN operation. Key properties:
+**Class**: ``FusedAttention`` in
+``transformer_engine/pytorch/attention/dot_product_attention/backends.py``
 
-- **F16 variant**: BF16/FP16 inputs, Ampere and later.
-- **FP8 variant**: FP8 Q/K/V inputs with per-tensor or block scales, Hopper and later.
-- Supports: arbitrary masks (causal, padding, sliding window), GQA/MQA, dropout.
-- Requires cuDNN 9.3+ for FP8.
+Uses cuDNN's **cudnn-frontend graph API** to fuse the entire attention computation
+(QK^T, scaling, masking, softmax, dropout, V multiply) into a single cuDNN operation.
 
-The cuDNN backend is the recommended choice for production FP8 training.
+Code flow:
 
-Custom/THD Kernels
-^^^^^^^^^^^^^^^^^^
+1. **Python** (``backends.py``): ``FusedAttention.forward()`` → ``FusedAttnFunc.apply()``
+   (custom autograd function).
+2. **pybind11** (``pytorch/csrc/extensions/attention.cpp``): ``fused_attn_fwd()`` converts
+   Python tensors to ``TensorWrapper`` objects and calls the C++ layer.
+3. **C++ dispatcher** (``common/fused_attn/fused_attn.cpp``): Routes to the appropriate
+   sub-backend implementation based on ``nvte_get_fused_attn_backend()``.
+4. **cuDNN graph builders** — one file per sub-backend:
 
-TE's own CUDA attention kernels, used for specific context-parallel patterns
-(THD = Token-Head-Dimension layout). These handle cases where cuDNN doesn't support the
-required distributed communication pattern.
+   - ``fused_attn_f16_max512_seqlen.cu`` — sub-backend 0
+   - ``fused_attn_f16_arbitrary_seqlen.cu`` — sub-backend 1
+   - ``fused_attn_fp8.cu`` — sub-backend 2
 
-See :doc:`fused_attn_kernels` for the C++ kernel organization.
+   Each builds a ``cudnn_frontend::graph::Graph``, configures SDPA attributes (masking,
+   dropout, scaling), and executes it. **Graphs are cached** per thread in a thread-local
+   cache keyed by ``FADescriptor`` to avoid rebuilding identical configurations.
+
+To modify cuDNN fused attention: start with the relevant ``.cu`` file for the sub-backend,
+specifically the ``fused_attn_*_fwd_impl()`` / ``fused_attn_*_bwd_impl()`` functions
+where the cuDNN graph is built. For backend selection logic, see
+``nvte_get_fused_attn_backend()`` in ``fused_attn.cpp``.
+
+Helper CUDA Kernels
+^^^^^^^^^^^^^^^^^^^
+
+The ``transformer_engine/common/fused_attn/`` directory also contains CUDA helper kernels
+that support the attention backends but do **not** perform the full attention operation
+themselves:
+
+- ``utils.cu`` — stride calculation, auxiliary tensor setup
+- ``context_parallel.cu`` — KV communication for context parallelism
+- ``kv_cache.cu`` — KV cache management for inference
+
+See :doc:`fused_attn_kernels` for the full C++ kernel organization.
 
 See Also
 --------
