@@ -20,6 +20,7 @@
 #include <cuda_fp4.h>
 #endif  // FP4_TYPE_SUPPORTED
 #include <cuda_bf16.h>
+
 #include "common/utils.cuh"
 
 namespace transformer_engine {
