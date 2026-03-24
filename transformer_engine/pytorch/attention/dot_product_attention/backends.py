@@ -1623,10 +1623,10 @@ class FusedAttnFunc(torch.autograd.Function):
         if not isinstance(d_out, QuantizedTensorStorage) and not ctx.use_FAv2_bwd:
             d_out = d_out.contiguous()
         d_out_fp8 = None
-        d_out_format = ctx.o_format
+        do_format = ctx.o_format
         if ctx.fp8:
             if ctx.fp8_recipe.mxfp8():
-                d_out, d_out_format = dpa_utils.permute_to_grouped_tensor(d_out_format, d_out)
+                d_out, do_format = dpa_utils.permute_to_grouped_tensor(do_format, d_out)
             if isinstance(d_out, QuantizedTensorStorage):
                 d_out_fp8 = d_out
             else:
@@ -1755,7 +1755,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.fast_zero_fill,
                         ctx.qkv_layout,
                         ctx.o_format,
-                        d_out_format,
+                        do_format,
                         ctx.dqkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
@@ -1899,7 +1899,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.fast_zero_fill,
                         ctx.qkv_layout,
                         ctx.o_format,
-                        d_out_format,
+                        do_format,
                         ctx.dqkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,

@@ -1145,7 +1145,7 @@ def cp_p2p_bwd_fused_attn(
     dropout_p,
     qkv_layout,
     o_format,
-    d_out_format,
+    do_format,
     dqkv_layout,
     attn_mask_type,
     attn_bias_type,
@@ -1223,7 +1223,7 @@ def cp_p2p_bwd_fused_attn(
                 out_part = Float8Tensor.make_like(out_fp8, data=out_part, dtype=fwd_nominal_dtype)
             dout_part = Float8Tensor.make_like(dout_fp8, data=dout_part, dtype=bwd_nominal_dtype)
         else:
-            dout_part, d_out_format = dpa_utils.permute_to_grouped_tensor(d_out_format, dout_part)
+            dout_part, do_format = dpa_utils.permute_to_grouped_tensor(do_format, dout_part)
             aux_tensors.append(dout_part)
             dout_part = dO_quantizer_per_step(dout_part)
         fp8_meta_kwargs["s_quantizer"] = S_quantizer
@@ -1249,7 +1249,7 @@ def cp_p2p_bwd_fused_attn(
         dropout=dropout_p,
         qkv_layout=qkv_layout,
         o_format=o_format,
-        d_out_format=d_out_format,
+        do_format=do_format,
         dqkv_layout=dqkv_layout,
         attn_mask_type=attn_mask_type_,
         attn_bias_type=attn_bias_type,
@@ -3571,7 +3571,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
                         fp8_meta_kwargs = {}
                         qkv_layout = ctx.qkv_layout
-                        d_out_format = ctx.o_format
+                        do_format = ctx.o_format
                         if ctx.fp8:
                             fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_FP8
                             fp8_meta_kwargs["s_quantizer"] = ctx.S_quantizer
@@ -3604,8 +3604,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 q_part, k_part, v_part, qkv_layout = combine_and_quantize(
                                     qkv_layout, q_part, k_part, v_part, ctx.QKV_quantizer
                                 )
-                                dout_part, d_out_format = dpa_utils.permute_to_grouped_tensor(
-                                    d_out_format, dout_part
+                                dout_part, do_format = dpa_utils.permute_to_grouped_tensor(
+                                    do_format, dout_part
                                 )
                                 aux_ctx_tensors.append(dout_part)
                                 dout_part = ctx.dO_quantizer(dout_part)
@@ -3628,7 +3628,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
                             o_format=ctx.o_format,
-                            d_out_format=d_out_format,
+                            do_format=do_format,
                             dqkv_layout=ctx.dqkv_layout,
                             attn_mask_type=ctx.attn_mask_type,
                             attn_bias_type=ctx.attn_bias_type,
@@ -4311,7 +4311,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         dq_fp8, dk_fp8, dv_fp8 = None, None, None
         if ctx.use_fused_attention:
-            d_out_format = ctx.o_format
+            do_format = ctx.o_format
             q_part, k_part, v_part, out_part, dout_part = q, k, v, out, dout
             if ctx.fp8:
                 q_part, k_part, v_part, out_part = q_fp8, k_fp8, v_fp8, out_fp8
@@ -4322,8 +4322,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 if not ctx.fp8_recipe.mxfp8():
                     dout_part = Float8Tensor.make_like(dout_fp8, data=dout, dtype=bwd_nominal_dtype)
                 else:
-                    # d_out_format = bhsd for both dout (F16) and dout_part (MXFP8)
-                    dout, d_out_format = dpa_utils.permute_to_grouped_tensor(d_out_format, dout)
+                    # do_format = bhsd for both dout (F16) and dout_part (MXFP8)
+                    dout, do_format = dpa_utils.permute_to_grouped_tensor(do_format, dout)
                     aux_ctx_tensors.append(dout)
                     dout_part = ctx.dO_quantizer(dout)
             dq, dk, dv, *rest = fused_attn_bwd(
@@ -4345,7 +4345,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 dropout=ctx.dropout_p,
                 qkv_layout=ctx.qkv_layout,
                 o_format=ctx.o_format,
-                d_out_format=d_out_format,
+                do_format=do_format,
                 dqkv_layout=ctx.dqkv_layout,
                 attn_mask_type=ctx.attn_mask_type,
                 attn_bias_type=ctx.attn_bias_type,

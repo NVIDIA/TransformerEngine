@@ -386,7 +386,7 @@ def fused_attn_bwd(
     fast_zero_fill: bool = True,
     qkv_layout: str = "sbh3d",
     o_format: str = "sbhd",
-    d_out_format: str = "sbhd",
+    do_format: str = "sbhd",
     dqkv_layout: str = "sbh3d",
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
@@ -454,7 +454,7 @@ def fused_attn_bwd(
                 "t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"}
     o_format : str, default = "sbhd"
                 format of O; {"sbhd", "bshd", "thd"}
-    d_out_format : str, default = "sbhd"
+    do_format : str, default = "sbhd"
                 format of dO; {"sbhd", "bshd", "thd"}
     dqkv_layout : str, default = "sbh3d"
                 layout of dQ, dK and dV;
@@ -529,7 +529,7 @@ def fused_attn_bwd(
         fast_zero_fill,
         QKVLayout[qkv_layout],
         QKVFormat[o_format],
-        QKVFormat[d_out_format],
+        QKVFormat[do_format],
         QKVLayout[dqkv_layout],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
