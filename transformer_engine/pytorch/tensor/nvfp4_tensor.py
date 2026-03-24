@@ -551,6 +551,164 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             "columnwise": self._columnwise_data is not None,
         }
 
+    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
+        """Called by FSDP2 before all-gather of weights.
+
+        Prepares sharded NVFP4 tensors for dim0 all-gather by unpadding scales
+        and transposing columnwise data/scales so M-related dims are in dim0.
+        """
+        # pylint: disable=unused-argument
+
+        if self._with_gemm_swizzled_scales:
+            raise NotImplementedError(
+                "FSDP2 is not supported for NVFP4Tensors with GEMM-swizzled scales."
+            )
+
+        shard_M = math.prod(self.shape[:-1])
+        K = self.shape[-1]
+
+        assert shard_M % NVFP4_BLOCK_SCALING_SIZE == 0, (
+            f"FSDP2 requires shard_M ({shard_M}) to be a multiple of "
+            f"NVFP4_BLOCK_SCALING_SIZE ({NVFP4_BLOCK_SCALING_SIZE}). "
+            "Adjust model dimensions or world size."
+        )
+
+        # Rowwise data: (shard_M, K//2) — M in dim0, pass as-is
+        rowwise_data = self._rowwise_data
+        # Rowwise scale: (round_up(shard_M, 128), inner) — unpad dim0 to shard_M
+        rowwise_scale_inv = self._rowwise_scale_inv
+        if rowwise_scale_inv is not None:
+            rowwise_scale_inv = rowwise_scale_inv[:shard_M, :]
+
+        # Columnwise data: (K, shard_M//2) — transpose to (shard_M//2, K)
+        columnwise_data = self._columnwise_data
+        # Columnwise scale: (round_up(K, 128), round_up(ceil(shard_M/16), 4))
+        columnwise_scale_inv = self._columnwise_scale_inv
+
+        if columnwise_data is not None:
+            columnwise_data = columnwise_data.t().contiguous()
+
+        if columnwise_scale_inv is not None:
+            # Unpad dim1 from round_up(ceil(shard_M/16), 4) to ceil(shard_M/16)
+            m_blocks = math.ceil(shard_M / NVFP4_BLOCK_SCALING_SIZE)
+            columnwise_scale_inv = columnwise_scale_inv[:, :m_blocks]
+            # Transpose to (m_blocks, round_up(K, 128)) so M-blocks are in dim0
+            columnwise_scale_inv = columnwise_scale_inv.t().contiguous()
+
+        # Always send both orientations (GEMM needs both for fwd/bwd)
+        rowwise_usage = True
+        assert self._rowwise_data is not None, (
+            "FSDP2 requires rowwise data, but _rowwise_data is None. "
+            "Ensure the NVFP4Quantizer was created with rowwise=True."
+        )
+        sharded_tensors = (rowwise_data, rowwise_scale_inv)
+        columnwise_usage = self._quantizer.columnwise_usage
+        if columnwise_usage:
+            sharded_tensors += (columnwise_data, columnwise_scale_inv)
+
+        # Pass amax via metadata (scalar, same on all ranks — not all-gathered)
+        metadata = (
+            self._fp4_dtype,
+            rowwise_usage,
+            columnwise_usage,
+            self._amax_rowwise,
+            self._amax_columnwise,
+            K,
+        )
+        return sharded_tensors, metadata
+
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[NVFP4Tensor] = None,
+    ):
+        """Called by FSDP2 after all-gather of weights.
+
+        Reverses the transforms from fsdp_pre_all_gather: repads rowwise scales,
+        transposes columnwise data/scales back, and constructs the full NVFP4Tensor.
+        """
+        fp4_dtype, rowwise_usage, columnwise_usage, amax_rowwise, amax_columnwise, K = metadata
+
+        # Extract rowwise tensors
+        rowwise_data, rowwise_scale_inv = all_gather_outputs[:2] if rowwise_usage else (None, None)
+
+        # Compute full_M from the all-gathered data
+        if rowwise_data is not None:
+            full_M = rowwise_data.shape[0]
+        else:
+            # columnwise_data after all-gather is (full_M//2, K)
+            full_M = all_gather_outputs[-2].shape[0] * 2
+
+        # Repad rowwise scale dim0 to round_up(full_M, 128)
+        if rowwise_scale_inv is not None:
+            target_m = round_up_to_nearest_multiple(full_M, 128)
+            current_m = rowwise_scale_inv.shape[0]
+            if current_m < target_m:
+                rowwise_scale_inv = torch.nn.functional.pad(
+                    rowwise_scale_inv, (0, 0, 0, target_m - current_m)
+                )
+
+        # Extract columnwise tensors — they were transposed in pre_all_gather
+        columnwise_data, columnwise_scale_inv = (
+            all_gather_outputs[-2:] if columnwise_usage else (None, None)
+        )
+
+        if columnwise_data is not None:
+            # All-gathered shape: (full_M//2, K), transpose back to (K, full_M//2)
+            columnwise_data = columnwise_data.t().contiguous()
+
+        if columnwise_scale_inv is not None:
+            # All-gathered shape: (full_m_blocks, round_up(K, 128))
+            # Transpose back to (round_up(K, 128), full_m_blocks)
+            columnwise_scale_inv = columnwise_scale_inv.t().contiguous()
+            # Repad dim1 (M-block dim) to round_up(ceil(full_M/16), 4)
+            current_m_blocks = columnwise_scale_inv.shape[1]
+            target_m_blocks = round_up_to_nearest_multiple(
+                math.ceil(full_M / NVFP4_BLOCK_SCALING_SIZE), 4
+            )
+            if current_m_blocks < target_m_blocks:
+                columnwise_scale_inv = torch.nn.functional.pad(
+                    columnwise_scale_inv, (0, target_m_blocks - current_m_blocks)
+                )
+            else:
+                assert current_m_blocks == target_m_blocks, (
+                    f"Columnwise scale m_blocks mismatch: got {current_m_blocks}, "
+                    f"expected {target_m_blocks}. This should be unreachable when "
+                    "shard_M is a multiple of NVFP4_BLOCK_SCALING_SIZE."
+                )
+
+        logical_shape = (full_M, K)
+
+        if out is not None:
+            # Update existing tensor in-place (subsequent iterations)
+            out._rowwise_data = rowwise_data
+            out._rowwise_scale_inv = rowwise_scale_inv
+            out._columnwise_data = columnwise_data
+            out._columnwise_scale_inv = columnwise_scale_inv
+            out._amax_rowwise = amax_rowwise
+            out._amax_columnwise = amax_columnwise
+        else:
+            # Construct new tensor (first iteration)
+            out = NVFP4Tensor(
+                shape=logical_shape,
+                dtype=param_dtype,
+                fp4_dtype=fp4_dtype,
+                rowwise_data=rowwise_data,
+                rowwise_scale_inv=rowwise_scale_inv,
+                columnwise_data=columnwise_data,
+                columnwise_scale_inv=columnwise_scale_inv,
+                amax_rowwise=amax_rowwise,
+                amax_columnwise=amax_columnwise,
+                quantizer=self._quantizer,
+                requires_grad=False,
+                with_gemm_swizzled_scales=False,
+            )
+        out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
+        return out, all_gather_outputs
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
@@ -563,6 +721,49 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             if shape == list(tensor.size()):
                 return tensor.detach()
             return tensor.view(shape)
+
+        # as_strided — FSDP2 applies this on the unsharded param.
+        # When shape and strides match (no-op), return self to preserve the quantized type.
+        if func == aten.as_strided.default:
+            tensor = args[0]
+            shape = args[1]
+            strides = args[2]
+            if (
+                len(shape) == len(strides) == 2
+                and tuple(strides) == (shape[-1], 1)
+                and tuple(shape) == tuple(tensor.size())
+            ):
+                return NVFP4Tensor.make_like(tensor)
+
+        # slice — FSDP2 applies this for shard unpadding.
+        # When the slice covers the full dimension, return self.
+        if func == aten.slice.Tensor:
+            tensor = args[0]
+            dim = args[1] if len(args) > 1 else 0
+            start = args[2] if len(args) > 2 else None
+            end = args[3] if len(args) > 3 else None
+            step = args[4] if len(args) > 4 else 1
+            if (
+                step == 1
+                and (start is None or start == 0)
+                and (end is None or end >= tensor.size(dim))
+            ):
+                return NVFP4Tensor.make_like(tensor)
+
+        # record_stream — FSDP2 records streams on all-gathered tensors.
+        if func == torch.ops.aten.record_stream.default:
+            qt, stream = args
+            for t in (
+                qt._rowwise_data,
+                qt._columnwise_data,
+                qt._rowwise_scale_inv,
+                qt._columnwise_scale_inv,
+                qt._amax_rowwise,
+                qt._amax_columnwise,
+            ):
+                if t is not None and t.is_cuda:
+                    t.record_stream(stream)
+            return None
 
         # NVFP4 dequantize not supported. Add manual support for needed funcs.
         if func in (aten.empty_like.default, aten.zero_.default):
