@@ -47,8 +47,6 @@ class mHCProjectionOp(torch.autograd.Function):
 
         ctx.use_tf32 = use_tf32
         ctx.dtype = x.dtype
-        x = x.to(torch.float32)
-        phi = phi.to(torch.float32)
 
         M, K = x.shape
         device = x.device
@@ -140,8 +138,8 @@ class mHCProjectionOp(torch.autograd.Function):
 
         N = phi.shape[0]
 
-        grad_H = grad_H.to(torch.float32)
-        grad_r = grad_r.to(torch.float32)
+        grad_H = grad_H
+        grad_r = grad_r
 
         grad_H = grad_H.contiguous().view(M, -1)
         grad_r = grad_r.contiguous().view(
