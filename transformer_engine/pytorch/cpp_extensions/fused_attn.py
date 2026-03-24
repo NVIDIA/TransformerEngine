@@ -357,7 +357,9 @@ def fused_attn_fwd(
         # thd (older cuDNN runtimes or sm120):   output_tensors: out [tq, h, d],    Stats [b, h, sq, 1], Max [b, h, sq, 1]
         # bshd:                                  output_tensors: out [b, sq, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]
         # sbhd:                                  output_tensors: out [sq, b, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]
-        aux_ctx_tensors = [output_tensors[1]] + list(output_tensors[3:])  # Stats + rng_state + optional tensors
+        aux_ctx_tensors = [output_tensors[1]] + list(
+            output_tensors[3:]
+        )  # Stats + rng_state + optional tensors
         max_tensor = output_tensors[2]
         amax_dims = (0, 2) if max_tensor.ndim == 3 else (0, 2, 3)
 
