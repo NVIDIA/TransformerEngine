@@ -1069,6 +1069,12 @@ def get_attention_backend(
                 "please install flash-attn >= 2.4.1."
             )
             use_flash_attention_2 = False
+    if use_flash_attention_3 and deterministic:
+        if head_dim_qk > 128:
+            logger.warning(
+                "Disabling FlashAttention 3 for deterministic execution with head_dim_qk > 128"
+            )
+            use_flash_attention_3 = False
     if use_fused_attention and deterministic:
         if softmax_type != "vanilla":
             logger.debug(
