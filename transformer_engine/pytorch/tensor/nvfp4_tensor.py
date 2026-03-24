@@ -567,6 +567,12 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         shard_M = math.prod(self.shape[:-1])
         K = self.shape[-1]
 
+        assert shard_M % NVFP4_BLOCK_SCALING_SIZE == 0, (
+            f"FSDP2 requires shard_M ({shard_M}) to be a multiple of "
+            f"NVFP4_BLOCK_SCALING_SIZE ({NVFP4_BLOCK_SCALING_SIZE}). "
+            "Adjust model dimensions or world size."
+        )
+
         # Rowwise data: (shard_M, K//2) — M in dim0, pass as-is
         rowwise_data = self._rowwise_data
         # Rowwise scale: (round_up(shard_M, 128), inner) — unpad dim0 to shard_M
@@ -667,8 +673,12 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 columnwise_scale_inv = torch.nn.functional.pad(
                     columnwise_scale_inv, (0, target_m_blocks - current_m_blocks)
                 )
-            elif current_m_blocks > target_m_blocks:
-                columnwise_scale_inv = columnwise_scale_inv[:, :target_m_blocks]
+            else:
+                assert current_m_blocks == target_m_blocks, (
+                    f"Columnwise scale m_blocks mismatch: got {current_m_blocks}, "
+                    f"expected {target_m_blocks}. This should be unreachable when "
+                    "shard_M is a multiple of NVFP4_BLOCK_SCALING_SIZE."
+                )
 
         logical_shape = (full_M, K)
 
