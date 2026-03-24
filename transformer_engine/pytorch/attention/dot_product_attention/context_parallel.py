@@ -25,10 +25,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.graph import is_graph_capturing
-from transformer_engine.pytorch.constants import (
-    dist_group_type,
-    TE_DType,
-)
+from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     get_distributed_rank,
@@ -536,7 +533,7 @@ def flash_attn_a2a_communicate(
                     # [cp, 2, s//2, b, h//cp, d] -> [2, s//2, b, cp, h//cp, d]
                     # [cp, 2, b, h//cp, s//2, d] -> [2, b, cp, h//cp, s//2, d]
                     # [cp, t, h//cp, d] -> [t, cp, h//cp, d]
-                    tmp_list = [x for x in qkv_format]
+                    tmp_list = list(qkv_format)
                     if "t" not in qkv_format:
                         tmp_list.insert(0, "2")
                     tmp_list.insert(0, "c")
@@ -3067,7 +3064,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         elif use_fused_attention:
             fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
-        orig_q_shape, orig_k_shape, orig_v_shape = q.shape, k.shape, v.shape
+        orig_q_shape, _, orig_v_shape = q.shape, k.shape, v.shape
         orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
 
         # q, k, v:
@@ -3201,7 +3198,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         if fp8:
                             softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
                         else:
-                            softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+                            softmax_lse_per_step[i], rng_states[i], *_ = aux_ctx_tensors
                         if return_max_logit:
                             max_logit_per_step[i] = max_logit_[0]
                         if fp8 and isinstance(out_per_step[i], QuantizedTensorStorage):
@@ -4220,7 +4217,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             *aux_ctx_tensors,
         ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
 
-        batch_dim_dqkv, seq_dim_dqkv, _ = get_bsh_dims(ctx.dqkv_format)
+        _, seq_dim_dqkv, _ = get_bsh_dims(ctx.dqkv_format)
         _, seq_dim_do, _ = get_bsh_dims(ctx.o_format)
         bwd_nominal_dtype = ctx.fwd_nominal_dtype
         fused_attn_backend = None
@@ -4579,6 +4576,7 @@ def attn_forward_func_with_cp(
     in Megatron-LM.
 
     """
+
     if cp_comm_type == "a2a+p2p":
         assert (
             isinstance(cp_group, list) and len(cp_group) == 2
@@ -4623,13 +4621,6 @@ def attn_forward_func_with_cp(
         "a2a",
         "all_gather",
     ], f"Context parallelism does not support sliding window attention with {cp_comm_type=}!"
-
-    enable_mla = k.shape[-1] != v.shape[-1]
-    # assert not enable_mla or cp_comm_type in [
-    #     "p2p",
-    #     "a2a+p2p",
-    #     "a2a",
-    # ], f"Context parallelism does not support MLA with {cp_comm_type=}!"
 
     if fp8 and fp8_meta is not None:
         if fp8_meta["recipe"].fp8_dpa:

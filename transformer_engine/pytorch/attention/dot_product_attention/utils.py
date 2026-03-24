@@ -346,7 +346,7 @@ def get_attention_backend(
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
     cp_comm_type = attention_params.cp_comm_type
-    cp_size = attention_params.cp_size
+    cp_size = attention_params.cp_size # pylint: disable=unused-variable
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
@@ -505,7 +505,7 @@ def get_attention_backend(
             fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()
         ):
             if FlashAttentionUtils.v3_is_installed:
-                logger.debug(f"Disabling FlashAttention 3 for {fp8_recipe.__class__.__name__}")
+                logger.debug("Disabling FlashAttention 3 for %s", fp8_recipe.__class__.__name__)
             use_flash_attention_3 = False
         if use_unfused_attention:
             allow_emulation = (
@@ -557,7 +557,7 @@ def get_attention_backend(
                     logger.debug("Disabling FusedAttention for MXFP8 with qkv_format = thd")
                     use_fused_attention = False
         if use_fused_attention and (fp8_recipe.float8_block_scaling() or fp8_recipe.nvfp4()):
-            logger.debug(f"Disabling FusedAttention for {fp8_recipe.__class__.__name__}")
+            logger.debug("Disabling FusedAttention for %s", fp8_recipe.__class__.__name__)
             use_fused_attention = False
 
         if device_compute_capability == (12, 0):
@@ -2339,7 +2339,8 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
                 device="cuda",
                 dtype=q.dtype,
             )
-            q_fp8, k_fp8, v_fp8 = grouped_tensor.quantize(input_tensors)
+            quantized_tensors = grouped_tensor.quantize(input_tensors)
+            q_fp8, k_fp8, v_fp8 = quantized_tensors[0], quantized_tensors[1], quantized_tensors[2]
         else:
             input_tensors = [q, k]
             num_tensors = len(input_tensors)
@@ -2351,7 +2352,8 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
                 device="cuda",
                 dtype=q.dtype,
             )
-            q_fp8, k_fp8 = grouped_tensor.quantize(input_tensors)
+            quantized_tensors = grouped_tensor.quantize(input_tensors)
+            q_fp8, k_fp8 = quantized_tensors[0], quantized_tensors[1]
             v_fp8 = qkv_quantizer(v)
         # view rowwise/columnwise data back to original shapes, not rowwise_scale_inv/columnwise_scale_inv
         q_fp8, k_fp8, v_fp8 = [x.view(s) for x, s in zip([q_fp8, k_fp8, v_fp8], original_shapes)]
@@ -2420,7 +2422,6 @@ def combine_and_dequantize(
         return q, k, v
 
     qkv_layout = qkv_layout.replace("paged_kv_", "")
-    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
     qkv_group = len(qkv_layout.split("_"))
     q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
     # 1: qkv packed, 2: kv packed, 3: qkv separate

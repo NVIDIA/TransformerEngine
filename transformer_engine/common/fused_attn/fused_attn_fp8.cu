@@ -2693,7 +2693,7 @@ void fused_attn_fp8_bwd_impl_v1(
   } catch (cudnn_frontend::cudnnException& e) {
     NVTE_ERROR(e.what());
   }
-}
+}  // NOLINT(readability/fn_size)
 
 #endif
 

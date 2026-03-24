@@ -36,9 +36,7 @@ from transformer_engine.pytorch.quantized_tensor import (
     restore_from_saved,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8TensorStorage
 from transformer_engine.pytorch.constants import (
-    TE_DType,
     QKVLayouts,
     dist_group_type,
 )
