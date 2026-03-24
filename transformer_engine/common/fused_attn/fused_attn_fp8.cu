@@ -1777,9 +1777,7 @@ void fused_attn_fp8_fwd_impl_v1(
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
       // Q, K, V, attn_scale
-      std::vector<int64_t> q_strides(4);
-      std::vector<int64_t> k_strides(4);
-      std::vector<int64_t> v_strides(4);
+      std::vector<int64_t> q_strides(4), k_strides(4), v_strides(4);
       generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(),
                                       k_strides.data(), v_strides.data(), qkv_layout);
       Q = mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -1821,8 +1819,7 @@ void fused_attn_fp8_fwd_impl_v1(
         if (is_current_scaling) {
           scale_o = mha_graph->tensor(1.0f);
         }
-      }
-      if (is_mxfp8) {
+      } else if (is_mxfp8) {
         NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
         NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
         std::vector<int64_t> q_scale_strides(4);
@@ -1870,11 +1867,13 @@ void fused_attn_fp8_fwd_impl_v1(
                                 : fe::DiagonalAlignment_t::TOP_LEFT;
       sdpa_options.set_diagonal_alignment(diagonal_alignment);
 
-      if (cudnn_runtime_version >= 90200 && window_size_left != -1) {
-        sdpa_options.set_diagonal_band_left_bound(window_size_left + 1);
-      }
-      if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
-        sdpa_options.set_diagonal_band_right_bound(window_size_right);
+      if (cudnn_runtime_version >= 92100) {
+        if (window_size_left != -1) {
+          sdpa_options.set_diagonal_band_left_bound(window_size_left + 1);
+        }
+        if (window_size_right != -1) {
+          sdpa_options.set_diagonal_band_right_bound(window_size_right);
+        }
       }
 
       // sdpa_options.set_alibi_mask(is_alibi);
@@ -2031,7 +2030,7 @@ void fused_attn_fp8_fwd_impl_v1(
     if (is_delayed_scaling) {
       variant_pack[scale_o] = devPtrScaleO;
     }
-    if (!is_mxfp8) {
+    if (is_delayed_scaling || is_current_scaling) {
       variant_pack[descale_s] = devPtrDescaleS;
       variant_pack[scale_s] = devPtrScaleS;
       variant_pack[amax_s] = devPtrAmaxS;
@@ -2234,11 +2233,7 @@ void fused_attn_fp8_bwd_impl_v1(
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
       // Q, K, V, O, dO, stats, attn_scale
-      std::vector<int64_t> q_strides(4);
-      std::vector<int64_t> k_strides(4);
-      std::vector<int64_t> v_strides(4);
-      std::vector<int64_t> o_strides(4);
-      std::vector<int64_t> dO_strides(4);
+      std::vector<int64_t> q_strides(4), k_strides(4), v_strides(4), o_strides(4), dO_strides(4);
       generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, q_strides.data(),
                                       k_strides.data(), v_strides.data(), qkv_layout);
       generateMatrixStridesWithFormat(b, h, s_q, d_v, o_strides.data(), o_format);
@@ -2309,14 +2304,11 @@ void fused_attn_fp8_bwd_impl_v1(
           scale_dK = mha_graph->tensor(1.0f);
           scale_dV = mha_graph->tensor(1.0f);
         }
-      }
-      if (is_mxfp8) {
+      } else if (is_mxfp8) {
         NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
         NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
         // Q_t, K_t, dO_t, dO_f16
-        std::vector<int64_t> q_t_strides(4);
-        std::vector<int64_t> k_t_strides(4);
-        std::vector<int64_t> dO_t_strides(4);
+        std::vector<int64_t> q_t_strides(4), k_t_strides(4), dO_t_strides(4);
         generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_t_strides.data(), q_format);
         generateMatrixStridesWithFormat(b, hg, s_kv, d_qk, k_t_strides.data(), kv_format);
         generateMatrixStridesWithFormat(b, h, s_q, d_v, dO_t_strides.data(), do_format);
@@ -2342,13 +2334,7 @@ void fused_attn_fp8_bwd_impl_v1(
                                        .set_data_type(o_tensor_type));
         // Descale_q, Descale_q_t, Descale_k, Descale_k_t, Descale_v, Descale_dO, Descale_dO_t
         auto padded = pad_s_d_for_mxfp8(s_q, s_kv, d_qk, d_v);
-        std::vector<int64_t> q_scale_strides(4);
-        std::vector<int64_t> q_t_scale_strides(4);
-        std::vector<int64_t> k_scale_strides(4);
-        std::vector<int64_t> k_t_scale_strides(4);
-        std::vector<int64_t> v_scale_strides(4);
-        std::vector<int64_t> dO_scale_strides(4);
-        std::vector<int64_t> dO_t_scale_strides(4);
+        std::vector<int64_t> q_scale_strides(4), q_t_scale_strides(4), k_scale_strides(4), k_t_scale_strides(4), v_scale_strides(4), dO_scale_strides(4), dO_t_scale_strides(4);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_qk_scale_padded,
                                         q_scale_strides.data(), q_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_qk_padded,
@@ -2425,11 +2411,13 @@ void fused_attn_fp8_bwd_impl_v1(
                                 : fe::DiagonalAlignment_t::TOP_LEFT;
       sdpa_backward_options.set_diagonal_alignment(diagonal_alignment);
 
-      if (cudnn_runtime_version >= 90200 && window_size_left != -1) {
-        sdpa_backward_options.set_diagonal_band_left_bound(window_size_left + 1);
-      }
-      if (cudnn_runtime_version >= 90600 && window_size_right != -1) {
-        sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
+      if (cudnn_runtime_version >= 92100) {
+        if (window_size_left != -1) {
+          sdpa_backward_options.set_diagonal_band_left_bound(window_size_left + 1);
+        }
+        if (window_size_right != -1) {
+          sdpa_backward_options.set_diagonal_band_right_bound(window_size_right);
+        }
       }
 
       // sdpa_backward_options.set_alibi_mask(is_alibi);
@@ -2502,32 +2490,20 @@ void fused_attn_fp8_bwd_impl_v1(
 
       std::shared_ptr<fe::graph::Tensor_attributes> dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP;
       if (is_delayed_scaling || is_current_scaling) {
-        auto outputs = mha_graph->sdpa_fp8_backward(Q, K, V, O, dO, Stats, descale_q, descale_k,
-                                                    descale_v, descale_o, descale_dO, descale_s,
-                                                    descale_dP, scale_s, scale_dQ, scale_dK,
-                                                    scale_dV, scale_dP, sdpa_backward_options);
-        dQ = outputs[0];
-        dK = outputs[1];
-        dV = outputs[2];
-        amax_dQ = outputs[3];
-        amax_dK = outputs[4];
-        amax_dV = outputs[5];
-        amax_dP = outputs[6];
+        std::tie(dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP) = std::apply(
+            [](const auto &...elems) { return std::make_tuple(elems...); },
+            mha_graph->sdpa_fp8_backward(Q, K, V, O, dO, Stats, descale_q, descale_k, descale_v,
+                                         descale_o, descale_dO, descale_s, descale_dP, scale_s,
+                                         scale_dQ, scale_dK, scale_dV, scale_dP,
+                                         sdpa_backward_options));
+      } else if (is_mxfp8) {
+        std::tie(dQ, dK, dV, amax_dQ, amax_dK, amax_dV) = std::apply(
+            [](const auto &...elems) { return std::make_tuple(elems...); },
+            mha_graph->sdpa_fp8_backward(Q, Q_t, K, K_t, V, O, dO_f16, dO, dO_t, Stats, descale_q,
+                                         descale_q_t, descale_k, descale_k_t, descale_v, descale_dO,
+                                         descale_dO_t, sdpa_backward_options));
       }
-      if (is_mxfp8) {
-        auto outputs = mha_graph->sdpa_fp8_backward(
-            Q, Q_t, K, K_t, V, O, dO_f16, dO, dO_t, Stats, descale_q, descale_q_t, descale_k,
-            descale_k_t, descale_v, descale_dO, descale_dO_t, sdpa_backward_options);
-        dQ = outputs[0];
-        dK = outputs[1];
-        dV = outputs[2];
-        amax_dQ = outputs[3];
-        amax_dK = outputs[4];
-        amax_dV = outputs[5];
-      }
-      std::vector<int64_t> dq_strides(4);
-      std::vector<int64_t> dk_strides(4);
-      std::vector<int64_t> dv_strides(4);
+      std::vector<int64_t> dq_strides(4), dk_strides(4), dv_strides(4);
       generateMatrixStridesWithLayout(b, h, hg, s_q, s_kv, d_qk, d_v, dq_strides.data(),
                                       dk_strides.data(), dv_strides.data(), dqkv_layout);
       dQ->set_output(true)
