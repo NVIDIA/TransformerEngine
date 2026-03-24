@@ -313,14 +313,6 @@ def test_cp_with_fused_attention(
     ]:
         pytest.skip("No support for SWA with cp_comm_type={p2p, a2a+p2p}!")
 
-    # TODO: Remove this once the issue is fixed!
-    if (
-        dtype == "fp8"
-        and (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0])
-        and cp_comm_type == "all_gather"
-    ):
-        pytest.skip("No support for SWA with FP8 attention and cp_comm_type=all_gather!")
-
     if cp_comm_type in ["a2a", "a2a+p2p"] and (
         config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0
     ):
@@ -350,6 +342,8 @@ def test_cp_with_fused_attention(
         pytest.skip("scaling_mode=delayed requires f16_O=False!")
     if scaling_mode == "mxfp8" and not f16_O:
         pytest.skip("scaling_mode=mxfp8 requires f16_O=True!")
+    if scaling_mode == "mxfp8" and fp8_mha:
+        pytest.skip("No support for scaling_mode=mxfp8 with fp8_mha=True!")
 
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
