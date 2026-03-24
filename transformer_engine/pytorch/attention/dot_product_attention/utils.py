@@ -460,19 +460,23 @@ def get_attention_backend(
         torch.Tensor,
         Float8Tensor,
         Float8TensorStorage,
-        MXFP8Tensor,
-        MXFP8TensorStorage,
     ):
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug(
                 "Disabling FlashAttention 3 for unsupported qkv_dtype = %s, qkv_type = %s."
                 " Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn},"
-                " qkv_type = {torch.Tensor, Float8Tensor, Float8TensorStorage, MXFP8Tensor,"
-                " MXFP8TensorStorage}. ",
+                " qkv_type = {torch.Tensor, Float8Tensor, Float8TensorStorage}. ",
                 qkv_dtype,
                 qkv_type,
             )
         use_flash_attention_3 = False
+    if qkv_dtype not in [torch.bfloat16, torch.float16, torch.float8_e4m3fn] or qkv_type not in (
+        torch.Tensor,
+        Float8Tensor,
+        Float8TensorStorage,
+        MXFP8Tensor,
+        MXFP8TensorStorage,
+    ):
         if use_fused_attention:
             logger.debug(
                 "Disabling FusedAttention for unsupported qkv_dtype = %s, qkv_type = %s. Supported:"
@@ -486,11 +490,10 @@ def get_attention_backend(
 
     # Filter: Execution type
     fp8_recipe = None
-    if fp8:
-        fp8_recipe = fp8_meta["recipe"] if fp8_meta is not None else None
+    if fp8 and fp8_meta["recipe"].fp8_dpa:
+        fp8_recipe = fp8_meta["recipe"]
         if fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
-    if fp8 and fp8_recipe.fp8_dpa:
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for FP8 attention")
         use_flash_attention_2 = False
@@ -765,10 +768,15 @@ def get_attention_backend(
         logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
         use_flash_attention = False
         if fp8 and fp8_recipe.fp8_dpa:
-            logger.debug(
-                "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
-            )
-            use_unfused_attention = False
+            if use_fused_attention and (device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0)):
+                logger.debug("Disabling FusedAttention for softmax_type = %s in FP8 on sm < 100 with cuDNN"
+                             " version < 9.21", softmax_type)
+                use_fused_attention = False
+            if use_unfused_attention:
+                logger.debug(
+                    "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
+                )
+                use_unfused_attention = False
         if qkv_format == "thd" and cudnn_version < (9, 18, 0):
             logger.debug(
                 "Disabling FusedAttention for softmax_type = %s, qkv_format = thd and cuDNN"
@@ -957,7 +965,13 @@ def get_attention_backend(
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-        if attention_dropout != 0.0:
+        if fp8 and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha) and (device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0)):
+            logger.debug(
+                "Disabling FusedAttention as it does not support sliding window attention for FP8 on sm < 100 with cuDNN"
+                " version < 9.21"
+            )
+            use_fused_attention = False
+        elif attention_dropout != 0.0:
             logger.debug(
                 "Disabling FusedAttention as it only supports sliding window attention "
                 "without dropout"
