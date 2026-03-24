@@ -1620,9 +1620,7 @@ class TestMaxSegmentsPerSeqWarning:
         b, s, h, d = 2, 4, 1, 8
         dtype = jnp.bfloat16
         qkv = qkv_tuple_fn(b, s, h, d, dtype)
-        seq_desc = SequenceDescriptor.from_seqlens(
-            seqlens=(jnp.full((b,), s), jnp.full((b,), s))
-        )
+        seq_desc = SequenceDescriptor.from_seqlens(seqlens=(jnp.full((b,), s), jnp.full((b,), s)))
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -1648,6 +1646,6 @@ class TestMaxSegmentsPerSeqWarning:
             issubclass(w.category, UserWarning) and "max_segments_per_seq" in str(w.message)
             for w in caught
         ), (
-            f"Expected a UserWarning mentioning 'max_segments_per_seq' when using "
+            "Expected a UserWarning mentioning 'max_segments_per_seq' when using "
             f"{qkv_layout} with max_segments_per_seq=2, but no such warning was found."
         )
