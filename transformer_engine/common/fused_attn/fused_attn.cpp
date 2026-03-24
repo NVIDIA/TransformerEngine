@@ -534,7 +534,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         std::cout << "Warning: Given combination of sm_arch_ == 120 and cudnn_runtime_version < "
                      "91801 is not supported. "
                   << " Please upgrade your cuDNN version if possible." << std::endl;
-      } else if (deterministic) {
+      } else if (deterministic && is_training) {
         backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
         std::cout << "Warning: Deterministic fused attention on SM120 is not supported."
                   << std::endl;
