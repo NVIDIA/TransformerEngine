@@ -2941,15 +2941,15 @@ void fused_attn_fp8_bwd(
       (dqkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
     fused_attn::fused_attn_fp8_bwd_impl_v1(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
-        attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type,
-        mask_type, softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
-        deterministic, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv, devPtrO, devPtrdO,
-        devPtrSoftmaxOffset, devPtrdQ, devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ,
-        devPtrDescaleK, devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS,
-        devPtrDescaledP, devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV,
-        devPtrAmaxdP, devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16,
-        devPtrdO_t, devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ,
-        devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
+        attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type, mask_type,
+        softmax_type, window_size_left, window_size_right, bottom_right_diagonal, deterministic,
+        devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv, devPtrO, devPtrdO, devPtrSoftmaxOffset,
+        devPtrdQ, devPtrdK, devPtrdV, devPtrdSoftmaxOffset, devPtrDescaleQ, devPtrDescaleK,
+        devPtrDescaleV, devPtrDescaleO, devPtrDescaledO, devPtrDescaleS, devPtrDescaledP,
+        devPtrScaleS, devPtrScaledP, devPtrScaledQ, devPtrScaledK, devPtrScaledV, devPtrAmaxdP,
+        devPtrAmaxdQ, devPtrAmaxdK, devPtrAmaxdV, devPtrQ_t, devPtrK_t, devPtrdO_f16, devPtrdO_t,
+        devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
+        devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
         get_cudnn_fe_dtype(O_type), get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type),
         input_dO->scaling_mode, workspace->data.dptr, &workspace_size, stream, handle);
   } else if (dqkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
