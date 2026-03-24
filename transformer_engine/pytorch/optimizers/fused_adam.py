@@ -377,10 +377,9 @@ class FusedAdam(torch.optim.Optimizer):
         if state_name not in state:
             self._initialize_state(param, state_name, False, store_param_remainders)
 
-        # If the original Parameter is a DTensor, retrieve the local Tensor
-        # of the state (which is also DTensor) for scaling.
+        # If the state is a DTensor, retrieve its local Tensor for scaling.
         local_state = state[state_name]
-        if isinstance(param, DTensor):
+        if isinstance(local_state, DTensor):
             local_state = local_state._local_tensor
 
         dtype = self.name_to_dtype_map[state_name]
@@ -421,12 +420,7 @@ class FusedAdam(torch.optim.Optimizer):
         # Install the quantized or un-quantized optimizer state.
         if dtype == torch.uint8:
             quantizer = Float8Quantizer(
-                scale=torch.ones([1], dtype=torch.float32, device=param.device),
-                amax=torch.zeros([1], dtype=torch.float32, device=param.device),
-                fp8_dtype=tex.DType.kFloat8E4M3,
-            )
-            self.state[param][state_name] = quantizer.make_empty(param.shape)
-            self.state[param][state_name].quantize_(data.float())
+            self.state[param][state_name] = quantizer.make_empty(data.shape)
         else:
             self.state[param][state_name] = data
 
