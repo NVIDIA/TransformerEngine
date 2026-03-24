@@ -614,12 +614,14 @@ class FusedAdam(torch.optim.Optimizer):
                 # Validate parameter, gradient, and state DTensor parity for the step.
                 dtensor_param = isinstance(p, DTensor)
                 assert dtensor_param == isinstance(p_grad, DTensor), (
-                    f"[FusedAdam DTensor Disparity] Parameter {p} and Gradient {p_grad} do not match!"
+                    f"[FusedAdam DTensor Disparity] Parameter {p} and Gradient {p_grad} do not"
+                    " match!"
                 )
                 for name in ["exp_avg", "exp_avg_sq", "master_param"]:
                     if name in state:
                         assert dtensor_param == isinstance(state[name], DTensor), (
-                            f"[FusedAdam DTensor Disparity] Parameter {p} and {name} {state[name]} do not match!"
+                            f"[FusedAdam DTensor Disparity] Parameter {p} and"
+                            f" {name} {state[name]} do not match!"
                         )
 
                 # Unscaling
