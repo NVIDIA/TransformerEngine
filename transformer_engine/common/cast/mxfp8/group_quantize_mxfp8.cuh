@@ -88,11 +88,18 @@ __device__ __forceinline__ float process_colwise_stage(
     const size_t buff, const int stage, const size_t tid_X_colwise,
     const size_t scales_offset_Y_colwise, const size_t scales_offset_X_colwise,
     const size_t scale_stride_colwise, const size_t tensor_base_for_scales, const size_t rows,
-    const size_t cols, IType *in_sh, IType *act_in_sh, IType *cached_act_sh,
-    OType *out_colwise_data_sh, e8m0_t *scales_colwise, float &partial_dbias_colwise) {
+    const size_t cols, IType *sIn_ptr, IType *sActIn_ptr, IType *sCachedAct_ptr,
+    OType *sOutColwise_ptr, e8m0_t *scales_colwise, float &partial_dbias_colwise) {
   using IType2 = typename ptx::FPx2<IType>;
   using IType4 = typename ptx::FPx4<IType>;
   using OType4 = typename ptx::FPx4<OType>;
+  using IType3D = IType[BUFFS_NUM][BUFF_DIM_Y][BUFF_DIM_X];
+  using OType3D = OType[BUFFS_NUM][BUFF_DIM_Y][BUFF_DIM_X];
+
+  const auto &sIn = *reinterpret_cast<const IType3D *>(sIn_ptr);
+  const auto &sActIn = *reinterpret_cast<const IType3D *>(sActIn_ptr);
+  auto &sCachedAct = *reinterpret_cast<IType3D *>(sCachedAct_ptr);
+  auto &sOutColwise = *reinterpret_cast<OType3D *>(sOutColwise_ptr);
 
   constexpr uint32_t IN_SHMEM_STRIDE = static_cast<uint32_t>(BUFF_DIM_X * sizeof(IType));
   constexpr uint32_t OUT_SHMEM_STRIDE = static_cast<uint32_t>(BUFF_DIM_X * sizeof(OType));
@@ -103,7 +110,8 @@ __device__ __forceinline__ float process_colwise_stage(
   constexpr bool FP16_CAST_ONLY = NO_ACTIVATIONS && (!IS_DBIAS) && std::is_same_v<IType, fp16>;
   constexpr bool BF16_CAST_ONLY = NO_ACTIVATIONS && (!IS_DBIAS) && std::is_same_v<IType, bf16>;
 
-  const size_t shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
+  const size_t j = tid_X_colwise;
+
   float thread_amax = 0.0f;
   float rInCompute[BUFF_DIM_Y];
   IType rIn[BUFF_DIM_Y];
@@ -113,8 +121,7 @@ __device__ __forceinline__ float process_colwise_stage(
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
     for (int i = 0; i < BUFF_DIM_Y; i += 4) {
-      const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-      const uint32_t src_smem_ptr = __cvta_generic_to_shared(&in_sh[shmem_offset_colwise]);
+      const uint32_t src_smem_ptr = __cvta_generic_to_shared(&sIn[buff][i][j]);
 
       // Load 4x elts S2R and find amax
       asm volatile(
@@ -149,22 +156,19 @@ __device__ __forceinline__ float process_colwise_stage(
     IType thread_amax_f16 = static_cast<IType>(0.0f);
 #pragma unroll
     for (int i = 0; i < BUFF_DIM_Y; ++i) {
-      const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-      rIn[i] = in_sh[shmem_offset_colwise];
+      rIn[i] = sIn[buff][i][j];
       thread_amax_f16 = __hmax(thread_amax_f16, __habs(rIn[i]));
     }
     thread_amax = static_cast<float>(thread_amax_f16);
   } else {
 #pragma unroll
     for (int i = 0; i < BUFF_DIM_Y; ++i) {
-      const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-
-      float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
+      float elt = static_cast<float>(sIn[buff][i][j]);
       if constexpr (IS_ACT) {
         elt = OP(elt, {});
       }
       if constexpr (IS_DACT) {
-        float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
+        float act_in_elt = static_cast<float>(sActIn[buff][i][j]);
         elt *= OP(act_in_elt, {});
       }
       if constexpr (IS_DBIAS) {
@@ -174,7 +178,7 @@ __device__ __forceinline__ float process_colwise_stage(
         elt = static_cast<float>(static_cast<IType>(elt));
       }
       if constexpr (IS_CACHED_ACT_OP) {
-        cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
+        sCachedAct[buff][i][j] = static_cast<IType>(elt);
       }
       thread_amax = fmaxf(thread_amax, fabsf(elt));
       rInCompute[i] = elt;
@@ -210,9 +214,7 @@ __device__ __forceinline__ float process_colwise_stage(
       OType4 out;
       ptx::mul_cvt_4x(out, rIn4x[i / 4], block_scale_inverse_bf16_x2);
 
-      const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-      const uint32_t dst_smem_ptr =
-          __cvta_generic_to_shared(&out_colwise_data_sh[shmem_offset_elt]);
+      const uint32_t dst_smem_ptr = __cvta_generic_to_shared(&sOutColwise[buff][i][j]);
 
       asm volatile(
           "{\n"
@@ -245,8 +247,7 @@ __device__ __forceinline__ float process_colwise_stage(
       }
       const float scaled_out = in * block_scale_inverse;
 
-      const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-      out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
+      sOutColwise[buff][i][j] = static_cast<OType>(scaled_out);
     }
   }
   return thread_amax;
@@ -260,7 +261,7 @@ __device__ __forceinline__ float process_rowwise_stage(
     const size_t thread_offset_X_rowwise, const int bank_group,
     const size_t scales_offset_Y_rowwise, const size_t scales_offset_X_rowwise,
     const size_t scale_stride_rowwise, const bool rowwise_scale_is_within_bounds, const size_t cols,
-    IType *in_sh, IType *act_in_sh, IType *cached_act_sh, OType *out_rowwise_data_sh,
+    IType *sIn_ptr, IType *sActIn_ptr, IType *sCachedAct_ptr, OType *sOutRowwise_ptr,
     e8m0_t *scales_rowwise, float *thread_dbias_rowwise) {
   using IType2 = typename ptx::FPx2<IType>;
   using IType4 = typename ptx::FPx4<IType>;
@@ -273,7 +274,16 @@ __device__ __forceinline__ float process_rowwise_stage(
   constexpr bool FP16_CAST_ONLY = NO_ACTIVATIONS && (!IS_DBIAS) && std::is_same_v<IType, fp16>;
   constexpr bool NON_FP32_CAST_ONLY = BF16_CAST_ONLY || FP16_CAST_ONLY;
 
-  const size_t shmem_offset_base_rowwise = buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
+  using IType3D = IType[BUFFS_NUM][BUFF_DIM_Y][BUFF_DIM_X];
+  using OType3D = OType[BUFFS_NUM][BUFF_DIM_Y][BUFF_DIM_X];
+
+  const auto &sIn = *reinterpret_cast<const IType3D *>(sIn_ptr);
+  const auto &sActIn = *reinterpret_cast<const IType3D *>(sActIn_ptr);
+  const auto &sCachedAct = *reinterpret_cast<const IType3D *>(sCachedAct_ptr);
+  auto &sOutRowwise = *reinterpret_cast<OType3D *>(sOutRowwise_ptr);
+
+  const size_t i = thread_offset_Y_rowwise;
+
   float thread_amax = 0.0f;
   float rInCompute[SCALE_DIM_X];
   Vec<IType, PACK_SIZE> rInCached[WAVES];
@@ -285,10 +295,9 @@ __device__ __forceinline__ float process_rowwise_stage(
 #pragma unroll
     for (int w = 0; w < WAVES; ++w) {
       const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-      const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-      const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
+      const size_t j = thread_offset_X_rowwise + swizzled_group_idx;
       if constexpr (std::is_same_v<IType, bf16>) {
-        const uint32_t src_smem_ptr = __cvta_generic_to_shared(&in_sh[shmem_offset_rowwise]);
+        const uint32_t src_smem_ptr = __cvta_generic_to_shared(&sIn[buff][i][j]);
         // Load 4x elts S2R and find amax
         asm volatile(
             "{\n"
@@ -302,7 +311,8 @@ __device__ __forceinline__ float process_rowwise_stage(
               "+r"(reinterpret_cast<uint32_t &>(thread_amax_2x))
             : "r"(src_smem_ptr));
       } else {
-        rIn[w].load_from(&in_sh[shmem_offset_rowwise]);
+        // rIn[w].load_from(&sIn_ptr[shmem_offset_rowwise]);
+        rIn[w].load_from(&sIn[buff][i][j]);
 #pragma unroll
         for (int e = 0; e < PACK_SIZE / 2; ++e) {
           ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, rIn[w].data.elt[e]);
@@ -316,9 +326,8 @@ __device__ __forceinline__ float process_rowwise_stage(
 #pragma unroll
     for (int w = 0; w < WAVES; ++w) {
       const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-      const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-      const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-      rInCached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
+      const size_t j = thread_offset_X_rowwise + swizzled_group_idx;
+      rInCached[w].load_from(&sCachedAct[buff][i][j]);
       if constexpr (std::is_same_v<IType, float>) {
 #pragma unroll
         for (int e = 0; e < PACK_SIZE; ++e) {
@@ -339,15 +348,14 @@ __device__ __forceinline__ float process_rowwise_stage(
 #pragma unroll
     for (int w = 0; w < WAVES; ++w) {
       const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-      const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-      const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
+      const size_t j = thread_offset_X_rowwise + swizzled_group_idx;
 
       Vec<IType, PACK_SIZE> in;
       Vec<IType, PACK_SIZE> act_in;
 
-      in.load_from(&in_sh[shmem_offset_rowwise]);
+      in.load_from(&sIn[buff][i][j]);
       if constexpr (IS_DACT) {
-        act_in.load_from(&act_in_sh[shmem_offset_rowwise]);
+        act_in.load_from(&sActIn[buff][i][j]);
       }
 #pragma unroll
       for (int e = 0; e < PACK_SIZE; ++e) {
@@ -398,16 +406,14 @@ __device__ __forceinline__ float process_rowwise_stage(
 #pragma unroll
   for (int w = 0; w < WAVES; ++w) {
     const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-    const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-    const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
+    const size_t j = swizzled_group_idx + thread_offset_X_rowwise;
 
     if constexpr (BF16_CAST_ONLY) {
       uint32_t out_4x = 0;
       OType4 &out = *reinterpret_cast<OType4 *>(&out_4x);
       ptx::mul_cvt_4x(out, rIn4x[w], block_scale_inverse_bf16_x2);
 
-      const uint32_t dst_smem_ptr =
-          __cvta_generic_to_shared(&out_rowwise_data_sh[shmem_offset_rowwise]);
+      const uint32_t dst_smem_ptr = __cvta_generic_to_shared(&sOutRowwise[buff][i][j]);
       asm volatile("st.shared.b32 [%0], %1;" : : "r"(dst_smem_ptr), "r"(out_4x));
     } else {
       Vec<OType2, PACK_SIZE / 2> out;
@@ -427,7 +433,7 @@ __device__ __forceinline__ float process_rowwise_stage(
         }
         ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
       }
-      out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
+      out.store_to(&sOutRowwise[buff][i][j]);
     }
   }
   return thread_amax;
@@ -497,12 +503,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
   unsigned char *dshmem = align_smem_ptr_per_TMA_requirements(dynamic_shmem);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
-  IType *in_sh = reinterpret_cast<IType *>(dshmem);
-  IType *act_in_sh = reinterpret_cast<IType *>(dshmem + elt_input_mem);
+  IType *sIn_ptr = reinterpret_cast<IType *>(dshmem);
+  IType *sActIn_ptr = reinterpret_cast<IType *>(dshmem + elt_input_mem);
 
-  OType *out_rowwise_data_sh = reinterpret_cast<OType *>(dshmem + in_mem);
-  OType *out_colwise_data_sh = reinterpret_cast<OType *>(dshmem + in_mem + out_mem_rowwise);
-  IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
+  OType *sOutRowwise_ptr = reinterpret_cast<OType *>(dshmem + in_mem);
+  OType *sOutColwise_ptr = reinterpret_cast<OType *>(dshmem + in_mem + out_mem_rowwise);
+  IType *sCachedAct_ptr = sIn_ptr;  // sIn_ptr is used as a cache buffer
 
   constexpr size_t shmem_buff_size = (IS_DACT ? 2 : 1) * buff_size_aligned_in / BUFFS_NUM;
 
@@ -627,7 +633,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t global_offset_X = block_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
       uint64_t *barrier = &IN_buff_readable_mbar[buff];
-      prefetch_input_stage<IType, IS_DACT>(in_sh, act_in_sh, tensor_map_input, tensor_map_act_input,
+      prefetch_input_stage<IType, IS_DACT>(sIn_ptr, sActIn_ptr, tensor_map_input, tensor_map_act_input,
                                            global_offset_X, global_offset_Y, buff_offset,
                                            shmem_buff_size, barrier, leading_thread);
     }
@@ -656,7 +662,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
         uint64_t *barrier = &IN_buff_readable_mbar[next_prefetch_buff];
         prefetch_input_stage<IType, IS_DACT>(
-            in_sh, act_in_sh, tensor_map_input, tensor_map_act_input, global_offset_X,
+            sIn_ptr, sActIn_ptr, tensor_map_input, tensor_map_act_input, global_offset_X,
             global_offset_Y, next_prefetch_buff_offset, shmem_buff_size, barrier, leading_thread);
       }
 
@@ -671,8 +677,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
         thread_amax = process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
                                             ROWWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
             buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
-            scale_stride_colwise, tensor_base_for_scales, rows, cols, in_sh, act_in_sh,
-            cached_act_sh, out_colwise_data_sh, scales_colwise, partial_dbias_colwise);
+            scale_stride_colwise, tensor_base_for_scales, rows, cols, sIn_ptr, sActIn_ptr,
+            sCachedAct_ptr, sOutColwise_ptr, scales_colwise, partial_dbias_colwise);
       }
 
       if constexpr (ROWWISE_SCALING) {
@@ -680,8 +686,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
                                             COLWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
             buff, stage_offset_Y, thread_offset_Y_rowwise, thread_offset_X_rowwise, bank_group,
             scales_offset_Y_rowwise, scales_offset_X_rowwise, scale_stride_rowwise,
-            rowwise_scale_is_within_bounds, cols, in_sh, act_in_sh, cached_act_sh,
-            out_rowwise_data_sh, scales_rowwise, thread_dbias_rowwise);
+            rowwise_scale_is_within_bounds, cols, sIn_ptr, sActIn_ptr, sCachedAct_ptr,
+            sOutRowwise_ptr, scales_rowwise, thread_dbias_rowwise);
       }
 
       __builtin_assume(block_amax >= 0);
@@ -696,7 +702,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       const size_t global_offset_X = block_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;
       store_output_stage<OType, ROWWISE_SCALING, COLWISE_SCALING>(
-          out_rowwise_data_sh, out_colwise_data_sh, tensor_map_output_rowwise,
+          sOutRowwise_ptr, sOutColwise_ptr, tensor_map_output_rowwise,
           tensor_map_output_colwise, global_offset_X, global_offset_Y, buff_offset, leading_thread);
 
       buff_in = (buff_in + 1) % BUFFS_NUM;
