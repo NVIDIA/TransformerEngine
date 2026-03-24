@@ -662,6 +662,7 @@ std::vector<std::vector<size_t>> input_config = {
     {SAME_BOTH_DIMS,        2,      256,128},
     {VARYING_FIRST_DIM,     2,      512,128,                    128,384},
     {VARYING_FIRST_DIM,     3,      1024,144,                   128,384,512},
+    {VARYING_FIRST_DIM,     4,      1024,144,                   128,384,0,512},
     {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
     {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
     {VARYING_FIRST_DIM,     5,      16 * 4096,512,              128,256,384,1024,2304},
