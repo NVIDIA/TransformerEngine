@@ -989,7 +989,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
     const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
-    const bool rowwise_scale_is_within_bounds = scales_offset_X_rowwise < cols;
+    const bool rowwise_scale_is_within_bounds = scales_offset_X_rowwise * SCALE_DIM_X < cols;
 
     const size_t dbias_offset_Y = block_id_Y;
     const size_t dbias_offset_X = block_id_X * CHUNK_DIM_X + threadIdx.x;
