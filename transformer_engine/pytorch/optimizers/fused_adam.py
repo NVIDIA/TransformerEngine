@@ -321,11 +321,14 @@ class FusedAdam(torch.optim.Optimizer):
         """
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
+        unscaled_local_state = state[state_name]
+        if isinstance(unscaled_local_state, DTensor):
+            unscaled_local_state = unscaled_local_state._local_tensor
         if dtype == torch.uint8:
-            unscaled = state[state_name].float()
+            unscaled = unscaled_local_state.float()
         elif dtype == torch.float16:
-            assert state[state_name].dtype == torch.float16
-            unscaled = state[state_name].float()
+            assert unscaled_local_state.dtype == torch.float16
+            unscaled = unscaled_local_state.float()
             unscaled.mul_(self._scales[param][state_name])
         elif dtype == torch.float32:
             if (
@@ -333,16 +336,16 @@ class FusedAdam(torch.optim.Optimizer):
                 and state_name == "master_param"
                 and param.dtype == torch.bfloat16
             ):
-                assert state[state_name].dtype == torch.int16
+                assert unscaled_local_state.dtype == torch.int16
             else:
-                assert state[state_name].dtype == torch.float32
-            unscaled = state[state_name]
+                assert unscaled_local_state.dtype == torch.float32
+            unscaled = unscaled_local_state
         elif dtype == torch.bfloat16:
-            assert state[state_name].dtype == torch.bfloat16
+            assert unscaled_local_state.dtype == torch.bfloat16
             if skip_unscale:
-                unscaled = state[state_name]
+                unscaled = unscaled_local_state
             else:
-                unscaled = state[state_name].float()
+                unscaled = unscaled_local_state.float()
         else:
             raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/bf16/fp32.")
         return unscaled
@@ -613,8 +616,11 @@ class FusedAdam(torch.optim.Optimizer):
                 unscaled_state = {}
                 for name in ["exp_avg", "exp_avg_sq", "master_param"]:
                     if name in state:
+                        state_tensor = state[name]
+                        if isinstance(state_tensor, DTensor):
+                            state_tensor = state_tensor._local_tensor
                         if name == "master_param" and store_param_remainders:
-                            unscaled_state[name] = self.state[p][name]
+                            unscaled_state[name] = state_tensor
                             assert unscaled_state[name].dtype == torch.int16
                         else:
                             unscaled = self.get_unscaled_state(
@@ -623,7 +629,7 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_state[name] = unscaled
                         if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
-                            scaled_lists[name].append(state[name])
+                            scaled_lists[name].append(state_tensor)
                             state_scales[name].append(self._scales[p][name])
                 if isinstance(p, Float8Tensor) or (
                     isinstance(p, DTensor) and isinstance(p._local_tensor, Float8Tensor)
