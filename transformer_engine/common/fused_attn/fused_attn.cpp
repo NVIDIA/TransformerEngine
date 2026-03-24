@@ -230,30 +230,30 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
 void nvte_convert_qkv_format(NVTE_QKV_Format src_format, std::vector<size_t> src_shape,
                              NVTE_QKV_Format dst_format, std::vector<size_t> &dst_shape, size_t *b,
                              size_t *h, size_t *s, size_t *d, size_t *t) {
-  size_t _b = 0, _h = 0, _s = 0, _d = 0, _t = 0;
+  size_t b_tmp = 0, h_tmp = 0, s_tmp = 0, d_tmp = 0, t_tmp = 0;
   switch (src_format) {
     case NVTE_QKV_Format::NVTE_BSHD:
-      _b = src_shape[0];
-      _s = src_shape[1];
-      _h = src_shape[2];
-      _d = src_shape[3];
+      b_tmp = src_shape[0];
+      s_tmp = src_shape[1];
+      h_tmp = src_shape[2];
+      d_tmp = src_shape[3];
       break;
     case NVTE_QKV_Format::NVTE_SBHD:
-      _s = src_shape[0];
-      _b = src_shape[1];
-      _h = src_shape[2];
-      _d = src_shape[3];
+      s_tmp = src_shape[0];
+      b_tmp = src_shape[1];
+      h_tmp = src_shape[2];
+      d_tmp = src_shape[3];
       break;
     case NVTE_QKV_Format::NVTE_BHSD:
-      _b = src_shape[0];
-      _h = src_shape[1];
-      _s = src_shape[2];
-      _d = src_shape[3];
+      b_tmp = src_shape[0];
+      h_tmp = src_shape[1];
+      s_tmp = src_shape[2];
+      d_tmp = src_shape[3];
       break;
     case NVTE_QKV_Format::NVTE_THD:
-      _t = src_shape[0];
-      _h = src_shape[1];
-      _d = src_shape[2];
+      t_tmp = src_shape[0];
+      h_tmp = src_shape[1];
+      d_tmp = src_shape[2];
       break;
     default:
       NVTE_ERROR("src_format not supported!");
@@ -261,27 +261,27 @@ void nvte_convert_qkv_format(NVTE_QKV_Format src_format, std::vector<size_t> src
   }
   switch (dst_format) {
     case NVTE_QKV_Format::NVTE_BSHD:
-      dst_shape[0] = _b;
-      dst_shape[1] = _s;
-      dst_shape[2] = _h;
-      dst_shape[3] = _d;
+      dst_shape[0] = b_tmp;
+      dst_shape[1] = s_tmp;
+      dst_shape[2] = h_tmp;
+      dst_shape[3] = d_tmp;
       break;
     case NVTE_QKV_Format::NVTE_SBHD:
-      dst_shape[0] = _s;
-      dst_shape[1] = _b;
-      dst_shape[2] = _h;
-      dst_shape[3] = _d;
+      dst_shape[0] = s_tmp;
+      dst_shape[1] = b_tmp;
+      dst_shape[2] = h_tmp;
+      dst_shape[3] = d_tmp;
       break;
     case NVTE_QKV_Format::NVTE_BHSD:
-      dst_shape[0] = _b;
-      dst_shape[1] = _h;
-      dst_shape[2] = _s;
-      dst_shape[3] = _d;
+      dst_shape[0] = b_tmp;
+      dst_shape[1] = h_tmp;
+      dst_shape[2] = s_tmp;
+      dst_shape[3] = d_tmp;
       break;
     case NVTE_QKV_Format::NVTE_THD:
-      dst_shape[0] = _t;
-      dst_shape[1] = _h;
-      dst_shape[2] = _d;
+      dst_shape[0] = t_tmp;
+      dst_shape[1] = h_tmp;
+      dst_shape[2] = d_tmp;
       break;
     default:
       NVTE_ERROR("dst_format not supported!");
@@ -289,19 +289,19 @@ void nvte_convert_qkv_format(NVTE_QKV_Format src_format, std::vector<size_t> src
   }
 
   if (b != nullptr) {
-    *b = _b;
+    *b = b_tmp;
   }
   if (h != nullptr) {
-    *h = _h;
+    *h = h_tmp;
   }
   if (s != nullptr) {
-    *s = _s;
+    *s = s_tmp;
   }
   if (d != nullptr) {
-    *d = _d;
+    *d = d_tmp;
   }
   if (t != nullptr) {
-    *t = _t;
+    *t = t_tmp;
   }
 }
 
