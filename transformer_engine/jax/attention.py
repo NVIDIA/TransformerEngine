@@ -1437,7 +1437,6 @@ def fused_attn(
             softmax_offset=softmax_offset,
         )
     if max_segments_per_seq > 1 and not qkv_layout.is_thd():
-    if max_segments_per_seq > 1 and not qkv_layout.is_thd():
         warnings.warn(
             f"max_segments_per_seq={max_segments_per_seq} is set but qkv_layout={qkv_layout} is "
             "not a THD layout. max_segments_per_seq > 1 only applies when using THD layouts "
