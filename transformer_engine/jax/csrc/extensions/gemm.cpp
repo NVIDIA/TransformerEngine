@@ -667,17 +667,17 @@ size_t grouped_gemm_num_gemms(Buffer_Type const &lhs_first_dims, Buffer_Type con
                               Buffer_Type const &out_first_dims, Buffer_Type const &out_last_dims,
                               Buffer_Type const &alpha) {
   if (lhs_first_dims.element_count() > 0) {
-    return lhs_first_dims.dimensions()[0];
+    return lhs_first_dims.element_count();
   } else if (lhs_last_dims.element_count() > 0) {
-    return lhs_last_dims.dimensions()[0];
+    return lhs_last_dims.element_count();
   } else if (rhs_first_dims.element_count() > 0) {
-    return rhs_first_dims.dimensions()[0];
+    return rhs_first_dims.element_count();
   } else if (rhs_last_dims.element_count() > 0) {
-    return rhs_last_dims.dimensions()[0];
+    return rhs_last_dims.element_count();
   } else if (out_first_dims.element_count() > 0) {
-    return out_first_dims.dimensions()[0];
+    return out_first_dims.element_count();
   } else if (out_last_dims.element_count() > 0) {
-    return out_last_dims.dimensions()[0];
+    return out_last_dims.element_count();
   } else {
     return alpha.element_count();  // uniform batch: no ragged tensor
   }
@@ -753,9 +753,9 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // lhs_data (2D)
+                                  .Arg<Buffer_Type>()      // lhs_data
                                   .Arg<Buffer_Type>()      // lhs_sinv
-                                  .Arg<Buffer_Type>()      // rhs_data (2D)
+                                  .Arg<Buffer_Type>()      // rhs_data
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
                                   .Arg<Buffer_Type>()      // lhs_first_dims (G,) or empty (0,)
@@ -1207,9 +1207,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // lhs_data (2D)
+                                  .Arg<Buffer_Type>()      // lhs_data
                                   .Arg<Buffer_Type>()      // lhs_sinv
-                                  .Arg<Buffer_Type>()      // rhs_data (2D)
+                                  .Arg<Buffer_Type>()      // rhs_data
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
                                   .Arg<Buffer_Type>()      // lhs_first_dims (G,) or empty (0,)

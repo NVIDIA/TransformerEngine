@@ -1158,7 +1158,6 @@ def grouped_quantize(
     x: jnp.ndarray,
     quantizer: GroupedQuantizer,
     group_sizes: jnp.ndarray = None,
-    amax: jnp.ndarray = None,
     flatten_axis: int = -1,
 ) -> Union[GroupedScaledTensor1x, GroupedNoScaleTensor]:
     """Quantize a tensor in grouped manner.
@@ -1171,7 +1170,6 @@ def grouped_quantize(
         x: Input tensor to quantize
         quantizer: The quantizer to use for quantization
         group_sizes: Array of ints containing the size of each group (default: None)
-        amax: The amax of x; if None, it is auto-generated. (default: None)
         flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
 
     Returns:
@@ -1186,17 +1184,10 @@ def grouped_quantize(
 
     if quantizer is None:
         if isinstance(x, GroupedNoScaleTensor):
-            assert amax is None, (
-                "If the input to grouped_quantize is already a GroupedNoScaleTensor, providing an"
-                " amax could be ambiguous. Please set amax to None and set the amax on your"
-                " GroupedNoScaleTensor directly, if needed. Alternatively, please call"
-                " grouped_quantize with a raw jnp.ndarray along with an amax value if you'd like"
-                " this function to handle amax for you."
-            )
             return x
         return GroupedNoScaleTensor(
             data=x,
-            amax=amax,
+            amax=None,
             first_dims=group_sizes,
             last_dims=None,
             original_shape=x.shape,
@@ -1226,10 +1217,7 @@ def grouped_quantize(
             scale = scale.at[i].set(quantizer_i.scale[0])
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
-        if amax is not None:
-            row_amax = amax
-        else:
-            row_amax = jnp.max(jnp.abs(x), axis=range(1, x.ndim))
+        row_amax = jnp.max(jnp.abs(x), axis=range(1, x.ndim))
         segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[0])
         grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):

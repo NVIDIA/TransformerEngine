@@ -321,7 +321,6 @@ def grouped_dense(
     group_sizes: jnp.ndarray,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (1,)),
     bias: jnp.ndarray = None,
-    kernel_amax: jnp.ndarray = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype = None,
     group_offset: jnp.array = None,
@@ -338,7 +337,6 @@ def grouped_dense(
         contracting_dims: Tuple of sequences specifying which dimensions to contract
                           (currently only supports ((1,), (1,)))
         bias: Bias tensor of shape (G, N)
-        kernel_amax: The amax values of weight matrix of shape (G,)
         precision: JAX precision for the GEMM operation
         preferred_element_type: Preferred data type for the output tensor
         group_offset: 1D array containing offsets for each group (not yet implemented)
@@ -357,7 +355,6 @@ def grouped_dense(
         group_sizes,
         contracting_dims,
         bias,
-        kernel_amax,
         precision,
         preferred_element_type,
         group_offset,
@@ -367,14 +364,13 @@ def grouped_dense(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 6, 7, 8, 10))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7, 9))
 def _grouped_dense(
     x,
     kernel,
     group_sizes,
     contracting_dims,
     bias,
-    kernel_amax,
     precision,
     preferred_element_type,
     group_offset,
@@ -387,7 +383,6 @@ def _grouped_dense(
         group_sizes,
         contracting_dims,
         bias,
-        kernel_amax,
         precision,
         preferred_element_type,
         group_offset,
@@ -403,7 +398,6 @@ def _grouped_dense_fwd_rule(
     group_sizes,
     contracting_dims,
     bias,
-    kernel_amax,
     precision,
     preferred_element_type,
     group_offset,
@@ -429,7 +423,7 @@ def _grouped_dense_fwd_rule(
     )
 
     casted_kernel = tex.grouped_quantize(
-        kernel, quantizer_set.kernel, amax=kernel_amax, flatten_axis=flatten_axis_k
+        kernel, quantizer_set.kernel, flatten_axis=flatten_axis_k
     )
     contracting_dims = (x_contracting_dims, k_contracting_dims)
 
@@ -535,9 +529,8 @@ def _grouped_dense_bwd_rule(
 
     group_sizes_grad = None
     dbias = tex.grouped_dbias(grad, group_sizes) if use_bias else None
-    dkernel_amax = None
 
-    return dgrad, wgrad, group_sizes_grad, dbias, dkernel_amax, quantizer_set
+    return dgrad, wgrad, group_sizes_grad, dbias, quantizer_set
 
 
 _grouped_dense.defvjp(_grouped_dense_fwd_rule, _grouped_dense_bwd_rule)
