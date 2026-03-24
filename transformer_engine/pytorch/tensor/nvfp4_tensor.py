@@ -591,6 +591,10 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
 
         # Always send both orientations (GEMM needs both for fwd/bwd)
         rowwise_usage = True
+        assert self._rowwise_data is not None, (
+            "FSDP2 requires rowwise data, but _rowwise_data is None. "
+            "Ensure the NVFP4Quantizer was created with rowwise=True."
+        )
         sharded_tensors = (rowwise_data, rowwise_scale_inv)
         columnwise_usage = self._quantizer.columnwise_usage
         if columnwise_usage:
