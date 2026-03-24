@@ -58,8 +58,7 @@ void compute_ref(const ProcessingMethod processing_method,
                  const size_t rows,
                  const size_t cols,
                  const size_t scales_stride_rowwise,
-                 const size_t scales_stride_colwise,
-                 const bool use_fast_math)
+                 const size_t scales_stride_colwise)
 {
     const size_t tile_size_Y = 32;
     const size_t tile_size_X = 32;
@@ -131,9 +130,6 @@ void compute_ref(const ProcessingMethod processing_method,
                     const size_t scale_idx = i * scales_stride_rowwise + tile_X;
                     output_scales_rowwise[scale_idx] = biased_exponent;
                     float scale_reciprocal = exp2f_rcp(biased_exponent);
-                    if (use_fast_math) {
-                        scale_reciprocal = static_cast<float>(static_cast<InputType>(scale_reciprocal));
-                    }
 
                     for (size_t j = j_min; j < j_max; ++j) {
                         const size_t idx = i * cols + j;
@@ -155,9 +151,6 @@ void compute_ref(const ProcessingMethod processing_method,
                     const size_t scale_idx = tile_Y * scales_stride_colwise + j;
                     output_scales_colwise[scale_idx] = biased_exponent;
                     float scale_reciprocal = exp2f_rcp(biased_exponent);
-                    if (use_fast_math) {
-                        scale_reciprocal = static_cast<float>(static_cast<InputType>(scale_reciprocal));
-                    }
 
                     for (size_t i = i_min; i < i_max; ++i) {
                         const size_t idx = i * cols + j;
@@ -248,8 +241,7 @@ void performTest(const ProcessingMethod processing_method,
                  const std::vector<size_t>& last_dims_h,
                  const std::vector<size_t>& offsets_h,
                  const bool rowwise,
-                 const bool colwise,
-                 const bool use_fast_math) {
+                 const bool colwise) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -508,12 +500,10 @@ void performTest(const ProcessingMethod processing_method,
             out_scales_rowwise_ptr, out_scales_colwise_ptr,
             ref_output_dbias_ptr, M, K,
             scales_stride_rowwise,
-            scales_stride_colwise,
-            use_fast_math);
+            scales_stride_colwise);
     }
 
     QuantizationConfigWrapper quant_config;
-    quant_config.set_use_fast_math(use_fast_math);
 
     // GPU
     Tensor workspace;
@@ -691,8 +681,7 @@ class GroupedFusedCastMXFP8TestSuite : public ::testing::TestWithParam
                 ScalingDirection,
                 std::vector<size_t>,        // Config
                 transformer_engine::DType,  // InputType
-                transformer_engine::DType,  // OutputType
-                bool
+                transformer_engine::DType   // OutputType
                 >> {};
 
 TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
@@ -710,7 +699,6 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
     const std::vector<size_t> input_config = std::get<3>(GetParam());
     const DType input_type = std::get<4>(GetParam());
     const DType output_type = std::get<5>(GetParam());
-    const bool use_fast_math = std::get<6>(GetParam());
 
     const ShapeRepresentation shape_rep = static_cast<ShapeRepresentation>(input_config[0]);
     const bool is_single_tensor = (shape_rep == SAME_BOTH_DIMS) || (shape_rep == VARYING_FIRST_DIM);
@@ -774,15 +762,6 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
         || processing_method == ProcessingMethod::CAST_ACT) && (activation == ActivationKind::Identity)) {
         GTEST_SKIP();
     }
-    // Skip fused tests in fast math is enabled.
-    if (use_fast_math) {
-        if (processing_method != ProcessingMethod::CAST_ONLY) {
-            GTEST_SKIP();
-        }
-        if (input_type != DType::kBFloat16) {
-            GTEST_SKIP();
-        }
-    }
 
     bool rowwise = false;
     bool colwise = false;
@@ -817,7 +796,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
             performTest<InputType, OutputType>(processing_method, OP, shape_rep, num_tensors,
                                                logical_shape, first_dims, last_dims, offsets,
-                                               rowwise, colwise, use_fast_math);
+                                               rowwise, colwise);
         );
     );
 }
@@ -873,9 +852,6 @@ std::string MakeGroupedFusedCastMXFP8TestName(
     name += "_" + test::typeName(std::get<4>(info.param)) +
             "_" + test::typeName(std::get<5>(info.param));
 
-    if (std::get<6>(info.param)) {
-        name += "_FASTMATH";
-    }
     return name;
 }
 
@@ -888,6 +864,5 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(scaling_directions),
         ::testing::ValuesIn(input_config),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-        ::testing::Values(true, false)),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
     MakeGroupedFusedCastMXFP8TestName);
