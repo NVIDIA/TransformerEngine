@@ -364,8 +364,9 @@ std::vector<py::object> fused_attn_bwd(
   std::vector<size_t> v_shape = convertShape(te_V.shape());
   const DType dqkv_fake_dtype = GetTransformerEngineDType(fake_dtype);
   size_t h_q = 0, h_kv = 0, d_qk = 0, d_v = 0;
-  size_t ndim = q_shape.size();
-  std::vector<size_t> dQ_shape(ndim), dK_shape(ndim), dV_shape(ndim);
+  size_t ndim_q = q_shape.size();
+  size_t ndim_kv = k_shape.size();
+  std::vector<size_t> dQ_shape(ndim_q), dK_shape(ndim_kv), dV_shape(ndim_kv);
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
