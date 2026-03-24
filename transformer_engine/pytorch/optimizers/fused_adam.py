@@ -420,7 +420,12 @@ class FusedAdam(torch.optim.Optimizer):
         # Install the quantized or un-quantized optimizer state.
         if dtype == torch.uint8:
             quantizer = Float8Quantizer(
+                scale=torch.ones([1], dtype=torch.float32, device=param.device),
+                amax=torch.zeros([1], dtype=torch.float32, device=param.device),
+                fp8_dtype=tex.DType.kFloat8E4M3,
+            )
             self.state[param][state_name] = quantizer.make_empty(data.shape)
+            self.state[param][state_name].quantize_(data.float())
         else:
             self.state[param][state_name] = data
 
