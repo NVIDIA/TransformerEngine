@@ -63,7 +63,7 @@ def _simulate_all_gather(
 class TestNVFP4FSDP2Hooks:
     """Tests for fsdp_pre_all_gather / fsdp_post_all_gather round-trip."""
 
-    @staticmethod
+    @classmethod
     def setup_class(cls) -> None:
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
@@ -155,8 +155,11 @@ class TestNVFP4FSDP2Hooks:
 
         # Pre all-gather
         sharded_tensors, metadata = qt.fsdp_pre_all_gather(
-            mesh=None, orig_size=None, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=None,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
 
         # Simulate all-gather (world_size copies — data from each "rank" is identical)
@@ -164,7 +167,9 @@ class TestNVFP4FSDP2Hooks:
 
         # Post all-gather
         result, _ = qt.fsdp_post_all_gather(
-            all_gather_outputs, metadata, param_dtype=torch.bfloat16,
+            all_gather_outputs,
+            metadata,
+            param_dtype=torch.bfloat16,
         )
 
         # Since each "rank" has the same data, the full rowwise_data should be
@@ -199,12 +204,17 @@ class TestNVFP4FSDP2Hooks:
         orig_deq = qt.dequantize()
 
         sharded_tensors, metadata = qt.fsdp_pre_all_gather(
-            mesh=None, orig_size=None, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=None,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         all_gather_outputs = _simulate_all_gather(sharded_tensors, world_size)
         result, _ = qt.fsdp_post_all_gather(
-            all_gather_outputs, metadata, param_dtype=torch.bfloat16,
+            all_gather_outputs,
+            metadata,
+            param_dtype=torch.bfloat16,
         )
 
         # The full tensor should dequantize to world_size copies of the shard
@@ -223,20 +233,28 @@ class TestNVFP4FSDP2Hooks:
         qt = _make_nvfp4_tensor(shard_shape)
 
         sharded_tensors, metadata = qt.fsdp_pre_all_gather(
-            mesh=None, orig_size=None, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=None,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         all_gather_outputs = _simulate_all_gather(sharded_tensors, world_size)
 
         # First call: out=None -> creates new tensor
         result, _ = qt.fsdp_post_all_gather(
-            all_gather_outputs, metadata, param_dtype=torch.bfloat16,
+            all_gather_outputs,
+            metadata,
+            param_dtype=torch.bfloat16,
         )
         first_deq = result.dequantize().clone()
 
         # Second call: out=result -> in-place update
         result2, _ = qt.fsdp_post_all_gather(
-            all_gather_outputs, metadata, param_dtype=torch.bfloat16, out=result,
+            all_gather_outputs,
+            metadata,
+            param_dtype=torch.bfloat16,
+            out=result,
         )
         assert result2 is result  # same object
         torch.testing.assert_close(result2.dequantize(), first_deq)
@@ -249,8 +267,11 @@ class TestNVFP4FSDP2Hooks:
 
         with pytest.raises(NotImplementedError, match="GEMM-swizzled"):
             qt.fsdp_pre_all_gather(
-                mesh=None, orig_size=None, contiguous_orig_stride=None,
-                module=None, mp_policy=None,
+                mesh=None,
+                orig_size=None,
+                contiguous_orig_stride=None,
+                module=None,
+                mp_policy=None,
             )
 
 

@@ -623,9 +623,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         fp4_dtype, rowwise_usage, columnwise_usage, amax_rowwise, amax_columnwise, K = metadata
 
         # Extract rowwise tensors
-        rowwise_data, rowwise_scale_inv = (
-            all_gather_outputs[:2] if rowwise_usage else (None, None)
-        )
+        rowwise_data, rowwise_scale_inv = all_gather_outputs[:2] if rowwise_usage else (None, None)
 
         # Compute full_M from the all-gathered data
         if rowwise_data is not None:
@@ -727,10 +725,13 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         # When the slice covers the full dimension, return self.
         if func == aten.slice.Tensor:
             tensor = args[0]
-            dim = args[1]
-            start = args[2]
-            length = args[3]
-            if start == 0 and length == tensor.size(dim):
+            dim = args[1] if len(args) > 1 else 0
+            start = args[2] if len(args) > 2 else None
+            end = args[3] if len(args) > 3 else None
+            step = args[4] if len(args) > 4 else 1
+            if step == 1 and (start is None or start == 0) and (
+                end is None or end >= tensor.size(dim)
+            ):
                 return NVFP4Tensor.make_like(tensor)
 
         # record_stream — FSDP2 records streams on all-gathered tensors.
