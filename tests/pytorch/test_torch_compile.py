@@ -90,8 +90,10 @@ _Q = get_opaque_type_name(ToyQuantizer)
 
 def _make_qfactory(tag: str):
     """Return a qfactory that produces ToyQuantizer instances tagged with *tag*."""
+
     def qfactory(role: str):
         return ToyQuantizer(tag=f"{tag}:{role}")
+
     return qfactory
 
 
@@ -140,7 +142,11 @@ class ToyLinear(TransformerEngineBaseModule):
             grad_output_q.optimize_for_gemm = True
 
             return torch.ops.test_te.toy_linear(
-                inp, self.weight, input_q, weight_q, grad_output_q,
+                inp,
+                self.weight,
+                input_q,
+                weight_q,
+                grad_output_q,
             )
         finally:
             self.end_forward()
@@ -153,11 +159,13 @@ class ToyLinear(TransformerEngineBaseModule):
 _lib = torch.library.Library("test_te", "DEF")
 
 _lib.define(
-    f"toy_linear(Tensor inp, Tensor weight, {_Q} input_q, {_Q} weight_q, {_Q} grad_output_q) -> Tensor"
+    f"toy_linear(Tensor inp, Tensor weight, {_Q} input_q, {_Q} weight_q, {_Q} grad_output_q) ->"
+    " Tensor"
 )
 
 _lib.define(
-    f"toy_linear_backward(Tensor grad_output, Tensor inp, Tensor weight, {_Q} grad_output_q) -> (Tensor, Tensor)"
+    f"toy_linear_backward(Tensor grad_output, Tensor inp, Tensor weight, {_Q} grad_output_q) ->"
+    " (Tensor, Tensor)"
 )
 
 last_fwd_quantizers: list[dict[str, ToyQuantizer]] = []
@@ -166,11 +174,13 @@ last_bwd_quantizers: list[dict[str, ToyQuantizer]] = []
 
 @torch.library.impl("test_te::toy_linear", "CompositeExplicitAutograd", lib=_lib)
 def _toy_linear_fwd_impl(inp, weight, input_q, weight_q, grad_output_q):
-    last_fwd_quantizers.append({
-        "input_q": input_q,
-        "weight_q": weight_q,
-        "grad_output_q": grad_output_q,
-    })
+    last_fwd_quantizers.append(
+        {
+            "input_q": input_q,
+            "weight_q": weight_q,
+            "grad_output_q": grad_output_q,
+        }
+    )
     out, _, _ = BasicLinear._functional_forward(
         input=inp,
         weight=weight,
@@ -213,7 +223,10 @@ def _toy_linear_bwd_fake(grad_output, inp, weight, grad_output_q):
 def _toy_linear_backward(ctx, grad_output):
     inp, weight = ctx.saved_tensors
     dx, dw = torch.ops.test_te.toy_linear_backward(
-        grad_output, inp, weight, ctx.grad_output_q,
+        grad_output,
+        inp,
+        weight,
+        ctx.grad_output_q,
     )
     return dx, dw, None, None, None
 
@@ -281,13 +294,17 @@ def test_autocast_nested_custom():
         fq = last_fwd_quantizers[i]
         assert fq["input_q"].tag.startswith(f"{tag}:"), f"fwd[{i}] input_q: {fq['input_q'].tag}"
         assert fq["weight_q"].tag.startswith(f"{tag}:"), f"fwd[{i}] weight_q: {fq['weight_q'].tag}"
-        assert fq["grad_output_q"].tag.startswith(f"{tag}:"), f"fwd[{i}] grad_output_q: {fq['grad_output_q'].tag}"
+        assert fq["grad_output_q"].tag.startswith(
+            f"{tag}:"
+        ), f"fwd[{i}] grad_output_q: {fq['grad_output_q'].tag}"
 
     # Backward: 3 calls — reverse order R2, R1, R0
     assert len(last_bwd_quantizers) == 3, f"Expected 3 bwd calls, got {len(last_bwd_quantizers)}"
     for i, tag in enumerate(["R2", "R1", "R0"]):
         bq = last_bwd_quantizers[i]
-        assert bq["grad_output_q"].tag.startswith(f"{tag}:"), f"bwd[{i}] grad_output_q: {bq['grad_output_q'].tag}"
+        assert bq["grad_output_q"].tag.startswith(
+            f"{tag}:"
+        ), f"bwd[{i}] grad_output_q: {bq['grad_output_q'].tag}"
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
