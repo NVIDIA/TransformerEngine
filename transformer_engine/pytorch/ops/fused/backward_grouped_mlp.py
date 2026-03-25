@@ -512,6 +512,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                         fc2_weight_grads[idx] = torch.empty(
                             fc2_weight_shape, dtype=dtype, device=device
                         )
+
                 delay_fc2_wgrad = (
                     fc2_op.wgrad_store is not None and fc2_op.wgrad_store.delay_wgrad_compute()
                 )
@@ -558,7 +559,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                                     weight_param.dtype,
                                     zero=getattr(weight_param, "zero_out_wgrad", False),
                                 )
-
 
         # Clear FC2 input tensor if possible
         if grouped_fc2_x is not None and not (
@@ -722,7 +722,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                         dtype=dtype,
                     )
 
-                # Launch GEMM
                 delay_fc1_wgrad = (
                     fc1_op.wgrad_store is not None and fc1_op.wgrad_store.delay_wgrad_compute()
                 )
@@ -825,7 +824,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                                     weight_param.dtype,
                                     zero=getattr(weight_param, "zero_out_wgrad", False),
                                 )
-
 
         # Clear FC1 input tensor if possible
         if grouped_fc1_x is not None and not (

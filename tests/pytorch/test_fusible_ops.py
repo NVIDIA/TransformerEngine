@@ -3776,6 +3776,7 @@ class TestSequentialModules:
         if delay_wgrad_compute:
             fc1.backward_dw()
             fc2.backward_dw()
+
         # Check for expected fusions
         if (
             quantization == "mxfp8"
