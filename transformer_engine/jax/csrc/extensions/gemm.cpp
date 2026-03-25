@@ -441,11 +441,11 @@ Error_Type GemmInitializeFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
                              bool lhs_transposed, bool rhs_transposed, bool fuse_bias,
                              bool fuse_gelu, bool grad, bool use_split_accumulator,
                              JAXX_Collective_Op collective_op) {
-  return wrapInStreamCapture(std::function(GemmFFI), stream, lhs, lhs_scale_inv, rhs,
-                             rhs_scale_inv, bias, gelu_input, alpha, beta, output, bias_grad,
-                             pre_gelu_out, workspace, scaling_mode, lhs_axis_boundary,
-                             rhs_axis_boundary, lhs_transposed, rhs_transposed, fuse_bias,
-                             fuse_gelu, grad, use_split_accumulator, collective_op);
+  return wrapInStreamCapture(std::function(GemmFFI), stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv,
+                             bias, gelu_input, alpha, beta, output, bias_grad, pre_gelu_out,
+                             workspace, scaling_mode, lhs_axis_boundary, rhs_axis_boundary,
+                             lhs_transposed, rhs_transposed, fuse_bias, fuse_gelu, grad,
+                             use_split_accumulator, collective_op);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmInitializeHandler, GemmInitializeFFI,
@@ -914,15 +914,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Attr<bool>("is_grouped_dense_wgrad"),
                               FFI_CudaGraph_Traits);
 
-Error_Type GroupedGemmV2InitializeFFI(cudaStream_t stream, Buffer_Type lhs_data,
-                                      Buffer_Type lhs_sinv, Buffer_Type rhs_data,
-                                      Buffer_Type rhs_sinv, Buffer_Type bias,
-                                      Buffer_Type group_sizes, Buffer_Type alpha, Buffer_Type beta,
-                                      Result_Type output, Result_Type cublas_workspace,
-                                      Result_Type setup_workspace, Result_Type int64_workspace,
-                                      size_t m, size_t n, size_t k, bool lhs_is_trans,
-                                      bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode,
-                                      bool is_grouped_dense_wgrad) {
+Error_Type GroupedGemmV2InitializeFFI(
+    cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv, Buffer_Type rhs_data,
+    Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type group_sizes, Buffer_Type alpha,
+    Buffer_Type beta, Result_Type output, Result_Type cublas_workspace, Result_Type setup_workspace,
+    Result_Type int64_workspace, size_t m, size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
+    JAXX_Scaling_Mode scaling_mode, bool is_grouped_dense_wgrad) {
   return wrapInStreamCapture(std::function(GroupedGemmV2FFI), stream, lhs_data, lhs_sinv, rhs_data,
                              rhs_sinv, bias, group_sizes, alpha, beta, output, cublas_workspace,
                              setup_workspace, int64_workspace, m, n, k, lhs_is_trans, rhs_is_trans,

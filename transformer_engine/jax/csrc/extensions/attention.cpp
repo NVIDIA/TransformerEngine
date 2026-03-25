@@ -420,9 +420,8 @@ Error_Type FusedAttnForwardInitializeFFI(
     Dictionary attrs) {
   return wrapInStreamCapture(std::function(FusedAttnForwardFFI), stream, q_buf, k_buf, v_buf,
                              bias_buf, softmax_offset_buf, seed_buf, q_cu_seqlens_buf,
-                             kv_cu_seqlens_buf, q_seq_offsets_buf, k_seq_offsets_buf,
-                             _unused_args, output_buf, softmax_aux_buf, rng_state_buf,
-                             workspace_buf, attrs);
+                             kv_cu_seqlens_buf, q_seq_offsets_buf, k_seq_offsets_buf, _unused_args,
+                             output_buf, softmax_aux_buf, rng_state_buf, workspace_buf, attrs);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardInitializeHandler, FusedAttnForwardInitializeFFI,
@@ -706,8 +705,8 @@ Error_Type FusedAttnBackwardInitializeFFI(
     Buffer_Type rng_state_buf, Buffer_Type output_buf, Buffer_Type doutput_buf,
     Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf, Buffer_Type q_seq_offsets_buf,
     Buffer_Type k_seq_offsets_buf, Variadic_Buffer_Type _unused_args, Result_Type dq_buf,
-    Result_Type dk_buf, Result_Type dv_buf, Result_Type dbias_buf,
-    Result_Type dsoftmax_offset_buf, Result_Type workspace_buf, Dictionary attrs) {
+    Result_Type dk_buf, Result_Type dv_buf, Result_Type dbias_buf, Result_Type dsoftmax_offset_buf,
+    Result_Type workspace_buf, Dictionary attrs) {
   return wrapInStreamCapture(std::function(FusedAttnBackwardFFI), stream, q_buf, k_buf, v_buf,
                              bias_buf, softmax_offset_buf, softmax_aux_buf, rng_state_buf,
                              output_buf, doutput_buf, q_cu_seqlens_buf, kv_cu_seqlens_buf,

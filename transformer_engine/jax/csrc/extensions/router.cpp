@@ -93,10 +93,10 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler,
                               FFI_CudaGraph_Traits);
 
 Error_Type FusedTopkWithScoreFunctionForwardInitializeFFI(
-    cudaStream_t stream, Buffer_Type logits_buf, Buffer_Type expert_bias_buf,
-    Result_Type probs_buf, Result_Type routing_map_buf, Result_Type intermediate_buf,
-    int64_t topk, int64_t use_pre_softmax, int64_t num_groups, int64_t group_topk,
-    double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores) {
+    cudaStream_t stream, Buffer_Type logits_buf, Buffer_Type expert_bias_buf, Result_Type probs_buf,
+    Result_Type routing_map_buf, Result_Type intermediate_buf, int64_t topk,
+    int64_t use_pre_softmax, int64_t num_groups, int64_t group_topk, double scaling_factor,
+    JAXX_Score_Function score_function, int64_t compute_aux_scores) {
   return wrapInStreamCapture(std::function(FusedTopkWithScoreFunctionForwardFFI), stream,
                              logits_buf, expert_bias_buf, probs_buf, routing_map_buf,
                              intermediate_buf, topk, use_pre_softmax, num_groups, group_topk,
@@ -188,9 +188,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
 
 Error_Type FusedTopkWithScoreFunctionBackwardInitializeFFI(
     cudaStream_t stream, Buffer_Type routing_map_buf, Buffer_Type intermediate_buf,
-    Buffer_Type grad_probs_buf, Result_Type grad_logits_buf, int64_t topk,
-    int64_t use_pre_softmax, double scaling_factor, JAXX_Score_Function score_function,
-    int64_t compute_aux_scores) {
+    Buffer_Type grad_probs_buf, Result_Type grad_logits_buf, int64_t topk, int64_t use_pre_softmax,
+    double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores) {
   return wrapInStreamCapture(std::function(FusedTopkWithScoreFunctionBackwardFFI), stream,
                              routing_map_buf, intermediate_buf, grad_probs_buf, grad_logits_buf,
                              topk, use_pre_softmax, scaling_factor, score_function,
