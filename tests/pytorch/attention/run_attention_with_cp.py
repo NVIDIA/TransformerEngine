@@ -193,15 +193,16 @@ def run_dpa_with_cp(
     logging.root.setLevel(log_level)
     # When is_training is False, gradient outputs are None.
     is_training = is_training == "True"
+
+    # set up environment variables and config
     if deterministic == "True":
         os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
     else:
         os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
-    # set up environment variables and config
     fp8_bwd = fp8_bwd == "True" and dtype == "fp8"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_bwd else "0"
     fp8_dpa = fp8_dpa == "True" and dtype == "fp8"
-    fp8_mha = fp8_mha == "True" and dtype == "fp8"
+    fp8_mha = fp8_mha == "True" and dtype == "fp8" and scaling_mode != "mxfp8"
     f16_O = dtype == "fp8" and scaling_mode in ["current", "mxfp8"] and f16_O == "True"
     os.environ["NVTE_DPA_FP8CS_O_in_F16"] = "1" if f16_O else "0"
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -259,7 +260,7 @@ def run_dpa_with_cp(
             fp8_recipe = Float8CurrentScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
         if scaling_mode == "mxfp8":
             fp8_recipe = MXFP8BlockScaling(
-                fp8_format=Format.HYBRID, fp8_dpa=fp8_dpa, fp8_mha=fp8_mha
+                fp8_format=Format.E4M3, fp8_dpa=fp8_dpa, fp8_mha=fp8_mha
             )
 
     # instantiate attention module
@@ -333,7 +334,7 @@ def run_dpa_with_cp(
         dout_quantizer.internal = False
     qkv_layout = "_".join([qkv_format] * 3)
     q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
-    if fp8_mha and scaling_mode != "mxfp8":
+    if fp8_mha:
         q, k, v, qkv_layout = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
     for x in [q, k, v]:
         x.requires_grad = True
@@ -380,12 +381,12 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            # fp8_output=fp8_mha,
+            fp8_output=fp8_mha,
         )
         if config.return_max_logit:
             out, max_logit = out
         if is_training:
-            if fp8_bwd and fp8_mha and scaling_mode != "mxfp8":
+            if fp8_bwd and fp8_mha:
                 dout_fp8 = dout_quantizer(dout)
                 out.backward(dout_fp8)
             else:
@@ -441,7 +442,7 @@ def run_dpa_with_cp(
         qkv_quantizer.amax.fill_(0.0)
         dout_quantizer.scale.fill_(1.0)
         dout_quantizer.amax.fill_(0.0)
-    if fp8_mha and scaling_mode != "mxfp8":
+    if fp8_mha:
         q_, k_, v_, qkv_layout = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
     if is_training:
         q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
@@ -497,12 +498,12 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
-            # fp8_output=fp8_mha,
+            fp8_output=fp8_mha,
         )
         if config.return_max_logit:
             out_, max_logit_ = out_
         if is_training:
-            if fp8_bwd and fp8_mha and scaling_mode != "mxfp8":
+            if fp8_bwd and fp8_mha:
                 dout_fp8_ = dout_quantizer(dout_)
                 out_.backward(dout_fp8_)
             else:
@@ -523,6 +524,7 @@ def run_dpa_with_cp(
 
     # get outputs
     tensors = [out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_]
+    names = ["out", "dq", "dk", "dv", "dbias", "out_cp", "dq_cp", "dk_cp", "dv_cp", "dbias_cp"]
     if fp8_mha:
         tensors_to_deq = [out, out_] if not fp8_bwd else tensors
         for i, tensor in enumerate(tensors_to_deq):
@@ -534,8 +536,8 @@ def run_dpa_with_cp(
     for i, tensor in enumerate(tensors):
         # dbias/dbias_ could be None, so skip check for it
         if tensor is not None:
-            assert torch.all(~torch.isnan(tensor))
-            assert torch.all(~torch.isinf(tensor))
+            assert torch.all(~torch.isnan(tensor)), f"{names[i]} contains NaN"
+            assert torch.all(~torch.isinf(tensor)), f"{names[i]} contains Inf"
     out, dq, dk, dv, dbias, out_, dq_, dk_, dv_, dbias_ = tensors
 
     ############  compare results between CP and no-CP ############

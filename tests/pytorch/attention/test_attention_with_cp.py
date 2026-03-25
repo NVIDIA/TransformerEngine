@@ -79,10 +79,10 @@ dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_2_0", "cp_3_0", "cp_2_2"]  # , "cp_1_2", "cp_2_1"]#, "cp_1_1", "cp_3_3"]
+    configs = ["cp_2_0", "cp_2_2", "cp_3_0"]  # ["cp_1_0", "cp_1_2", "cp_2_1", "cp_3_2", "cp_3_3"]
     model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
-    qkv_formats = ["bshd", "sbhd", "thd"]
+    # qkv_formats = ["sbhd", "thd"]
 
 
 @pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
@@ -165,7 +165,7 @@ model_configs_fused_attn = {
     "cp_1_4": ModelConfig(
         2, 4096, 12, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"
     ),  # MHA
-    "cp_1_5": ModelConfig(2, 4096, 32, 128, attn_mask_type="causal", window_size=(128, 0)),  # MHA
+    "cp_1_5": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 512)),  # MHA
     "cp_2_0": ModelConfig(
         2,
         4096,
@@ -175,8 +175,13 @@ model_configs_fused_attn = {
         attn_mask_type="causal",
     ),  # GQA
     "cp_2_1": ModelConfig(
-        2, 4096, 128, 192, head_dim_v=128, attn_mask_type="causal"
-    ),  # num_gqa_groups=4, attn_mask_type="causal"),  # GQA
+        2,
+        4096,
+        32,
+        128,
+        attn_mask_type="causal",
+        window_size=(128, 0),
+    ),  # GQA
     "cp_2_2": ModelConfig(
         2,
         4096,
@@ -214,7 +219,7 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 512)
     ),  # GQA
     "cp_3_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", head_dim_v=64),  # MLA
-    "cp_3_1": ModelConfig(2, 4096, 12, 192, head_dim_v=128),  # MLA
+    "cp_3_1": ModelConfig(2, 4096, 128, 192, head_dim_v=128, attn_mask_type="causal"),  # MLA
     "cp_3_2": ModelConfig(
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias", head_dim_v=64
     ),  # MLA
@@ -231,6 +236,9 @@ model_configs_fused_attn = {
     "cp_4_2": ModelConfig(
         2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
     ),  # GQA
+    "cp_4_3": ModelConfig(
+        2, 4096, 64, 64, attn_mask_type="causal", window_size=(128, 0), softmax_type="learnable"
+    ),  # GQA
 }
 
 
@@ -242,20 +250,21 @@ if test_essential:
         # "cp_1_0",
         # "cp_1_1",
         # "cp_1_4",
-        "cp_1_5",
+        # "cp_1_5",
         "cp_2_0",
         "cp_2_1",
         # "cp_2_2",
         # "cp_2_3",
         # "cp_2_4",
-        # "cp_3_1",
+        "cp_3_1",
         # "cp_3_2",
         # "cp_3_4",
-        # "cp_4_2",
+        "cp_4_2",
+        "cp_4_3",
     ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
     dtypes = ["bf16", "fp8"]
-    qkv_formats = ["bshd", "sbhd", "thd"]
+    # qkv_formats = ["sbhd", "thd"]
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
@@ -368,9 +377,9 @@ def test_cp_with_fused_attention(
             DelayedScaling(fp8_dpa=True),
         ]
     if fp8 and scaling_mode == "mxfp8":
-        fp8_meta["recipe"] = MXFP8BlockScaling(fp8_format=Format.HYBRID, fp8_dpa=True)
+        fp8_meta["recipe"] = MXFP8BlockScaling(fp8_format=Format.E4M3, fp8_dpa=True)
         fp8_meta["local_recipes"] = [
-            MXFP8BlockScaling(fp8_format=Format.HYBRID, fp8_dpa=True),
+            MXFP8BlockScaling(fp8_format=Format.E4M3, fp8_dpa=True),
         ]
 
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
