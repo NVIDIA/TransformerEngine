@@ -73,12 +73,14 @@ num_cublas_streams = get_num_compute_streams()
 # Cache whether the CUDA-graphable grouped GEMM implementation is available at import time.
 # Calling get_grouped_gemm_setup_workspace_size raises a RuntimeError mentioning "cublas" when
 # compiled against cuBLAS < 13.2, in which case the cuda-graphable path is unavailable.
+_v2_grouped_gemm_available_reason = ""
 try:
     get_grouped_gemm_setup_workspace_size(1)
     _v2_grouped_gemm_available = True
 except RuntimeError as e:
     if "cublas" in str(e).lower():
         _v2_grouped_gemm_available = False
+        _v2_grouped_gemm_available_reason = str(e)
     else:
         raise
 
@@ -1922,6 +1924,12 @@ def grouped_gemm_copy_group_sizes(
     return out
 
 
+@cache
+def _should_enforce_v2_grouped_gemm() -> bool:
+    """Read NVTE_JAX_ENFORCE_V2_GROUPED_GEMM once per process (cached)."""
+    return os.getenv("NVTE_JAX_ENFORCE_V2_GROUPED_GEMM", "0") == "1"
+
+
 def _can_use_v2_grouped_gemm(
     scaling_mode: ScalingMode,
     dtype: jnp.dtype,
@@ -1933,15 +1941,37 @@ def _can_use_v2_grouped_gemm(
     # feature-compatible with the main branch.
     # Bias can be supported in a kernel or in pure-JAX in the future.
 
+    enforce_v2_gmm = _should_enforce_v2_grouped_gemm()
+
     if not _v2_grouped_gemm_available:
+        if enforce_v2_gmm:
+            raise RuntimeError(
+                "The TE V2 grouped GEMM is not available but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is"
+                " enabled. The reason for V2 grouped GEMM not being available:"
+                f" {_v2_grouped_gemm_available_reason}"
+            )
         return False
 
     # nvte_grouped_gemm (the v2 kernel) requires SM100+ (Blackwell or newer).
     # Fall back to the v1 path on SM90 (Hopper) and older architectures.
     if get_device_compute_capability(0) < 100:
+        if enforce_v2_gmm:
+            raise RuntimeError(
+                "The TE V2 grouped GEMM requires SM100+ (Blackwell or newer) but current device"
+                f" compute capability of GPU 0 is {get_device_compute_capability(0)} and"
+                " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
+            )
         return False
 
-    return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
+    if scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias:
+        return True
+
+    if enforce_v2_gmm:
+        raise RuntimeError(
+            "The TE V2 grouped GEMM currently only supports BF16 with no quantization recipe and"
+            f" without bias, but received {scaling_mode=}, {dtype=}, {has_bias=}"
+        )
+    return False
 
 
 def grouped_gemm(
