@@ -832,7 +832,9 @@ def test_dcp_resharding_save(recipe_name):
     else:
         model_state = model.state_dict()
 
-    dcp.save({"model": model_state, "optimizer": optimizer.state_dict()}, checkpoint_id=checkpoint_dir)
+    dcp.save(
+        {"model": model_state, "optimizer": optimizer.state_dict()}, checkpoint_id=checkpoint_dir
+    )
     dist.barrier()
 
 
@@ -906,7 +908,11 @@ def test_dcp_resharding_load(recipe_name):
         dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
         model2.load_state_dict(
             state_to_load["model"],
-            strict=(False if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling) else True),
+            strict=(
+                False
+                if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling)
+                else True
+            ),
         )
         optimizer2.load_state_dict(state_to_load["optimizer"])
 
