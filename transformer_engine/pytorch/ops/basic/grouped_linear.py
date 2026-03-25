@@ -810,7 +810,11 @@ class GroupedLinear(BasicOperation):
                 single_output=True,
             )
 
-        delay_wgrad = ctx.weight_requires_grad and self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
+        delay_wgrad = (
+            ctx.weight_requires_grad
+            and self.wgrad_store is not None
+            and self.wgrad_store.delay_wgrad_compute()
+        )
 
         # Perform wgrad GEMMs (or defer them to backward_dw)
         if ctx.weight_requires_grad:
@@ -883,9 +887,7 @@ class GroupedLinear(BasicOperation):
         else:
             if delay_wgrad and ctx.weight_requires_grad:
                 weight_grads_out = [None] * num_groups
-                grad_params = (
-                    weight_grads_out + grad_biases if has_bias else weight_grads_out
-                )
+                grad_params = weight_grads_out + grad_biases if has_bias else weight_grads_out
             else:
                 grad_params = grad_weights + grad_biases if has_bias else grad_weights
         return grad_input, [grad_params], [(None,)]
