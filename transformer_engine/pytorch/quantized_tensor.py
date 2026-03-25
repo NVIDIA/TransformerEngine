@@ -21,6 +21,12 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
 )
 
 
+# Custom ops that should pass through __torch_dispatch__ without unwrapping
+# QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
+# handle quantized tensors internally.
+_quantized_tensor_passthrough_ops: set = set()
+
+
 class QuantizedTensorStorage:
     r"""Base class for all TensorStorage classes.
 
@@ -159,7 +165,9 @@ def restore_from_saved(
         list[Optional[torch.Tensor]],
     ]
 ):
-    """Recombine the tensor data and metadata during backward pass."""
+    """Recombine the tensor data and metadata during backward pass.
+    Note: please use `restore_from_func_ctx` instead if you are restoring tensors from a function context to make sure tensor_objects is detached and its memory can be freed
+    """
     tensor_objects = []
     for tensor in tensors:
         if tensor is None or isinstance(tensor, torch.Tensor):
@@ -172,6 +180,24 @@ def restore_from_saved(
     if return_saved_tensors:
         return tensor_objects, saved_tensors
     return tensor_objects
+
+
+def restore_from_func_ctx(ctx: torch.autograd.function.FunctionCtx, return_saved_tensors=False) -> (
+    list[Optional[torch.Tensor | QuantizedTensorStorage]]
+    | tuple[
+        list[Optional[torch.Tensor | QuantizedTensorStorage]],
+        list[Optional[torch.Tensor]],
+    ]
+):
+    """Recombine the tensor data and metadata during backward pass and delete tensor objects attached to function context."""
+    if not hasattr(ctx, "tensor_objects") or ctx.tensor_objects is None:
+        raise AttributeError("ctx must have .tensor_objects to restore saved tensors")
+    out = restore_from_saved(
+        ctx.tensor_objects, ctx.saved_tensors, return_saved_tensors=return_saved_tensors
+    )
+    # Delete the references to tensor objects once they've been consumed by the `restore_from_saved` method to construct back the actual tensors.
+    ctx.tensor_objects = None
+    return out
 
 
 class Quantizer(abc.ABC):
@@ -613,6 +639,12 @@ class QuantizedTensor(torch.Tensor):
                 if t is not None:
                     return func(t)
             return False  # Or error out?
+
+        # Pass through registered custom ops without unwrapping
+        if func in _quantized_tensor_passthrough_ops:
+            if kwargs is None:
+                kwargs = {}
+            return super().__torch_dispatch__(func, types, args, kwargs)
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):

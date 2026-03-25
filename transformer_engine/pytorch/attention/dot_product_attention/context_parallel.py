@@ -38,7 +38,7 @@ from transformer_engine.pytorch.distributed import (
 
 from transformer_engine.pytorch.quantized_tensor import (
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 
 # Import attention utils
@@ -1494,7 +1494,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         softmax_lse_in_packed_format = False
         if qkv_format == "thd":
             if use_fused_attention:
-                softmax_lse_in_packed_format = get_cudnn_version() >= (9, 6, 0)
+                softmax_lse_in_packed_format = get_cudnn_version() >= (
+                    9,
+                    6,
+                    0,
+                ) and get_device_compute_capability() != (12, 0)
             else:
                 softmax_lse_in_packed_format = fa_utils.v2_6_0_plus or use_flash_attn_3
 
@@ -2085,7 +2089,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             cu_seqlens_q_padded,
             cu_seqlens_kv_padded,
             *other_tensors,
-        ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
+        ) = restore_from_func_ctx(ctx)
         cu_seqlens_q_per_step = other_tensors[:cp_size]
         cu_seqlens_kv_per_step = other_tensors[cp_size : cp_size * 2]
         rng_states = other_tensors[cp_size * 2 : cp_size * 3]
@@ -3675,7 +3679,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cu_seqlens_q_padded,
             cu_seqlens_kv_padded,
             *aux_ctx_tensors,
-        ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
+        ) = restore_from_func_ctx(ctx)
 
         qkv_format = ctx.qkv_format
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format

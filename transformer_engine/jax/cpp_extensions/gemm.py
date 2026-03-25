@@ -1936,6 +1936,11 @@ def _can_use_v2_grouped_gemm(
     if not _v2_grouped_gemm_available:
         return False
 
+    # nvte_grouped_gemm (the v2 kernel) requires SM100+ (Blackwell or newer).
+    # Fall back to the v1 path on SM90 (Hopper) and older architectures.
+    if get_device_compute_capability(0) < 100:
+        return False
+
     return scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias
 
 

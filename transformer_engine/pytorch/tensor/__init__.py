@@ -12,6 +12,7 @@ from ..quantized_tensor import (
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
+    restore_from_func_ctx,
 )
 from .storage.float8_tensor_storage import Float8TensorStorage
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -46,6 +47,7 @@ __all__ = [
     "GroupedTensor",
     "prepare_for_saving",
     "restore_from_saved",
+    "restore_from_func_ctx",
 ]
 
 
