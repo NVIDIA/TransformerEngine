@@ -283,17 +283,13 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DBiasQuantizeHandler, DBiasQuantizeFFI,
                                   .Attr<bool>("use_rht"),
                               FFI_CudaGraph_Traits);
 
-Error_Type DBiasQuantizeInitializeFFI(cudaStream_t stream, Buffer_Type input_buf,
-                                      Buffer_Type scale_buf, Buffer_Type amax_buf,
-                                      Buffer_Type sr_rng_state, Buffer_Type post_rht_amax_buf,
-                                      Buffer_Type rht_matrix_buf, Result_Type output_buf,
-                                      Result_Type output_trans_buf, Result_Type scale_inv_buf,
-                                      Result_Type colwise_scale_inv_buf,
-                                      Result_Type updated_amax_buf, Result_Type dbias_buf,
-                                      Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode,
-                                      JAXX_Quantize_Layout quantize_layout, bool is_dbias,
-                                      int64_t flatten_axis, bool stochastic_rounding,
-                                      bool use_rht) {
+Error_Type DBiasQuantizeInitializeFFI(
+    cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scale_buf, Buffer_Type amax_buf,
+    Buffer_Type sr_rng_state, Buffer_Type post_rht_amax_buf, Buffer_Type rht_matrix_buf,
+    Result_Type output_buf, Result_Type output_trans_buf, Result_Type scale_inv_buf,
+    Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf, Result_Type dbias_buf,
+    Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode, JAXX_Quantize_Layout quantize_layout,
+    bool is_dbias, int64_t flatten_axis, bool stochastic_rounding, bool use_rht) {
   return wrapInStreamCapture(std::function(DBiasQuantizeFFI), stream, input_buf, scale_buf,
                              amax_buf, sr_rng_state, post_rht_amax_buf, rht_matrix_buf, output_buf,
                              output_trans_buf, scale_inv_buf, colwise_scale_inv_buf,
@@ -355,9 +351,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DequantizeHandler, DequantizeFFI,
                                   .Ret<Buffer_Type>(),     // output
                               FFI_CudaGraph_Traits);
 
-Error_Type DequantizeInitializeFFI(cudaStream_t stream, Buffer_Type input_buf,
-                                   Buffer_Type amax_buf, Buffer_Type scale_buf,
-                                   Buffer_Type scale_inv_buf, Result_Type output_buf) {
+Error_Type DequantizeInitializeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
+                                   Buffer_Type scale_buf, Buffer_Type scale_inv_buf,
+                                   Result_Type output_buf) {
   return wrapInStreamCapture(std::function(DequantizeFFI), stream, input_buf, amax_buf, scale_buf,
                              scale_inv_buf, output_buf);
 }

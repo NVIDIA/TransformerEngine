@@ -180,8 +180,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledSoftmaxBackwardHandler, ScaledSoftmaxBackwar
                               FFI_CudaGraph_Traits);
 
 Error_Type ScaledSoftmaxBackwardInitializeFFI(cudaStream_t stream, Buffer_Type grad_output_buf,
-                                              Buffer_Type softmax_output_buf,
-                                              Result_Type dgrad_buf, double scale_factor_) {
+                                              Buffer_Type softmax_output_buf, Result_Type dgrad_buf,
+                                              double scale_factor_) {
   return wrapInStreamCapture(std::function(ScaledSoftmaxBackwardFFI), stream, grad_output_buf,
                              softmax_output_buf, dgrad_buf, scale_factor_);
 }
