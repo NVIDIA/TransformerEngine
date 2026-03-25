@@ -200,6 +200,7 @@ def test_dot_product_attention(
     # FA3 natively supports pad_between_seqs via seqused_q/seqused_k.
     # FA2 does not support pad_between_seqs, but _run_dot_product_attention
     # manually pads and unpads the input and output of FlashAttention for testing purposes.
+    # Flash Attention is not supported on SM100+
     if (
         pad_between_seqs
         and FlashAttentionUtils.is_installed
@@ -208,6 +209,7 @@ def test_dot_product_attention(
             and config.attn_mask_type in ["causal", "padding_causal"]
         )
         and (config.window_size[0] == -1 or FlashAttentionUtils.v2_3_plus)
+        and get_device_compute_capability() < (10, 0)
     ):
         flash_attn_supported = True
 
