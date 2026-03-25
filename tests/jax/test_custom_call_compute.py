@@ -151,8 +151,13 @@ def assert_dequantized_grouped_scaled_tensor(
     a: Union[GroupedScaledTensor1x, ScaledTensor2x], b: jnp.ndarray
 ):
     if isinstance(a, GroupedScaledTensor1x):
-        assert a.group_sizes.sum() == b.shape[0]
-        b = jnp.split(b, jnp.cumulative_sum(a.group_sizes)[:-1], axis=0)
+        group_sizes = (
+            a.first_dims
+            if a.first_dims is not None
+            else jnp.ones(a.original_shape[0], dtype=jnp.int32)
+        )
+        assert group_sizes.sum() == b.shape[0]
+        b = jnp.split(b, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         dq_a = a.dequantize()
         for dq_a_i, b_i in zip(dq_a, b):
             if len(dq_a_i) == 0:
