@@ -22,6 +22,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
     get_ub,
+    quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -175,8 +176,10 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_weight: torch.Tensor,
         ln_bias: torch.Tensor,
         fc1_weight: torch.Tensor,
+        fc1_weight_workspace: Optional[torch.Tensor],
         fc1_bias: torch.Tensor,
         fc2_weight: torch.Tensor,
+        fc2_weight_workspace: Optional[torch.Tensor],
         fc2_bias: torch.Tensor,
         non_tensor_args: Tuple,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
@@ -227,7 +230,8 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_bulk_dgrad,
             gemm_gelu_fusion,
             fsdp_group,
-            module,
+            fp8_meta,
+            cache_weight,
             skip_fp8_weight_update,
             symmetric_ar_type,
             checkpoint,
@@ -249,7 +253,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     == "DelayedScaling"
                 ):  # only applicable for delayed scaling
                     FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(
-                        module.fp8_meta
+                        fp8_meta
                     )  # to restore quantizers during recomputation
                 # save the rng states
                 ctx.cpu_rng_state = torch.get_rng_state()
@@ -320,7 +324,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 "ub_bulk_dgrad": ub_bulk_dgrad,
                 "gemm_gelu_fusion": gemm_gelu_fusion,
                 "fsdp_group": fsdp_group,
-                "module": module,
+                "fp8_meta": fp8_meta,
+                "cache_weight": False,
                 "skip_fp8_weight_update": skip_fp8_weight_update,
                 "symmetric_ar_type": symmetric_ar_type,
                 "checkpoint": checkpoint,
@@ -463,13 +468,12 @@ class _LayerNormMLP(torch.autograd.Function):
             ln_out_total = ln_out
 
         # Cast weights to expected dtype
+        new_fc1_weight_workspace = None
+        new_fc2_weight_workspace = None
         fc1_weight_final = fc1_weight
         fc2_weight_final = fc2_weight
         if fp8 or debug:
-            # If weights are not quantized, we call get_weight_workspace,
-            # which handles weight caching etc.
-            # FP8 cast to workspace buffer
-            update_workspace = is_first_microbatch is None or is_first_microbatch
+            update_ws = is_first_microbatch is None or is_first_microbatch
             # No need to set the quantizer states if weights are already quantized
             # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
             if isinstance(fc1_weight, QuantizedTensorStorage) and not debug:
@@ -482,23 +486,25 @@ class _LayerNormMLP(torch.autograd.Function):
             elif fc2_weight_quantizer is not None:
                 fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
 
-            fc1_weight_final = module.get_weight_workspace(
+            fc1_weight_final, new_fc1_weight_workspace = quantize_weight(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "fc1_weight"),
-                update_workspace=update_workspace,
+                workspace=fc1_weight_workspace,
+                update_workspace=update_ws,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                cache=cache_weight,
             )
-            fc2_weight_final = module.get_weight_workspace(
+            fc2_weight_final, new_fc2_weight_workspace = quantize_weight(
                 tensor=fc2_weight,
                 quantizer=fc2_weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "fc2_weight"),
-                update_workspace=update_workspace,
+                workspace=fc2_weight_workspace,
+                update_workspace=update_ws,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                cache=cache_weight,
             )
             fc1_weight_final.update_usage(rowwise_usage=True)
             fc2_weight_final.update_usage(rowwise_usage=True)
@@ -857,13 +863,15 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
 
         # we only get to this point if we are not recomputing for bwd, since that would have returned in the block above
+        ln_out_for_return = None
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp_shape)
                 shape[0] *= tp_size if (sequence_parallel and set_parallel_mode) else 1
-                return fc2_out, ln_out_return.view(shape)
-            return fc2_out, ln_out_return.view(inp_shape)
-        return fc2_out
+                ln_out_for_return = ln_out_return.view(shape)
+            else:
+                ln_out_for_return = ln_out_return.view(inp_shape)
+        return fc2_out, ln_out_for_return, new_fc1_weight_workspace, new_fc2_weight_workspace
 
     @staticmethod
     def forward(
@@ -872,11 +880,13 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_weight: torch.Tensor,
         ln_bias: torch.Tensor,
         fc1_weight: torch.Tensor,
+        fc1_weight_workspace: Optional[torch.Tensor],
         fc1_bias: torch.Tensor,
         fc2_weight: torch.Tensor,
+        fc2_weight_workspace: Optional[torch.Tensor],
         fc2_bias: torch.Tensor,
         non_tensor_args: Tuple,
-    ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
 
         # add recompute_for_bwd
@@ -888,8 +898,10 @@ class _LayerNormMLP(torch.autograd.Function):
             ln_weight,
             ln_bias,
             fc1_weight,
+            fc1_weight_workspace,
             fc1_bias,
             fc2_weight,
+            fc2_weight_workspace,
             fc2_bias,
             non_tensor_args,
         )
@@ -913,7 +925,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling"
             ):  # only applicable for delayed scaling
                 FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(
-                    ctx.other_args["module"].fp8_meta
+                    ctx.other_args["fp8_meta"]
                 )  # set old quantizer state
 
             # get current rng state
@@ -924,9 +936,27 @@ class _LayerNormMLP(torch.autograd.Function):
             torch.set_rng_state(ctx.cpu_rng_state)
             _set_cuda_rng_state(ctx.cuda_rng_state)
 
+            # Unpack saved tensors and pass None for weight workspaces (recomputed from scratch)
+            (
+                inp_r,
+                ln_weight_r,
+                ln_bias_r,
+                fc1_weight_r,
+                fc1_bias_r,
+                fc2_weight_r,
+                fc2_bias_r,
+            ) = tensors
             out = _LayerNormMLP._forward(  # recompute
                 ctx,
-                *tensors,
+                inp_r,
+                ln_weight_r,
+                ln_bias_r,
+                fc1_weight_r,
+                None,
+                fc1_bias_r,
+                fc2_weight_r,
+                None,
+                fc2_bias_r,
                 tuple(ctx.other_args.values()),
             )
 
@@ -936,7 +966,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling"
             ):
                 FP8GlobalStateManager.restore_fp8_meta_tensors(
-                    ctx.other_args["module"].fp8_meta
+                    ctx.other_args["fp8_meta"]
                 )  # restore quantizers
 
             # set rng state for fwd
@@ -1637,8 +1667,10 @@ class _LayerNormMLP(torch.autograd.Function):
             dgamma,
             dbeta,
             fc1_wgrad,
+            None,  # fc1_weight_workspace
             fc1_bias_grad if fc1_bias is not None else None,
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
+            None,  # fc2_weight_workspace
             fc2_bias_grad,
             None,
         )
@@ -2102,6 +2134,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fwd_fn = _LayerNormMLP.forward
                 autograd_ctx = [None]
 
+            cache_name_fc1 = None if is_first_microbatch is None else "fc1_weight"
+            cache_name_fc2 = None if is_first_microbatch is None else "fc2_weight"
+            fc1_weight_workspace = (
+                self._fp8_workspaces.get(cache_name_fc1) if cache_name_fc1 is not None else None
+            )
+            fc2_weight_workspace = (
+                self._fp8_workspaces.get(cache_name_fc2) if cache_name_fc2 is not None else None
+            )
+
             non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
@@ -2145,29 +2186,34 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.ub_bulk_wgrad,
                 self.gemm_gelu_fusion and not debug,
                 self.fsdp_group,
-                self,
+                self.fp8_meta,
+                cache_name_fc1 is not None,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 self.checkpoint,
                 debug,
             )
-            out = fwd_fn(
+            out, ln_out, new_fc1_ws, new_fc2_ws = fwd_fn(
                 *autograd_ctx,
                 inp,
                 self.layer_norm_weight,
                 self.layer_norm_bias,
                 fc1_weight,
+                fc1_weight_workspace,
                 fc1_bias,
                 fc2_weight,
+                fc2_weight_workspace,
                 fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 non_tensor_args,
             )
 
+            if new_fc1_ws is not None and cache_name_fc1 is not None:
+                self._fp8_workspaces[cache_name_fc1] = new_fc1_ws
+            if new_fc2_ws is not None and cache_name_fc2 is not None:
+                self._fp8_workspaces[cache_name_fc2] = new_fc2_ws
+
         finally:
             self.end_forward()
-
-        if self.return_layernorm_output:
-            out, ln_out = out
 
         if self.gemm_bias_unfused_add:
             out = out + cast_if_needed(fc2_bias, self.activation_dtype)

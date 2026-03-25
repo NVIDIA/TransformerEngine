@@ -20,6 +20,7 @@ from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
+    quantize_weight,
     TransformerEngineBaseModule,
     get_dummy_wgrad,
     _2X_ACC_FPROP,
@@ -93,9 +94,10 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_weight: torch.Tensor,
         ln_bias: Union[torch.Tensor, None],
         weight: torch.Tensor,
+        weight_workspace: Optional[torch.Tensor],
         bias: torch.Tensor,
         non_tensor_args: Tuple,
-    ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
 
         # Reduce number of arguments to autograd function in order
@@ -135,7 +137,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_bulk_dgrad,
             ub_name,
             fsdp_group,
-            module,
+            cache_weight,
             skip_fp8_weight_update,
             symmetric_ar_type,
             debug,
@@ -284,6 +286,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+        new_weight_workspace = None
         weightmat = weight
         is_weight_param_quantized = False
         if fp8 or debug:
@@ -298,15 +301,16 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
 
             # Get quantized weight
-            update_workspace = is_first_microbatch is None or is_first_microbatch
-            weightmat = module.get_weight_workspace(
+            update_ws = is_first_microbatch is None or is_first_microbatch
+            weightmat, new_weight_workspace = quantize_weight(
                 tensor=weight,
                 quantizer=weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "weight"),
-                update_workspace=update_workspace,
+                workspace=weight_workspace,
+                update_workspace=update_ws,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                cache=cache_weight,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -526,13 +530,15 @@ class _LayerNormLinear(torch.autograd.Function):
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
 
+        ln_out_for_return = None
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp_shape)
                 shape[0] *= tp_size if with_input_all_gather else 1
-                return out, ln_out_return.view(shape)
-            return out, ln_out_return.view(inp_shape)
-        return out
+                ln_out_for_return = ln_out_return.view(shape)
+            else:
+                ln_out_for_return = ln_out_return.view(inp_shape)
+        return out, ln_out_for_return, new_weight_workspace
 
     @staticmethod
     def backward(
@@ -1019,6 +1025,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dgamma,
             dbeta,
             wgrad,
+            None,  # weight_workspace
             grad_bias,
             None,
         )
@@ -1538,6 +1545,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             else:
                 fwd_fn = _LayerNormLinear.forward
                 autograd_ctx = [None]
+            cache_name = None if is_first_microbatch is None else "weight"
+            weight_workspace = (
+                self._fp8_workspaces.get(cache_name) if cache_name is not None else None
+            )
+
             non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
@@ -1573,26 +1585,27 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_bulk_dgrad,
                 self.ub_name,
                 self.fsdp_group,
-                self,
+                cache_name is not None,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 debug,
             )
-            out = fwd_fn(
+            out, ln_out, new_weight_workspace = fwd_fn(
                 *autograd_ctx,
                 inp,
                 self.layer_norm_weight,
                 self.layer_norm_bias,
                 weight_tensor,
+                weight_workspace,
                 bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 non_tensor_args,
             )
 
+            if new_weight_workspace is not None and cache_name is not None:
+                self._fp8_workspaces[cache_name] = new_weight_workspace
+
         finally:
             self.end_forward()
-
-        if self.return_layernorm_output:
-            out, ln_out = out
 
         if self.gemm_bias_unfused_add:
             out = out + cast_if_needed(bias_tensor, self.activation_dtype)
