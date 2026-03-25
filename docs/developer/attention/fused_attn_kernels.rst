@@ -8,8 +8,7 @@
 Fused Attention Kernels
 =======================
 
-The C++ fused attention implementation lives in ``transformer_engine/common/fused_attn/``
-and represents the most complex kernel area in Transformer Engine.
+The C++ fused attention implementation lives in ``transformer_engine/common/fused_attn/``.
 
 C API
 -----
@@ -86,6 +85,37 @@ before execution:
    // Second call with allocated workspace executes the kernel
 
 This two-pass pattern (query size, then execute) is common across TE's C API.
+
+Auxiliary Tensors (NVTETensorPack)
+----------------------------------
+
+The forward pass produces auxiliary tensors needed for the backward pass — softmax
+statistics, RNG state, and optionally bias gradients. Because different sub-backends
+produce different auxiliary tensors, they are passed through an ``NVTETensorPack``
+(defined in ``transformer_engine.h``):
+
+.. code-block:: c
+
+   struct NVTETensorPack {
+       static const int MAX_SIZE = 10;
+       NVTETensor tensors[MAX_SIZE];
+       size_t size = 0;
+   };
+
+Each sub-backend populates the pack differently:
+
+- **Sub-backend 0** (F16 max512): 1 tensor — ``S`` (full softmax intermediate).
+- **Sub-backend 1** (F16 arbitrary): 2+ tensors — softmax stats (``S`` or
+  ``Max``/``Sum_Exp`` depending on ``return_max_logit``), ``rng_state``, and optionally
+  ``Bias`` and ``SoftmaxOffset``.
+- **Sub-backend 2** (FP8): 3 tensors — ``M`` (row max), ``ZInv`` (inverse softmax
+  denominator), ``rng_state``.
+
+On the Python/pybind11 side (``pytorch/csrc/extensions/attention.cpp``), the forward call
+uses the two-pass pattern: the first call with empty tensors discovers the required shapes
+and dtypes; PyTorch tensors are then allocated; the second call executes with the
+memory-backed pack. The backward call receives the same pack to reuse the saved
+statistics.
 
 See Also
 --------

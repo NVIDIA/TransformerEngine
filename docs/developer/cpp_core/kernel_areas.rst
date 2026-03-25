@@ -41,8 +41,10 @@ Scaling Mode Dispatch
 ----------------------
 
 Kernels that handle multiple scaling modes use a switch on the output's
-``scaling_mode`` to dispatch to the appropriate implementation. For example, in
-``cast/dispatch/quantize.cuh``:
+``scaling_mode`` to dispatch to the appropriate implementation. The scaling mode
+effectively acts as a tag in a tagged union — the ``Tensor`` struct holds the same set of
+fields, but which fields are valid and how they are interpreted depends on the scaling
+mode. For example, in ``cast/dispatch/quantize.cuh``:
 
 .. code-block:: text
 
@@ -85,8 +87,6 @@ Many areas support fusing quantization with the primary computation:
   avoiding a separate cast kernel launch.
 - **Activation + quantize**: Similarly, activation functions can cast their output to FP8
   in the same kernel pass.
-- **Cast + transpose**: A single kernel produces both rowwise and transposed (columnwise)
-  output, critical for efficiently preparing data for the backward pass.
 
 These fusions are driven by the same output-driven pattern: if the output tensor's dtype
 is an FP8 type and has the appropriate scale fields, the kernel produces quantized output

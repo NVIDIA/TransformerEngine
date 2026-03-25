@@ -64,11 +64,12 @@ package as an external dependency (not bundled). The integration imports from
 
 Code flow:
 
-1. ``FlashAttention.forward()`` converts TE's tensor layouts (sbhd/thd) to FlashAttention's
-   expected bshd format.
-2. Selects between ``flash_attn_func`` (dense), ``flash_attn_varlen_func``
-   (variable-length), or ``flash_attn_with_kvcache`` (inference) based on the
-   configuration.
+1. ``FlashAttention.forward()`` converts TE's tensor layouts as needed — sbhd tensors
+   are transposed to bshd, while THD (variable-length) inputs use FlashAttention's
+   native ``flash_attn_varlen_func`` without converting to dense bshd.
+2. Selects between ``flash_attn_func`` (dense bshd/sbhd without padding),
+   ``flash_attn_varlen_func`` (THD or padding masks), or ``flash_attn_with_kvcache``
+   (inference) based on the configuration.
 3. For context parallelism, wraps the call via ``attn_forward_func_with_cp()``.
 
 To modify FlashAttention integration: start with ``FlashAttention.forward()`` in
@@ -94,13 +95,16 @@ Code flow:
    sub-backend implementation based on ``nvte_get_fused_attn_backend()``.
 4. **cuDNN graph builders** — one file per sub-backend:
 
-   - ``fused_attn_f16_max512_seqlen.cu`` — sub-backend 0
-   - ``fused_attn_f16_arbitrary_seqlen.cu`` — sub-backend 1
+   - ``fused_attn_f16_max512_seqlen.cu`` — sub-backend 0 (legacy; only selected when
+     sub-backend 1 is unavailable due to older cuDNN or restrictive parameters)
+   - ``fused_attn_f16_arbitrary_seqlen.cu`` — sub-backend 1 (preferred for all F16 cases)
    - ``fused_attn_fp8.cu`` — sub-backend 2
 
    Each builds a ``cudnn_frontend::graph::Graph``, configures SDPA attributes (masking,
-   dropout, scaling), and executes it. **Graphs are cached** per thread in a thread-local
-   cache keyed by ``FADescriptor`` to avoid rebuilding identical configurations.
+   dropout, scaling), and executes it. **Graphs are cached** per thread in thread-local
+   caches (e.g., ``sdpa_f16_fprop_cache`` keyed by ``FADescriptor_v1`` for sub-backend 1,
+   ``fa_fprop_cache`` keyed by ``FADescriptor`` for FP8) to avoid rebuilding identical
+   configurations. See ``utils.h`` for the descriptor definitions.
 
 To modify cuDNN fused attention: start with the relevant ``.cu`` file for the sub-backend,
 specifically the ``fused_attn_*_fwd_impl()`` / ``fused_attn_*_bwd_impl()`` functions
@@ -111,8 +115,7 @@ Helper CUDA Kernels
 ^^^^^^^^^^^^^^^^^^^
 
 The ``transformer_engine/common/fused_attn/`` directory also contains CUDA helper kernels
-that support the attention backends but do **not** perform the full attention operation
-themselves:
+that support the attention backends:
 
 - ``utils.cu`` — stride calculation, auxiliary tensor setup
 - ``context_parallel.cu`` — KV communication for context parallelism
@@ -126,3 +129,4 @@ See Also
 - :doc:`backend_selection` — How the backend is chosen at runtime
 - :doc:`pytorch_attention` — PyTorch DotProductAttention and MultiheadAttention modules
 - :doc:`fused_attn_kernels` — C++ kernel organization and cuDNN integration
+- :doc:`context_parallel` — Context parallelism strategies and implementation
