@@ -7,6 +7,7 @@
 from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 import contextlib
+import functools
 import math
 from typing import Any, Optional
 
@@ -15,6 +16,7 @@ import torch
 import transformer_engine_torch as tex
 from ...cpp_extensions import general_grouped_gemm
 from ...distributed import CudaRNGStatesTracker
+from ...module._common import WeightGradStore
 from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -70,6 +72,8 @@ class GroupedLinear(BasicOperation):
         Megatron-LM. This argument along with weight tensor having
         attribute ``overwrite_main_grad`` set to True will overwrite
         ``main_grad`` instead of accumulating.
+    delay_wgrad_compute : bool, default = ``False``
+        Whether to delay weight gradient computation
 
     """
 
@@ -88,8 +92,11 @@ class GroupedLinear(BasicOperation):
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
         single_grouped_parameter: bool = False,
+        delay_wgrad_compute: bool = False,
     ) -> None:
         super().__init__()
+
+        self.wgrad_store = WeightGradStore(delay_wgrad_compute)
 
         # Weight tensor dimensions
         self.num_groups: int = num_groups
@@ -154,6 +161,38 @@ class GroupedLinear(BasicOperation):
 
         # Whether to accumulate weight gradient into main_grad
         self._accumulate_into_main_grad: bool = accumulate_into_main_grad
+
+        self._apply_delay_wgrad_param_hooks()
+
+    def _apply_delay_wgrad_param_hooks(self) -> None:
+        """Set ``skip_backward_post_hook`` on weights when delaying wgrad (bias uses main backward)."""
+        if not self.wgrad_store.delay_wgrad_compute():
+            return
+        if self.single_grouped_parameter:
+            self.weight.skip_backward_post_hook = True
+        else:
+            for group_idx in range(self.num_groups):
+                getattr(self, f"weight{group_idx}").skip_backward_post_hook = True
+
+    def need_backward_dw(self) -> bool:
+        """Return whether :meth:`backward_dw` must run to finish weight gradients."""
+        return self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
+
+    def backward_dw(self) -> None:
+        """Execute delayed weight gradient grouped GEMMs (see ``delay_wgrad_compute``)."""
+        if not self.need_backward_dw():
+            return
+        _, tensor_list = self.wgrad_store.pop()
+        xs, grad_weights = tensor_list[0], tensor_list[2]
+        clear_tensor_data(*xs)
+        if self._accumulate_into_main_grad:
+            return
+        if self.single_grouped_parameter:
+            self.weight.grad = torch.stack(grad_weights, dim=0).to(self.weight.dtype)
+        else:
+            for group_idx in range(self.num_groups):
+                w = getattr(self, f"weight{group_idx}")
+                w.grad = grad_weights[group_idx].to(w.dtype)
 
     def num_quantizers(self, mode: str) -> int:
         if mode == "forward":
@@ -240,6 +279,7 @@ class GroupedLinear(BasicOperation):
 
         if self.single_grouped_parameter:
             self.make_grouped_weights()
+        self._apply_delay_wgrad_param_hooks()
 
     def make_grouped_weights(self) -> None:
         """
@@ -277,6 +317,8 @@ class GroupedLinear(BasicOperation):
         self.register_parameter("weight", torch.nn.Parameter(grouped_weights))
         for group_idx in range(self.num_groups):
             self.register_parameter(f"weight{group_idx}", None)
+
+        self._apply_delay_wgrad_param_hooks()
 
     def _quantize_weights(
         self,
@@ -768,22 +810,37 @@ class GroupedLinear(BasicOperation):
                 single_output=True,
             )
 
-        # Perform wgrad GEMMs
+        delay_wgrad = ctx.weight_requires_grad and self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
+
+        # Perform wgrad GEMMs (or defer them to backward_dw)
         if ctx.weight_requires_grad:
-            general_grouped_gemm(
-                xs,
-                dys,
-                grad_weights,
-                [None] * num_groups,  # quantization_params
-                ctx.dtype,
-                layout="NT",
-                m_splits=split_sizes_int,
-                use_split_accumulator=_2X_ACC_WGRAD,
-                accumulate=accumulate_into_main_grad,
-            )
+            if delay_wgrad:
+                grouped_gemm_wgrad = functools.partial(
+                    general_grouped_gemm,
+                    quantization_params=[None] * num_groups,
+                    out_dtype=ctx.dtype,
+                    layout="NT",
+                    m_splits=split_sizes_int,
+                    use_split_accumulator=_2X_ACC_WGRAD,
+                    accumulate=accumulate_into_main_grad,
+                )
+                self.wgrad_store.put([xs, dys, grad_weights], grouped_gemm_wgrad)
+            else:
+                general_grouped_gemm(
+                    xs,
+                    dys,
+                    grad_weights,
+                    [None] * num_groups,  # quantization_params
+                    ctx.dtype,
+                    layout="NT",
+                    m_splits=split_sizes_int,
+                    use_split_accumulator=_2X_ACC_WGRAD,
+                    accumulate=accumulate_into_main_grad,
+                )
 
         # Clear input tensors if possible
-        clear_tensor_data(*xs)
+        if not delay_wgrad:
+            clear_tensor_data(*xs)
 
         # Megatron-LM wgrad fusion
         # Note: Return dummy tensor for grad weight if needed.
@@ -815,12 +872,20 @@ class GroupedLinear(BasicOperation):
 
         if self.single_grouped_parameter:
             grad_weight = None
-            # Unfused path single param: Can be optimized to remove stack.
             if ctx.weight_requires_grad:
-                grad_weight = torch.stack(grad_weights, dim=0)
+                if delay_wgrad:
+                    grad_weight = None
+                else:
+                    grad_weight = torch.stack(grad_weights, dim=0)
             # Parameter registration order with single_grouped_parameter=True is:
             # bias0..biasN-1, then weight. Return grads in the same order.
             grad_params = grad_biases + [grad_weight] if has_bias else [grad_weight]
         else:
-            grad_params = grad_weights + grad_biases if has_bias else grad_weights
+            if delay_wgrad and ctx.weight_requires_grad:
+                weight_grads_out = [None] * num_groups
+                grad_params = (
+                    weight_grads_out + grad_biases if has_bias else weight_grads_out
+                )
+            else:
+                grad_params = grad_weights + grad_biases if has_bias else grad_weights
         return grad_input, [grad_params], [(None,)]
