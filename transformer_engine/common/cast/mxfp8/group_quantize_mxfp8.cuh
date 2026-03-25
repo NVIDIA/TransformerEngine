@@ -197,10 +197,10 @@ __device__ __forceinline__ float process_colwise_stage(
     const size_t tensor_scales_offset_Y_base = tensor_base_row / SCALE_DIM_Y;
     const size_t tensor_scales_offset_colwise_base = tensor_base_for_scales / SCALE_DIM_Y;
     const size_t local_scales_offset_Y = global_scales_offset_Y - tensor_scales_offset_Y_base;
-    scale_idx =
-        tensor_scales_offset_colwise_base +
-        transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
-            global_scales_offset_X, local_scales_offset_Y, DIVUP(rows, static_cast<size_t>(SCALING_FACTORS_SWIZZLE_ALIGNMENT)));
+    scale_idx = tensor_scales_offset_colwise_base +
+                transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
+                    global_scales_offset_X, local_scales_offset_Y,
+                    DIVUP(rows, static_cast<size_t>(SCALING_FACTORS_SWIZZLE_ALIGNMENT)));
   } else {
     scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
   }
@@ -389,7 +389,8 @@ __device__ __forceinline__ float process_rowwise_stage(
   size_t scale_idx = 0;
   if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
     scale_idx = transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
-        stage_scales_offset_Y, stage_scales_offset_X, DIVUP(cols, static_cast<size_t>(SCALING_FACTORS_SWIZZLE_ALIGNMENT)));
+        stage_scales_offset_Y, stage_scales_offset_X,
+        DIVUP(cols, static_cast<size_t>(SCALING_FACTORS_SWIZZLE_ALIGNMENT)));
   } else {
     scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
   }
@@ -566,8 +567,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const size_t scale_alignment_X_rowwise = static_cast<size_t>(scale_tensor_alignment_X_rowwise);
     const size_t scale_alignment_X_colwise = static_cast<size_t>(scale_tensor_alignment_X_colwise);
 
-    const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(SCALE_DIM_X)),
-                                                          scale_alignment_X_rowwise);
+    const size_t scale_stride_rowwise =
+        DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(SCALE_DIM_X)), scale_alignment_X_rowwise);
     const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, scale_alignment_X_colwise);
 
     const size_t tensor_base = current_block.tensor_base;

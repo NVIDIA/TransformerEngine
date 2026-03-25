@@ -504,19 +504,22 @@ __global__ void __launch_bounds__(1)
     }
     if (compute_dactivations) {
       CUtensorMap *modified_tensor_map_act_input = &g_tensor_maps.act_input[tensor_id];
-      const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(act_input_data_ptr + offset_elts);
+      const uintptr_t global_data_ptr =
+          reinterpret_cast<uintptr_t>(act_input_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_act_input, modified_tensor_map_act_input,
                              global_data_ptr, rows, cols, sizeof(IType));
     }
     if (rowwise) {
       CUtensorMap *modified_tensor_map_output_rowwise = &g_tensor_maps.output_rowwise[tensor_id];
-      const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(output_rowwise_data_ptr + offset_elts);
+      const uintptr_t global_data_ptr =
+          reinterpret_cast<uintptr_t>(output_rowwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_rowwise, modified_tensor_map_output_rowwise,
                              global_data_ptr, rows, cols, sizeof(OType));
     }
     if (colwise) {
       CUtensorMap *modified_tensor_map_output_colwise = &g_tensor_maps.output_colwise[tensor_id];
-      const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(output_colwise_data_ptr + offset_elts);
+      const uintptr_t global_data_ptr =
+          reinterpret_cast<uintptr_t>(output_colwise_data_ptr + offset_elts);
       modify_base_tensor_map(base_tensor_map_output_colwise, modified_tensor_map_output_colwise,
                              global_data_ptr, rows, cols, sizeof(OType));
     }
