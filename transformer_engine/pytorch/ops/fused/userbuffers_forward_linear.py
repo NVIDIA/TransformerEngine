@@ -388,6 +388,19 @@ class UserbuffersForwardLinear(FusedOperation):
 
         """
 
+        # Disable Userbuffers for backward overrides.
+        # In high_precision/dequantized modes we want to avoid all UB-specific overlap
+        # paths and run through the standard non-UB operator sequence instead.
+        recipe = unused.get("recipe", None)
+        if recipe is not None:
+            backward_override = recipe.backward_override
+        elif FP8GlobalStateManager.is_fp8_enabled():
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+        else:
+            backward_override = None
+        if backward_override is not None:
+            return ops
+
         # Return immediately if environment is not distributed
         if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
             return ops
