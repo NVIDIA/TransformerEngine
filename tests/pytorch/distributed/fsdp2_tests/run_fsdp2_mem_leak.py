@@ -56,7 +56,6 @@ NUM_LAYERS = 8
 SEQ_LEN = 32
 BATCH_PER_RANK = 2
 WARMUP_STEPS = 2
-MEASURED_STEPS = 3
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -458,7 +457,7 @@ def test_transpose_cache_retained_after_backward(recipe_name, quantized_model_in
     excess = fp8_bwd_delta - bf16_bwd_delta
 
     # Allow 256 KiB total for FP8 scale/amax bookkeeping.
-    # Transpose caches (~3 MiB for this 4-layer model) should NOT persist.
+    # Transpose caches (~3 MiB for this 8-layer model) should NOT persist.
     tolerance = 256 * 1024
 
     assert excess <= tolerance, (
@@ -501,8 +500,17 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
 
+    _PARAMETRIZED_TESTS = {
+        "fp8_temp_accumulation_across_layers",
+        "transpose_cache_retained_after_backward",
+    }
+
     try:
-        TESTS[args.test](args.recipe, args.quantized_model_init)
+        test_fn = TESTS[args.test]
+        if args.test in _PARAMETRIZED_TESTS:
+            test_fn(args.recipe, args.quantized_model_init)
+        else:
+            test_fn()
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
