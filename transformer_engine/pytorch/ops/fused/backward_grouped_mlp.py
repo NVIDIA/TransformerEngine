@@ -335,6 +335,10 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
         grad_scales = grad_scales.view(-1).to(dtype=dtype)
 
+        # Autograd returns for weight grads when wgrad is deferred (multi-weight path only).
+        fc1_autograd_weight_grads: Optional[list[Optional[torch.Tensor]]] = None
+        fc2_autograd_weight_grads: Optional[list[Optional[torch.Tensor]]] = None
+
         # FC1 grad output for dgrad and wgrad GEMMs
         grouped_fc1_dy = make_grouped_tensor_from_buffers(
             num_groups=num_groups,
@@ -407,25 +411,48 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                         dtype=dtype,
                     )
 
-                # Launch GEMM
-                # A=grouped_input, B=grouped_fc2_dy; B's scales are GEMM-swizzled (see group_quantize above).
-                general_grouped_gemm_for_grouped_tensor(
-                    grouped_fc2_x,
-                    grouped_fc2_dy,
-                    grouped_fc2_wgrad,
-                    layout="NT",
-                    accumulate=accumulate_into_main_grad,
+                delay_fc2_wgrad = (
+                    fc2_op.wgrad_store is not None and fc2_op.wgrad_store.delay_wgrad_compute()
                 )
-                fc2_packed_wgrad = grouped_fc2_wgrad.rowwise_data.view(
-                    num_groups, *fc2_weight_shape
-                )
-                if accumulate_into_main_grad and hasattr(weight_param, "grad_added_to_main_grad"):
-                    weight_param.grad_added_to_main_grad = True
-                    fc2_packed_wgrad = get_dummy_wgrad(
-                        list(weight_param.size()),
-                        weight_param.dtype,
-                        zero=getattr(weight_param, "zero_out_wgrad", False),
+                if delay_fc2_wgrad:
+                    fc2_op.wgrad_store.put(
+                        [grouped_fc2_x, grouped_fc2_dy, grouped_fc2_wgrad],
+                        functools.partial(
+                            general_grouped_gemm_for_grouped_tensor,
+                            layout="NT",
+                            accumulate=accumulate_into_main_grad,
+                        ),
                     )
+                    if accumulate_into_main_grad and hasattr(
+                        weight_param, "grad_added_to_main_grad"
+                    ):
+                        weight_param.grad_added_to_main_grad = True
+                        fc2_packed_wgrad = get_dummy_wgrad(
+                            list(weight_param.size()),
+                            weight_param.dtype,
+                            zero=getattr(weight_param, "zero_out_wgrad", False),
+                        )
+                else:
+                    # A=grouped_input, B=grouped_fc2_dy; B's scales are GEMM-swizzled (see group_quantize above).
+                    general_grouped_gemm_for_grouped_tensor(
+                        grouped_fc2_x,
+                        grouped_fc2_dy,
+                        grouped_fc2_wgrad,
+                        layout="NT",
+                        accumulate=accumulate_into_main_grad,
+                    )
+                    fc2_packed_wgrad = grouped_fc2_wgrad.rowwise_data.view(
+                        num_groups, *fc2_weight_shape
+                    )
+                    if accumulate_into_main_grad and hasattr(
+                        weight_param, "grad_added_to_main_grad"
+                    ):
+                        weight_param.grad_added_to_main_grad = True
+                        fc2_packed_wgrad = get_dummy_wgrad(
+                            list(weight_param.size()),
+                            weight_param.dtype,
+                            zero=getattr(weight_param, "zero_out_wgrad", False),
+                        )
             else:
                 if fc2_op._accumulate_into_main_grad:
                     for idx in range(num_groups):
@@ -442,26 +469,59 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                             fc2_weight_shape, dtype=dtype, device=device
                         )
 
-                general_grouped_gemm_for_grouped_tensor(
-                    grouped_fc2_x,
-                    grouped_fc2_dy,
-                    fc2_weight_grads,
-                    layout="NT",
-                    accumulate=accumulate_into_main_grad,
+                delay_fc2_wgrad = (
+                    fc2_op.wgrad_store is not None and fc2_op.wgrad_store.delay_wgrad_compute()
                 )
-                if accumulate_into_main_grad:
-                    for idx in range(num_groups):
-                        weight_param = getattr(fc2_op, f"weight{idx}")
-                        if hasattr(weight_param, "grad_added_to_main_grad"):
-                            weight_param.grad_added_to_main_grad = True
-                            fc2_weight_grads[idx] = get_dummy_wgrad(
-                                list(weight_param.size()),
-                                weight_param.dtype,
-                                zero=getattr(weight_param, "zero_out_wgrad", False),
-                            )
+                if delay_fc2_wgrad:
+                    fc2_wgrad_buffers = fc2_weight_grads
+                    fc2_op.wgrad_store.put(
+                        [grouped_fc2_x, grouped_fc2_dy, fc2_wgrad_buffers],
+                        functools.partial(
+                            general_grouped_gemm_for_grouped_tensor,
+                            layout="NT",
+                            accumulate=accumulate_into_main_grad,
+                        ),
+                    )
+                    if accumulate_into_main_grad:
+                        fc2_autograd_weight_grads = [
+                            fc2_wgrad_buffers[i] for i in range(num_groups)
+                        ]
+                        for idx in range(num_groups):
+                            weight_param = getattr(fc2_op, f"weight{idx}")
+                            if hasattr(weight_param, "grad_added_to_main_grad"):
+                                weight_param.grad_added_to_main_grad = True
+                                fc2_autograd_weight_grads[idx] = get_dummy_wgrad(
+                                    list(weight_param.size()),
+                                    weight_param.dtype,
+                                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                                )
+                    else:
+                        fc2_autograd_weight_grads = [None] * num_groups
+                else:
+                    general_grouped_gemm_for_grouped_tensor(
+                        grouped_fc2_x,
+                        grouped_fc2_dy,
+                        fc2_weight_grads,
+                        layout="NT",
+                        accumulate=accumulate_into_main_grad,
+                    )
+                    if accumulate_into_main_grad:
+                        for idx in range(num_groups):
+                            weight_param = getattr(fc2_op, f"weight{idx}")
+                            if hasattr(weight_param, "grad_added_to_main_grad"):
+                                weight_param.grad_added_to_main_grad = True
+                                fc2_weight_grads[idx] = get_dummy_wgrad(
+                                    list(weight_param.size()),
+                                    weight_param.dtype,
+                                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                                )
 
         # Clear FC2 input tensor if possible
-        if grouped_fc2_x is not None:
+        if grouped_fc2_x is not None and not (
+            fc2_ctx.weight_requires_grad
+            and fc2_op.wgrad_store is not None
+            and fc2_op.wgrad_store.delay_wgrad_compute()
+        ):
             clear_tensor_data(
                 grouped_fc2_x.data,
                 grouped_fc2_x.columnwise_data,
@@ -549,24 +609,47 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                         dtype=dtype,
                     )
 
-                # Launch GEMM
-                general_grouped_gemm_for_grouped_tensor(
-                    grouped_fc1_x,
-                    grouped_fc1_dy,
-                    grouped_fc1_wgrad,
-                    layout="NT",
-                    accumulate=accumulate_into_main_grad,
+                delay_fc1_wgrad = (
+                    fc1_op.wgrad_store is not None and fc1_op.wgrad_store.delay_wgrad_compute()
                 )
-                fc1_packed_wgrad = grouped_fc1_wgrad.rowwise_data.view(
-                    num_groups, *fc1_weight_shape
-                )
-                if accumulate_into_main_grad and hasattr(weight_param, "grad_added_to_main_grad"):
-                    weight_param.grad_added_to_main_grad = True
-                    fc1_packed_wgrad = get_dummy_wgrad(
-                        list(weight_param.size()),
-                        weight_param.dtype,
-                        zero=getattr(weight_param, "zero_out_wgrad", False),
+                if delay_fc1_wgrad:
+                    fc1_op.wgrad_store.put(
+                        [grouped_fc1_x, grouped_fc1_dy, grouped_fc1_wgrad],
+                        functools.partial(
+                            general_grouped_gemm_for_grouped_tensor,
+                            layout="NT",
+                            accumulate=accumulate_into_main_grad,
+                        ),
                     )
+                    if accumulate_into_main_grad and hasattr(
+                        weight_param, "grad_added_to_main_grad"
+                    ):
+                        weight_param.grad_added_to_main_grad = True
+                        fc1_packed_wgrad = get_dummy_wgrad(
+                            list(weight_param.size()),
+                            weight_param.dtype,
+                            zero=getattr(weight_param, "zero_out_wgrad", False),
+                        )
+                else:
+                    general_grouped_gemm_for_grouped_tensor(
+                        grouped_fc1_x,
+                        grouped_fc1_dy,
+                        grouped_fc1_wgrad,
+                        layout="NT",
+                        accumulate=accumulate_into_main_grad,
+                    )
+                    fc1_packed_wgrad = grouped_fc1_wgrad.rowwise_data.view(
+                        num_groups, *fc1_weight_shape
+                    )
+                    if accumulate_into_main_grad and hasattr(
+                        weight_param, "grad_added_to_main_grad"
+                    ):
+                        weight_param.grad_added_to_main_grad = True
+                        fc1_packed_wgrad = get_dummy_wgrad(
+                            list(weight_param.size()),
+                            weight_param.dtype,
+                            zero=getattr(weight_param, "zero_out_wgrad", False),
+                        )
             else:
                 if fc1_op._accumulate_into_main_grad:
                     for idx in range(num_groups):
@@ -583,26 +666,59 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                             fc1_weight_shape, dtype=dtype, device=device
                         )
 
-                general_grouped_gemm_for_grouped_tensor(
-                    grouped_fc1_x,
-                    grouped_fc1_dy,
-                    fc1_weight_grads,
-                    layout="NT",
-                    accumulate=accumulate_into_main_grad,
+                delay_fc1_wgrad = (
+                    fc1_op.wgrad_store is not None and fc1_op.wgrad_store.delay_wgrad_compute()
                 )
-                if accumulate_into_main_grad:
-                    for idx in range(num_groups):
-                        weight_param = getattr(fc1_op, f"weight{idx}")
-                        if hasattr(weight_param, "grad_added_to_main_grad"):
-                            weight_param.grad_added_to_main_grad = True
-                            fc1_weight_grads[idx] = get_dummy_wgrad(
-                                list(weight_param.size()),
-                                weight_param.dtype,
-                                zero=getattr(weight_param, "zero_out_wgrad", False),
-                            )
+                if delay_fc1_wgrad:
+                    fc1_wgrad_buffers = fc1_weight_grads
+                    fc1_op.wgrad_store.put(
+                        [grouped_fc1_x, grouped_fc1_dy, fc1_wgrad_buffers],
+                        functools.partial(
+                            general_grouped_gemm_for_grouped_tensor,
+                            layout="NT",
+                            accumulate=accumulate_into_main_grad,
+                        ),
+                    )
+                    if accumulate_into_main_grad:
+                        fc1_autograd_weight_grads = [
+                            fc1_wgrad_buffers[i] for i in range(num_groups)
+                        ]
+                        for idx in range(num_groups):
+                            weight_param = getattr(fc1_op, f"weight{idx}")
+                            if hasattr(weight_param, "grad_added_to_main_grad"):
+                                weight_param.grad_added_to_main_grad = True
+                                fc1_autograd_weight_grads[idx] = get_dummy_wgrad(
+                                    list(weight_param.size()),
+                                    weight_param.dtype,
+                                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                                )
+                    else:
+                        fc1_autograd_weight_grads = [None] * num_groups
+                else:
+                    general_grouped_gemm_for_grouped_tensor(
+                        grouped_fc1_x,
+                        grouped_fc1_dy,
+                        fc1_weight_grads,
+                        layout="NT",
+                        accumulate=accumulate_into_main_grad,
+                    )
+                    if accumulate_into_main_grad:
+                        for idx in range(num_groups):
+                            weight_param = getattr(fc1_op, f"weight{idx}")
+                            if hasattr(weight_param, "grad_added_to_main_grad"):
+                                weight_param.grad_added_to_main_grad = True
+                                fc1_weight_grads[idx] = get_dummy_wgrad(
+                                    list(weight_param.size()),
+                                    weight_param.dtype,
+                                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                                )
 
         # Clear FC1 input tensor if possible
-        if grouped_fc1_x is not None:
+        if grouped_fc1_x is not None and not (
+            fc1_ctx.weight_requires_grad
+            and fc1_op.wgrad_store is not None
+            and fc1_op.wgrad_store.delay_wgrad_compute()
+        ):
             clear_tensor_data(
                 grouped_fc1_x.data,
                 grouped_fc1_x.columnwise_data,
@@ -613,8 +729,12 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         # Construct param grads in parameter registration order.
         if fc1_op.single_grouped_parameter:
             fc1_weight_grads = [fc1_packed_wgrad] if fc1_packed_wgrad is not None else [None]
+        elif fc1_autograd_weight_grads is not None:
+            fc1_weight_grads = fc1_autograd_weight_grads
         if fc2_op.single_grouped_parameter:
             fc2_weight_grads = [fc2_packed_wgrad] if fc2_packed_wgrad is not None else [None]
+        elif fc2_autograd_weight_grads is not None:
+            fc2_weight_grads = fc2_autograd_weight_grads
 
         return (
             grad_input,

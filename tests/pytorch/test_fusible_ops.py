@@ -3246,6 +3246,7 @@ class TestSequentialModules:
     @pytest.mark.parametrize("single_grouped_parameter", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     def test_grouped_mlp(
         self,
         *,
@@ -3259,6 +3260,7 @@ class TestSequentialModules:
         device: torch.device = "cuda",
         split_alignment: int = 256,
         glu_interleave_size: Optional[int],
+        delay_wgrad_compute: bool,
     ) -> None:
         """GroupedLinear + ScaledSwiGLU + GroupedLinear"""
 
@@ -3385,6 +3387,7 @@ class TestSequentialModules:
                 dtype=dtype,
                 single_grouped_parameter=single_grouped_parameter,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                delay_wgrad_compute=delay_wgrad_compute,
             )
             fc2 = te_ops.GroupedLinear(
                 group_size,
@@ -3395,6 +3398,7 @@ class TestSequentialModules:
                 dtype=dtype,
                 single_grouped_parameter=single_grouped_parameter,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                delay_wgrad_compute=delay_wgrad_compute,
             )
             module = te_ops.Sequential(
                 fc1,
@@ -3455,6 +3459,9 @@ class TestSequentialModules:
         with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = module(x_test, split_sizes, probs_test, split_sizes)
         y_test.backward(dy_test)
+        if delay_wgrad_compute:
+            fc1.backward_dw()
+            fc2.backward_dw()
 
         # Check for expected fusions
         if (

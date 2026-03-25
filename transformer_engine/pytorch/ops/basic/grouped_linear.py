@@ -182,13 +182,32 @@ class GroupedLinear(BasicOperation):
         """Execute delayed weight gradient grouped GEMMs (see ``delay_wgrad_compute``)."""
         if not self.need_backward_dw():
             return
+        if self.wgrad_store.context is None or self.wgrad_store.context.empty():
+            return
         _, tensor_list = self.wgrad_store.pop()
-        xs, grad_weights = tensor_list[0], tensor_list[2]
-        clear_tensor_data(*xs)
+        activations = tensor_list[0]
+        grad_weights = tensor_list[2]
+        if isinstance(activations, list):
+            clear_tensor_data(*activations)
+        else:
+            # Fused MXFP8 grouped MLP saves `GroupedTensor` activations for wgrad.
+            clear_tensor_data(
+                activations.data,
+                activations.columnwise_data,
+                activations.scale_inv,
+                activations.columnwise_scale_inv,
+            )
         if self._accumulate_into_main_grad:
             return
         if self.single_grouped_parameter:
-            self.weight.grad = torch.stack(grad_weights, dim=0).to(self.weight.dtype)
+            if isinstance(grad_weights, list):
+                self.weight.grad = torch.stack(grad_weights, dim=0).to(self.weight.dtype)
+            else:
+                self.weight.grad = grad_weights.rowwise_data.view(
+                    self.num_groups,
+                    self.out_features,
+                    self.in_features,
+                ).to(self.weight.dtype)
         else:
             for group_idx in range(self.num_groups):
                 w = getattr(self, f"weight{group_idx}")
