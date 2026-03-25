@@ -985,6 +985,8 @@ constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
+constexpr size_t SCALING_FACTORS_SWIZZLE_ALIGNMENT = 128;
+
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
 constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment
 constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment

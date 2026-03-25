@@ -200,7 +200,7 @@ __device__ __forceinline__ float process_colwise_stage(
     scale_idx =
         tensor_scales_offset_colwise_base +
         transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
-            global_scales_offset_X, local_scales_offset_Y, DIVUP(rows, static_cast<size_t>(128)));
+            global_scales_offset_X, local_scales_offset_Y, DIVUP(rows, static_cast<size_t>(SCALING_FACTORS_SWIZZLE_ALIGNMENT)));
   } else {
     scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
   }
@@ -359,7 +359,7 @@ __device__ __forceinline__ float process_rowwise_stage(
       }
 #pragma unroll
       for (int e = 0; e < PACK_SIZE; ++e) {
-        const int j = w * PACK_SIZE + e;
+        const int k = w * PACK_SIZE + e;
         float elt = static_cast<float>(in.data.elt[e]);
         if constexpr (IS_ACT) {
           elt = OP(elt, {});
@@ -370,13 +370,13 @@ __device__ __forceinline__ float process_rowwise_stage(
         }
 
         if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
-          thread_dbias_rowwise[j] += elt;
+          thread_dbias_rowwise[k] += elt;
         }
         if constexpr (!std::is_same_v<IType, float>) {
           elt = static_cast<float>(static_cast<IType>(elt));
         }
         thread_amax = fmaxf(thread_amax, fabsf(elt));
-        rInCompute[j] = elt;
+        rInCompute[k] = elt;
       }
     }
   }
@@ -389,7 +389,7 @@ __device__ __forceinline__ float process_rowwise_stage(
   size_t scale_idx = 0;
   if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
     scale_idx = transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
-        stage_scales_offset_Y, stage_scales_offset_X, DIVUP(cols, static_cast<size_t>(128)));
+        stage_scales_offset_Y, stage_scales_offset_X, DIVUP(cols, static_cast<size_t>(SCALING_FACTORS_SWIZZLE_ALIGNMENT)));
   } else {
     scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
   }
@@ -563,9 +563,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const size_t cols = current_job.cols;
     const BlockDescriptor current_block =
         decode_block<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(current_job, offsets_ptr);
+    const size_t scale_alignment_X_rowwise = static_cast<size_t>(scale_tensor_alignment_X_rowwise);
+    const size_t scale_alignment_X_colwise = static_cast<size_t>(scale_tensor_alignment_X_colwise);
 
-    const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(32)), 4);
-    const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, 128);
+    const size_t scale_stride_rowwise = DIVUP_TO_MULTIPLE(DIVUP(cols, static_cast<size_t>(SCALE_DIM_X)),
+                                                          scale_alignment_X_rowwise);
+    const size_t scale_stride_colwise = DIVUP_TO_MULTIPLE(cols, scale_alignment_X_colwise);
 
     const size_t tensor_base = current_block.tensor_base;
     const size_t tensor_base_for_scales = (is_single_tensor && num_tensors > 1)
@@ -597,15 +600,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     const size_t dbias_offset_X = block_id_X * CHUNK_DIM_X + threadIdx.x;
 
     const CUtensorMap &tensor_map_input =
-        is_single_tensor ? tensor_map_input_static : g_tensor_map_input[tensor_id];
+        is_single_tensor ? tensor_map_input_static : g_tensor_maps.input[tensor_id];
     const CUtensorMap &tensor_map_act_input =
-        is_single_tensor ? tensor_map_act_input_static : g_tensor_map_act_input[tensor_id];
+        is_single_tensor ? tensor_map_act_input_static : g_tensor_maps.act_input[tensor_id];
     const CUtensorMap &tensor_map_output_rowwise = is_single_tensor
                                                        ? tensor_map_output_rowwise_static
-                                                       : g_tensor_map_output_rowwise[tensor_id];
+                                                       : g_tensor_maps.output_rowwise[tensor_id];
     const CUtensorMap &tensor_map_output_colwise = is_single_tensor
                                                        ? tensor_map_output_colwise_static
-                                                       : g_tensor_map_output_colwise[tensor_id];
+                                                       : g_tensor_maps.output_colwise[tensor_id];
 
     if (leading_thread && (!is_single_tensor) && (last_acquired_tensor_id != tensor_id)) {
       fence_acquire_tensormap(&tensor_map_input);
