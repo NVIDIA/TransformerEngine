@@ -69,9 +69,9 @@ class GroupedTensorStorage:
         offsets: Optional[List[int]] = None,
         scale_inv_offsets: Optional[List[int]] = None,
         columnwise_scale_inv_offsets: Optional[List[int]] = None,
-        with_gemm_swizzled_scales: bool = False,
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
+        with_gemm_swizzled_scales: bool = False,
     ) -> None:
         """
         Initialize a GroupedTensor.
@@ -147,8 +147,6 @@ class GroupedTensorStorage:
         instance.quantized_tensors = None
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
-        instance.with_gemm_swizzled_scales = with_gemm_swizzled_scales
-
     def __new__(
         cls,
         shape: Tuple[int, int],
@@ -170,9 +168,9 @@ class GroupedTensorStorage:
         offsets: Optional[List[int]] = None,
         scale_inv_offsets: Optional[List[int]] = None,
         columnwise_scale_inv_offsets: Optional[List[int]] = None,
-        with_gemm_swizzled_scales: bool = False,
         requires_grad: bool = False,
         stride: Optional[List[int]] = None,
+        with_gemm_swizzled_scales: bool = False,
     ):
         instance = object.__new__(cls)
         cls._initialize_storage_fields(
@@ -195,9 +193,9 @@ class GroupedTensorStorage:
             offsets=offsets,
             scale_inv_offsets=scale_inv_offsets,
             columnwise_scale_inv_offsets=columnwise_scale_inv_offsets,
-            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
             requires_grad=requires_grad,
             stride=stride,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         )
         return instance
 
@@ -543,7 +541,7 @@ class GroupedTensorStorage:
 
         rowwise_usage = quantizer.rowwise_usage if not no_quantization else True
         columnwise_usage = quantizer.columnwise_usage if not no_quantization else False
-        with_gemm_swizzled_scales = quantizer.optimize_for_gemm if not no_quantization else False
+
         # Calculate total elements across all tensors
         total_elements = logical_first_dim * logical_last_dim
 
@@ -556,11 +554,6 @@ class GroupedTensorStorage:
         scale = None
         scale_inv_offsets = None
         columnwise_scale_inv_offsets = None
-        if shape is None and not no_quantization:
-            raise RuntimeError(
-                "Cannot materialize quantized GroupedTensor with varying first dims "
-                "during CUDA graph capture."
-            )
         if no_quantization:
             assert dtype is not None, "dtype must be provided for unquantized GroupedTensor"
             if rowwise_usage:
@@ -592,7 +585,7 @@ class GroupedTensorStorage:
                 total_columnwise_scale_elements = 0
                 columnwise_scale_inv_offsets = [0]
                 for i, s in enumerate(shape):
-                    scale_inv_shape = quantizer.get_scale_shape(s, True)
+                    scale_inv_shape = quantizer.get_scale_shape(s, False)
                     columnwise_scale_elements = math.prod(scale_inv_shape)
                     total_columnwise_scale_elements += columnwise_scale_elements
                     columnwise_scale_inv_offsets.append(total_columnwise_scale_elements)
@@ -733,11 +726,11 @@ class GroupedTensorStorage:
             offsets=offsets,
             scale_inv_offsets=scale_inv_offsets,
             columnwise_scale_inv_offsets=columnwise_scale_inv_offsets,
-            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+            with_gemm_swizzled_scales=(
+                quantizer.optimize_for_gemm if quantizer is not None else False
+            ),
         )
-
-        if grouped_tensor.shape is not None:
-            grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()
+        grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()
         return grouped_tensor
 
     def split_into_quantized_tensors(
@@ -757,6 +750,7 @@ class GroupedTensorStorage:
         TODO(ksivaman): Block cases where any dims are varying. This is needed only
         to expose the weights as separate parameters.
         """
+
         result = []
 
         no_quantization = self.quantizer is None

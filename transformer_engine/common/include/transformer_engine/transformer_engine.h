@@ -558,23 +558,6 @@ NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor)
  */
 NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
 
-/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
-/*! \brief Set whether the grouped tensor has GEMM-swizzled scales.
- *
- *  \param[in] tensor Grouped tensor.
- *  \param[in] val    1 if scales are swizzled, 0 otherwise.
- */
-void nvte_set_grouped_tensor_swizzled_scales(NVTEGroupedTensor tensor, uint8_t val);
-
-/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
-/*! \brief Get whether the grouped tensor has GEMM-swizzled scales.
- *
- *  \param[in] tensor Grouped tensor.
- *
- *  \return 1 if scales are swizzled, 0 otherwise.
- */
-uint8_t nvte_get_grouped_tensor_swizzled_scales(const NVTEGroupedTensor tensor);
-
 #ifdef __cplusplus
 }  // extern "C"
 

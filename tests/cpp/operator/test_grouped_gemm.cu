@@ -671,18 +671,18 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
   }
 
   nvte_grouped_gemm_with_discrete_inputA(A_list_ptrs.data(),
-                                         num_gemms,
-                                         params.transa,
-                                         grouped_B.get_handle(),
-                                         params.transb,
-                                         params.use_null_c ? nullptr : grouped_C->get_handle(),
-                                         grouped_D.get_handle(),
-                                         alpha_tensor.data(),
-                                         beta_tensor.data(),
-                                         setup_ws.data(),
-                                         cublas_ws.data(),
-                                         nullptr,  // config (use defaults)
-                                         0);
+                                     num_gemms,
+                                     params.transa,
+                                     grouped_B.get_handle(),
+                                     params.transb,
+                                     params.use_null_c ? nullptr : grouped_C->get_handle(),
+                                     grouped_D.get_handle(),
+                                     alpha_tensor.data(),
+                                     beta_tensor.data(),
+                                     setup_ws.data(),
+                                     cublas_ws.data(),
+                                     nullptr,  // config (use defaults)
+                                     0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
   // Compare results

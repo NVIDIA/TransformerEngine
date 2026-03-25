@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import functools
-import gc
 import io
 import math
 import random
@@ -36,6 +35,12 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
     is_bf16_available,
+)
+from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.cpp_extensions.gemm import general_grouped_gemm_for_grouped_tensor
+from transformer_engine.pytorch.ops._common import (
+    make_grouped_tensor_from_buffers,
+    make_grouped_tensor_from_mxfp8_weights,
 )
 import transformer_engine_torch as tex
 
@@ -1220,7 +1225,316 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
-        torch.testing.assert_close(db_test, b_ref.grad, **tols)
+
+
+def test_grouped_gemm_quant_cute_matches_ref() -> None:
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Requires SM100+ for grouped GEMM quant kernel.")
+
+    try:
+        from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
+    except ImportError as exc:
+        pytest.skip(f"grouped_gemm_quant_wrapper_sm100 unavailable: {exc}")
+
+    import sys
+    from pathlib import Path
+    fe_api_root = Path(__file__).parents[2] / "3rdparty" / "cudnn-frontend" / "test" / "python"
+    fe_api_dir = fe_api_root / "fe_api"
+    sys.path.append(str(fe_api_root))
+    sys.path.append(str(fe_api_dir))
+    from test_grouped_gemm_swiglu_utils import allocate_grouped_gemm_input_tensors  # type: ignore
+    from test_grouped_gemm_quant_utils import check_ref_grouped_gemm_quant  # type: ignore
+
+    cfg = {
+        "n": 512,
+        "k": 512,
+        "l": 4,
+        "group_m_list": [256] * 4,
+        "sf_vec_size": 32,
+        "sf_dtype": torch.float8_e8m0fnu,
+        "ab_dtype": torch.float8_e4m3fn,
+        "m_aligned": 256,
+    }
+
+    inputs = allocate_grouped_gemm_input_tensors(
+        n=cfg["n"],
+        k=cfg["k"],
+        l=cfg["l"],
+        group_m_list=cfg["group_m_list"],
+        ab_dtype=cfg["ab_dtype"],
+        sf_dtype=cfg["sf_dtype"],
+        sf_vec_size=cfg["sf_vec_size"],
+        m_aligned=cfg["m_aligned"],
+    )
+
+    alpha_tensor = torch.ones_like(inputs["alpha_tensor"])
+    prob_tensor = torch.ones_like(inputs["prob_tensor"])
+    norm_const_tensor = torch.ones(1, dtype=torch.float32, device=inputs["a_tensor"].device)
+
+    cute_out = grouped_gemm_quant_wrapper_sm100(
+        a_tensor=inputs["a_tensor"],
+        b_tensor=inputs["b_tensor"],
+        sfa_tensor=inputs["sfa_tensor"],
+        sfb_tensor=inputs["sfb_tensor"],
+        padded_offsets=inputs["padded_offsets_tensor"],
+        alpha_tensor=alpha_tensor,
+        norm_const_tensor=norm_const_tensor,
+        prob_tensor=prob_tensor,
+        acc_dtype=torch.float32,
+        c_dtype=torch.bfloat16,
+        d_dtype=torch.bfloat16,
+        cd_major="n",
+        sf_vec_size=cfg["sf_vec_size"],
+        discrete_col_sfd=True,
+        current_stream=None,
+    )
+
+    if isinstance(cute_out, dict):
+        outputs = cute_out
+    else:
+        d_tensor, d_col_tensor, amax_tensor, sfd_row_tensor, sfd_col_tensor = cute_out
+        outputs = {
+            "d_tensor": d_tensor,
+            "d_col_tensor": d_col_tensor,
+            "amax_tensor": amax_tensor,
+            "sfd_row_tensor": sfd_row_tensor,
+            "sfd_col_tensor": sfd_col_tensor,
+        }
+
+    check_ref_grouped_gemm_quant(
+        inputs,
+        outputs,
+        {
+            "c_dtype": torch.bfloat16,
+            "d_dtype": torch.bfloat16,
+            "sf_vec_size": cfg["sf_vec_size"],
+            "sf_dtype": cfg["sf_dtype"],
+            "discrete_col_sfd": True,
+            "skip_ref": False,
+        },
+    )
+
+
+def test_grouped_gemm_quant_cute_matches_golden() -> None:
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Requires SM100+ for grouped GEMM quant kernel.")
+
+    try:
+        from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
+    except ImportError as exc:
+        pytest.skip(f"grouped_gemm_quant_wrapper_sm100 unavailable: {exc}")
+
+    import sys
+    from pathlib import Path
+
+    fe_api_root = Path(__file__).parents[2] / "3rdparty" / "cudnn-frontend" / "test" / "python"
+    fe_api_dir = fe_api_root / "fe_api"
+    sys.path.append(str(fe_api_root))
+    sys.path.append(str(fe_api_dir))
+    from test_grouped_gemm_swiglu_utils import allocate_grouped_gemm_input_tensors  # type: ignore
+    from test_grouped_gemm_quant_utils import check_ref_grouped_gemm_quant  # type: ignore
+
+    cfg = {
+        "n": 512,
+        "k": 512,
+        "l": 4,
+        "group_m_list": [256] * 4,
+        "sf_vec_size": 32,
+        "sf_dtype": torch.float8_e8m0fnu,
+        "ab_dtype": torch.float8_e4m3fn,
+        "c_dtype": torch.bfloat16,
+        "d_dtype": torch.bfloat16,
+        "cd_major": "n",
+        "acc_dtype": torch.float32,
+        "mma_tiler_mn": (256, 256),
+        "cluster_shape_mn": (2, 1),
+        "vector_f32": False,
+        "discrete_col_sfd": True,
+        "m_aligned": 256,
+        "skip_ref": False,
+    }
+
+    inputs = allocate_grouped_gemm_input_tensors(
+        n=cfg["n"],
+        k=cfg["k"],
+        l=cfg["l"],
+        group_m_list=cfg["group_m_list"],
+        ab_dtype=cfg["ab_dtype"],
+        sf_dtype=cfg["sf_dtype"],
+        sf_vec_size=cfg["sf_vec_size"],
+        m_aligned=cfg["m_aligned"],
+    )
+
+    cute_out = grouped_gemm_quant_wrapper_sm100(
+        a_tensor=inputs["a_tensor"],
+        b_tensor=inputs["b_tensor"],
+        sfa_tensor=inputs["sfa_tensor"],
+        sfb_tensor=inputs["sfb_tensor"],
+        padded_offsets=inputs["padded_offsets_tensor"],
+        alpha_tensor=inputs["alpha_tensor"],
+        norm_const_tensor=inputs["norm_const_tensor"],
+        prob_tensor=inputs["prob_tensor"],
+        acc_dtype=cfg["acc_dtype"],
+        c_dtype=cfg["c_dtype"],
+        d_dtype=cfg["d_dtype"],
+        cd_major=cfg["cd_major"],
+        mma_tiler_mn=cfg["mma_tiler_mn"],
+        cluster_shape_mn=cfg["cluster_shape_mn"],
+        sf_vec_size=cfg["sf_vec_size"],
+        vector_f32=cfg["vector_f32"],
+        m_aligned=cfg["m_aligned"],
+        discrete_col_sfd=cfg["discrete_col_sfd"],
+        current_stream=None,
+    )
+
+    if isinstance(cute_out, dict):
+        outputs = cute_out
+    else:
+        d_tensor, d_col_tensor, amax_tensor, sfd_row_tensor, sfd_col_tensor = cute_out
+        outputs = {
+            "d_tensor": d_tensor,
+            "d_col_tensor": d_col_tensor,
+            "amax_tensor": amax_tensor,
+            "sfd_row_tensor": sfd_row_tensor,
+            "sfd_col_tensor": sfd_col_tensor,
+        }
+
+    check_ref_grouped_gemm_quant(
+        inputs,
+        outputs,
+        cfg,
+        skip_ref=cfg["skip_ref"],
+    )
+
+
+def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Requires SM100+ for grouped GEMM quant kernel.")
+
+    try:
+        from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
+    except ImportError as exc:
+        pytest.skip(f"grouped_gemm_quant_wrapper_sm100 unavailable: {exc}")
+
+    import sys
+    from pathlib import Path
+
+    fe_api_root = Path(__file__).parents[2] / "3rdparty" / "cudnn-frontend" / "test" / "python"
+    fe_api_dir = fe_api_root / "fe_api"
+    sys.path.append(str(fe_api_root))
+    sys.path.append(str(fe_api_dir))
+    from test_grouped_gemm_swiglu_utils import allocate_grouped_gemm_input_tensors  # type: ignore
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16 if is_bf16_available() else torch.float16
+    num_groups = 4
+    m = 256
+    n = 512
+    k = 512
+    split_sizes = torch.full((num_groups,), m, device=device, dtype=torch.int64)
+
+    q = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+    q.optimize_for_gemm = False
+
+    torch.manual_seed(0)
+    a_full = torch.randn(num_groups * m, k, device=device, dtype=dtype)
+    weights = [torch.randn(n, k, device=device, dtype=dtype) for _ in range(num_groups)]
+
+    grouped_a = tex.group_quantize(a_full, q, num_groups, split_sizes)
+    a_groups = grouped_a.split_into_quantized_tensors()
+    b_groups = [q(w) for w in weights]
+
+    # Reference GEMM on dequantized tensors.
+    ref = torch.empty((num_groups * m, n), device=device, dtype=torch.float32)
+    start = 0
+    for group_idx in range(num_groups):
+        end = start + m
+        a_deq = a_groups[group_idx].dequantize(dtype=torch.float32)
+        b_deq = b_groups[group_idx].dequantize(dtype=torch.float32)
+        ref[start:end, :] = a_deq @ b_deq.t()
+        start = end
+    ref = ref.to(dtype=torch.bfloat16).to(torch.float32)
+
+    inputs = allocate_grouped_gemm_input_tensors(
+        n=n,
+        k=k,
+        l=num_groups,
+        group_m_list=[m] * num_groups,
+        ab_dtype=torch.float8_e4m3fn,
+        sf_dtype=torch.float8_e8m0fnu,
+        sf_vec_size=32,
+        m_aligned=256,
+    )
+
+    # Overwrite inputs with quantized data/scales from MXFP8 quantizer.
+    a_data = grouped_a.rowwise_data.view(num_groups * m, k).view(dtype=torch.float8_e4m3fn)
+    a_data = a_data.unsqueeze(0).permute(1, 2, 0).contiguous()
+    inputs["a_tensor"].copy_(a_data)
+
+    a_scales = grouped_a.scale_inv.view(dtype=torch.float8_e8m0fnu)
+    a_scales = a_scales.view(1, (num_groups * m) // 128, 4, 32, k // 128, 4)
+    a_scales = a_scales.permute(0, 1, 4, 3, 2, 5).contiguous()
+    a_scales = a_scales.permute(3, 4, 1, 5, 2, 0).contiguous()
+    inputs["sfa_tensor"].copy_(a_scales)
+
+    b_data = torch.cat([w._rowwise_data.reshape(-1) for w in b_groups])
+    b_data = b_data.view(dtype=torch.float8_e4m3fn)
+    b_data = b_data.view(num_groups, n, k).permute(1, 2, 0).contiguous()
+    inputs["b_tensor"].copy_(b_data)
+
+    b_scales = torch.cat([w._rowwise_scale_inv for w in b_groups])
+    b_scales = b_scales.view(dtype=torch.float8_e8m0fnu)
+    b_scales = b_scales.view(num_groups, n // 128, 4, 32, k // 128, 4)
+    b_scales = b_scales.permute(0, 1, 4, 3, 2, 5).contiguous()
+    b_scales = b_scales.permute(3, 4, 1, 5, 2, 0).contiguous()
+    inputs["sfb_tensor"].copy_(b_scales)
+
+    inputs["alpha_tensor"].fill_(1.0)
+    inputs["prob_tensor"].fill_(1.0)
+
+    cute_out = grouped_gemm_quant_wrapper_sm100(
+        a_tensor=inputs["a_tensor"],
+        b_tensor=inputs["b_tensor"],
+        sfa_tensor=inputs["sfa_tensor"],
+        sfb_tensor=inputs["sfb_tensor"],
+        padded_offsets=inputs["padded_offsets_tensor"],
+        alpha_tensor=inputs["alpha_tensor"],
+        norm_const_tensor=None,
+        prob_tensor=inputs["prob_tensor"],
+        acc_dtype=torch.float32,
+        c_dtype=torch.bfloat16,
+        d_dtype=torch.bfloat16,
+        cd_major="n",
+        sf_vec_size=32,
+        discrete_col_sfd=True,
+        current_stream=None,
+    )
+
+    if isinstance(cute_out, dict):
+        outputs = cute_out
+    else:
+        d_tensor, d_col_tensor, amax_tensor, sfd_row_tensor, sfd_col_tensor = cute_out
+        outputs = {
+            "d_tensor": d_tensor,
+            "d_col_tensor": d_col_tensor,
+            "amax_tensor": amax_tensor,
+            "sfd_row_tensor": sfd_row_tensor,
+            "sfd_col_tensor": sfd_col_tensor,
+        }
+
+    d_cute = outputs["d_tensor"]
+    if d_cute.dim() == 3:
+        d_cute = d_cute.squeeze(-1)
+    tols = {"rtol": 0.125, "atol": 0.25}
+    assert_close(d_cute[: num_groups * m].float(), ref, **tols)
+
+
 
     def test_layer_norm_autocast(
         self,
@@ -3246,6 +3560,7 @@ class TestSequentialModules:
     @pytest.mark.parametrize("single_grouped_parameter", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
+    @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     def test_grouped_mlp(
         self,
         *,
@@ -3259,6 +3574,7 @@ class TestSequentialModules:
         device: torch.device = "cuda",
         split_alignment: int = 256,
         glu_interleave_size: Optional[int],
+        delay_wgrad_compute: bool,
     ) -> None:
         """GroupedLinear + ScaledSwiGLU + GroupedLinear"""
 
@@ -3385,6 +3701,7 @@ class TestSequentialModules:
                 dtype=dtype,
                 single_grouped_parameter=single_grouped_parameter,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                delay_wgrad_compute=delay_wgrad_compute,
             )
             fc2 = te_ops.GroupedLinear(
                 group_size,
@@ -3395,6 +3712,7 @@ class TestSequentialModules:
                 dtype=dtype,
                 single_grouped_parameter=single_grouped_parameter,
                 accumulate_into_main_grad=accumulate_into_main_grad,
+                delay_wgrad_compute=delay_wgrad_compute,
             )
             module = te_ops.Sequential(
                 fc1,
@@ -3455,7 +3773,9 @@ class TestSequentialModules:
         with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = module(x_test, split_sizes, probs_test, split_sizes)
         y_test.backward(dy_test)
-
+        if delay_wgrad_compute:
+            fc1.backward_dw()
+            fc2.backward_dw()
         # Check for expected fusions
         if (
             quantization == "mxfp8"
@@ -3665,23 +3985,20 @@ class TestSequentialModules:
             out_buf.copy_(out)
             return out_buf
 
-        # Warmup to initialize kernels and allocator state.
         _init_main_grads(0.0)
-        warmup_x = torch.randn(in_shape, device=device, dtype=dtype, requires_grad=True)
-        warmup_probs = torch.randn((in_shape[0],), device=device, dtype=dtype, requires_grad=True)
-        warmup_dy = torch.randn(in_shape, device=device, dtype=dtype)
-        warmup_out = torch.empty((in_shape[0], hidden_size), device=device, dtype=dtype)
-        # Single forward+backward to initialize MXFP8 grad cache.
-        train_step(warmup_x, warmup_probs, warmup_dy, warmup_out, use_graphed=False)
-        # Clear warmup graph references before capture.
-        del warmup_out, warmup_x, warmup_probs, warmup_dy
-        gc.collect()
-        torch.cuda.synchronize()
 
         static_x = torch.randn(in_shape, device=device, dtype=dtype, requires_grad=True)
         static_probs = torch.randn((in_shape[0],), device=device, dtype=dtype, requires_grad=True)
         static_dy = torch.randn(in_shape, device=device, dtype=dtype)
         static_out_buf = torch.empty((in_shape[0], hidden_size), device=device, dtype=dtype)
+
+        graphed_module = te.make_graphed_callables(
+            module,
+            (static_x, static_split_sizes, static_probs, static_split_sizes),
+            num_warmup_iters=3,
+            enabled=True,
+            recipe=recipe,
+        )
 
         forward_ops = module._module_groups[0]._forward_ops
         backward_ops = module._module_groups[0]._backward_ops
@@ -3694,14 +4011,6 @@ class TestSequentialModules:
         assert isinstance(
             backward_ops[0][0],
             te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
-        )
-
-        graphed_module = te.make_graphed_callables(
-            module,
-            (static_x, static_split_sizes, static_probs, static_split_sizes),
-            num_warmup_iters=3,
-            enabled=True,
-            recipe=recipe,
         )
 
         fresh_x = torch.randn_like(static_x)

@@ -6,18 +6,18 @@
 
 from __future__ import annotations
 from collections.abc import Callable, Iterable
+import os
 import functools
 from typing import Any, Optional
 
 import torch
-from cuda.bindings import driver as cuda
 
 import transformer_engine_torch as tex
-from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
+from cuda.bindings import driver as cuda
 from ...module._common import noop_cat
 from ...quantization import Recipe
 from ...tensor import Quantizer
-from ...utils import get_device_compute_capability
+from ...utils import get_cached_ones_tensor, get_device_compute_capability
 from ...tensor.grouped_tensor import GroupedTensor
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
 from ..basic import GroupedLinear, ScaledSwiGLU
@@ -29,9 +29,6 @@ from .._common import (
     maybe_dequantize,
 )
 
-global_alpha_tensor = None
-
-
 class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     """Fused op for MXFP8 GroupedLinear + ScaledSwiGLU + GroupedLinear
 
@@ -41,22 +38,29 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
     @classmethod
     @functools.lru_cache(maxsize=None)
-    def grouped_gemm_swiglu_kernel(cls) -> Callable:
-        """Fused kernel for grouped GEMM, SwiGLU, and post-multiplication."""
-        from cudnn import grouped_gemm_swiglu_wrapper_sm100  # pylint: disable=no-name-in-module
+    def grouped_gemm_glu_kernel(cls) -> Callable:
+        """Fused kernel for grouped GEMM, GLU activation, and post-multiplication."""
+        from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=no-name-in-module
 
-        return grouped_gemm_swiglu_wrapper_sm100
+        return grouped_gemm_glu_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_quant_kernel(cls) -> Callable:
+        """Grouped GEMM quant kernel for block-scaled inputs."""
+        from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_quant_wrapper_sm100
 
     @classmethod
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
         """Whether this fused operation is supported on the current system."""
         if get_device_compute_capability() < (10, 0):
-            # Kernel requires SM100+
             return False
         try:
-            # Make sure kernel is available
-            cls.grouped_gemm_swiglu_kernel()
+            cls.grouped_gemm_glu_kernel()
+            cls.grouped_gemm_quant_kernel()
         except ImportError:
             return False
         return True
@@ -69,11 +73,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2: GroupedLinear,
     ) -> None:
         super().__init__((fc1, swiglu, fc2))
-        self._mxfp8_alpha_tensor: Optional[torch.Tensor] = None
-        self._mxfp8_norm_const_tensor: Optional[torch.Tensor] = None
         # Check for unsupported configurations
         if not self.is_supported():
-            self.grouped_gemm_swiglu_kernel()  # Try triggering import error
+            self.grouped_gemm_glu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
             raise ValueError(
@@ -248,6 +250,18 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         ):
             grouped_fc2_weight.with_gemm_swizzled_scales = False
 
+        # Swizzle grouped weight scales for GEMM (returns new tensors, does not modify weights)
+        fc1_swizzled_row_scales = None
+        if fc1_op.single_grouped_parameter:
+            fc1_swizzled_row_scales, _ = tex.swizzle_grouped_scales_for_gemm(
+                grouped_fc1_weight, rowwise=True, columnwise=False
+            )
+        fc2_swizzled_row_scales = None
+        if fc2_op.single_grouped_parameter:
+            fc2_swizzled_row_scales, _ = tex.swizzle_grouped_scales_for_gemm(
+                grouped_fc2_weight, rowwise=True, columnwise=False
+            )
+
         # Group-quantize input tensor and convert dtypes if needed
         fc1_x = maybe_dequantize(input_, dtype)
         for quantizer in fc1_input_quantizers:
@@ -279,63 +293,75 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         )
         fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
 
-        # Pack weight tensors
-        # Note: Fused kernel expects tensor with non-contiguous
-        # logical dims.
-        # Data actual shape: (num_groups, n, k)
-        # Scale actual shape: (num_groups, n/128, k/128, 32 (block row),
-        #  4 (block row), 4 (block col))
-        # Data logical shape: (n, k, num_groups)
-        # Scale logical shape: (32 (block row), 4 (block row), n/128,
-        #   4 (block col), k/128, num_groups)
-        fc1_w_data = (
-            grouped_fc1_weight.rowwise_data
-            if fc1_op.single_grouped_parameter
-            else noop_cat([w._rowwise_data for w in grouped_fc1_weight])
-        )
-        fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
-        fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_shape[1])
-        fc1_w_data = fc1_w_data.permute(1, 2, 0)
-        fc1_w_scales = (
-            grouped_fc1_weight.scale_inv
-            if fc1_op.single_grouped_parameter
-            else noop_cat([w._rowwise_scale_inv for w in grouped_fc1_weight])
-        )
-        fc1_w_scales = fc1_w_scales.view(dtype=torch.float8_e8m0fnu)
-        fc1_w_scales = fc1_w_scales.view(
-            num_groups, fc1_weight_shape[0] // 128, 4, 32, fc1_weight_shape[1] // 128, 4
-        )  # Unswizzled layout
-        fc1_w_scales = fc1_w_scales.permute(
-            0, 1, 4, 3, 2, 5
-        ).contiguous()  # Convert to swizzled layout
-        fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
+        alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
+        norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
+        current_stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
 
-        # Kernel scaling factors
-        alpha_tensor, norm_const_tensor = self._get_kernel_constants(
-            num_groups=num_groups, dtype=dtype, device=device
-        )
-        current_stream = cuda.CUstream(  # pylint: disable=c-extension-no-member
-            torch.cuda.current_stream().cuda_stream
-        )
+        if fc1_op.single_grouped_parameter:
+            # Pack weight tensors for stacked kernel
+            # Data actual shape: (num_groups, n, k)
+            # Data logical shape: (n, k, num_groups)
+            fc1_w_data = grouped_fc1_weight.rowwise_data
+            fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
+            fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_shape[1])
+            fc1_w_data = fc1_w_data.permute(1, 2, 0)
+            fc1_w_scales = fc1_swizzled_row_scales.view(dtype=torch.float8_e8m0fnu)
+            fc1_w_scales = fc1_w_scales.view(
+                num_groups, fc1_weight_shape[0] // 128, fc1_weight_shape[1] // 128, 32, 4, 4
+            )
+            fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
-        # Fused kernel for FC1 + SwiGLU + post-scale
-        fc1_kernel_out = self.grouped_gemm_swiglu_kernel()(
-            fc1_x_data,
-            fc1_w_data,
-            fc1_x_scales,
-            fc1_w_scales,
-            split_points,
-            alpha_tensor,  # alpha_tensor
-            norm_const_tensor=norm_const_tensor,
-            prob_tensor=scales.detach().reshape(-1, 1, 1),
-            acc_dtype=torch.float32,
-            c_dtype=torch.bfloat16,
-            d_dtype=torch.float8_e4m3fn,
-            cd_major="n",
-            sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-            current_stream=current_stream,
-            discrete_col_sfd=True,
-        )
+            fc1_kernel_out = self.grouped_gemm_glu_kernel()(
+                a_tensor=fc1_x_data,
+                sfa_tensor=fc1_x_scales,
+                padded_offsets=split_points,
+                alpha_tensor=alpha_tensor,
+                b_tensor=fc1_w_data,
+                sfb_tensor=fc1_w_scales,
+                norm_const_tensor=norm_const_tensor,
+                prob_tensor=scales.detach().to(dtype=dtype).reshape(-1, 1, 1),
+                acc_dtype=torch.float32,
+                c_dtype=torch.bfloat16,
+                d_dtype=torch.float8_e4m3fn,
+                cd_major="n",
+                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
+                current_stream=current_stream,
+                discrete_col_sfd=True,
+                act_func="swiglu",
+                use_dynamic_sched=True,
+            )
+        else:
+            # Discrete-weight kernel: per-expert data/scale pointers
+            fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sw = tex.get_device_pointer_for_data_and_scales(
+                [w._rowwise_data for w in grouped_fc1_weight],
+                [w._rowwise_scale_inv for w in grouped_fc1_weight],
+                swizzle=True,
+                rowwise=True,
+                data_dtype=grouped_fc1_weight[0]._fp8_dtype,
+            )
+
+            fc1_kernel_out = self.grouped_gemm_glu_kernel()(
+                a_tensor=fc1_x_data,
+                sfa_tensor=fc1_x_scales,
+                padded_offsets=split_points,
+                alpha_tensor=alpha_tensor,
+                b_ptrs=fc1_b_ptrs,
+                sfb_ptrs=fc1_sfb_ptrs,
+                n=fc1_weight_shape[0],
+                b_dtype=torch.float8_e4m3fn,
+                b_major="k",
+                norm_const_tensor=norm_const_tensor,
+                prob_tensor=scales.detach().to(dtype=dtype).reshape(-1, 1, 1),
+                acc_dtype=torch.float32,
+                c_dtype=torch.bfloat16,
+                d_dtype=torch.float8_e4m3fn,
+                cd_major="n",
+                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
+                current_stream=current_stream,
+                discrete_col_sfd=True,
+                act_func="swiglu",
+                use_dynamic_sched=True,
+            )
 
         # Unpack kernel outputs
         # Note: Fused kernel outputs tensors with non-contiguous
@@ -379,22 +405,91 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # FC2 GEMM
         fc2_out_shape = in_shape[:-1] + [fc2_weight_shape[0]]
-        fc2_out = torch.empty(fc2_out_shape, dtype=dtype, device=device)
-        grouped_fc2_out = make_grouped_tensor_from_buffers(
-            num_groups=num_groups,
-            data=fc2_out,
-            split_sizes=split_sizes,
-            dtype=fc2_out.dtype,
-            logical_last_dim=fc2_weight_shape[0],
-        )
+        if fc2_op.single_grouped_parameter:
+            fc2_a_data = fc1_kernel_out["d_tensor"]
+            fc2_a_scales = fc1_kernel_out["sfd_row_tensor"]
 
-        general_grouped_gemm_for_grouped_tensor(
-            grouped_fc2_weight,
-            grouped_fc2_x,
-            grouped_fc2_out,
-            layout="TN",
-            accumulate=False,
-        )
+            fc2_w_data = grouped_fc2_weight.rowwise_data
+            fc2_w_data = fc2_w_data.view(dtype=torch.float8_e4m3fn)
+            fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_shape[1])
+            fc2_w_data = fc2_w_data.permute(1, 2, 0)
+
+            fc2_w_scales = fc2_swizzled_row_scales.view(dtype=torch.float8_e8m0fnu)
+            fc2_w_scales = fc2_w_scales.view(
+                num_groups,
+                fc2_weight_shape[0] // 128,
+                fc2_weight_shape[1] // 128,
+                32,
+                4,
+                4,
+            )
+            fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
+
+            fc2_kernel_out = self.grouped_gemm_quant_kernel()(
+                a_tensor=fc2_a_data,
+                sfa_tensor=fc2_a_scales,
+                padded_offsets=split_points,
+                alpha_tensor=alpha_tensor.float(),
+                b_tensor=fc2_w_data,
+                sfb_tensor=fc2_w_scales,
+                norm_const_tensor=None,
+                prob_tensor=torch.ones(
+                    (in_shape[0], 1, 1), dtype=torch.float32, device=device
+                ),
+                acc_dtype=torch.float32,
+                c_dtype=dtype,
+                d_dtype=dtype,
+                cd_major="n",
+                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
+                current_stream=current_stream,
+                use_dynamic_sched=True,
+            )
+            fc2_out = (
+                fc2_kernel_out["d_tensor"]
+                .permute(2, 0, 1)
+                .view(fc2_out_shape)
+                .contiguous()
+            )
+        else:
+            fc2_a_data = fc1_kernel_out["d_tensor"]
+            fc2_a_scales = fc1_kernel_out["sfd_row_tensor"]
+
+            fc2_b_ptrs, fc2_sfb_ptrs, _ = tex.get_device_pointer_for_data_and_scales(
+                [w._rowwise_data for w in grouped_fc2_weight],
+                [w._rowwise_scale_inv for w in grouped_fc2_weight],
+                swizzle=True,
+                rowwise=True,
+                data_dtype=grouped_fc2_weight[0]._fp8_dtype,
+            )
+
+            fc2_kernel_out = self.grouped_gemm_quant_kernel()(
+                a_tensor=fc2_a_data,
+                sfa_tensor=fc2_a_scales,
+                padded_offsets=split_points,
+                alpha_tensor=alpha_tensor.float(),
+                b_ptrs=fc2_b_ptrs,
+                sfb_ptrs=fc2_sfb_ptrs,
+                n=fc2_weight_shape[0],
+                b_dtype=torch.float8_e4m3fn,
+                b_major="k",
+                norm_const_tensor=None,
+                prob_tensor=torch.ones(
+                    (in_shape[0], 1, 1), dtype=torch.float32, device=device
+                ),
+                acc_dtype=torch.float32,
+                c_dtype=dtype,
+                d_dtype=dtype,
+                cd_major="n",
+                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
+                current_stream=current_stream,
+                use_dynamic_sched=True,
+            )
+            fc2_out = (
+                fc2_kernel_out["d_tensor"]
+                .permute(2, 0, 1)
+                .view(fc2_out_shape)
+                .contiguous()
+            )
 
         # Prepare input tensors for backward pass
         if not weight_requires_grad:
@@ -474,44 +569,6 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc2_ctx.weight_requires_grad = weight_requires_grad
 
         return fc2_out, [(), (), ()]
-
-    def _get_kernel_constants(
-        self,
-        *,
-        num_groups: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        global global_alpha_tensor
-        alpha_tensor = self._mxfp8_alpha_tensor
-        norm_const_tensor = self._mxfp8_norm_const_tensor
-        if (
-            alpha_tensor is None
-            or alpha_tensor.numel() != num_groups
-            or alpha_tensor.dtype != dtype
-            or alpha_tensor.device != device
-        ):
-            if (
-                global_alpha_tensor is None
-                or global_alpha_tensor.numel() != num_groups
-                or global_alpha_tensor.dtype != dtype
-                or global_alpha_tensor.device != device
-            ):
-                global_alpha_tensor = torch.ones(num_groups, dtype=dtype, device=device)
-            alpha_tensor = global_alpha_tensor
-            norm_const_tensor = alpha_tensor[:1]
-            self._mxfp8_alpha_tensor = alpha_tensor
-            self._mxfp8_norm_const_tensor = norm_const_tensor
-        elif (
-            norm_const_tensor is None
-            or norm_const_tensor.numel() != 1
-            or norm_const_tensor.dtype != dtype
-            or norm_const_tensor.device != device
-        ):
-            norm_const_tensor = alpha_tensor[:1]
-            self._mxfp8_norm_const_tensor = norm_const_tensor
-        return alpha_tensor, norm_const_tensor
-
 
 def fuse_forward_ops(
     ops: list[FusibleOperation],

@@ -454,6 +454,12 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
+std::vector<at::Tensor> convert_host_pointers_to_tensor(
+    std::vector<std::vector<at::Tensor>> tensor_lists);
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_scales(
+    std::vector<at::Tensor> data_tensors, std::vector<at::Tensor> scale_tensors, bool swizzle,
+    bool rowwise, transformer_engine::DType data_dtype);
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
 
 /***************************************************************************************************
@@ -560,6 +566,9 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
  **************************************************************************************************/
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
+
+std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_grouped_scales_for_gemm(
+    py::handle &tensor, bool rowwise, bool columnwise);
 
 /***************************************************************************************************
  * NVSHMEM APIs
