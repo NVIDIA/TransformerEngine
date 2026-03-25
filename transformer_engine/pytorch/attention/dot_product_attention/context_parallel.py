@@ -2078,8 +2078,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # fwd: fp8, bwd: f16, save all f16
             # there is already an F16 version of the inputs
             q_f16, k_f16, v_f16 = combine_and_dequantize(qkv_layout, q, k, v)
-            kv = torch.cat((k_f16.view(-1), v_f16.view(-1)), dim=-1)
-            f16_tensors = (q_f16, kv, out_f16)
+            kv_f16 = torch.cat((k_f16.view(-1), v_f16.view(-1)), dim=-1)
+            f16_tensors = (q_f16, kv_f16, out_f16)
         elif fp8 and not is_input_fp8 and fp8_recipe.mxfp8():
             f16_tensors = (q, kv, out_f16)
         elif fp8:
@@ -2131,15 +2131,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.is_output_fp8 = is_output_fp8
         ctx.use_flash_attn_3 = use_flash_attn_3
 
-        ctx.k_numel = k_numel
-        ctx.k_shape = k_shape
-        ctx.v_shape = v_shape
-        ctx.o_shape = o_shape
         ctx.orig_q_shape = orig_q_shape
         ctx.orig_k_shape = orig_k_shape
         ctx.orig_v_shape = orig_v_shape
         ctx.orig_o_shape = orig_o_shape
         ctx.post_a2a_o_shape = post_a2a_o_shape
+        ctx.k_numel = k_numel
+        ctx.k_shape = k_shape
+        ctx.v_shape = v_shape
+        ctx.o_shape = o_shape
         ctx.qkv_format = qkv_format
         ctx.qkv_layout = qkv_layout
         ctx.fwd_nominal_dtype = fwd_nominal_dtype
@@ -2173,7 +2173,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         nvtx_range_push(f"{nvtx_label}")
 
         # dout is expected to be in FP8 if is_output_fp8=True,
-        # but in the case it's not, convert it to FP8 before any operation
+        # but in the case it's not, convert it to FP8 (except for MXFP8) before any operation
         if (
             ctx.fp8
             and ctx.is_output_fp8
