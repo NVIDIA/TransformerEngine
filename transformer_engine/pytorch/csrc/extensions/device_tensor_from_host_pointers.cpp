@@ -4,12 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <ATen/cuda/CUDAContext.h>
+
 #include <vector>
 
 #include "common/common.h"
 #include "extensions.h"
-
-#include <ATen/cuda/CUDAContext.h>
 
 namespace transformer_engine::pytorch {
 
@@ -147,8 +147,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_s
 
     // Collect swizzled scale pointers
     for (size_t i = 0; i < num_tensors; ++i) {
-      scale_host_ptrs[i] = static_cast<int64_t>(
-          reinterpret_cast<uintptr_t>(output_dptr + output_offsets[i]));
+      scale_host_ptrs[i] =
+          static_cast<int64_t>(reinterpret_cast<uintptr_t>(output_dptr + output_offsets[i]));
     }
   } else {
     swizzled_scales_keepalive = at::empty({0}, at::TensorOptions().dtype(at::kByte).device(device));

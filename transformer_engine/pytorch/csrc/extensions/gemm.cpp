@@ -118,7 +118,6 @@ GroupedGemmConfig prepare_grouped_gemm_config(at::Tensor alpha, at::Tensor beta,
 
 }  // namespace detail
 
-
 std::pair<TensorWrapper, py::object> createOutputTensor(const std::vector<size_t>& shape,
                                                         DType dtype, py::handle quantizer) {
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);

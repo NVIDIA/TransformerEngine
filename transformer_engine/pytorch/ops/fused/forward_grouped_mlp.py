@@ -29,6 +29,7 @@ from .._common import (
     maybe_dequantize,
 )
 
+
 class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     """Fused op for MXFP8 GroupedLinear + ScaledSwiGLU + GroupedLinear
 
@@ -433,9 +434,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 b_tensor=fc2_w_data,
                 sfb_tensor=fc2_w_scales,
                 norm_const_tensor=None,
-                prob_tensor=torch.ones(
-                    (in_shape[0], 1, 1), dtype=torch.float32, device=device
-                ),
+                prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
                 acc_dtype=torch.float32,
                 c_dtype=dtype,
                 d_dtype=dtype,
@@ -444,12 +443,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 current_stream=current_stream,
                 use_dynamic_sched=True,
             )
-            fc2_out = (
-                fc2_kernel_out["d_tensor"]
-                .permute(2, 0, 1)
-                .view(fc2_out_shape)
-                .contiguous()
-            )
+            fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
         else:
             fc2_a_data = fc1_kernel_out["d_tensor"]
             fc2_a_scales = fc1_kernel_out["sfd_row_tensor"]
@@ -473,9 +467,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 b_dtype=torch.float8_e4m3fn,
                 b_major="k",
                 norm_const_tensor=None,
-                prob_tensor=torch.ones(
-                    (in_shape[0], 1, 1), dtype=torch.float32, device=device
-                ),
+                prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
                 acc_dtype=torch.float32,
                 c_dtype=dtype,
                 d_dtype=dtype,
@@ -484,12 +476,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 current_stream=current_stream,
                 use_dynamic_sched=True,
             )
-            fc2_out = (
-                fc2_kernel_out["d_tensor"]
-                .permute(2, 0, 1)
-                .view(fc2_out_shape)
-                .contiguous()
-            )
+            fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
 
         # Prepare input tensors for backward pass
         if not weight_requires_grad:
@@ -569,6 +556,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc2_ctx.weight_requires_grad = weight_requires_grad
 
         return fc2_out, [(), (), ()]
+
 
 def fuse_forward_ops(
     ops: list[FusibleOperation],

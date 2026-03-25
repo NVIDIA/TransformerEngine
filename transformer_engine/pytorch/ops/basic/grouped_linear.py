@@ -310,7 +310,10 @@ class GroupedLinear(BasicOperation):
 
         recipe = None if quantizer is None else quantizer._get_compatible_recipe()
         if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
-            raise RuntimeError("Delayed scaling or float8 current scaling is not supported with single_grouped_parameter=True")
+            raise RuntimeError(
+                "Delayed scaling or float8 current scaling is not supported with"
+                " single_grouped_parameter=True"
+            )
 
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_groups,
@@ -830,7 +833,11 @@ class GroupedLinear(BasicOperation):
             )
 
         # Perform wgrad GEMMs
-        delay_wgrad = ctx.weight_requires_grad and self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
+        delay_wgrad = (
+            ctx.weight_requires_grad
+            and self.wgrad_store is not None
+            and self.wgrad_store.delay_wgrad_compute()
+        )
         if ctx.weight_requires_grad:
             if delay_wgrad:
                 grouped_gemm_wgrad = functools.partial(
@@ -893,16 +900,14 @@ class GroupedLinear(BasicOperation):
                 if delay_wgrad:
                     grad_weight = None
                 else:
-                    grad_weight = torch.stack(grad_weights, dim=0)        
+                    grad_weight = torch.stack(grad_weights, dim=0)
             # Parameter registration order with single_grouped_parameter=True is:
             # bias0..biasN-1, then weight. Return grads in the same order.
             grad_params = grad_biases + [grad_weight] if has_bias else [grad_weight]
         else:
             if delay_wgrad and ctx.weight_requires_grad:
                 weight_grads_out = [None] * num_groups
-                grad_params = (
-                    weight_grads_out + grad_biases if has_bias else weight_grads_out
-                )
+                grad_params = weight_grads_out + grad_biases if has_bias else weight_grads_out
             else:
                 grad_params = grad_weights + grad_biases if has_bias else grad_weights
         return grad_input, [grad_params], [(None,)]

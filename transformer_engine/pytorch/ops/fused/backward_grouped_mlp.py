@@ -35,6 +35,7 @@ from .._common import (
     maybe_dequantize,
 )
 
+
 class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
     """Fused op for MXFP8 GroupedLinear + ScaledSwiGLU + GroupedLinear
 
@@ -559,7 +560,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                                     zero=getattr(weight_param, "zero_out_wgrad", False),
                                 )
 
-
         # Clear FC2 input tensor if possible
         if grouped_fc2_x is not None and not (
             fc2_ctx.weight_requires_grad
@@ -584,9 +584,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
 
                 fc1_w_data = grouped_fc1_weight.columnwise_data
                 fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
-                fc1_w_data = fc1_w_data.view(
-                    num_groups, fc1_weight_shape[0], fc1_weight_shape[1]
-                )
+                fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_shape[1])
                 fc1_w_data = fc1_w_data.permute(2, 1, 0)
                 fc1_w_scales = fc1_swizzled_col_scales.view(dtype=torch.float8_e8m0fnu)
                 fc1_w_scales = fc1_w_scales.view(
@@ -619,10 +617,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                     discrete_col_sfd=True,
                     use_dynamic_sched=True,
                 )
-                grad_input = (
-                    fc1_dgrad_kernel_out["d_tensor"]
-                    .view(in_shape)
-                )
+                grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
             else:
                 fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
                 fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]
@@ -658,10 +653,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                     discrete_col_sfd=True,
                     use_dynamic_sched=True,
                 )
-                grad_input = (
-                    fc1_dgrad_kernel_out["d_tensor"]
-                    .view(in_shape)
-                )
+                grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
 
         # FC1 wgrad GEMM
         fc1_packed_wgrad = None
@@ -826,7 +818,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                                     zero=getattr(weight_param, "zero_out_wgrad", False),
                                 )
 
-
         # Clear FC1 input tensor if possible
         if grouped_fc1_x is not None and not (
             fc1_ctx.weight_requires_grad
@@ -854,6 +845,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             [fc1_weight_grads, (), fc2_weight_grads],
             [(None,), (grad_scales,), (None,)],
         )
+
 
 def fuse_backward_ops(
     ops: list[FusibleOperation],

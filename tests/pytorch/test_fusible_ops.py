@@ -1240,6 +1240,7 @@ def test_grouped_gemm_quant_cute_matches_ref() -> None:
 
     import sys
     from pathlib import Path
+
     fe_api_root = Path(__file__).parents[2] / "3rdparty" / "cudnn-frontend" / "test" / "python"
     fe_api_dir = fe_api_root / "fe_api"
     sys.path.append(str(fe_api_root))
@@ -1533,8 +1534,6 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
         d_cute = d_cute.squeeze(-1)
     tols = {"rtol": 0.125, "atol": 0.25}
     assert_close(d_cute[: num_groups * m].float(), ref, **tols)
-
-
 
     def test_layer_norm_autocast(
         self,

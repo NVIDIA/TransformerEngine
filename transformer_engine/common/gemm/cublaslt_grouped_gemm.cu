@@ -809,8 +809,7 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
                                  transformer_engine::DType d_dtype, size_t num_tensors,
                                  bool use_split_accumulator, bool use_fp8, int64_t avg_m_val,
                                  int64_t avg_n_val, int64_t avg_k_val, void *cublas_workspace_ptr,
-                                 cudaStream_t stream,
-                                 int math_sm_count = 0) {
+                                 cudaStream_t stream, int math_sm_count = 0) {
   using cublasHandleManager =
       transformer_engine::detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
