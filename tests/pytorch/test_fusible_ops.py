@@ -2010,6 +2010,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("weight_requires_grad", (False, True))
+    @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
     def test_grouped_linear(
         self,
         *,
@@ -2024,6 +2025,7 @@ class TestBasicOps:
         quantized_weight: bool,
         input_requires_grad: bool,
         weight_requires_grad: bool,
+        delay_wgrad_compute: bool,
     ) -> None:
         """Grouped GEMM"""
 
@@ -2104,6 +2106,7 @@ class TestBasicOps:
                 bias=bias,
                 device=device,
                 dtype=dtype,
+                delay_wgrad_compute=delay_wgrad_compute,
             )
         with torch.no_grad():
             for group_idx in range(group_size):
@@ -2119,6 +2122,8 @@ class TestBasicOps:
             y_test = op(x_test, split_sizes)
         if input_requires_grad or weight_requires_grad:
             y_test.backward(dy_test)
+            if delay_wgrad_compute and weight_requires_grad:
+                op.backward_dw()
 
         # Expected numerical error
         tols = dtype_tols(dtype)
