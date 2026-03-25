@@ -129,7 +129,7 @@ void compute_ref(const ProcessingMethod processing_method,
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
                     const size_t scale_idx = i * scales_stride_rowwise + tile_X;
                     output_scales_rowwise[scale_idx] = biased_exponent;
-                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
+                    float scale_reciprocal = exp2f_rcp(biased_exponent);
 
                     for (size_t j = j_min; j < j_max; ++j) {
                         const size_t idx = i * cols + j;
@@ -150,7 +150,7 @@ void compute_ref(const ProcessingMethod processing_method,
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
                     const size_t scale_idx = tile_Y * scales_stride_colwise + j;
                     output_scales_colwise[scale_idx] = biased_exponent;
-                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
+                    float scale_reciprocal = exp2f_rcp(biased_exponent);
 
                     for (size_t i = i_min; i < i_max; ++i) {
                         const size_t idx = i * cols + j;
@@ -272,9 +272,13 @@ void performTest(const ProcessingMethod processing_method,
         const size_t elts = M * K;
         elts_num += elts;
 
+        auto divide_round_up_blocks = [](const size_t N, const size_t M) -> size_t {
+            return (N == 0) ? 0 : 1 + (N - 1) / M;
+        };
+
         const size_t unpadded_rowwise_blocks_Y = M;
-        const size_t unpadded_rowwise_blocks_X = divide_round_up(K, 32);
-        const size_t unpadded_colwise_blocks_Y = divide_round_up(M, 32);
+        const size_t unpadded_rowwise_blocks_X = divide_round_up_blocks(K, 32);
+        const size_t unpadded_colwise_blocks_Y = divide_round_up_blocks(M, 32);
         const size_t unpadded_colwise_blocks_X = K;
 
         rowwise_scales_first_dim[t] = round_up_to_nearest_multiple(unpadded_rowwise_blocks_Y, 128);
@@ -371,7 +375,7 @@ void performTest(const ProcessingMethod processing_method,
 
     NVTEShape logical_shape_ = nvte_make_shape(logical_shape_vec.data(), logical_shape_vec.size());
 
-    std::vector<size_t> dbias_logical_shape_vec= {num_tensors, cols};
+    std::vector<size_t> dbias_logical_shape_vec = {num_tensors, cols};
     NVTEShape dbias_logical_shape_ = nvte_make_shape(dbias_logical_shape_vec.data(),
                                                      dbias_logical_shape_vec.size());
 
@@ -499,11 +503,13 @@ void performTest(const ProcessingMethod processing_method,
             scales_stride_colwise);
     }
 
+    QuantizationConfigWrapper quant_config;
+
     // GPU
     Tensor workspace;
     switch (processing_method) {
         case ProcessingMethod::CAST_ONLY: {
-            nvte_group_quantize(in_group_tensor, out_group_tensor, 0);
+            nvte_group_quantize_v2(in_group_tensor, out_group_tensor, quant_config, 0);
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
@@ -554,6 +560,11 @@ void performTest(const ProcessingMethod processing_method,
     const double abs_tolerable_mismatches_limit = 0.0;
     const double rel_tolerable_mismatches_limit = 0.0;
 
+    // Compare only allocated contiguous output range.
+    // In graph-safe mode logical shape may include trailing garbage beyond offsets_h.back().
+    const size_t compare_rows = 1;
+    const size_t compare_cols = elts_num;
+
     if (rowwise) {
         cudaMemcpy(out_data_rowwise_h.data(), out_data_rowwise_d, out_data_size, cudaMemcpyDeviceToHost);
         cudaMemcpy(out_scales_rowwise_h.data(), out_scales_rowwise_d, rowwise_scales_size, cudaMemcpyDeviceToHost);
@@ -566,7 +577,8 @@ void performTest(const ProcessingMethod processing_method,
         const size_t mismatches_elts = 32 * mismatches_scales;
 
         compare_scaled_elts<OutputType>("rowwise_output", out_data_rowwise_ref.data(),
-                                        out_data_rowwise_h.data(), rows, cols, true, mismatches_elts);
+                                        out_data_rowwise_h.data(), compare_rows, compare_cols,
+                                        true, mismatches_elts);
     }
 
     if (colwise) {
@@ -581,7 +593,8 @@ void performTest(const ProcessingMethod processing_method,
         const size_t mismatches_elts = 32 * mismatches_scales;
 
         compare_scaled_elts<OutputType>("colwise_output", out_data_colwise_ref.data(),
-                                        out_data_colwise_h.data(), rows, cols, false, mismatches_elts);
+                                        out_data_colwise_h.data(), compare_rows, compare_cols,
+                                        false, mismatches_elts);
     }
 
     if (compute_dbias) {
@@ -652,9 +665,13 @@ std::vector<std::vector<size_t>> input_config = {
     {VARYING_FIRST_DIM,     4,      1024,144,                   128,384,0,512},
     {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
     {VARYING_FIRST_DIM,     5,      4096,512,                   128,256,384,1024,2304},
+    {VARYING_FIRST_DIM,     5,      16 * 4096,512,              128,256,384,1024,2304},
     {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
     {VARYING_BOTH_DIMS,     2,      1,(128*128)+(256*256),      128,256,        128,256},
     {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
+    // Empty tensor in the middle of the group must not terminate the persistent work loop.
+    {VARYING_FIRST_DIM,     4,      512,160,                    128,0,0,256},
+    {VARYING_BOTH_DIMS,     3,      1,(128*128)+(128*128),      128,0,128,      128,0,128},
 };
 
 }  // namespace
@@ -808,6 +825,37 @@ std::string to_string(const ActivationKind activation) {
     }
 }
 
+std::string MakeGroupedFusedCastMXFP8TestName(
+    const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
+    const ProcessingMethod method = std::get<0>(info.param);
+    std::string name = to_string(method);
+    name += "X" + to_string(std::get<1>(info.param));
+
+    switch (std::get<2>(info.param)) {
+        case ScalingDirection::ROWWISE: name += "_ROWWISE_"; break;
+        case ScalingDirection::COLWISE: name += "_COLWISE_"; break;
+        case ScalingDirection::BOTH:    name += "_BIDIMENSIONAL_"; break;
+    }
+
+    const std::vector<size_t> input = std::get<3>(info.param);
+
+    switch (static_cast<ShapeRepresentation>(input[0])) {
+        case ShapeRepresentation::SAME_BOTH_DIMS:    name += "SAME_BOTH_DIMS"; break;
+        case ShapeRepresentation::VARYING_FIRST_DIM: name += "VARYING_FIRST_DIM"; break;
+        case ShapeRepresentation::VARYING_LAST_DIM:  name += "VARYING_LAST_DIM"; break;
+        case ShapeRepresentation::VARYING_BOTH_DIMS: name += "VARYING_BOTH_DIMS"; break;
+    }
+
+    name += "_N_" + std::to_string(input[1]);
+
+    name += "_SHAPE_" + std::to_string(input[2]) + "X" + std::to_string(input[3]);
+
+    name += "_" + test::typeName(std::get<4>(info.param)) +
+            "_" + test::typeName(std::get<5>(info.param));
+
+    return name;
+}
+
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     GroupedFusedCastMXFP8TestSuite,
@@ -818,33 +866,4 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(input_config),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
-    [](const testing::TestParamInfo<GroupedFusedCastMXFP8TestSuite::ParamType>& info) {
-        const ProcessingMethod method = std::get<0>(info.param);
-        std::string name = to_string(method);
-        name += "X" + to_string(std::get<1>(info.param));
-
-        switch (std::get<2>(info.param)) {
-            case ScalingDirection::ROWWISE: name += "_ROWWISE_"; break;
-            case ScalingDirection::COLWISE: name += "_COLWISE_"; break;
-            case ScalingDirection::BOTH:    name += "_BIDIMENSIONAL_"; break;
-        }
-
-        const std::vector<size_t> input = std::get<3>(info.param);
-
-        switch(static_cast<ShapeRepresentation>(input[0])) {
-            case ShapeRepresentation::SAME_BOTH_DIMS:       name += "SAME_BOTH_DIMS"; break;
-            case ShapeRepresentation::VARYING_FIRST_DIM:    name += "VARYING_FIRST_DIM"; break;
-            case ShapeRepresentation::VARYING_LAST_DIM:     name += "VARYING_LAST_DIM"; break;
-            case ShapeRepresentation::VARYING_BOTH_DIMS:    name += "VARYING_BOTH_DIMS"; break;
-        };
-
-        name += "_N_" + std::to_string(input[1]);
-
-        name += "_SHAPE_" +
-                std::to_string(input[2]) +
-                "X" + std::to_string(input[3]);
-
-        name += "_" + test::typeName(std::get<4>(info.param)) +
-                "_" + test::typeName(std::get<5>(info.param));
-        return name;
-    });
+    MakeGroupedFusedCastMXFP8TestName);
