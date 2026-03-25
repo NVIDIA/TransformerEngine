@@ -549,7 +549,7 @@ def get_attention_backend(
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
     # ---------------------------------------------------------------------------------------
     # Fused    | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 1
-    # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 256
+    # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | % 256 == 0
     # Flash v3 | FP16/BF16      | non-paged/paged | sm90         | bshd,sbhd,thd | >= 1
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
@@ -588,9 +588,9 @@ def get_attention_backend(
                 use_fused_attention = False
                 use_unfused_attention = False
         if inference_params.is_paged:
-            if use_flash_attention_2 and inference_params.page_size < 256:
+            if use_flash_attention_2 and inference_params.page_size % 256 != 0:
                 if FlashAttentionUtils.is_installed:
-                    logger.debug("Disabling FlashAttention 2 for page size < 256")
+                    logger.debug("Disabling FlashAttention 2 for page size not divisible by 256")
                 use_flash_attention_2 = False
             if use_flash_attention_2:
                 if not FlashAttentionUtils.is_installed:
@@ -600,6 +600,16 @@ def get_attention_backend(
                         "Disabling FlashAttention 2 as paged attention requires flash-attn 2.5+"
                     )
                     use_flash_attention_2 = False
+        else:
+            # Non-paged KV cache still passes a block_table to FA2 for thd_2bshd support,
+            # and FA2 enforces page_size % 256 == 0 on the effective page size (max_seqlen_kv).
+            if use_flash_attention_2 and max_seqlen_kv % 256 != 0:
+                if FlashAttentionUtils.is_installed:
+                    logger.debug(
+                        "Disabling FlashAttention 2 for non-paged KV cache"
+                        " with max_seqlen_kv not divisible by 256"
+                    )
+                use_flash_attention_2 = False
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
