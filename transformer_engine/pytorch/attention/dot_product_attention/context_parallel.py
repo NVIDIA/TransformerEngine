@@ -22,6 +22,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.graph import is_graph_capturing
@@ -3813,6 +3814,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
         original_qkv_layout = qkv_layout
         orig_q_shape, orig_k_shape, orig_v_shape = q.shape, k.shape, v.shape
+        orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
         o_format = qkv_format
         batch_dim_qkv, seq_dim_qkv, _ = get_bsh_dims(qkv_format)
         _, seq_dim_o, _ = get_bsh_dims(o_format)
@@ -3954,7 +3956,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         # _part: inputs to attention kernel and saved for backward
         # note: they have post a2a shapes
-        batch_size = q.shape[batch_dim_qkv]
         q_part, k_part, v_part = q, k, v
         out_part, out_fp8, out_f16 = None, None, None
         bwd_requires_o_f16 = is_training and (
@@ -4015,6 +4016,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 cuda_graph=is_graph_capturing(),
             )
             # construct out_part for backward
+            # out_fp8 and out_f16 store the FP8 or F16 tensor for backward saves
             out_fp8 = out_
             out_f16 = out_
             if bwd_requires_o_fp8:
@@ -4056,7 +4058,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [b, s, h//cp, d] -> [b*s//cp, h, d]
         # [s, b, h//cp, d] -> [s//cp*b, h, d]
         # [t, h//cp, d] -> [t//cp, h, d]
-        if isinstance(out_, QuantizedTensorStorage):
+        if isinstance(out_, Float8TensorStorage):
             out_ = out_._data
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, out_.device)
         out_ = flash_attn_a2a_communicate(
@@ -4074,12 +4076,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [b*s//cp, h, d] -> [b, s//cp, h, d]
         # [s//cp*b, h, d] -> [s//cp, b, h, d]
         # [t//cp, h, d] -> [t//cp, h, d]
-        if o_format == "bshd":
-            out_ = out_.view(batch_size, -1, *out_.shape[-2:])
-        elif o_format == "sbhd":
-            out_ = out_.view(-1, batch_size, *out_.shape[-2:])
+        out_ = out_.view(orig_o_shape)
 
         # out_ret: output tensor for forward pass
+        # out_fp8 and out_f16 are reused here to store the FP8 or F16 tensor for forward returns
         if fp8:
             if fp8_recipe.delayed():
                 out_fp8 = Float8Tensor.make_like(out_fp8, data=out_, dtype=fwd_nominal_dtype)
@@ -4109,8 +4109,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.orig_q_shape = orig_q_shape
         ctx.orig_k_shape = orig_k_shape
         ctx.orig_v_shape = orig_v_shape
-        ctx.out_part_shape = out_part.shape
-        ctx.out_ret_shape = out_ret.shape
+        ctx.orig_o_shape = orig_o_shape
 
         # save tensors for backward
         ctx.fp8 = fp8 and is_bwd_fp8
@@ -4130,9 +4129,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 ):
                     fp8_tensors = (q_part, k_part, v_part, out_part)
             elif fp8:
-                # FP8DS/CS: convert post-a2a FP8 q/k/v to F16
-                # MXFP8: save post-a2a pre-quantization F16 q/k/v
-                # out_part is already converted to the right precision
+                # FP8DS/CS: convert post-a2a FP8 q/k/v to F16; out_part already in F16
+                # MXFP8: save post-a2a pre-quantization F16 q/k/v; out_part already in F16
                 if fp8_recipe.mxfp8():
                     f16_tensors = (q, k, v, out_part)
                     ctx.qkv_layout = original_qkv_layout
@@ -4142,7 +4140,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     )
                     f16_tensors = (q_part, k_part, v_part, out_part)
             else:
-                # all tensors are already in F16
+                # all tensors are in F16
                 f16_tensors = (q_part, k_part, v_part, out_part)
         tensors_to_save, tensor_objects = prepare_for_saving(
             *fp8_tensors,
@@ -4243,7 +4241,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 dout = dout.dequantize(dtype=bwd_nominal_dtype)
             if ctx.use_fused_attention:
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
-        dout = dout.view(*ctx.out_ret_shape)
+        dout = dout.view(*ctx.orig_o_shape)
 
         # dout:
         # FP8DS/CS: torch.uint8
@@ -4352,7 +4350,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fp8_meta_kwargs,
                 softmax_type=ctx.softmax_type,
             )
-            if all(isinstance(x, QuantizedTensorStorage) for x in [dq, dk, dv]):
+            if all(isinstance(x, Float8TensorStorage) for x in [dq, dk, dv]):
                 dq_fp8, dk_fp8, dv_fp8 = dq, dk, dv
                 dq, dk, dv = [x._data for x in [dq, dk, dv]]
         else:
