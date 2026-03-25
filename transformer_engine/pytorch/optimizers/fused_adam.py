@@ -494,6 +494,15 @@ class FusedAdam(torch.optim.Optimizer):
                 new_v = {}
                 for name in v:
                     new_v[name] = self.get_unscaled_state(param, name)
+                    if isinstance(param, DTensor):
+                        # Re-wrap the optimizer state as a DTensor.
+                        new_v[name] = DTensor.from_local(
+                            new_v[name],
+                            device_mesh=param.device_mesh,
+                            placements=param.placements,
+                            shape=param.size(),
+                            stride=param.stride(),
+                        )
                 state_dict["state"][k] = new_v
 
         return state_dict
@@ -519,15 +528,19 @@ class FusedAdam(torch.optim.Optimizer):
                 for name in v:
                     if v[name] is None:
                         continue
+                    state = v[name]
+                    if isinstance(state, DTensor):
+                        # Un-pack the local Tensor state for set_scaled_state.
+                        state = state._local_tensor
                     if (
                         self.store_param_remainders
                         and name == "master_param"
                         and param.dtype == torch.bfloat16
                     ):
-                        self.set_scaled_state(param, name, v[name])
-                        assert v[name].dtype == torch.int16
+                        self.set_scaled_state(param, name, state)
+                        assert state.dtype == torch.int16
                     else:
-                        self.set_scaled_state(param, name, v[name].float())
+                        self.set_scaled_state(param, name, state.float())
 
     def step(self, closure=None, grad_scaler=None):
         """Performs a single optimization step.
