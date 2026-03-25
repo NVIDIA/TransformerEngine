@@ -92,6 +92,34 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler,
                                   .Attr<int64_t>("compute_aux_scores"),
                               FFI_CudaGraph_Traits);
 
+Error_Type FusedTopkWithScoreFunctionForwardInitializeFFI(
+    cudaStream_t stream, Buffer_Type logits_buf, Buffer_Type expert_bias_buf, Result_Type probs_buf,
+    Result_Type routing_map_buf, Result_Type intermediate_buf, int64_t topk,
+    int64_t use_pre_softmax, int64_t num_groups, int64_t group_topk, double scaling_factor,
+    JAXX_Score_Function score_function, int64_t compute_aux_scores) {
+  return wrapInStreamCapture(std::function(FusedTopkWithScoreFunctionForwardFFI), stream,
+                             logits_buf, expert_bias_buf, probs_buf, routing_map_buf,
+                             intermediate_buf, topk, use_pre_softmax, num_groups, group_topk,
+                             scaling_factor, score_function, compute_aux_scores);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardInitializeHandler,
+                              FusedTopkWithScoreFunctionForwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // logits
+                                  .Arg<Buffer_Type>()      // expert_bias
+                                  .Ret<Buffer_Type>()      // probs (or scores)
+                                  .Ret<Buffer_Type>()      // routing_map
+                                  .Ret<Buffer_Type>()      // intermediate_output
+                                  .Attr<int64_t>("topk")
+                                  .Attr<int64_t>("use_pre_softmax")
+                                  .Attr<int64_t>("num_groups")
+                                  .Attr<int64_t>("group_topk")
+                                  .Attr<double>("scaling_factor")
+                                  .Attr<JAXX_Score_Function>("score_function")
+                                  .Attr<int64_t>("compute_aux_scores"));
+
 // ============================================================================
 // Fused Top-K with Score Function - Backward
 // ============================================================================
@@ -158,6 +186,30 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
                                   .Attr<int64_t>("compute_aux_scores"),
                               FFI_CudaGraph_Traits);
 
+Error_Type FusedTopkWithScoreFunctionBackwardInitializeFFI(
+    cudaStream_t stream, Buffer_Type routing_map_buf, Buffer_Type intermediate_buf,
+    Buffer_Type grad_probs_buf, Result_Type grad_logits_buf, int64_t topk, int64_t use_pre_softmax,
+    double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores) {
+  return wrapInStreamCapture(std::function(FusedTopkWithScoreFunctionBackwardFFI), stream,
+                             routing_map_buf, intermediate_buf, grad_probs_buf, grad_logits_buf,
+                             topk, use_pre_softmax, scaling_factor, score_function,
+                             compute_aux_scores);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardInitializeHandler,
+                              FusedTopkWithScoreFunctionBackwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // routing_map
+                                  .Arg<Buffer_Type>()      // intermediate_output
+                                  .Arg<Buffer_Type>()      // grad_probs
+                                  .Ret<Buffer_Type>()      // grad_logits
+                                  .Attr<int64_t>("topk")
+                                  .Attr<int64_t>("use_pre_softmax")
+                                  .Attr<double>("scaling_factor")
+                                  .Attr<JAXX_Score_Function>("score_function")
+                                  .Attr<int64_t>("compute_aux_scores"));
+
 // ============================================================================
 // Fused MoE Aux Loss - Forward
 // ============================================================================
@@ -203,6 +255,25 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler, FusedMoEAuxLossForw
                                   .Attr<double>("coeff"),
                               FFI_CudaGraph_Traits);
 
+Error_Type FusedMoEAuxLossForwardInitializeFFI(cudaStream_t stream, Buffer_Type probs_buf,
+                                               Buffer_Type tokens_per_expert_buf,
+                                               Result_Type aux_loss_buf, Result_Type const_buf,
+                                               int64_t topk, double coeff) {
+  return wrapInStreamCapture(std::function(FusedMoEAuxLossForwardFFI), stream, probs_buf,
+                             tokens_per_expert_buf, aux_loss_buf, const_buf, topk, coeff);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedMoEAuxLossForwardInitializeHandler,
+                              FusedMoEAuxLossForwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // probs
+                                  .Arg<Buffer_Type>()      // tokens_per_expert
+                                  .Ret<Buffer_Type>()      // aux_loss
+                                  .Ret<Buffer_Type>()      // const_buf
+                                  .Attr<int64_t>("topk")
+                                  .Attr<double>("coeff"));
+
 // ============================================================================
 // Fused MoE Aux Loss - Backward
 // ============================================================================
@@ -247,6 +318,23 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler, FusedMoEAuxLossBac
                                   .Arg<Buffer_Type>()      // grad_aux_loss
                                   .Ret<Buffer_Type>(),     // grad_probs
                               FFI_CudaGraph_Traits);
+
+Error_Type FusedMoEAuxLossBackwardInitializeFFI(cudaStream_t stream, Buffer_Type const_buf_in,
+                                                Buffer_Type tokens_per_expert_buf,
+                                                Buffer_Type grad_aux_loss_buf,
+                                                Result_Type grad_probs_buf) {
+  return wrapInStreamCapture(std::function(FusedMoEAuxLossBackwardFFI), stream, const_buf_in,
+                             tokens_per_expert_buf, grad_aux_loss_buf, grad_probs_buf);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardInitializeHandler,
+                              FusedMoEAuxLossBackwardInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // const_buf
+                                  .Arg<Buffer_Type>()      // tokens_per_expert
+                                  .Arg<Buffer_Type>()      // grad_aux_loss
+                                  .Ret<Buffer_Type>());    // grad_probs
 
 }  // namespace jax
 }  // namespace transformer_engine

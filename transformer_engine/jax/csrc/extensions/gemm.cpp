@@ -348,6 +348,28 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmV2Handler, GemmV2FFI,
                                   .Attr<GemmConfig>("config"),
                               FFI_CudaGraph_Traits);
 
+Error_Type GemmV2InitializeFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv,
+                               Buffer_Type rhs, Buffer_Type rhs_scale_inv, Buffer_Type bias,
+                               Buffer_Type alpha, Buffer_Type beta, Result_Type output,
+                               Result_Type workspace, GemmConfig config) {
+  return wrapInStreamCapture(std::function(GemmV2FFI), stream, lhs, lhs_scale_inv, rhs,
+                             rhs_scale_inv, bias, alpha, beta, output, workspace, config);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmV2InitializeHandler, GemmV2InitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // lhs
+                                  .Arg<Buffer_Type>()      // lhs_scale_inv
+                                  .Arg<Buffer_Type>()      // rhs
+                                  .Arg<Buffer_Type>()      // rhs_scale_inv
+                                  .Arg<Buffer_Type>()      // bias
+                                  .Arg<Buffer_Type>()      // alpha
+                                  .Arg<Buffer_Type>()      // beta
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attr<GemmConfig>("config"));
+
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
                    Buffer_Type alpha, Buffer_Type beta, Result_Type output, Result_Type bias_grad,
@@ -409,6 +431,48 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("use_split_accumulator")
                                   .Attr<JAXX_Collective_Op>("collective_op"),
                               FFI_CudaGraph_Traits);
+
+Error_Type GemmInitializeFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv,
+                             Buffer_Type rhs, Buffer_Type rhs_scale_inv, Buffer_Type bias,
+                             Buffer_Type gelu_input, Buffer_Type alpha, Buffer_Type beta,
+                             Result_Type output, Result_Type bias_grad, Result_Type pre_gelu_out,
+                             Result_Type workspace, JAXX_Scaling_Mode scaling_mode,
+                             int64_t lhs_axis_boundary, int64_t rhs_axis_boundary,
+                             bool lhs_transposed, bool rhs_transposed, bool fuse_bias,
+                             bool fuse_gelu, bool grad, bool use_split_accumulator,
+                             JAXX_Collective_Op collective_op) {
+  return wrapInStreamCapture(std::function(GemmFFI), stream, lhs, lhs_scale_inv, rhs, rhs_scale_inv,
+                             bias, gelu_input, alpha, beta, output, bias_grad, pre_gelu_out,
+                             workspace, scaling_mode, lhs_axis_boundary, rhs_axis_boundary,
+                             lhs_transposed, rhs_transposed, fuse_bias, fuse_gelu, grad,
+                             use_split_accumulator, collective_op);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmInitializeHandler, GemmInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // lhs
+                                  .Arg<Buffer_Type>()      // lhs_scale_inv
+                                  .Arg<Buffer_Type>()      // rhs
+                                  .Arg<Buffer_Type>()      // rhs_scale_inv
+                                  .Arg<Buffer_Type>()      // bias
+                                  .Arg<Buffer_Type>()      // gelu_input
+                                  .Arg<Buffer_Type>()      // alpha
+                                  .Arg<Buffer_Type>()      // beta
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // bias_grad
+                                  .Ret<Buffer_Type>()      // pre_gelu_out
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<int64_t>("lhs_axis_boundary")
+                                  .Attr<int64_t>("rhs_axis_boundary")
+                                  .Attr<bool>("lhs_transposed")
+                                  .Attr<bool>("rhs_transposed")
+                                  .Attr<bool>("fuse_bias")
+                                  .Attr<bool>("fuse_gelu")
+                                  .Attr<bool>("grad")
+                                  .Attr<bool>("use_split_accumulator")
+                                  .Attr<JAXX_Collective_Op>("collective_op"));
 
 size_t GroupedGemmGetGroupSizes(cudaStream_t stream, size_t num_gemms, int32_t *dev_group_sizes,
                                 int32_t *host_group_sizes) {
@@ -849,6 +913,41 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("is_grouped_dense_wgrad"),
                               FFI_CudaGraph_Traits);
+
+Error_Type GroupedGemmV2InitializeFFI(
+    cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv, Buffer_Type rhs_data,
+    Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type group_sizes, Buffer_Type alpha,
+    Buffer_Type beta, Result_Type output, Result_Type cublas_workspace, Result_Type setup_workspace,
+    Result_Type int64_workspace, size_t m, size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
+    JAXX_Scaling_Mode scaling_mode, bool is_grouped_dense_wgrad) {
+  return wrapInStreamCapture(std::function(GroupedGemmV2FFI), stream, lhs_data, lhs_sinv, rhs_data,
+                             rhs_sinv, bias, group_sizes, alpha, beta, output, cublas_workspace,
+                             setup_workspace, int64_workspace, m, n, k, lhs_is_trans, rhs_is_trans,
+                             scaling_mode, is_grouped_dense_wgrad);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2InitializeHandler, GroupedGemmV2InitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // lhs_data
+                                  .Arg<Buffer_Type>()      // lhs_sinv
+                                  .Arg<Buffer_Type>()      // rhs_data
+                                  .Arg<Buffer_Type>()      // rhs_sinv
+                                  .Arg<Buffer_Type>()      // bias
+                                  .Arg<Buffer_Type>()      // group_sizes (int32)
+                                  .Arg<Buffer_Type>()      // alpha
+                                  .Arg<Buffer_Type>()      // beta
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // cublas_workspace
+                                  .Ret<Buffer_Type>()      // setup_workspace
+                                  .Ret<Buffer_Type>()      // int64_workspace
+                                  .Attr<int64_t>("M")
+                                  .Attr<int64_t>("N")
+                                  .Attr<int64_t>("K")
+                                  .Attr<bool>("lhs_is_trans")
+                                  .Attr<bool>("rhs_is_trans")
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<bool>("is_grouped_dense_wgrad"));
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
