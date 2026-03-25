@@ -32,6 +32,7 @@
 #include <transformer_engine/fused_router.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/hadamard_transform.h>
+#include <transformer_engine/device_tensor_from_host_pointers.h>
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>

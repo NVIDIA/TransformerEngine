@@ -182,13 +182,32 @@ class GroupedLinear(BasicOperation):
         """Execute delayed weight gradient grouped GEMMs (see ``delay_wgrad_compute``)."""
         if not self.need_backward_dw():
             return
+        if self.wgrad_store.context is None or self.wgrad_store.context.empty():
+            return
         _, tensor_list = self.wgrad_store.pop()
-        xs, grad_weights = tensor_list[0], tensor_list[2]
-        clear_tensor_data(*xs)
+        activations = tensor_list[0]
+        grad_weights = tensor_list[2]
+        if isinstance(activations, list):
+            clear_tensor_data(*activations)
+        else:
+            # Fused MXFP8 grouped MLP saves `GroupedTensor` activations for wgrad.
+            clear_tensor_data(
+                activations.data,
+                activations.columnwise_data,
+                activations.scale_inv,
+                activations.columnwise_scale_inv,
+            )
         if self._accumulate_into_main_grad:
             return
         if self.single_grouped_parameter:
-            self.weight.grad = torch.stack(grad_weights, dim=0).to(self.weight.dtype)
+            if isinstance(grad_weights, list):
+                self.weight.grad = torch.stack(grad_weights, dim=0).to(self.weight.dtype)
+            else:
+                self.weight.grad = grad_weights.rowwise_data.view(
+                    self.num_groups,
+                    self.out_features,
+                    self.in_features,
+                ).to(self.weight.dtype)
         else:
             for group_idx in range(self.num_groups):
                 w = getattr(self, f"weight{group_idx}")
@@ -291,7 +310,7 @@ class GroupedLinear(BasicOperation):
 
         recipe = None if quantizer is None else quantizer._get_compatible_recipe()
         if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
-            return
+            raise RuntimeError("Delayed scaling or float8 current scaling is not supported with single_grouped_parameter=True")
 
         grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
             num_tensors=self.num_groups,
@@ -580,8 +599,8 @@ class GroupedLinear(BasicOperation):
         device = weight_param.device
 
         if self._accumulate_into_main_grad:
-            assert hasattr(weight_param, "main_grad"), "MAIN GRAD NOT FOUND !!!!"
-            assert weight_param.main_grad is not None, "MAIN GRAD IS NONE   !!!!"
+            assert hasattr(weight_param, "main_grad"), "MAIN GRAD NOT FOUND"
+            assert weight_param.main_grad is not None, "MAIN GRAD IS NONE"
 
         # Check which grads are required
         ctx = basic_op_ctxs[0]
@@ -810,13 +829,8 @@ class GroupedLinear(BasicOperation):
                 single_output=True,
             )
 
-        delay_wgrad = (
-            ctx.weight_requires_grad
-            and self.wgrad_store is not None
-            and self.wgrad_store.delay_wgrad_compute()
-        )
-
-        # Perform wgrad GEMMs (or defer them to backward_dw)
+        # Perform wgrad GEMMs
+        delay_wgrad = ctx.weight_requires_grad and self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
         if ctx.weight_requires_grad:
             if delay_wgrad:
                 grouped_gemm_wgrad = functools.partial(
@@ -842,7 +856,6 @@ class GroupedLinear(BasicOperation):
                     accumulate=accumulate_into_main_grad,
                 )
 
-        # Clear input tensors if possible
         if not delay_wgrad:
             clear_tensor_data(*xs)
 
@@ -880,14 +893,16 @@ class GroupedLinear(BasicOperation):
                 if delay_wgrad:
                     grad_weight = None
                 else:
-                    grad_weight = torch.stack(grad_weights, dim=0)
+                    grad_weight = torch.stack(grad_weights, dim=0)        
             # Parameter registration order with single_grouped_parameter=True is:
             # bias0..biasN-1, then weight. Return grads in the same order.
             grad_params = grad_biases + [grad_weight] if has_bias else [grad_weight]
         else:
             if delay_wgrad and ctx.weight_requires_grad:
                 weight_grads_out = [None] * num_groups
-                grad_params = weight_grads_out + grad_biases if has_bias else weight_grads_out
+                grad_params = (
+                    weight_grads_out + grad_biases if has_bias else weight_grads_out
+                )
             else:
                 grad_params = grad_weights + grad_biases if has_bias else grad_weights
         return grad_input, [grad_params], [(None,)]
