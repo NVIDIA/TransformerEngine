@@ -372,12 +372,10 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
 
   const auto tensor_offsets = input.get_tensor_offsets();
   if (tensor_offsets.data_ptr != nullptr) {
-    swizzle_input.set_tensor_offsets(tensor_offsets.data_ptr,
-                                     static_cast<DType>(tensor_offsets.dtype),
-                                     tensor_offsets.shape);
-    swizzle_output.set_tensor_offsets(tensor_offsets.data_ptr,
-                                      static_cast<DType>(tensor_offsets.dtype),
-                                      tensor_offsets.shape);
+    swizzle_input.set_tensor_offsets(
+        tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype), tensor_offsets.shape);
+    swizzle_output.set_tensor_offsets(
+        tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype), tensor_offsets.shape);
   }
 
   if (swizzle_rowwise) {
@@ -400,7 +398,7 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
     columnwise_scales_pyt = allocateSpace(col_scales.shape, scales_dtype, false);
     swizzle_output.set_columnwise_data(nullptr, data_dtype, data.shape);
     swizzle_output.set_columnwise_scale_inv(getDataPtr(*columnwise_scales_pyt), scales_dtype,
-                                             col_scales.shape);
+                                            col_scales.shape);
   }
 
   swizzle_output.set_with_gemm_swizzled_scales(true);
@@ -425,8 +423,8 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
   return SwizzledGroupedScales{std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};
 }
 
-std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>
-swizzle_grouped_scales_for_gemm(py::handle &tensor, bool rowwise, bool columnwise) {
+std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_grouped_scales_for_gemm(
+    py::handle &tensor, bool rowwise, bool columnwise) {
   using namespace transformer_engine::pytorch::detail;
 
   auto tensor_nvte = GroupedTensorFromPyTorchGroupedTensor(tensor);

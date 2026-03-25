@@ -27,12 +27,12 @@
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
 #include <transformer_engine/comm_gemm_overlap.h>
+#include <transformer_engine/device_tensor_from_host_pointers.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/fused_router.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/hadamard_transform.h>
-#include <transformer_engine/device_tensor_from_host_pointers.h>
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>
