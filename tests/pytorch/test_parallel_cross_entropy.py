@@ -4,6 +4,7 @@
 
 import random
 import torch
+import torch.nn.functional as F
 from transformer_engine.pytorch import parallel_cross_entropy
 
 from utils import dtype_tols
@@ -14,11 +15,39 @@ class TestParallelCrossEntropy:
     def generate_iters(self, iters: int):
         self.iters = iters
 
-    def generate_infra(self, reduce_loss: bool, label_smoothing: float):
+    def generate_infra(
+        self,
+        reduce_loss: bool,
+        label_smoothing: float,
+        z_loss_weight: float = 0.0,
+        ignore_idx: int = -100,
+    ):
         self.test_loss_func = parallel_cross_entropy
-        self.ref_loss_func = torch.nn.CrossEntropyLoss(
-            label_smoothing=label_smoothing, reduction="mean" if reduce_loss else "none"
-        )
+        if z_loss_weight == 0.0:
+            self.ref_loss_func = torch.nn.CrossEntropyLoss(
+                label_smoothing=label_smoothing,
+                reduction="mean" if reduce_loss else "none",
+                ignore_index=ignore_idx,
+            )
+        else:
+
+            def ref_with_zloss(inp, tar):
+                inp = inp.float()
+                ce = F.cross_entropy(
+                    inp,
+                    tar,
+                    reduction="none",
+                    label_smoothing=label_smoothing,
+                    ignore_index=ignore_idx,
+                )
+                z_pen = z_loss_weight * torch.square(torch.logsumexp(inp, dim=-1))
+                z_pen[tar == ignore_idx] = 0.0
+                loss = ce + z_pen
+                if reduce_loss:
+                    loss = loss.sum() / (tar != ignore_idx).sum()
+                return loss
+
+            self.ref_loss_func = ref_with_zloss
 
     def generate_input(
         self,
@@ -63,14 +92,20 @@ class TestParallelCrossEntropy:
         label_smoothing: float,
         reduce_loss: bool,
         ignore_idx: bool = False,
+        z_loss_weight: float = 0.0,
     ):
 
         # Random data
         self.generate_input(dtype, swap_dim, ignore_idx)
 
-        # Forward pass
+        # Forward pass — default return is a single tensor (backward compatible)
         test_loss = self.test_loss_func(
-            self.input_test, self.tar_test, label_smoothing, reduce_loss, None
+            self.input_test,
+            self.tar_test,
+            label_smoothing,
+            reduce_loss,
+            None,
+            z_loss_weight=z_loss_weight,
         )
         ref_loss = self.ref_loss_func(self.input_ref, self.tar_ref)
 
@@ -166,6 +201,106 @@ class TestParallelCrossEntropy:
                 label_smoothing=0,
                 reduce_loss=True,
                 ignore_idx=True,
+            )
+
+    def test_z_loss(self):
+        self.generate_iters(5)
+        self.generate_infra(False, 0, z_loss_weight=0.001)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=False,
+                z_loss_weight=0.001,
+            )
+
+    def test_z_loss_zero_weight(self):
+        self.generate_infra(False, 0)
+        self.generate_input(torch.float32, False, False)
+
+        inp_base = self.input_test.clone().detach().requires_grad_(True)
+        inp_zero = self.input_test.clone().detach().requires_grad_(True)
+
+        loss_base = self.test_loss_func(inp_base, self.tar_test)
+        loss_zero = self.test_loss_func(inp_zero, self.tar_test, z_loss_weight=0.0)
+
+        assert torch.equal(
+            loss_base, loss_zero
+        ), "z_loss_weight=0.0 must be bit-identical to the default"
+
+        loss_base.sum().backward()
+        loss_zero.sum().backward()
+
+        assert torch.equal(
+            inp_base.grad, inp_zero.grad
+        ), "Gradients with z_loss_weight=0.0 must be bit-identical to the default"
+
+        self.input_test = None
+        self.input_ref = None
+        self.tar_test = None
+        self.tar_ref = None
+
+    def test_z_loss_with_ignore_idx(self):
+        self.generate_iters(5)
+        self.generate_infra(False, 0, z_loss_weight=0.001)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=False,
+                ignore_idx=True,
+                z_loss_weight=0.001,
+            )
+
+    def test_z_loss_reduced(self):
+        self.generate_iters(5)
+        self.generate_infra(True, 0, z_loss_weight=0.001)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=True,
+                z_loss_weight=0.001,
+            )
+
+    def test_z_loss_reduced_with_ignore_idx(self):
+        self.generate_iters(5)
+        self.generate_infra(True, 0, z_loss_weight=0.001)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=True,
+                ignore_idx=True,
+                z_loss_weight=0.001,
+            )
+
+    def test_z_loss_label_smoothing(self):
+        self.generate_iters(3)
+        self.generate_infra(False, 0.1, z_loss_weight=0.001)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0.1,
+                reduce_loss=False,
+                z_loss_weight=0.001,
+            )
+
+    def test_z_loss_bfloat16(self):
+        self.generate_iters(3)
+        self.generate_infra(False, 0, z_loss_weight=0.001)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.bfloat16,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=False,
+                z_loss_weight=0.001,
             )
 
 

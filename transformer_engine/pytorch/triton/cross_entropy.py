@@ -30,6 +30,7 @@ def cross_entropy_forward(
     reduce_loss: bool,
     dist_process_group: Union[dist.ProcessGroup, None],
     ignore_idx: int,
+    z_loss_weight: float = 0.0,
 ):
     """Forward implementation of Cross Entropy kernel"""
 
@@ -100,6 +101,7 @@ def cross_entropy_forward(
         n_non_ignore=n_non_ignore,
         reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,
+        z_loss_weight=z_loss_weight,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=32,
     )
