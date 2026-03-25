@@ -259,9 +259,7 @@ def run_dpa_with_cp(
         if scaling_mode == "current":
             fp8_recipe = Float8CurrentScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
         if scaling_mode == "mxfp8":
-            fp8_recipe = MXFP8BlockScaling(
-                fp8_format=Format.E4M3, fp8_dpa=fp8_dpa, fp8_mha=fp8_mha
-            )
+            fp8_recipe = MXFP8BlockScaling(fp8_format=Format.E4M3, fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
 
     # instantiate attention module
     core_attn = DotProductAttention(

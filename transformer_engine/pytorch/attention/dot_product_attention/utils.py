@@ -346,7 +346,7 @@ def get_attention_backend(
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
     cp_comm_type = attention_params.cp_comm_type
-    cp_size = attention_params.cp_size # pylint: disable=unused-variable
+    cp_size = attention_params.cp_size  # pylint: disable=unused-variable
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
@@ -768,13 +768,19 @@ def get_attention_backend(
         logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
         use_flash_attention = False
         if fp8 and fp8_recipe.fp8_dpa:
-            if use_fused_attention and (device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0)):
-                logger.debug("Disabling FusedAttention for softmax_type = %s in FP8 on sm < 100 with cuDNN"
-                             " version < 9.21", softmax_type)
+            if use_fused_attention and (
+                device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0)
+            ):
+                logger.debug(
+                    "Disabling FusedAttention for softmax_type = %s in FP8 on sm < 100 with cuDNN"
+                    " version < 9.21",
+                    softmax_type,
+                )
                 use_fused_attention = False
             if use_unfused_attention:
                 logger.debug(
-                    "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
+                    "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8",
+                    softmax_type,
                 )
                 use_unfused_attention = False
         if qkv_format == "thd" and cudnn_version < (9, 18, 0):
@@ -965,10 +971,14 @@ def get_attention_backend(
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-        if fp8 and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha) and (device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0)):
+        if (
+            fp8
+            and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha)
+            and (device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0))
+        ):
             logger.debug(
-                "Disabling FusedAttention as it does not support sliding window attention for FP8 on sm < 100 with cuDNN"
-                " version < 9.21"
+                "Disabling FusedAttention as it does not support sliding window attention for FP8"
+                " on sm < 100 with cuDNN version < 9.21"
             )
             use_fused_attention = False
         elif attention_dropout != 0.0:

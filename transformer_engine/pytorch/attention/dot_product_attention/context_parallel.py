@@ -3154,9 +3154,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         new_qkv_layout = qkv_layout
                         if fp8:
                             if not fp8_recipe.mxfp8():
-                                q_part, k_part, v_part = [Float8Tensor.make_like(
-                                    x, data=y, dtype=fwd_nominal_dtype
-                                ) for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])]
+                                q_part, k_part, v_part = [
+                                    Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                                    for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
+                                ]
                             else:
                                 q_part, k_part, v_part, new_qkv_layout = combine_and_quantize(
                                     qkv_layout, q_part, k_part, v_part, QKV_quantizer
@@ -3571,9 +3572,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             # FP8CS+_dpa_fp8_cs_o_in_f16: q/k/v/do in FP8, o in f16
                             # MXFP8: q/k/v/do all in MXFP8, o/do_f16 in F16
                             if not ctx.fp8_recipe.mxfp8():
-                                q_part, k_part, v_part = [Float8Tensor.make_like(
-                                    x, data=y, dtype=ctx.fwd_nominal_dtype
-                                ) for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])]
+                                q_part, k_part, v_part = [
+                                    Float8Tensor.make_like(x, data=y, dtype=ctx.fwd_nominal_dtype)
+                                    for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
+                                ]
                                 if ctx.fp8_recipe.delayed() or (
                                     ctx.fp8_recipe.float8_current_scaling()
                                     and not _dpa_fp8_cs_o_in_f16

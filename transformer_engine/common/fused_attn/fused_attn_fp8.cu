@@ -2334,7 +2334,8 @@ void fused_attn_fp8_bwd_impl_v1(
                                        .set_data_type(o_tensor_type));
         // Descale_q, Descale_q_t, Descale_k, Descale_k_t, Descale_v, Descale_dO, Descale_dO_t
         auto padded = pad_s_d_for_mxfp8(s_q, s_kv, d_qk, d_v);
-        std::vector<int64_t> q_scale_strides(4), q_t_scale_strides(4), k_scale_strides(4), k_t_scale_strides(4), v_scale_strides(4), dO_scale_strides(4), dO_t_scale_strides(4);
+        std::vector<int64_t> q_scale_strides(4), q_t_scale_strides(4), k_scale_strides(4),
+            k_t_scale_strides(4), v_scale_strides(4), dO_scale_strides(4), dO_t_scale_strides(4);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_qk_scale_padded,
                                         q_scale_strides.data(), q_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_qk_padded,
@@ -2490,15 +2491,15 @@ void fused_attn_fp8_bwd_impl_v1(
 
       std::shared_ptr<fe::graph::Tensor_attributes> dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP;
       if (is_delayed_scaling || is_current_scaling) {
-        std::tie(dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP) = std::apply(
-            [](const auto &...elems) { return std::make_tuple(elems...); },
-            mha_graph->sdpa_fp8_backward(Q, K, V, O, dO, Stats, descale_q, descale_k, descale_v,
-                                         descale_o, descale_dO, descale_s, descale_dP, scale_s,
-                                         scale_dQ, scale_dK, scale_dV, scale_dP,
-                                         sdpa_backward_options));
+        std::tie(dQ, dK, dV, amax_dQ, amax_dK, amax_dV, amax_dP) =
+            std::apply([](const auto&... elems) { return std::make_tuple(elems...); },
+                       mha_graph->sdpa_fp8_backward(Q, K, V, O, dO, Stats, descale_q, descale_k,
+                                                    descale_v, descale_o, descale_dO, descale_s,
+                                                    descale_dP, scale_s, scale_dQ, scale_dK,
+                                                    scale_dV, scale_dP, sdpa_backward_options));
       } else if (is_mxfp8) {
         std::tie(dQ, dK, dV, amax_dQ, amax_dK, amax_dV) = std::apply(
-            [](const auto &...elems) { return std::make_tuple(elems...); },
+            [](const auto&... elems) { return std::make_tuple(elems...); },
             mha_graph->sdpa_fp8_backward(Q, Q_t, K, K_t, V, O, dO_f16, dO, dO_t, Stats, descale_q,
                                          descale_q_t, descale_k, descale_k_t, descale_v, descale_dO,
                                          descale_dO_t, sdpa_backward_options));
