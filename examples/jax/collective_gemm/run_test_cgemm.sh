@@ -93,50 +93,63 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
   # Clear PIDs array for this test case
   PIDS=()
 
-  for i in $(seq 0 $(($NUM_GPUS - 1))); do
-    # Define output file for logs
-    LOG_FILE="${TEST_NAME}_gpu_${i}.log"
+  BACKENDS=("cublasmp" "userbuffers")
+  for BACKEND in "${BACKENDS[@]}"; do
+    echo "Setting backend to $BACKEND for test $TEST_NAME"
 
-    if [ $i -eq 0 ]; then
-      # For process 0: show live output AND save to log file using tee
-      echo "=== Live output from process 0 ==="
-      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
-        -vs --junitxml=$XML_LOG_DIR/collective_gemm_${TEST_NAME}.xml \
-        "$TE_PATH/examples/jax/collective_gemm/$TEST_CASE" \
-        --num-processes=$NUM_GPUS \
-        --process-id=$i 2>&1 | tee "$LOG_FILE" &
-      PID=$!
-      PIDS+=($PID)
+    for i in $(seq 0 $(($NUM_GPUS - 1))); do
+      # Define output file for logs
+      LOG_FILE="${TEST_NAME}_gpu_${i}_${BACKEND}.log"
+
+      test_args=(
+        "--num-processes=$NUM_GPUS"
+        "--process-id=$i"
+      )
+      if [ "$BACKEND" == "cublasmp" ]; then
+        test_args+=("--use-cublasmp")
+      fi
+
+      if [ $i -eq 0 ]; then
+        # For process 0: show live output AND save to log file using tee
+        echo "=== Live output from process 0 ==="
+        pytest -s -c "${TE_PATH}/tests/jax/pytest.ini" -vs \
+          "--junitxml=${XML_LOG_DIR}/${TEST_NAME}_gpu_${i}_${BACKEND}.xml" \
+          "${TE_PATH}/examples/jax/collective_gemm/${TEST_CASE}" \
+          "${test_args[@]}" 2>&1 | tee "$LOG_FILE" &
+        PID=$!
+        PIDS+=($PID)
+      else
+        # For other processes: redirect to log files only
+        pytest -s -c "${TE_PATH}/tests/jax/pytest.ini" -vs \
+          "${TE_PATH}/examples/jax/collective_gemm/${TEST_CASE}" \
+          "${test_args[@]}" > "$LOG_FILE" 2>&1 &
+        PID=$!
+        PIDS+=($PID)
+      fi
+    done
+
+    # Wait for all processes to finish
+    wait
+
+    # Check and print the log content from process 0
+    if grep -q "SKIPPED" "${TEST_NAME}_gpu_0_${BACKEND}.log"; then
+      echo "... $TEST_CASE SKIPPED"
+    elif grep -q "FAILED" "${TEST_NAME}_gpu_0_${BACKEND}.log"; then
+      echo "... $TEST_CASE FAILED"
+      HAS_FAILURE=1
+    elif grep -q "PASSED" "${TEST_NAME}_gpu_0_${BACKEND}.log"; then
+      echo "... $TEST_CASE PASSED"
     else
-      # For other processes: redirect to log files only
-      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
-        -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_CASE" \
-        --num-processes=$NUM_GPUS \
-        --process-id=$i > "$LOG_FILE" 2>&1 &
-      PID=$!
-      PIDS+=($PID)
+      echo "... $TEST_CASE INVALID"
+      HAS_FAILURE=1
     fi
+
+
+    # Remove the log files after processing them
+    wait
+    rm ${TEST_NAME}_gpu_*_${BACKEND}.log
+
   done
-
-  # Wait for all processes to finish
-  wait
-
-  # Check and print the log content from process 0
-  if grep -q "SKIPPED" "${TEST_NAME}_gpu_0.log"; then
-    echo "... $TEST_CASE SKIPPED"
-  elif grep -q "FAILED" "${TEST_NAME}_gpu_0.log"; then
-    echo "... $TEST_CASE FAILED"
-    HAS_FAILURE=1
-  elif grep -q "PASSED" "${TEST_NAME}_gpu_0.log"; then
-    echo "... $TEST_CASE PASSED"
-  else
-    echo "... $TEST_CASE INVALID"
-    HAS_FAILURE=1
-  fi
-
-  # Remove the log files after processing them
-  wait
-  rm ${TEST_NAME}_gpu_*.log
 done
 
 wait

@@ -594,6 +594,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("comm_cga_size") = 2, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
            py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
            py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
+      .def(py::init<CommOverlapHelper *, int, int, int, bool>(), py::arg("helper"),
+           py::arg("tp_rank"), py::arg("tp_size"), py::arg("num_comm_sm") = 16,
+           py::arg("atomic_gemm") = false, py::call_guard<py::gil_scoped_release>())
       .def("copy_into_buffer",
            static_cast<void (CommOverlap::*)(const at::Tensor &, bool)>(
                &CommOverlap::copy_into_buffer),
@@ -614,6 +617,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
+      .def(py::init<CommOverlapHelper *, int, int, int, bool>(), py::arg("helper"),
+           py::arg("tp_rank"), py::arg("tp_size"), py::arg("num_comm_sm") = 1,
+           py::arg("atomic_gemm") = false, py::call_guard<py::gil_scoped_release>())
       .def("copy_into_buffer",
            static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(
                &CommOverlapP2P::copy_into_buffer),
