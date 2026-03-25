@@ -380,7 +380,7 @@ struct AdamFunctor {
   }
 };
 
-template <typename T, typename FULL_T, typename MOMENT_T>
+template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename MOMENT_T>
 struct AdamCapturableFunctor {
   __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<4> &tl,  // NOLINT(*)
@@ -404,10 +404,10 @@ struct AdamCapturableFunctor {
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
     int64_t n = tl.sizes[tensor_loc];
 
-    T *g = reinterpret_cast<T *>(tl.addresses[0][tensor_loc]);
+    GRAD_T *g = reinterpret_cast<GRAD_T *>(tl.addresses[0][tensor_loc]);
     g += chunk_idx * chunk_size;
 
-    T *p = reinterpret_cast<T *>(tl.addresses[1][tensor_loc]);
+    PARAM_T *p = reinterpret_cast<PARAM_T *>(tl.addresses[1][tensor_loc]);
     p += chunk_idx * chunk_size;
 
     MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_loc]);
@@ -429,7 +429,7 @@ struct AdamCapturableFunctor {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
           r_g[ii] = static_cast<MATH_T>(g[i]) * (*inv_scale);
-          g[i] = static_cast<T>(r_g[ii]);
+          g[i] = static_cast<GRAD_T>(r_g[ii]);
           r_p[ii] = static_cast<MATH_T>(p[i]);
           r_m[ii] = static_cast<MATH_T>(m[i]);
           r_v[ii] = static_cast<MATH_T>(v[i]);
@@ -465,7 +465,7 @@ struct AdamCapturableFunctor {
       for (int ii = 0; ii < ILP; ii++) {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
-          p[i] = static_cast<T>(r_p[ii]);
+          p[i] = static_cast<PARAM_T>(r_p[ii]);
           m[i] = static_cast<MOMENT_T>(r_m[ii]);
           v[i] = static_cast<MOMENT_T>(r_v[ii]);
         }
@@ -874,13 +874,14 @@ void multi_tensor_adam_capturable_cuda(int chunk_size, Tensor noop_flag,
 
   // Check tensor dtypes
   const auto g_in_type_te = tensor_lists[0][0]->dtype();
+  const auto p_in_type_te = tensor_lists[1][0]->dtype();
   for (size_t j = 0; j < num_tensors_per_list; j++) {
     NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te, "Grad tensor ", j,
                " has dtype=", to_string(tensor_lists[0][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[1][j]->dtype() == g_in_type_te, "Param tensor ", j,
+    NVTE_CHECK(tensor_lists[1][j]->dtype() == p_in_type_te, "Param tensor ", j,
                " has dtype=", to_string(tensor_lists[1][j]->dtype()),
-               ", but expected dtype=", to_string(g_in_type_te));
+               ", but expected dtype=", to_string(p_in_type_te));
     {
       const bool m_is_fp32 = tensor_lists[2][j]->dtype() == DType::kFloat32;
       const bool m_is_bf16 = tensor_lists[2][j]->dtype() == DType::kBFloat16;
@@ -899,14 +900,17 @@ void multi_tensor_adam_capturable_cuda(int chunk_size, Tensor noop_flag,
 
   // Launch kernel
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      tensor_lists[0][0]->dtype(), dtype,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
-          moment_type_te, moment_type,
-          multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                AdamCapturableFunctor<dtype, float, moment_type>(), stream, beta1,
-                                beta2, reinterpret_cast<int *>(step.data.dptr), bias_correction,
-                                epsilon, reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode,
-                                weight_decay, reinterpret_cast<float *>(inv_scale.data.dptr));))
+      p_in_type_te, p_in_type,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+          g_in_type_te, g_in_type,
+          TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+              moment_type_te, moment_type,
+              multi_tensor_apply<4>(
+                  BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                  AdamCapturableFunctor<p_in_type, g_in_type, float, moment_type>(), stream, beta1,
+                  beta2, reinterpret_cast<int *>(step.data.dptr), bias_correction, epsilon,
+                  reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode, weight_decay,
+                  reinterpret_cast<float *>(inv_scale.data.dptr));)))
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
