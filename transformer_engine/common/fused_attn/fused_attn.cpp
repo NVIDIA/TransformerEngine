@@ -310,7 +310,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // architecture
         ((cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90)) ||
          (cudnn_runtime_version >= 8903 && sm_arch_ >= 80 && sm_arch_ < 100) ||
-         (cudnn_runtime_version >= 90700 && sm_arch_ >= 80)) &&
+         (cudnn_runtime_version >= 90700 && sm_arch_ >= 100)) &&
         // sequence length
         ((cudnn_runtime_version < 90000 && max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0) ||
          (cudnn_runtime_version >= 90000)) &&
@@ -534,6 +534,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         std::cout << "Warning: Given combination of sm_arch_ == 120 and cudnn_runtime_version < "
                      "91801 is not supported. "
                   << " Please upgrade your cuDNN version if possible." << std::endl;
+      } else if (deterministic && is_training) {
+        backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+        std::cout << "Warning: Deterministic fused attention on SM120 is not supported."
+                  << std::endl;
       } else {
         // Known missing support for T3HD/TH3D layouts on SM120
         const bool is_t3hd_or_th3d =
