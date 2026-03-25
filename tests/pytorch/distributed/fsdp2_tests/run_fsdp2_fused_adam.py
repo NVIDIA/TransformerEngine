@@ -471,7 +471,8 @@ def test_safetensors_fp32_export(recipe_name):
     if recipe_name == "MXFP8BlockScaling":
         pytest.xfail(
             "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access"
+            "MXFP8 quantized tensors, causing illegal memory access. "
+            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
         )
 
     from safetensors.torch import load_file, save_file
@@ -560,7 +561,8 @@ def test_dcp_output_parity(recipe_name, async_save):
             "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
             "MXFP8 quantized tensors, causing illegal memory access: "
             "/transformer_engine/common/multi_tensor/multi_tensor_apply.cuh:92 in function "
-            "multi_tensor_apply: CUDA Error: an illegal memory access was encountered"
+            "multi_tensor_apply: CUDA Error: an illegal memory access was encountered. "
+            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
         )
 
     if recipe_name == "NVFP4BlockScaling":
@@ -765,7 +767,8 @@ def test_dcp_resharding_save(recipe_name):
     if recipe_name == "MXFP8BlockScaling":
         pytest.xfail(
             "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access"
+            "MXFP8 quantized tensors, causing illegal memory access. "
+            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
         )
     if recipe_name == "NVFP4BlockScaling":
         pytest.xfail(
@@ -852,7 +855,8 @@ def test_dcp_resharding_load(recipe_name):
     if recipe_name == "MXFP8BlockScaling":
         pytest.xfail(
             "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access"
+            "MXFP8 quantized tensors, causing illegal memory access. "
+            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
         )
     if recipe_name == "NVFP4BlockScaling":
         pytest.xfail(
