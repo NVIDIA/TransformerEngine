@@ -162,6 +162,7 @@ _run_shadow_f16_bwd = os.getenv("NVTE_RUN_SHADOW_F16_BWD", "0") == "1"
 _replace_dq_with_shadow_f16 = os.getenv("NVTE_REPLACE_DQ_WITH_SHADOW_F16", "0") == "1"
 _replace_dk_with_shadow_f16 = os.getenv("NVTE_REPLACE_DK_WITH_SHADOW_F16", "0") == "1"
 _replace_dv_with_shadow_f16 = os.getenv("NVTE_REPLACE_DV_WITH_SHADOW_F16", "0") == "1"
+_qdq_dO_in_bwd = os.getenv("NVTE_QDQ_DO_IN_BWD", "0") == "1"
 
 
 class FP8EmulationFunc(torch.autograd.Function):
@@ -1614,6 +1615,16 @@ class FusedAttnFunc(torch.autograd.Function):
     def backward(ctx, d_out, *_args):
         # pylint: disable=missing-function-docstring
         d_out_shadow_f16 = d_out
+        if ctx.fp8 and _run_shadow_f16_bwd and _qdq_dO_in_bwd and ctx.fp8_recipe.mxfp8():
+            d_out_shadow_f16, _ = dpa_utils.permute_to_grouped_tensor(ctx.o_format, d_out_shadow_f16)
+            tmp_quantizer = ctx.dO_quantizer.copy()
+            tmp_quantizer.optimize_for_gemm = False
+            d_out_shadow_fp8 = tmp_quantizer(d_out_shadow_f16)
+            d_out_shadow_f16 = d_out_shadow_fp8.dequantize(dtype=ctx.nominal_dtype)
+            if ctx.o_format == "bshd":
+                d_out_shadow_f16 = d_out_shadow_f16.permute(0, 2, 1, 3).contiguous()
+            elif ctx.o_format == "sbhd":
+                d_out_shadow_f16 = d_out_shadow_f16.permute(2, 0, 1, 3).contiguous()
 
         # d_out:     torch.Tensor; dtype = torch.float16 or torch.bfloat16
         # d_out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
