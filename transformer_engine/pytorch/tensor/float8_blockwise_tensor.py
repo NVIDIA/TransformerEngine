@@ -54,6 +54,45 @@ class Float8BlockQuantizer(Quantizer):
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
 
+    def __eq__(self, other):
+        if not isinstance(other, Float8BlockQuantizer):
+            return NotImplemented
+        return (
+            self.dtype == other.dtype
+            and self.force_pow_2_scales == other.force_pow_2_scales
+            and self.amax_epsilon == other.amax_epsilon
+            and self.block_scaling_dim == other.block_scaling_dim
+            and self.rowwise_usage == other.rowwise_usage
+            and self.columnwise_usage == other.columnwise_usage
+        )
+
+    def __hash__(self):
+        return hash(
+            (
+                type(self),
+                self.dtype,
+                self.force_pow_2_scales,
+                self.amax_epsilon,
+                self.block_scaling_dim,
+                self.rowwise_usage,
+                self.columnwise_usage,
+            )
+        )
+
+    def __fx_repr__(self):
+        return (
+            (
+                "Float8BlockQuantizer("
+                f"fp8_dtype=TE_DType.{self.dtype.name}, "
+                f"rowwise={self.rowwise_usage}, "
+                f"columnwise={self.columnwise_usage}, "
+                f"amax_epsilon={self.amax_epsilon}, "
+                f"force_pow_2_scales={self.force_pow_2_scales}, "
+                f"block_scaling_dim={self.block_scaling_dim})"
+            ),
+            {"Float8BlockQuantizer": Float8BlockQuantizer, "TE_DType": TE_DType},
+        )
+
     def copy(self) -> Float8BlockQuantizer:
         """Create shallow copy"""
 

@@ -13,6 +13,13 @@ import math
 import torch
 from torch.utils._pytree import tree_map
 
+try:
+    from torch._opaque_base import OpaqueBaseMeta
+
+    _HAS_OPAQUE_BASE = True
+except ImportError:
+    _HAS_OPAQUE_BASE = False
+
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
@@ -195,12 +202,21 @@ def restore_from_func_ctx(ctx: torch.autograd.function.FunctionCtx, return_saved
     out = restore_from_saved(
         ctx.tensor_objects, ctx.saved_tensors, return_saved_tensors=return_saved_tensors
     )
-    # Delete the references to tensor objects once they've been consumed by the `restore_from_saved` method to construct back the actual tensors.
     ctx.tensor_objects = None
     return out
 
 
-class Quantizer(abc.ABC):
+if _HAS_OPAQUE_BASE:
+
+    class _TEQuantizerMeta(OpaqueBaseMeta, abc.ABCMeta):
+        """Metaclass combining OpaqueBaseMeta (for torch.compile opaque objects)
+        and ABCMeta (for abstract quantizer methods)."""
+
+else:
+    _TEQuantizerMeta = abc.ABCMeta
+
+
+class Quantizer(metaclass=_TEQuantizerMeta):
     """Builder class for quantized tensors.
 
     This class is typically used to convert a high-precision tensor
