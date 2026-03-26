@@ -254,11 +254,7 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_sum_Output_x_Grad += local_grad[i] * act_output[i];
       }
-      // Warp reduce the sum
-      for (int s = 16; s > 0; s /= 2) {
-        local_sum_Output_x_Grad += __shfl_xor_sync(0xffffffff, local_sum_Output_x_Grad, s);
-      }
-      CompType sum_Output_x_Grad = local_sum_Output_x_Grad;
+      CompType sum_Output_x_Grad = warp_reduce_sum_float(local_sum_Output_x_Grad);
       // In-place update
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_grad[i] = local_grad[i] / (sum_fwd_input + epsilon) -
