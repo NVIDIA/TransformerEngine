@@ -2353,25 +2353,17 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
     """Combine q,k,v based on qkv_layout and quantize them together"""
     if isinstance(qkv_quantizer, MXFP8Quantizer):
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
-        # q_orig, k_orig, v_orig = q, k, v
-        # # permute q, k, v to bhsd/htd format
-        # if qkv_layout in ["bshd_bshd_bshd", "sbhd_sbhd_sbhd"]:
-        #     print(f">>>>>>>>>>>> {qkv_layout} PermuteToGroupedTensor")
-        #     q, k, v = PermuteToGroupedTensor.apply(q, k, v, qkv_layout)
-        # # else:
-        #     if q_format not in ["bhsd", "htd"]:
-        #         q_, _ = permute_to_grouped_tensor(q_format, q_orig)
-        #     if kv_format not in ["bhsd", "htd"]:
-        #         k_, _ = permute_to_grouped_tensor(kv_format, k_orig)
-        #         v_, _ = permute_to_grouped_tensor(kv_format, v_orig)
-        #     torch.testing.assert_close(q_, q)
-        #     torch.testing.assert_close(k_, k)
-        #     torch.testing.assert_close(v_, v)
-        if q_format not in ["bhsd", "htd"]:
-            q, _ = permute_to_grouped_tensor(q_format, q)
-        if kv_format not in ["bhsd", "htd"]:
-            k, _ = permute_to_grouped_tensor(kv_format, k)
-            v, _ = permute_to_grouped_tensor(kv_format, v)
+        # permute q, k, v to bhsd/htd format
+        qkv_contiguous_block = False
+        if qkv_layout in ["bshd_bshd_bshd", "sbhd_sbhd_sbhd"]:
+            q, k, v = PermuteToGroupedTensor.apply(q, k, v, qkv_layout)
+            qkv_contiguous_block = True
+        else:
+            if q_format not in ["bhsd", "htd"]:
+                q, _ = permute_to_grouped_tensor(q_format, q)
+            if kv_format not in ["bhsd", "htd"]:
+                k, _ = permute_to_grouped_tensor(kv_format, k)
+                v, _ = permute_to_grouped_tensor(kv_format, v)
 
         qkv_layout = "bhsd_bhsd_bhsd" if qkv_format != "thd" else "htd_htd_htd"
         # check shapes
@@ -2384,33 +2376,37 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
         )
         q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
         # quantize q, k, v
-        if d_qk == d_v:
-            input_tensors = [q, k, v]
-            num_tensors = len(input_tensors)
-            shapes = [x.shape for x in input_tensors]
-            grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
-                num_tensors=num_tensors,
-                shapes=shapes,
-                quantizer=qkv_quantizer,
-                device="cuda",
-                dtype=q.dtype,
-            )
-            quantized_tensors = grouped_tensor.quantize(input_tensors)
-            q_fp8, k_fp8, v_fp8 = quantized_tensors[0], quantized_tensors[1], quantized_tensors[2]
-        else:
-            input_tensors = [q, k]
-            num_tensors = len(input_tensors)
-            shapes = [x.shape for x in input_tensors]
-            grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
-                num_tensors=num_tensors,
-                shapes=shapes,
-                quantizer=qkv_quantizer,
-                device="cuda",
-                dtype=q.dtype,
-            )
-            quantized_tensors = grouped_tensor.quantize(input_tensors)
-            q_fp8, k_fp8 = quantized_tensors[0], quantized_tensors[1]
-            v_fp8 = qkv_quantizer(v)
+        # if qkv_contiguous_block:
+        #     if d_qk == d_v:
+        #         first_dims = torch.tensor(
+        #             [q.shape[0], k.shape[0], v.shape[0]], dtype=torch.int64, device=q.device
+        #         )
+        #         qkv_2d = torch.cat([q, k, v], dim=0)
+        #         grouped_tensor = tex.group_quantize(qkv_2d, qkv_quantizer, 3, first_dims)
+        #         quantized_tensors = grouped_tensor.split_into_quantized_tensors()
+        #         q_fp8, k_fp8, v_fp8 = quantized_tensors[0], quantized_tensors[1], quantized_tensors[2]
+        #     else:
+        #         first_dims = torch.tensor([q.shape[0], k.shape[0]], dtype=torch.int64, device=q.device)
+        #         qk_2d = torch.cat([q, k], dim=0)
+        #         grouped_tensor = tex.group_quantize(qk_2d, qkv_quantizer, 2, first_dims)
+        #         q_fp8, k_fp8 = grouped_tensor.split_into_quantized_tensors()
+        #         v_fp8 = qkv_quantizer(v)
+        # else:
+        #     input_tensors = [q, k, v]
+        #     num_tensors = len(input_tensors)
+        #     shapes = [x.shape for x in input_tensors]
+        #     grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
+        #         num_tensors=num_tensors,
+        #         shapes=shapes,
+        #         quantizer=qkv_quantizer,
+        #         device="cuda",
+        #         dtype=q.dtype,
+        #     )
+        #     quantized_tensors = grouped_tensor.quantize(input_tensors)
+        #     q_fp8, k_fp8, v_fp8 = quantized_tensors[0], quantized_tensors[1], quantized_tensors[2]
+        # else:
+        #     q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
+        q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
         # view rowwise/columnwise data back to original shapes, not rowwise_scale_inv/columnwise_scale_inv
         q_fp8, k_fp8, v_fp8 = [x.view(s) for x, s in zip([q_fp8, k_fp8, v_fp8], original_shapes)]
 
