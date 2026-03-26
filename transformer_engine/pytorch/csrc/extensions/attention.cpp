@@ -684,9 +684,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_fwd(at:
                  value.size(original_layout == NVTE_SBHD_SBHD_SBHD ? 1 : 0) == B,
              "permute_to_grouped_tensor_fwd: Q/K/V batch dimension must match.");
 
-  at::Tensor q_out = at::empty({B, H_q, S_q, D_qk}, query.options());
-  at::Tensor k_out = at::empty({B, H_kv, S_kv, D_qk}, key.options());
-  at::Tensor v_out = at::empty({B, H_kv, S_kv, D_v}, value.options());
+  const int64_t numel_q = B * H_q * S_q * D_qk;
+  const int64_t numel_k = B * H_kv * S_kv * D_qk;
+  const int64_t numel_v = B * H_kv * S_kv * D_v;
+  at::Tensor qkv_out_flat = at::empty({numel_q + numel_k + numel_v}, query.options());
+  at::Tensor q_out = qkv_out_flat.narrow(0, 0, numel_q).view({B, H_q, S_q, D_qk});
+  at::Tensor k_out = qkv_out_flat.narrow(0, numel_q, numel_k).view({B, H_kv, S_kv, D_qk});
+  at::Tensor v_out = qkv_out_flat.narrow(0, numel_q + numel_k, numel_v).view({B, H_kv, S_kv, D_v});
 
   auto te_q = makeTransformerEngineTensor(query);
   auto te_k = makeTransformerEngineTensor(key);
@@ -722,17 +726,22 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_bwd(
   const int64_t S_kv = key_grad.size(2);
   const int64_t D_v = value_grad.size(3);
 
+  const int64_t numel_q = S_q * B * H_q * D_qk;
+  const int64_t numel_k = S_kv * B * H_kv * D_qk;
+  const int64_t numel_v = S_kv * B * H_kv * D_v;
+  at::Tensor qkv_grad_flat = at::empty({numel_q + numel_k + numel_v}, query_grad.options());
+
   at::Tensor query;
   at::Tensor key;
   at::Tensor value;
   if (original_layout == NVTE_SBHD_SBHD_SBHD) {
-    query = at::empty({S_q, B, H_q, D_qk}, query_grad.options());
-    key = at::empty({S_kv, B, H_kv, D_qk}, key_grad.options());
-    value = at::empty({S_kv, B, H_kv, D_v}, value_grad.options());
+    query = qkv_grad_flat.narrow(0, 0, numel_q).view({S_q, B, H_q, D_qk});
+    key = qkv_grad_flat.narrow(0, numel_q, numel_k).view({S_kv, B, H_kv, D_qk});
+    value = qkv_grad_flat.narrow(0, numel_q + numel_k, numel_v).view({S_kv, B, H_kv, D_v});
   } else {
-    query = at::empty({B, S_q, H_q, D_qk}, query_grad.options());
-    key = at::empty({B, S_kv, H_kv, D_qk}, key_grad.options());
-    value = at::empty({B, S_kv, H_kv, D_v}, value_grad.options());
+    query = qkv_grad_flat.narrow(0, 0, numel_q).view({B, S_q, H_q, D_qk});
+    key = qkv_grad_flat.narrow(0, numel_q, numel_k).view({B, S_kv, H_kv, D_qk});
+    value = qkv_grad_flat.narrow(0, numel_q + numel_k, numel_v).view({B, S_kv, H_kv, D_v});
   }
 
   auto te_gq = makeTransformerEngineTensor(query_grad);
