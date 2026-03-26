@@ -283,6 +283,38 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DBiasQuantizeHandler, DBiasQuantizeFFI,
                                   .Attr<bool>("use_rht"),
                               FFI_CudaGraph_Traits);
 
+Error_Type DBiasQuantizeInitializeFFI(cudaStream_t stream, Buffer_Type input_buf,
+                                      Buffer_Type scale_buf, Buffer_Type amax_buf,
+                                      Result_Type output_buf, Result_Type output_trans_buf,
+                                      Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
+                                      Result_Type updated_amax_buf, Result_Type dbias_buf,
+                                      Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode,
+                                      int64_t quantize_layout_enum, bool is_dbias,
+                                      int64_t flatten_axis) {
+  return wrapInStreamCapture(std::function(DBiasQuantizeFFI), stream, input_buf, scale_buf,
+                             amax_buf, output_buf, output_trans_buf, scale_inv_buf,
+                             colwise_scale_inv_buf, updated_amax_buf, dbias_buf, workspace_buf,
+                             scaling_mode, quantize_layout_enum, is_dbias, flatten_axis);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(DBiasQuantizeInitializeHandler, DBiasQuantizeInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // amax
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // colwise output
+                                  .Ret<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>()      // scale_inv colwise
+                                  .Ret<Buffer_Type>()      // amax
+                                  .Ret<Buffer_Type>()      // dbias
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<int64_t>("q_layout")
+                                  .Attr<bool>("is_dbias")
+                                  .Attr<int64_t>("flatten_axis"));
+
 Error_Type DequantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
                          Buffer_Type scale_buf, Buffer_Type scale_inv_buf, Result_Type output_buf) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
@@ -313,6 +345,22 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DequantizeHandler, DequantizeFFI,
                                   .Arg<Buffer_Type>()      // scale_inv
                                   .Ret<Buffer_Type>(),     // output
                               FFI_CudaGraph_Traits);
+
+Error_Type DequantizeInitializeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
+                                   Buffer_Type scale_buf, Buffer_Type scale_inv_buf,
+                                   Result_Type output_buf) {
+  return wrapInStreamCapture(std::function(DequantizeFFI), stream, input_buf, amax_buf, scale_buf,
+                             scale_inv_buf, output_buf);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(DequantizeInitializeHandler, DequantizeInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Arg<Buffer_Type>()      // amax
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>());    // output
 
 Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Type scales,
                               Buffer_Type group_sizes, Result_Type outputs,
@@ -492,6 +540,32 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeHandler, GroupedQuantizeFFI,
                                   .Ret<Buffer_Type>()      // amax
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<JAXX_Quantize_Layout>("q_layout")
+                                  .Attr<int64_t>("flatten_axis"));
+
+Error_Type GroupedQuantizeInitializeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Type scales,
+                                        Buffer_Type group_sizes, Result_Type outputs,
+                                        Result_Type colwise_outputs, Result_Type scale_invs,
+                                        Result_Type colwise_scale_invs, Result_Type amaxs,
+                                        JAXX_Scaling_Mode scaling_mode,
+                                        int64_t quantize_layout_enum, int64_t flatten_axis) {
+  return wrapInStreamCapture(std::function(GroupedQuantizeFFI), stream, inputs, scales, group_sizes,
+                             outputs, colwise_outputs, scale_invs, colwise_scale_invs, amaxs,
+                             scaling_mode, quantize_layout_enum, flatten_axis);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeInitializeHandler, GroupedQuantizeInitializeFFI,
+                              FFI::Bind<FFI_Initialize>()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // group_sizes
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // colwise output
+                                  .Ret<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>()      // scale_inv colwise
+                                  .Ret<Buffer_Type>()      // amax
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<int64_t>("q_layout")
                                   .Attr<int64_t>("flatten_axis"));
 
 }  // namespace jax
