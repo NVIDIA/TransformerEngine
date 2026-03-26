@@ -109,15 +109,17 @@ class Float8BlockQuantizer(Quantizer):
         if not src.is_contiguous():
             src = src.contiguous()
 
-        # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        # Launch cast kernel via stable ABI
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+        quantize_into(src, self, dst, noop_flag)
 
         dst._fp8_dtype = self.dtype
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
-        return tex.quantize(tensor, self)
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+        return quantize_new(tensor, self)
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Scaling tensor shape.

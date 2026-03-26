@@ -209,7 +209,7 @@ if __name__ == "__main__":
 
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
             if "pytorch" in frameworks:
-                from build_tools.pytorch import setup_pytorch_extension
+                from build_tools.pytorch import setup_pytorch_extension, setup_pytorch_stable_extension
 
                 ext_modules.append(
                     setup_pytorch_extension(
@@ -218,6 +218,13 @@ if __name__ == "__main__":
                         current_file_path / "transformer_engine",
                     )
                 )
+                stable_ext = setup_pytorch_stable_extension(
+                    "transformer_engine/pytorch/csrc",
+                    current_file_path / "transformer_engine" / "pytorch" / "csrc",
+                    current_file_path / "transformer_engine",
+                )
+                if stable_ext is not None:
+                    ext_modules.append(stable_ext)
             if "jax" in frameworks:
                 from build_tools.jax import setup_jax_extension
 
