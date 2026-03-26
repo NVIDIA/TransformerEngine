@@ -647,6 +647,108 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
   return qkv;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_fwd(at::Tensor query,
+                                                                             at::Tensor key,
+                                                                             at::Tensor value,
+                                                                             NVTE_QKV_Layout original_layout) {
+  NVTE_CHECK(original_layout == NVTE_SBHD_SBHD_SBHD || original_layout == NVTE_BSHD_BSHD_BSHD,
+             "permute_to_grouped_tensor_fwd: original_layout must be NVTE_SBHD_SBHD_SBHD or NVTE_BSHD_BSHD_BSHD.");
+  NVTE_CHECK(query.is_cuda() && key.is_cuda() && value.is_cuda());
+  NVTE_CHECK(query.is_contiguous() && key.is_contiguous() && value.is_contiguous());
+  NVTE_CHECK(query.dim() == 4 && key.dim() == 4 && value.dim() == 4);
+  NVTE_CHECK(query.scalar_type() == at::ScalarType::Half ||
+             query.scalar_type() == at::ScalarType::BFloat16);
+  NVTE_CHECK(key.scalar_type() == query.scalar_type() && value.scalar_type() == query.scalar_type());
+
+  int64_t B = 0;
+  int64_t S_q = 0, H_q = 0, D_qk = 0;
+  int64_t S_kv = 0, H_kv = 0, D_v = 0;
+  if (original_layout == NVTE_SBHD_SBHD_SBHD) {
+    S_q = query.size(0);
+    B = query.size(1);
+    H_q = query.size(2);
+    D_qk = query.size(3);
+    S_kv = key.size(0);
+    H_kv = key.size(2);
+    D_v = value.size(3);
+  } else {
+    B = query.size(0);
+    S_q = query.size(1);
+    H_q = query.size(2);
+    D_qk = query.size(3);
+    S_kv = key.size(1);
+    H_kv = key.size(2);
+    D_v = value.size(3);
+  }
+  NVTE_CHECK(key.size(original_layout == NVTE_SBHD_SBHD_SBHD ? 1 : 0) == B &&
+                 value.size(original_layout == NVTE_SBHD_SBHD_SBHD ? 1 : 0) == B,
+             "permute_to_grouped_tensor_fwd: Q/K/V batch dimension must match.");
+
+  at::Tensor q_out = at::empty({B, H_q, S_q, D_qk}, query.options());
+  at::Tensor k_out = at::empty({B, H_kv, S_kv, D_qk}, key.options());
+  at::Tensor v_out = at::empty({B, H_kv, S_kv, D_v}, value.options());
+
+  auto te_q = makeTransformerEngineTensor(query);
+  auto te_k = makeTransformerEngineTensor(key);
+  auto te_v = makeTransformerEngineTensor(value);
+  auto te_qo = makeTransformerEngineTensor(q_out);
+  auto te_ko = makeTransformerEngineTensor(k_out);
+  auto te_vo = makeTransformerEngineTensor(v_out);
+
+  nvte_permute_to_grouped_tensor_fwd(
+      te_q.data(), te_k.data(), te_v.data(), te_qo.data(), te_ko.data(), te_vo.data(),
+      original_layout, at::cuda::getCurrentCUDAStream());
+
+  return std::make_tuple(q_out, k_out, v_out);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_bwd(
+    at::Tensor query_grad, at::Tensor key_grad, at::Tensor value_grad, NVTE_QKV_Layout original_layout) {
+  NVTE_CHECK(original_layout == NVTE_SBHD_SBHD_SBHD || original_layout == NVTE_BSHD_BSHD_BSHD,
+             "permute_to_grouped_tensor_bwd: original_layout must be NVTE_SBHD_SBHD_SBHD or NVTE_BSHD_BSHD_BSHD.");
+  NVTE_CHECK(query_grad.is_cuda() && key_grad.is_cuda() && value_grad.is_cuda());
+  NVTE_CHECK(query_grad.is_contiguous() && key_grad.is_contiguous() && value_grad.is_contiguous());
+  NVTE_CHECK(query_grad.dim() == 4 && key_grad.dim() == 4 && value_grad.dim() == 4);
+  NVTE_CHECK(query_grad.scalar_type() == at::ScalarType::Half ||
+             query_grad.scalar_type() == at::ScalarType::BFloat16);
+  NVTE_CHECK(key_grad.scalar_type() == query_grad.scalar_type() &&
+             value_grad.scalar_type() == query_grad.scalar_type());
+
+  const int64_t B = query_grad.size(0);
+  const int64_t H_q = query_grad.size(1);
+  const int64_t S_q = query_grad.size(2);
+  const int64_t D_qk = query_grad.size(3);
+  const int64_t H_kv = key_grad.size(1);
+  const int64_t S_kv = key_grad.size(2);
+  const int64_t D_v = value_grad.size(3);
+
+  at::Tensor query;
+  at::Tensor key;
+  at::Tensor value;
+  if (original_layout == NVTE_SBHD_SBHD_SBHD) {
+    query = at::empty({S_q, B, H_q, D_qk}, query_grad.options());
+    key = at::empty({S_kv, B, H_kv, D_qk}, key_grad.options());
+    value = at::empty({S_kv, B, H_kv, D_v}, value_grad.options());
+  } else {
+    query = at::empty({B, S_q, H_q, D_qk}, query_grad.options());
+    key = at::empty({B, S_kv, H_kv, D_qk}, key_grad.options());
+    value = at::empty({B, S_kv, H_kv, D_v}, value_grad.options());
+  }
+
+  auto te_gq = makeTransformerEngineTensor(query_grad);
+  auto te_gk = makeTransformerEngineTensor(key_grad);
+  auto te_gv = makeTransformerEngineTensor(value_grad);
+  auto te_q = makeTransformerEngineTensor(query);
+  auto te_k = makeTransformerEngineTensor(key);
+  auto te_v = makeTransformerEngineTensor(value);
+
+  nvte_permute_to_grouped_tensor_bwd(
+      te_gq.data(), te_gk.data(), te_gv.data(), te_q.data(), te_k.data(), te_v.data(),
+      original_layout, at::cuda::getCurrentCUDAStream());
+
+  return std::make_tuple(query, key, value);
+}
+
 /***************************************************************************************************
  * Support THD format for Context Parallel: Read the half of a THD tensor
  **************************************************************************************************/

@@ -46,6 +46,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
     META_O,
     META_QKV,
+    QKVLayout,
 )
 from transformer_engine.pytorch.quantization import get_fp8_torch_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.distributed import get_distributed_world_size

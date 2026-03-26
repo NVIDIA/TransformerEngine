@@ -112,6 +112,13 @@ std::vector<py::object> fused_attn_bwd(
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_fwd(at::Tensor query,
+                                                                             at::Tensor key,
+                                                                             at::Tensor value,
+                                                                             NVTE_QKV_Layout input_layout);
+std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_bwd(
+    at::Tensor query_grad, at::Tensor key_grad, at::Tensor value_grad, NVTE_QKV_Layout input_layout);
+
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
 void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at::Tensor v_cache,

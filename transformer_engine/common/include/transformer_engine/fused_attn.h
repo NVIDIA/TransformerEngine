@@ -608,6 +608,34 @@ void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t s
 void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
                                  cudaStream_t stream);
 
+/*!  \brief Permute Q, K, V to grouped tensors.
+ *
+ *  \param[in]     q                Query tensor
+ *  \param[in]     k                Key tensor
+ *  \param[in]     v                Value tensor
+ *  \param[out]    q_out            Output query tensor
+ *  \param[out]    k_out            Output key tensor
+ *  \param[out]    v_out            Output value tensor
+ *  \param[in]     original_layout  Original QKV layout.
+ *  \param[in]     stream           CUDA stream.
+ */
+void nvte_permute_to_grouped_tensor_fwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor q_out, NVTETensor k_out, NVTETensor v_out, NVTE_QKV_Layout original_layout, cudaStream_t stream);
+
+/*!  \brief Permute Q, K, V back to original layout.
+ *
+ *  \param[in]     grad_q           Gradient of query tensor
+ *  \param[in]     grad_k           Gradient of key tensor
+ *  \param[in]     grad_v           Gradient of value tensor
+ *  \param[out]    q                Original query tensor
+ *  \param[out]    k                Original key tensor
+ *  \param[out]    v                Original value tensor
+ *  \param[in]     original_layout  Original QKV layout.
+ *  \param[in]     stream           CUDA stream.
+ */
+void nvte_permute_to_grouped_tensor_bwd(NVTETensor grad_q, NVTETensor grad_k, NVTETensor grad_v,
+                                        NVTETensor q, NVTETensor k, NVTETensor v,
+                                        NVTE_QKV_Layout original_layout, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

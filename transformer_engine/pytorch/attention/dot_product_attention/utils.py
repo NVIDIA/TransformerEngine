@@ -2317,16 +2317,62 @@ def permute_to_grouped_tensor(src_format, tensor):
     return tensor, des_format
 
 
+class PermuteToGroupedTensor(torch.autograd.Function):
+    """Permute Q, K, V from {bshd_bshd_bshd, sbhd_sbhd_sbhd} to bhsd_bhsd_bhsd."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        input_layout: str = "bshd_bshd_bshd",
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # pylint: disable=missing-function-docstring
+        ctx.original_layout = QKVLayout[input_layout]
+        return tex.permute_to_grouped_tensor_fwd(query, key, value, ctx.original_layout)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        query_grad: torch.Tensor,
+        key_grad: torch.Tensor,
+        value_grad: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # pylint: disable=missing-function-docstring
+        q, k, v = tex.permute_to_grouped_tensor_bwd(
+            query_grad,
+            key_grad,
+            value_grad,
+            ctx.original_layout,
+        )
+        return q, k, v, None
+
+
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
     """Combine q,k,v based on qkv_layout and quantize them together"""
     if isinstance(qkv_quantizer, MXFP8Quantizer):
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
-        # permute q, k, v to bhsd/htd format
+        # q_orig, k_orig, v_orig = q, k, v
+        # # permute q, k, v to bhsd/htd format
+        # if qkv_layout in ["bshd_bshd_bshd", "sbhd_sbhd_sbhd"]:
+        #     print(f">>>>>>>>>>>> {qkv_layout} PermuteToGroupedTensor")
+        #     q, k, v = PermuteToGroupedTensor.apply(q, k, v, qkv_layout)
+        # # else:
+        #     if q_format not in ["bhsd", "htd"]:
+        #         q_, _ = permute_to_grouped_tensor(q_format, q_orig)
+        #     if kv_format not in ["bhsd", "htd"]:
+        #         k_, _ = permute_to_grouped_tensor(kv_format, k_orig)
+        #         v_, _ = permute_to_grouped_tensor(kv_format, v_orig)
+        #     torch.testing.assert_close(q_, q)
+        #     torch.testing.assert_close(k_, k)
+        #     torch.testing.assert_close(v_, v)
         if q_format not in ["bhsd", "htd"]:
             q, _ = permute_to_grouped_tensor(q_format, q)
         if kv_format not in ["bhsd", "htd"]:
             k, _ = permute_to_grouped_tensor(kv_format, k)
             v, _ = permute_to_grouped_tensor(kv_format, v)
+
         qkv_layout = "bhsd_bhsd_bhsd" if qkv_format != "thd" else "htd_htd_htd"
         # check shapes
         original_shapes = [x.shape for x in [q, k, v]]
