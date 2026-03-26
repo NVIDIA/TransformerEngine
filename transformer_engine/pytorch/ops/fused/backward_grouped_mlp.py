@@ -9,7 +9,6 @@ from collections.abc import Callable
 import os
 import functools
 import math
-from pickle import TRUE
 from typing import Optional
 
 import torch
@@ -101,8 +100,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
                 f"out_features={fc2.out_features}) do not match."
             )
-        if fc1.has_bias or fc2.has_bias:
-            raise ValueError("Fused kernel does not support bias.")
         if swiglu.glu_interleave_size != 32:
             raise ValueError(
                 "Fused kernel requires 32-wide GLU interleaving, "
@@ -241,9 +238,23 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         for quantizer in fc2_ctx.grad_output_quantizers:
             quantizer.set_usage(rowwise=True, columnwise=fc2_ctx.weight_requires_grad)
             quantizer.optimize_for_gemm = True
-        grouped_fc2_dy = tex.group_quantize(
-            fc2_dy, fc2_ctx.grad_output_quantizers[0], num_groups, split_sizes
+        output_fc2_dbias = fc2_op.has_bias
+        gq_ret = tex.group_quantize(
+            fc2_dy,
+            fc2_ctx.grad_output_quantizers[0],
+            num_groups,
+            split_sizes,
+            output_fc2_dbias,
         )
+        if output_fc2_dbias:
+            grouped_fc2_dy, fc2_dbias_packed = gq_ret
+        else:
+            grouped_fc2_dy = gq_ret
+            fc2_dbias_packed = None
+
+        fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
+        if fc2_dbias_packed is not None:
+            fc2_bias_grads = [fc2_dbias_packed[idx].to(dtype=dtype) for idx in range(num_groups)]
 
         # Pack data tensors
         # Note: Fused kernel expects tensor with non-contiguous
@@ -307,6 +318,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 dprob_tensor=dprob_tensor,
                 b_tensor=fc2_w_data,
                 sfb_tensor=fc2_w_scales,
+                generate_dbias=fc1_op.has_bias,
                 norm_const_tensor=norm_const_tensor,
                 d_dtype=torch.float8_e4m3fn,
                 cd_major="n",
@@ -341,6 +353,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 n=fc2_weight_shape[1],
                 b_dtype=torch.float8_e4m3fn,
                 b_major="n",
+                generate_dbias=fc1_op.has_bias,
                 norm_const_tensor=norm_const_tensor,
                 d_dtype=torch.float8_e4m3fn,
                 cd_major="n",
@@ -377,6 +390,15 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
 
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
         grad_scales = grad_scales.view(-1).to(dtype=dtype)
+
+        fc1_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
+        if fc1_op.has_bias:
+            dbias_t = fc2_dgrad_kernel_out["dbias_tensor"]
+            if dbias_t is not None:
+                dbias_2d = dbias_t.squeeze(-1)
+                fc1_bias_grads = [
+                    dbias_2d[group_idx].to(dtype=dtype) for group_idx in range(num_groups)
+                ]
 
         # Autograd returns for weight grads when wgrad is deferred (multi-weight path only).
         fc1_autograd_weight_grads: Optional[list[Optional[torch.Tensor]]] = None
@@ -831,18 +853,42 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 grouped_fc1_x.columnwise_scale_inv,
             )
 
-        # Construct param grads in parameter registration order.
+        # Construct param grads in parameter registration order (see GroupedLinear.fuser_backward).
         if fc1_op.single_grouped_parameter:
-            fc1_weight_grads = [fc1_packed_wgrad] if fc1_packed_wgrad is not None else [None]
+            fc1_w_list = [fc1_packed_wgrad] if fc1_packed_wgrad is not None else [None]
         elif fc1_autograd_weight_grads is not None:
-            fc1_weight_grads = fc1_autograd_weight_grads
+            fc1_w_list = fc1_autograd_weight_grads
+        else:
+            fc1_w_list = fc1_weight_grads
+        if fc1_op.has_bias:
+            fc1_bias_list = fc1_bias_grads if fc1_bias_grads is not None else [None] * num_groups
+            fc1_grad_params = (
+                fc1_bias_list + fc1_w_list
+                if fc1_op.single_grouped_parameter
+                else fc1_w_list + fc1_bias_list
+            )
+        else:
+            fc1_grad_params = fc1_w_list
+
         if fc2_op.single_grouped_parameter:
-            fc2_weight_grads = [fc2_packed_wgrad] if fc2_packed_wgrad is not None else [None]
+            fc2_w_list = [fc2_packed_wgrad] if fc2_packed_wgrad is not None else [None]
         elif fc2_autograd_weight_grads is not None:
-            fc2_weight_grads = fc2_autograd_weight_grads
+            fc2_w_list = fc2_autograd_weight_grads
+        else:
+            fc2_w_list = fc2_weight_grads
+        if fc2_op.has_bias:
+            fc2_bias_list = fc2_bias_grads if fc2_bias_grads is not None else [None] * num_groups
+            fc2_grad_params = (
+                fc2_bias_list + fc2_w_list
+                if fc2_op.single_grouped_parameter
+                else fc2_w_list + fc2_bias_list
+            )
+        else:
+            fc2_grad_params = fc2_w_list
+
         return (
             grad_input,
-            [fc1_weight_grads, (), fc2_weight_grads],
+            [fc1_grad_params, (), fc2_grad_params],
             [(None,), (grad_scales,), (None,)],
         )
 
@@ -891,8 +937,6 @@ def fuse_backward_ops(
             and isinstance(window[1], ScaledSwiGLU)
             and isinstance(window[2], GroupedLinear)
         ):
-            matches_pattern = False
-        elif window[0].has_bias or window[2].has_bias:
             matches_pattern = False
         elif window[0].num_groups != window[2].num_groups:
             matches_pattern = False

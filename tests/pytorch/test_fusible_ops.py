@@ -3471,7 +3471,6 @@ class TestSequentialModules:
         if (
             quantization == "mxfp8"
             and dtype in (torch.bfloat16, torch.float16)
-            and not bias
             and glu_interleave_size == 32
         ):
             assert te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported()

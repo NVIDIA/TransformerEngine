@@ -30,6 +30,29 @@ from .._common import (
 )
 
 
+def _pack_grouped_linear_bias_for_cudnn(
+    linear_op: GroupedLinear,
+    *,
+    num_groups: int,
+    out_features: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Bias layout expected by cuDNN grouped GEMM: shape (n, num_groups), stride (1, n)."""
+    if not linear_op.has_bias:
+        return None
+    packed = torch.empty_strided(
+        (out_features, num_groups),
+        (1, out_features),
+        dtype=dtype,
+        device=device,
+    )
+    for group_idx in range(num_groups):
+        bias_param = getattr(linear_op, f"bias{group_idx}")
+        packed.select(1, group_idx).copy_(maybe_dequantize(bias_param, dtype))
+    return packed
+
+
 class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     """Fused op for MXFP8 GroupedLinear + ScaledSwiGLU + GroupedLinear
 
@@ -95,8 +118,6 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
                 f"out_features={fc2.out_features}) do not match."
             )
-        if fc1.has_bias or fc2.has_bias:
-            raise ValueError("Fused kernel does not support bias.")
         if swiglu.glu_interleave_size != 32:
             raise ValueError(
                 "Fused kernel requires 32-wide GLU interleaving, "
@@ -298,6 +319,21 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
         current_stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
 
+        fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(
+            fc1_op,
+            num_groups=num_groups,
+            out_features=fc1_weight_shape[0],
+            dtype=dtype,
+            device=device,
+        )
+        fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(
+            fc2_op,
+            num_groups=num_groups,
+            out_features=fc2_weight_shape[0],
+            dtype=dtype,
+            device=device,
+        )
+
         if fc1_op.single_grouped_parameter:
             # Pack weight tensors for stacked kernel
             # Data actual shape: (num_groups, n, k)
@@ -319,6 +355,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 alpha_tensor=alpha_tensor,
                 b_tensor=fc1_w_data,
                 sfb_tensor=fc1_w_scales,
+                bias_tensor=fc1_bias_packed,
                 norm_const_tensor=norm_const_tensor,
                 prob_tensor=scales.detach().to(dtype=dtype).reshape(-1, 1, 1),
                 acc_dtype=torch.float32,
@@ -351,6 +388,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 n=fc1_weight_shape[0],
                 b_dtype=torch.float8_e4m3fn,
                 b_major="k",
+                bias_tensor=fc1_bias_packed,
                 norm_const_tensor=norm_const_tensor,
                 prob_tensor=scales.detach().to(dtype=dtype).reshape(-1, 1, 1),
                 acc_dtype=torch.float32,
@@ -433,6 +471,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 alpha_tensor=alpha_tensor.float(),
                 b_tensor=fc2_w_data,
                 sfb_tensor=fc2_w_scales,
+                bias_tensor=fc2_bias_packed,
                 norm_const_tensor=None,
                 prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
                 acc_dtype=torch.float32,
@@ -466,6 +505,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 n=fc2_weight_shape[0],
                 b_dtype=torch.float8_e4m3fn,
                 b_major="k",
+                bias_tensor=fc2_bias_packed,
                 norm_const_tensor=None,
                 prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
                 acc_dtype=torch.float32,
@@ -602,8 +642,6 @@ def fuse_forward_ops(
             and isinstance(window[1], ScaledSwiGLU)
             and isinstance(window[2], GroupedLinear)
         ):
-            matches_pattern = False
-        elif window[0].has_bias or window[2].has_bias:
             matches_pattern = False
         elif window[0].num_groups != window[2].num_groups:
             matches_pattern = False
