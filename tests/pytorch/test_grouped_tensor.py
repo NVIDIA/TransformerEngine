@@ -356,8 +356,9 @@ class TestGroupedTensor:
         "shape",
         [[(256, 512), (512, 512), (768, 512)], [(512, 512), (512, 512), (512, 512)]],
     )
+    @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_quantize_grouped_mxfp8(self, shape: List[Tuple[int, int]]) -> None:
+    def test_quantize_grouped_mxfp8(self, shape: List[Tuple[int, int]], output_dbias: bool) -> None:
         """Test grouped quantization for MXFP8 against per-tensor quantization."""
         # Test wont pass until the grouped quantization PR from Oleg is merged.
         num_tensors = 2
@@ -377,12 +378,21 @@ class TestGroupedTensor:
         )
 
         # Quantize using grouped API
-        grouped_output = tex.group_quantize(
-            grouped_input,
-            quantizer,
-            num_tensors,
-            first_dims,
-        )
+        if output_dbias:
+            grouped_output, dbias = tex.group_quantize(
+                grouped_input,
+                quantizer,
+                num_tensors,
+                first_dims,
+                output_dbias=True,
+            )
+        else:
+            grouped_output = tex.group_quantize(
+                grouped_input,
+                quantizer,
+                num_tensors,
+                first_dims,
+            )
         # Build expected output by quantizing each tensor independently
         expected_data = []
         expected_scale_inv = []
@@ -397,8 +407,13 @@ class TestGroupedTensor:
         assert torch.equal(grouped_output.rowwise_data, expected_data)
         assert torch.equal(grouped_output.scale_inv, expected_scale_inv)
 
+        if output_dbias:
+            expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
+            assert torch.allclose(dbias, expected_dbias)
+
+    @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_group_quantize_cudagraph_capturable(self) -> None:
+    def test_group_quantize_cudagraph_capturable(self, output_dbias: bool) -> None:
         """Ensure group_quantize is CUDA graph capturable."""
         num_tensors = 2
         shape = [(512, 1024) for _ in range(num_tensors)]
@@ -418,17 +433,31 @@ class TestGroupedTensor:
         static_first_dims = first_dims.clone()
 
         # Warmup to initialize kernels and allocator state
-        _ = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
+        if output_dbias:
+            _ = tex.group_quantize(
+                static_input, quantizer, num_tensors, static_first_dims, output_dbias=True
+            )
+        else:
+            _ = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
         torch.cuda.synchronize()
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            static_output = tex.group_quantize(
-                static_input,
-                quantizer,
-                num_tensors,
-                static_first_dims,
-            )
+            if output_dbias:
+                static_output, static_dbias = tex.group_quantize(
+                    static_input,
+                    quantizer,
+                    num_tensors,
+                    static_first_dims,
+                    output_dbias=True,
+                )
+            else:
+                static_output = tex.group_quantize(
+                    static_input,
+                    quantizer,
+                    num_tensors,
+                    static_first_dims,
+                )
 
         fresh_input = torch.cat(
             [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape],
@@ -438,9 +467,22 @@ class TestGroupedTensor:
         graph.replay()
         torch.cuda.synchronize()
 
-        expected = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
-        assert torch.equal(static_output.rowwise_data, expected.rowwise_data)
-        assert torch.equal(static_output.scale_inv, expected.scale_inv)
+        if output_dbias:
+            expected_out, expected_dbias = tex.group_quantize(
+                static_input,
+                quantizer,
+                num_tensors,
+                static_first_dims,
+                output_dbias=True,
+            )
+        else:
+            expected_out = tex.group_quantize(
+                static_input, quantizer, num_tensors, static_first_dims
+            )
+        assert torch.equal(static_output.rowwise_data, expected_out.rowwise_data)
+        assert torch.equal(static_output.scale_inv, expected_out.scale_inv)
+        if output_dbias:
+            assert torch.allclose(static_dbias, expected_dbias)
 
     def test_clear(self) -> None:
         """Test clear method"""

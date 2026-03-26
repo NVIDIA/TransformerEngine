@@ -186,6 +186,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             dst.columnwise_scale_inv_offsets = src.columnwise_scale_inv_offsets
             dst.logical_shape = src.logical_shape
             dst.quantized_tensors = src.quantized_tensors
+            dst._with_gemm_swizzled_scales = src._with_gemm_swizzled_scales
 
         def make_wrapper_like(src: GroupedTensor, requires_grad: bool) -> GroupedTensor:
             """Create a wrapper of the same type and tensor metadata as src."""
