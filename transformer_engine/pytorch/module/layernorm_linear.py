@@ -63,6 +63,7 @@ from ..quantized_tensor import (
     restore_from_func_ctx,
 )
 from ...debug.pytorch.debug_state import TEDebugState
+from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer, Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..cpu_offload import (
     is_cpu_offload_enabled,
@@ -286,6 +287,19 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         weightmat = weight
         is_weight_param_quantized = False
+        try:
+            from ..distributed import _get_module_fsdp_state
+
+            _get_module_fsdp_state(module)
+            is_fsdp2 = True
+        except (RuntimeError, ImportError):
+            is_fsdp2 = False
+        # FSDP2 workspace optimization only applies to quantizer types
+        # whose backward re-creation is validated.
+        _fsdp2_safe = isinstance(
+            weight_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, MXFP8Quantizer)
+        ) or isinstance(weight, Float8Tensor)
+        is_fsdp2 = is_fsdp2 and _fsdp2_safe
         if fp8 or debug:
             is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
 
@@ -295,14 +309,23 @@ class _LayerNormLinear(torch.autograd.Function):
             if is_weight_param_quantized and not debug:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
-                weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+                # FSDP2: Skip columnwise/transpose creation during forward
+                # to avoid accumulating caches across layers. Backward's
+                # FSDP2 all-gather will recreate them. (Issue #2681)
+                weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=is_grad_enabled and not is_fsdp2,
+                )
 
             # Get quantized weight
+            # FSDP2: Don't cache workspaces — they would persist across
+            # layers, defeating FSDP2 memory savings. (Issue #2681)
             update_workspace = is_first_microbatch is None or is_first_microbatch
+            wt_cache = None if (is_first_microbatch is None or is_fsdp2) else "weight"
             weightmat = module.get_weight_workspace(
                 tensor=weight,
                 quantizer=weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "weight"),
+                cache_name=wt_cache,
                 update_workspace=update_workspace,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
@@ -459,9 +482,15 @@ class _LayerNormLinear(torch.autograd.Function):
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
 
+            # FSDP2: Don't save FP8 workspace for non-quantized weights.
+            # Backward will re-quantize from FSDP2 all-gathered weight.
+            # (Issue #2681)
+            wt_save = weightmat
+            if is_fsdp2 and weightmat is not weight:
+                wt_save = None
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
-                weightmat,
+                wt_save,
                 weight,
                 bias,
                 ln_weight,
@@ -474,6 +503,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.is_weight_param_quantized = is_weight_param_quantized
+            ctx.is_fsdp2 = is_fsdp2
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
@@ -694,6 +724,16 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: Gradient w.r.t. GEMM input (i.e. norm output).
             # --------------------------------------------------
 
+            # FSDP2: Re-create workspace from all-gathered weight when
+            # workspace was not saved. (Issue #2681)
+            if weight is None:
+                if isinstance(origin_weight, QuantizedTensorStorage):
+                    origin_weight.update_usage(columnwise_usage=True)
+                    weight = origin_weight
+                elif ctx.weight_quantizer is not None:
+                    ctx.weight_quantizer.set_usage(rowwise=False, columnwise=True)
+                    weight = ctx.weight_quantizer(origin_weight)
+
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
@@ -739,6 +779,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+            # FSDP2: Clear FP8 transpose cache after dgrad GEMM. (Issue #2717)
+            if getattr(ctx, "is_fsdp2", False) and hasattr(weight, "_transpose"):
+                if getattr(weight, "_transpose", None) is not None:
+                    weight._transpose = None
+                    weight._transpose_invalid = True
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
