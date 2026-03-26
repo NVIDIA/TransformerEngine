@@ -17,7 +17,7 @@ from cuda.bindings import driver as cuda
 from ...module._common import noop_cat
 from ...quantization import Recipe
 from ...tensor import Quantizer
-from ...utils import get_cached_ones_tensor, get_device_compute_capability
+from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark_grouped_tensor
 from ...tensor.grouped_tensor import GroupedTensor
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
 from ..basic import GroupedLinear, ScaledSwiGLU
@@ -548,11 +548,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # Save state for backward pass
         if requires_grad:
+            mark_grouped_tensor(grouped_fc1_x, swiglu_in, scales, grouped_fc2_x)
             if grouped_fc1_x is not None:
-                grouped_fc1_x.columnwise_data.grouped_name = "fc1_columnwise_data"
-                grouped_fc1_x.columnwise_data.logical_shape = grouped_fc1_x.logical_shape
-                grouped_fc1_x.columnwise_scale_inv.grouped_name = "fc1_columnwise_scale_inv"
-                grouped_fc1_x.columnwise_scale_inv.logical_shape = grouped_fc1_x.logical_shape
                 fc1_input_tensors = (
                     None,  # data
                     grouped_fc1_x.columnwise_data,  # columnwise_data
@@ -581,8 +578,6 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc1_ctx.weight_requires_grad = weight_requires_grad
 
             # Scaled SwiGLU
-            swiglu_in.grouped_name = "swiglu_in"
-            scales.grouped_name = "scales"
             swiglu_ctx.save_for_backward(swiglu_in, scales)
             swiglu_ctx.input_requires_grad = True
             swiglu_ctx.extra_input_requires_grad = True
@@ -590,10 +585,6 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
             # FC2 state
             if grouped_fc2_x is not None:
-                grouped_fc2_x.columnwise_data.grouped_name = "fc2_columnwise_data"
-                grouped_fc2_x.columnwise_data.logical_shape = grouped_fc2_x.logical_shape
-                grouped_fc2_x.columnwise_scale_inv.grouped_name = "fc2_columnwise_scale_inv"
-                grouped_fc2_x.columnwise_scale_inv.logical_shape = grouped_fc2_x.logical_shape
                 fc2_input_tensors = (
                     None,  # data
                     grouped_fc2_x.columnwise_data,  # columnwise_data
