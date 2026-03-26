@@ -178,12 +178,10 @@ def mark_grouped_tensor(*tensors: List[Any]):
             assert tensor.columnwise_data is not None, "Columnwise data is not set for grouped tensor"
             assert tensor.columnwise_scale_inv is not None, "Columnwise scale inverse is not set for grouped tensor"
             setattr(tensor.columnwise_data, "grouped_tensor_scale_inv", False)
-            setattr(tensor.columnwise_data, "logical_shape", tensor.logical_shape)
             setattr(tensor.columnwise_scale_inv, "grouped_tensor_scale_inv", True)
             setattr(tensor.columnwise_scale_inv, "logical_shape", tensor.logical_shape)
         else:
             setattr(tensor, "grouped_tensor_scale_inv", False)
-            setattr(tensor, "logical_shape", None)
 
 def split_tensor_along_dim(
     tensor: torch.Tensor, dim: int, num_partitions: int, contiguous_split_chunks: bool = False
