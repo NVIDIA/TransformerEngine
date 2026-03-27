@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 from collections.abc import Callable
-import os
 import functools
+import inspect
 import math
 from typing import Optional
 
@@ -33,6 +33,20 @@ from .._common import (
     make_grouped_tensor_from_buffers,
     maybe_dequantize,
 )
+
+
+@functools.lru_cache(maxsize=1)
+def _dglu_wrapper_has_generate_dbias_arg() -> bool:
+    """True if cudnn-frontend SM100 dGLU wrapper accepts ``generate_dbias``."""
+    try:
+        from cudnn import grouped_gemm_dglu_wrapper_sm100  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return False
+    try:
+        params = inspect.signature(grouped_gemm_dglu_wrapper_sm100).parameters
+    except (TypeError, ValueError):
+        return False
+    return "generate_dbias" in params
 
 
 class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
@@ -70,6 +84,13 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         except ImportError:
             return False
         return True
+
+    @classmethod
+    def is_fc1_bias_supported(cls) -> bool:
+        """Whether cudnn-frontend exposes ``generate_dbias`` on the dGLU SM100 wrapper (FC1 bias grad only)."""
+        if not cls.is_supported():
+            return False
+        return _dglu_wrapper_has_generate_dbias_arg()
 
     def __init__(
         self,
@@ -948,6 +969,8 @@ def fuse_backward_ops(
         ):
             matches_pattern = False
         elif window[1].glu_interleave_size != 32:
+            matches_pattern = False
+        elif window[0].has_bias and not BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_fc1_bias_supported():
             matches_pattern = False
 
         if matches_pattern:

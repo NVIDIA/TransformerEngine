@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 from collections.abc import Callable, Iterable
-import os
 import functools
+import inspect
 from typing import Any, Optional
 
 import torch
@@ -28,6 +28,34 @@ from .._common import (
     make_grouped_tensor_from_buffers,
     maybe_dequantize,
 )
+
+
+@functools.lru_cache(maxsize=1)
+def _glu_wrapper_has_bias_tensor_arg() -> bool:
+    """True if cudnn-frontend SM100 GLU wrapper accepts ``bias_tensor``."""
+    try:
+        from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return False
+    try:
+        params = inspect.signature(grouped_gemm_glu_wrapper_sm100).parameters
+    except (TypeError, ValueError):
+        return False
+    return "bias_tensor" in params
+
+
+@functools.lru_cache(maxsize=1)
+def _quant_wrapper_has_bias_tensor_arg() -> bool:
+    """True if cudnn-frontend SM100 Quant wrapper accepts ``bias_tensor``."""
+    try:
+        from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return False
+    try:
+        params = inspect.signature(grouped_gemm_quant_wrapper_sm100).parameters
+    except (TypeError, ValueError):
+        return False
+    return "bias_tensor" in params
 
 
 def _pack_grouped_linear_bias_for_cudnn(
@@ -88,6 +116,20 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         except ImportError:
             return False
         return True
+
+    @classmethod
+    def is_fc1_bias_supported(cls) -> bool:
+        """Whether cudnn-frontend exposes ``bias_tensor`` on the grouped GEMM GLU SM100 wrapper (FC1)."""
+        if not cls.is_supported():
+            return False
+        return _glu_wrapper_has_bias_tensor_arg()
+
+    @classmethod
+    def is_fc2_bias_supported(cls) -> bool:
+        """Whether cudnn-frontend exposes ``bias_tensor`` on the grouped GEMM Quant SM100 wrapper (FC2)."""
+        if not cls.is_supported():
+            return False
+        return _quant_wrapper_has_bias_tensor_arg()
 
     def __init__(
         self,
@@ -653,6 +695,10 @@ def fuse_forward_ops(
         ):
             matches_pattern = False
         elif window[1].glu_interleave_size != 32:
+            matches_pattern = False
+        elif window[0].has_bias and not ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_fc1_bias_supported():
+            matches_pattern = False
+        elif window[2].has_bias and not ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_fc2_bias_supported():
             matches_pattern = False
 
         if matches_pattern:
