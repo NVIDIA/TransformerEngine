@@ -3968,7 +3968,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if fp8:
                 if fp8_recipe.mxfp8():
                     q_fp8, k_fp8, v_fp8, qkv_layout = combine_and_quantize(
-                        qkv_layout, q_part, k_part, v_part, QKV_quantizer
+                        qkv_layout, q_part, k_part, v_part, QKV_quantizer, used_in_backward=is_training
                     )
                     q_part, k_part, v_part = [q_fp8, k_fp8, v_fp8]
                 else:

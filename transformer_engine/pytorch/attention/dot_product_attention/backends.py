@@ -1461,7 +1461,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     if isinstance(tmp_quantizer, MXFP8Quantizer):
                         tmp_quantizer.optimize_for_gemm = False
                     q_fp8_, k_fp8_, _, _ = combine_and_quantize(
-                        original_qkv_layout, q, k, v, tmp_quantizer
+                        original_qkv_layout, q, k, v, tmp_quantizer, used_in_backward=True
                     )
                     q_ = q_fp8_.dequantize(dtype=out_nominal_dtype)
                     k_ = k_fp8_.dequantize(dtype=out_nominal_dtype)
@@ -1797,7 +1797,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         if isinstance(tmp_quantizer, MXFP8Quantizer):
                             tmp_quantizer.optimize_for_gemm = False
                         q_fp8_, k_fp8_, v_fp8_, _ = combine_and_quantize(
-                            original_qkv_layout, q, k, v, tmp_quantizer
+                            original_qkv_layout, q, k, v, tmp_quantizer, used_in_backward=True
                         )
                         q_shadow_f16, k_shadow_f16, v_shadow_f16 = [
                             x.dequantize(dtype=dqkv_nominal_dtype) for x in (q_fp8_, k_fp8_, v_fp8_)
