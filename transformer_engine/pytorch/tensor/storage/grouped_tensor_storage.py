@@ -54,7 +54,7 @@ class GroupedTensorStorage:
         shape: Tuple[int, int],
         dtype: torch.dtype,
         num_tensors: int,
-        shapes: Optional[List[Tuple[int, int]]] = None,
+        shapes: Optional[List[Tuple[int, ...]]] = None,
         quantizer: Optional[Quantizer] = None,
         data: Optional[torch.Tensor] = None,
         columnwise_data: Optional[torch.Tensor] = None,
@@ -153,7 +153,7 @@ class GroupedTensorStorage:
         dtype: torch.dtype,
         *,
         num_tensors: int,
-        shapes: Optional[List[Tuple[int, int]]] = None,
+        shapes: Optional[List[Tuple[int, ...]]] = None,
         quantizer: Optional[Quantizer] = None,
         data: Optional[torch.Tensor] = None,
         columnwise_data: Optional[torch.Tensor] = None,
@@ -387,7 +387,7 @@ class GroupedTensorStorage:
     def make_grouped_tensor_from_rowwise_data(
         *,
         num_tensors: int,
-        tensor_shape: Tuple[int, int],
+        tensor_shape: Tuple[int, ...],
         rowwise_data: torch.Tensor,
         dtype: Optional[torch.dtype] = None,
         internal: bool = False,
@@ -395,8 +395,16 @@ class GroupedTensorStorage:
         """Wrap pre-existing contiguous rowwise data as a grouped tensor.
 
         This helper does not allocate storage. It creates grouped metadata over
-        `rowwise_data`, which is expected to contain `num_tensors` matrices of
-        shape `tensor_shape` in packed contiguous layout.
+        `rowwise_data`, which is expected to contain `num_tensors` tensors of
+        shape ``tensor_shape`` in packed contiguous layout.
+
+        ``tensor_shape`` may be:
+
+        * ``(rows, cols)`` — each member is a 2D matrix; wrapper shape
+          ``(num_tensors, rows, cols)``.
+        * ``(n,)`` — each member is a 1D vector of length ``n``; logical storage
+          uses ``logical_shape = (num_tensors * n, 1)`` and the wrapper shape is
+          ``(num_tensors, n)``.
         """
         if num_tensors <= 0:
             raise ValueError(f"num_tensors must be positive, got {num_tensors}")
@@ -405,8 +413,22 @@ class GroupedTensorStorage:
         if not rowwise_data.is_contiguous():
             rowwise_data = rowwise_data.contiguous()
 
-        rows, cols = tensor_shape
-        expected_numel = num_tensors * rows * cols
+        if len(tensor_shape) == 2:
+            rows, cols = tensor_shape
+            expected_numel = num_tensors * rows * cols
+            logical_shape = (num_tensors * rows, cols)
+            shapes_list: List[Tuple[int, ...]] = [tensor_shape] * num_tensors
+        elif len(tensor_shape) == 1:
+            (n,) = tensor_shape
+            expected_numel = num_tensors * n
+            logical_shape = (num_tensors * n, 1)
+            shapes_list = [tensor_shape] * num_tensors
+        else:
+            raise ValueError(
+                "tensor_shape must be 1D (n,) or 2D (rows, cols), "
+                f"got {tensor_shape!r} with length {len(tensor_shape)}"
+            )
+
         if rowwise_data.numel() != expected_numel:
             raise ValueError(
                 "Grouped rowwise buffer size mismatch: expected "
@@ -415,8 +437,6 @@ class GroupedTensorStorage:
             )
         if dtype is None:
             dtype = rowwise_data.dtype
-
-        logical_shape = (num_tensors * rows, cols)
         grouped_tensor_class = GroupedTensorStorage
         if not internal:
             from ..grouped_tensor import GroupedTensor
@@ -427,7 +447,7 @@ class GroupedTensorStorage:
             shape=logical_shape,
             dtype=dtype,
             num_tensors=num_tensors,
-            shapes=[tensor_shape] * num_tensors,
+            shapes=shapes_list,
             quantizer=None,
             data=rowwise_data.view(-1),
             columnwise_data=None,
@@ -785,7 +805,7 @@ class GroupedTensorStorage:
                 # Get tensor data slice
                 if self.offsets is not None:
                     start_offset = self.offsets[i]
-                    numel = tensor_shape[0] * tensor_shape[1]
+                    numel = math.prod(tensor_shape)
                     end_offset = start_offset + numel
 
                     if self.has_data():
@@ -800,7 +820,7 @@ class GroupedTensorStorage:
                         raise RuntimeError("GroupedTensor has no data to split")
                 else:
                     # All same shape case
-                    numel = tensor_shape[0] * tensor_shape[1]
+                    numel = math.prod(tensor_shape)
                     start_offset = i * numel
                     end_offset = start_offset + numel
 
@@ -836,7 +856,7 @@ class GroupedTensorStorage:
             quantizer = self.quantizer
             # Get tensor shape
             tensor_shape = self.tensor_shapes[i]
-            numel = tensor_shape[0] * tensor_shape[1]
+            numel = math.prod(tensor_shape)
 
             # Get data offsets
             if self.offsets is not None:

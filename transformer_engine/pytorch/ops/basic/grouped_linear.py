@@ -371,7 +371,7 @@ class GroupedLinear(BasicOperation):
         bias_data = packed_biases.detach().clone().contiguous()
         grouped_bias = GroupedTensor.make_grouped_tensor_from_rowwise_data(
             num_tensors=self.num_groups,
-            tensor_shape=(1, self.out_features),
+            tensor_shape=(self.out_features,),
             rowwise_data=bias_data,
             dtype=bias_data.dtype,
         )
@@ -957,9 +957,7 @@ class GroupedLinear(BasicOperation):
                 # Be mindful of param registration order.
                 if has_bias:
                     if self.single_grouped_bias:
-                        final_bias_grads = (
-                            torch.stack(grad_biases, dim=0).to(ctx.dtype).unsqueeze(1)
-                        )
+                        final_bias_grads = torch.stack(grad_biases, dim=0).to(ctx.dtype)
                         grad_params = [final_bias_grads, grad_weight]
                     else:
                         grad_params = grad_biases + [grad_weight]
@@ -993,7 +991,7 @@ class GroupedLinear(BasicOperation):
         if not has_bias:
             grad_params = list(final_weight_grads)
         elif self.single_grouped_bias:
-            final_bias_grads = torch.stack(grad_biases, dim=0).to(ctx.dtype).unsqueeze(1)
+            final_bias_grads = torch.stack(grad_biases, dim=0).to(ctx.dtype)
             if self.single_grouped_parameter:
                 grad_params = [final_bias_grads] + list(final_weight_grads)
             else:

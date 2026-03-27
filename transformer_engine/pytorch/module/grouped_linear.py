@@ -830,7 +830,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         packed = torch.stack([b.detach().clone() for b in biases], dim=0).contiguous()
         grouped_bias = GroupedTensor.make_grouped_tensor_from_rowwise_data(
             num_tensors=self.num_gemms,
-            tensor_shape=(1, self.out_features),
+            tensor_shape=(self.out_features,),
             rowwise_data=packed,
             dtype=packed.dtype,
         )
@@ -958,6 +958,9 @@ class GroupedLinear(TransformerEngineBaseModule):
             elif has_grouped_bias:
                 for key in per_gemm_bias_keys:
                     state_dict.pop(key, None)
+                val = state_dict[grouped_bias_key]
+                if isinstance(val, torch.Tensor) and val.dim() == 3 and val.shape[1] == 1:
+                    state_dict[grouped_bias_key] = val.squeeze(1)
         else:
             if not has_per_gemm_biases and has_grouped_bias:
                 gb = state_dict.pop(grouped_bias_key)
@@ -1113,7 +1116,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             if self.use_bias:
                 grouped_bias = getattr(self, "bias", None)
                 if grouped_bias is not None:
-                    gstack = torch.stack(grad_biases_, dim=0).unsqueeze(1).to(grouped_bias.dtype)
+                    gstack = torch.stack(grad_biases_, dim=0).to(grouped_bias.dtype)
                     if grouped_bias.grad is None:
                         grouped_bias.grad = gstack
                     else:

@@ -156,14 +156,14 @@ def check_grouped_weight(
 
 
 def check_grouped_bias(module: GroupedLinear, num_gemms: int, out_features: int):
-    """Verify GroupedLinear exposes one grouped bias parameter with shape [num_gemms, 1, out_features]."""
+    """Verify GroupedLinear exposes one grouped bias parameter with shape [num_gemms, out_features]."""
     bias_params = [(name, p) for name, p in module.named_parameters() if name == "bias"]
     assert len(bias_params) == 1, f"Expected 1 grouped bias parameter, got {len(bias_params)}"
     name, bias = bias_params[0]
     assert name == "bias", f"Expected grouped parameter name 'bias', got {name}"
-    assert tuple(bias.shape) == (num_gemms, 1, out_features), (
+    assert tuple(bias.shape) == (num_gemms, out_features), (
         "Grouped bias has unexpected shape. "
-        f"Expected {(num_gemms, 1, out_features)}, got {tuple(bias.shape)}"
+        f"Expected {(num_gemms, out_features)}, got {tuple(bias.shape)}"
     )
 
 

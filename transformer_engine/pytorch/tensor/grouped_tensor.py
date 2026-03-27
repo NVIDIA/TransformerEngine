@@ -74,7 +74,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         dtype: torch.dtype,
         *,
         num_tensors: int,
-        shapes: Optional[List[Tuple[int, int]]] = None,
+        shapes: Optional[List[Tuple[int, ...]]] = None,
         quantizer: Optional[Quantizer] = None,
         data: Optional[torch.Tensor] = None,
         columnwise_data: Optional[torch.Tensor] = None,
@@ -99,7 +99,15 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             and num_tensors > 0
             and all(shapes[0] == s for s in shapes)
         ):
-            wrapper_shape = (num_tensors, shapes[0][0], shapes[0][1])
+            s0 = shapes[0]
+            if len(s0) == 2:
+                wrapper_shape = (num_tensors, s0[0], s0[1])
+            elif len(s0) == 1:
+                wrapper_shape = (num_tensors, s0[0])
+            else:
+                raise ValueError(
+                    f"GroupedTensor member shapes must be 1D or 2D, got {len(s0)}-D shape {s0!r}"
+                )
         else:
             wrapper_shape = shape
 

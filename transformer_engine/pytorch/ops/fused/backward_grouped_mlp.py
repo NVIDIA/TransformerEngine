@@ -894,7 +894,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         if fc1_op.has_bias:
             if fc1_op.single_grouped_bias:
                 if fc1_bias_grad_packed is not None:
-                    fc1_gb = fc1_bias_grad_packed.unsqueeze(1)
+                    fc1_gb = fc1_bias_grad_packed
                 else:
                     fc1_gb = None
                 if fc1_op.single_grouped_parameter:
@@ -921,7 +921,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         if fc2_op.has_bias:
             if fc2_op.single_grouped_bias:
                 if fc2_bias_grad_packed is not None:
-                    fc2_gb = fc2_bias_grad_packed.unsqueeze(1)
+                    fc2_gb = fc2_bias_grad_packed
                 else:
                     fc2_gb = None
                 if fc2_op.single_grouped_parameter:
