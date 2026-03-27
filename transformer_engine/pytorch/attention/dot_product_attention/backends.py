@@ -1286,7 +1286,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = q, k, v
             else:
                 q_fp8, k_fp8, v_fp8, qkv_layout = combine_and_quantize(
-                    qkv_layout, q, k, v, QKV_quantizer, used_in_backward=is_training
+                    qkv_layout, q, k, v, QKV_quantizer
                 )
 
             # print quantizers
