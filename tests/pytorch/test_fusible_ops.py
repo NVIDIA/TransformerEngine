@@ -3512,8 +3512,16 @@ class TestSequentialModules:
         for group_idx in range(group_size):
             if bias:
                 if single_grouped_bias:
-                    assert_close_grads(fc2.bias.grad[group_idx], fc2_bs_ref[group_idx], **tols)
-                    assert_close_grads(fc1.bias.grad[group_idx], fc1_bs_ref[group_idx], **tols)
+                    assert_close(
+                        fc2.bias.grad[group_idx],
+                        fc2_bs_ref[group_idx].grad,
+                        **tols,
+                    )
+                    assert_close(
+                        fc1.bias.grad[group_idx],
+                        fc1_bs_ref[group_idx].grad,
+                        **tols,
+                    )
                 else:
                     assert_close_grads(
                         getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols

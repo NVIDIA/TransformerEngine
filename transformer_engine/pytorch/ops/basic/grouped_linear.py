@@ -958,7 +958,7 @@ class GroupedLinear(BasicOperation):
                 if has_bias:
                     if self.single_grouped_bias:
                         final_bias_grads = torch.stack(grad_biases, dim=0).to(ctx.dtype)
-                        grad_params = [final_bias_grads, grad_weight]
+                        grad_params = [grad_weight, final_bias_grads]
                     else:
                         grad_params = grad_biases + [grad_weight]
                 else:
@@ -992,10 +992,7 @@ class GroupedLinear(BasicOperation):
             grad_params = list(final_weight_grads)
         elif self.single_grouped_bias:
             final_bias_grads = torch.stack(grad_biases, dim=0).to(ctx.dtype)
-            if self.single_grouped_parameter:
-                grad_params = [final_bias_grads] + list(final_weight_grads)
-            else:
-                grad_params = list(final_weight_grads) + [final_bias_grads]
+            grad_params = list(final_weight_grads) + [final_bias_grads]
         else:
             if self.single_grouped_parameter:
                 grad_params = list(grad_biases) + list(final_weight_grads)
