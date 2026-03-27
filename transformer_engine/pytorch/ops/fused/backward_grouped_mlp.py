@@ -274,8 +274,14 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             fc2_dbias_packed = None
 
         fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
+        fc2_bias_grad_packed: Optional[torch.Tensor] = None
         if fc2_dbias_packed is not None:
-            fc2_bias_grads = [fc2_dbias_packed[idx].to(dtype=dtype) for idx in range(num_groups)]
+            if fc2_op.single_grouped_bias:
+                fc2_bias_grad_packed = fc2_dbias_packed.to(dtype=dtype)
+            else:
+                fc2_bias_grads = [
+                    fc2_dbias_packed[idx].to(dtype=dtype) for idx in range(num_groups)
+                ]
 
         # Pack data tensors
         # Note: Fused kernel expects tensor with non-contiguous
@@ -413,13 +419,17 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         grad_scales = grad_scales.view(-1).to(dtype=dtype)
 
         fc1_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
+        fc1_bias_grad_packed: Optional[torch.Tensor] = None
         if fc1_op.has_bias:
             dbias_t = fc2_dgrad_kernel_out["dbias_tensor"]
             if dbias_t is not None:
                 dbias_2d = dbias_t.squeeze(-1)
-                fc1_bias_grads = [
-                    dbias_2d[group_idx].to(dtype=dtype) for group_idx in range(num_groups)
-                ]
+                if fc1_op.single_grouped_bias:
+                    fc1_bias_grad_packed = dbias_2d.to(dtype=dtype)
+                else:
+                    fc1_bias_grads = [
+                        dbias_2d[group_idx].to(dtype=dtype) for group_idx in range(num_groups)
+                    ]
 
         # Autograd returns for weight grads when wgrad is deferred (multi-weight path only).
         fc1_autograd_weight_grads: Optional[list[Optional[torch.Tensor]]] = None
@@ -882,12 +892,21 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         else:
             fc1_w_list = fc1_weight_grads
         if fc1_op.has_bias:
-            fc1_bias_list = fc1_bias_grads if fc1_bias_grads is not None else [None] * num_groups
-            fc1_grad_params = (
-                fc1_bias_list + fc1_w_list
-                if fc1_op.single_grouped_parameter
-                else fc1_w_list + fc1_bias_list
-            )
+            if fc1_op.single_grouped_bias:
+                if fc1_bias_grad_packed is not None:
+                    fc1_gb = fc1_bias_grad_packed.unsqueeze(1)
+                else:
+                    fc1_gb = None
+                if fc1_op.single_grouped_parameter:
+                    fc1_grad_params = [fc1_gb] + fc1_w_list
+                else:
+                    fc1_grad_params = fc1_w_list + [fc1_gb]
+            else:
+                fc1_bias_list = fc1_bias_grads if fc1_bias_grads is not None else [None] * num_groups
+                if fc1_op.single_grouped_parameter:
+                    fc1_grad_params = fc1_bias_list + fc1_w_list
+                else:
+                    fc1_grad_params = fc1_w_list + fc1_bias_list
         else:
             fc1_grad_params = fc1_w_list
 
@@ -898,12 +917,21 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         else:
             fc2_w_list = fc2_weight_grads
         if fc2_op.has_bias:
-            fc2_bias_list = fc2_bias_grads if fc2_bias_grads is not None else [None] * num_groups
-            fc2_grad_params = (
-                fc2_bias_list + fc2_w_list
-                if fc2_op.single_grouped_parameter
-                else fc2_w_list + fc2_bias_list
-            )
+            if fc2_op.single_grouped_bias:
+                if fc2_bias_grad_packed is not None:
+                    fc2_gb = fc2_bias_grad_packed.unsqueeze(1)
+                else:
+                    fc2_gb = None
+                if fc2_op.single_grouped_parameter:
+                    fc2_grad_params = [fc2_gb] + fc2_w_list
+                else:
+                    fc2_grad_params = fc2_w_list + [fc2_gb]
+            else:
+                fc2_bias_list = fc2_bias_grads if fc2_bias_grads is not None else [None] * num_groups
+                if fc2_op.single_grouped_parameter:
+                    fc2_grad_params = fc2_bias_list + fc2_w_list
+                else:
+                    fc2_grad_params = fc2_w_list + fc2_bias_list
         else:
             fc2_grad_params = fc2_w_list
 

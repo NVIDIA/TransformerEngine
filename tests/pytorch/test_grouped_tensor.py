@@ -531,6 +531,7 @@ class TestGroupedTensor:
                         torch.randn(out_features, device="cuda", dtype=dtype)
                     )
         expected_weights = [getattr(src, f"weight{i}").detach().clone() for i in range(num_gemms)]
+        expected_biases = [getattr(src, f"bias{i}").detach().clone() for i in range(num_gemms)]
         ckpt_path = tmp_path / "grouped_linear_per_gemm.pt"
         torch.save(src.state_dict(), ckpt_path)
         del src
@@ -543,6 +544,7 @@ class TestGroupedTensor:
             out_features=out_features,
             params_dtype=dtype,
             single_grouped_parameter=True,
+            single_grouped_bias=True,
         ).cuda()
         load_result = dst.load_state_dict(src_state_dict, strict=True)
         assert len(load_result.missing_keys) == 0
@@ -553,6 +555,12 @@ class TestGroupedTensor:
         assert len(loaded_weights) == num_gemms
         for loaded_weight, expected_weight in zip(loaded_weights, expected_weights):
             assert torch.equal(loaded_weight, expected_weight)
+
+        assert getattr(dst, "bias", None) is not None
+        loaded_biases = dst.bias.split_into_quantized_tensors()
+        assert len(loaded_biases) == num_gemms
+        for loaded_bias, expected_bias in zip(loaded_biases, expected_biases):
+            assert torch.equal(loaded_bias.reshape(-1), expected_bias.reshape(-1))
 
     def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
@@ -567,6 +575,7 @@ class TestGroupedTensor:
             out_features=out_features,
             params_dtype=dtype,
             single_grouped_parameter=True,
+            single_grouped_bias=True,
         ).cuda()
         with torch.no_grad():
             source_weights = src.weight.split_into_quantized_tensors()
@@ -575,6 +584,10 @@ class TestGroupedTensor:
                     torch.randn(out_features, in_features, device="cuda", dtype=dtype)
                 )
         expected_weights = [weight.detach().clone() for weight in source_weights]
+        source_biases = src.bias.split_into_quantized_tensors()
+        for i in range(num_gemms):
+            source_biases[i].copy_(torch.randn(out_features, device="cuda", dtype=dtype))
+        expected_biases = [b.detach().clone() for b in source_biases]
         ckpt_path = tmp_path / "grouped_linear_single_param.pt"
         torch.save(src.state_dict(), ckpt_path)
         del src
@@ -594,3 +607,5 @@ class TestGroupedTensor:
 
         for i, expected_weight in enumerate(expected_weights):
             assert torch.equal(getattr(dst, f"weight{i}"), expected_weight)
+        for i, expected_bias in enumerate(expected_biases):
+            assert torch.equal(getattr(dst, f"bias{i}"), expected_bias.reshape(-1))

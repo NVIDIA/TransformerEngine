@@ -72,8 +72,13 @@ class GroupedLinear(BasicOperation):
         Megatron-LM. This argument along with weight tensor having
         attribute ``overwrite_main_grad`` set to True will overwrite
         ``main_grad`` instead of accumulating.
+    single_grouped_parameter : bool, default = ``False``
+        Store all expert weights as one ``GroupedTensor`` parameter ``weight``.
     delay_wgrad_compute : bool, default = ``False``
         Whether to delay weight gradient computation
+    single_grouped_bias : bool, default = ``False``
+        If ``True`` (and ``bias=True``), store all expert biases as one ``GroupedTensor``
+        parameter named ``bias`` instead of ``bias0``..``bias{N-1}``.
 
     """
 
@@ -92,6 +97,7 @@ class GroupedLinear(BasicOperation):
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
         single_grouped_parameter: bool = False,
+        single_grouped_bias: bool = False,
         delay_wgrad_compute: bool = False,
     ) -> None:
         super().__init__()
@@ -103,6 +109,8 @@ class GroupedLinear(BasicOperation):
         self.in_features: int = in_features
         self.out_features: int = out_features
         self.single_grouped_parameter: bool = single_grouped_parameter
+        self.single_grouped_bias: bool = single_grouped_bias
+        self.use_bias: bool = bias
         if self.num_groups <= 0:
             raise ValueError(f"Invalid number of groups ({self.num_groups})")
         if self.in_features <= 0:
@@ -223,7 +231,7 @@ class GroupedLinear(BasicOperation):
     @property
     def has_bias(self) -> bool:
         """Whether an additive bias is being applied"""
-        return self.bias0 is not None
+        return self.use_bias
 
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""
@@ -285,19 +293,35 @@ class GroupedLinear(BasicOperation):
             setattr(self, f"weight{group_idx}", weight)
 
         # Initialize biases if needed
-        if self.bias0 is not None:
+        packed_biases: Optional[torch.Tensor] = None
+        if self.use_bias:
+            if self.bias0 is not None:
+                bias_dtype = self.bias0.dtype
+            elif getattr(self, "bias", None) is not None:
+                bias_dtype = self.bias.dtype
+            elif getattr(self, "weight", None) is not None:
+                bias_dtype = self.weight.dtype
+            else:
+                bias_dtype = self.weight0.dtype
             packed_biases = torch.zeros(
                 self.num_groups,
                 self.out_features,
-                dtype=self.bias0.dtype,
+                dtype=bias_dtype,
                 device=device,
             )
+            if not self.single_grouped_bias:
+                for group_idx in range(self.num_groups):
+                    bias = torch.nn.Parameter(packed_biases[group_idx])
+                    setattr(self, f"bias{group_idx}", bias)
+        else:
             for group_idx in range(self.num_groups):
-                bias = torch.nn.Parameter(packed_biases[group_idx])
-                setattr(self, f"bias{group_idx}", bias)
+                self.register_parameter(f"bias{group_idx}", None)
 
         if self.single_grouped_parameter:
             self.make_grouped_weights()
+        if self.use_bias and self.single_grouped_bias:
+            assert packed_biases is not None
+            self._make_grouped_biases_from_packed(packed_biases)
         self._apply_delay_wgrad_param_hooks()
 
     def make_grouped_weights(self) -> None:
@@ -341,6 +365,20 @@ class GroupedLinear(BasicOperation):
             self.register_parameter(f"weight{group_idx}", None)
 
         self._apply_delay_wgrad_param_hooks()
+
+    def _make_grouped_biases_from_packed(self, packed_biases: torch.Tensor) -> None:
+        """Replace per-group bias parameters with one ``GroupedTensor`` (``single_grouped_bias``)."""
+        bias_data = packed_biases.detach().clone().contiguous()
+        grouped_bias = GroupedTensor.make_grouped_tensor_from_rowwise_data(
+            num_tensors=self.num_groups,
+            tensor_shape=(1, self.out_features),
+            rowwise_data=bias_data,
+            dtype=bias_data.dtype,
+        )
+        grouped_bias.requires_grad_(True)
+        self.register_parameter("bias", torch.nn.Parameter(grouped_bias))
+        for group_idx in range(self.num_groups):
+            self.register_parameter(f"bias{group_idx}", None)
 
     def _quantize_weights(
         self,
@@ -474,28 +512,50 @@ class GroupedLinear(BasicOperation):
             weight_tensor_type = type(self.weight.data)
 
         # Check that biases are consistent
-        for group_idx in range(self.num_groups):
-            bias = getattr(self, f"bias{group_idx}")
-            if self.has_bias:
-                if bias is None:
-                    raise RuntimeError(f"Expected biases, but bias {group_idx} is uninitialized")
+        if self.has_bias:
+            if self.single_grouped_bias:
+                bias = self.bias
                 if bias.dtype != dtype:
                     raise RuntimeError(
-                        f"Bias {group_idx} has invalid dtype (expected {dtype}, got {bias.dtype})."
+                        f"Bias has invalid dtype (expected {dtype}, got {bias.dtype})."
                     )
                 if not devices_match(bias.device, device):
                     raise RuntimeError(
-                        f"Bias {group_idx} has invalid device "
-                        f"(expected {device}, got {bias.device})."
+                        f"Bias has invalid device (expected {device}, got {bias.device})."
                     )
                 if bias.requires_grad != weight_requires_grad:
                     raise RuntimeError(
-                        f"Bias {group_idx} has requires_grad={bias.requires_grad}, "
+                        f"Bias has requires_grad={bias.requires_grad}, "
                         f"but expected requires_grad={weight_requires_grad}."
                     )
             else:
-                if bias is not None:
-                    raise RuntimeError(f"Expected no biases, but bias {group_idx} is initialized")
+                for group_idx in range(self.num_groups):
+                    bias = getattr(self, f"bias{group_idx}")
+                    if bias is None:
+                        raise RuntimeError(f"Expected biases, but bias {group_idx} is uninitialized")
+                    if bias.dtype != dtype:
+                        raise RuntimeError(
+                            f"Bias {group_idx} has invalid dtype (expected {dtype}, got {bias.dtype})."
+                        )
+                    if not devices_match(bias.device, device):
+                        raise RuntimeError(
+                            f"Bias {group_idx} has invalid device "
+                            f"(expected {device}, got {bias.device})."
+                        )
+                    if bias.requires_grad != weight_requires_grad:
+                        raise RuntimeError(
+                            f"Bias {group_idx} has requires_grad={bias.requires_grad}, "
+                            f"but expected requires_grad={weight_requires_grad}."
+                        )
+        else:
+            if self.single_grouped_bias:
+                if getattr(self, "bias", None) is not None:
+                    raise RuntimeError("Expected no biases, but grouped `bias` is registered")
+            else:
+                for group_idx in range(self.num_groups):
+                    bias = getattr(self, f"bias{group_idx}")
+                    if bias is not None:
+                        raise RuntimeError(f"Expected no biases, but bias {group_idx} is initialized")
 
     def pre_fuser_forward(self, *, requires_grad: bool) -> None:
         super().pre_fuser_forward(requires_grad=requires_grad)
@@ -642,7 +702,13 @@ class GroupedLinear(BasicOperation):
             weights = [getattr(self, f"weight{idx}") for idx in range(num_groups)]
         bs = None
         if has_bias:
-            bs = [maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(num_groups)]
+            if self.single_grouped_bias:
+                bias_parts = self.bias.quantized_tensors
+                if bias_parts is None:
+                    bias_parts = self.bias.split_into_quantized_tensors()
+                bs = [maybe_dequantize(p.reshape(-1), dtype) for p in bias_parts]
+            else:
+                bs = [maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(num_groups)]
 
         # Convert weight dtype if needed
         ws = []
@@ -880,9 +946,15 @@ class GroupedLinear(BasicOperation):
                     )
                 else:
                     grad_weight = None
-                # Parameter registration order with single_grouped_parameter=True is:
-                # bias0..biasN-1, then weight. Return grads in the same order.
-                grad_params = grad_biases + [grad_weight] if has_bias else [grad_weight]
+                # Be mindful of param registration order.
+                if has_bias:
+                    if self.single_grouped_bias:
+                        final_bias_grads = torch.stack(grad_biases, dim=0).to(ctx.dtype).unsqueeze(1)
+                        grad_params = [final_bias_grads, grad_weight]
+                    else:
+                        grad_params = grad_biases + [grad_weight]
+                else:
+                    grad_params = [grad_weight]
                 return grad_input, [grad_params], [(None,)]
             for group_idx in range(num_groups):
                 weight_param = getattr(self, f"weight{group_idx}")
@@ -901,13 +973,25 @@ class GroupedLinear(BasicOperation):
                     grad_weight = None
                 else:
                     grad_weight = torch.stack(grad_weights, dim=0)
-            # Parameter registration order with single_grouped_parameter=True is:
-            # bias0..biasN-1, then weight. Return grads in the same order.
-            grad_params = grad_biases + [grad_weight] if has_bias else [grad_weight]
+            final_weight_grads = [grad_weight]
         else:
             if delay_wgrad and ctx.weight_requires_grad:
-                weight_grads_out = [None] * num_groups
-                grad_params = weight_grads_out + grad_biases if has_bias else weight_grads_out
+                final_weight_grads = [None] * num_groups
             else:
-                grad_params = grad_weights + grad_biases if has_bias else grad_weights
+                final_weight_grads = grad_weights
+
+        if not has_bias:
+            grad_params = list(final_weight_grads)
+        elif self.single_grouped_bias:
+            final_bias_grads = torch.stack(grad_biases, dim=0).to(ctx.dtype).unsqueeze(1)
+            if self.single_grouped_parameter:
+                grad_params = [final_bias_grads] + list(final_weight_grads)
+            else:
+                grad_params = list(final_weight_grads) + [final_bias_grads]
+        else:
+            if self.single_grouped_parameter:
+                grad_params = list(grad_biases) + list(final_weight_grads)
+            else:
+                grad_params = list(final_weight_grads) + list(grad_biases)
+
         return grad_input, [grad_params], [(None,)]

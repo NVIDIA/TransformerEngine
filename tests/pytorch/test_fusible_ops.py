@@ -3248,6 +3248,7 @@ class TestSequentialModules:
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("single_grouped_parameter", (False, True))
+    @pytest.mark.parametrize("single_grouped_bias", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
@@ -3260,6 +3261,7 @@ class TestSequentialModules:
         dtype: torch.dtype,
         quantization: Optional[str],
         single_grouped_parameter: bool,
+        single_grouped_bias: bool,
         accumulate_into_main_grad: bool,
         device: torch.device = "cuda",
         split_alignment: int = 256,
@@ -3282,6 +3284,8 @@ class TestSequentialModules:
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if single_grouped_parameter and quantization != "mxfp8":
             pytest.skip("single_grouped_parameter is only supported for MXFP8 quantization")
+        if single_grouped_bias and not bias:
+            pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
 
@@ -3390,6 +3394,7 @@ class TestSequentialModules:
                 device=device,
                 dtype=dtype,
                 single_grouped_parameter=single_grouped_parameter,
+                single_grouped_bias=single_grouped_bias,
                 accumulate_into_main_grad=accumulate_into_main_grad,
                 delay_wgrad_compute=delay_wgrad_compute,
             )
@@ -3401,6 +3406,7 @@ class TestSequentialModules:
                 device=device,
                 dtype=dtype,
                 single_grouped_parameter=single_grouped_parameter,
+                single_grouped_bias=single_grouped_bias,
                 accumulate_into_main_grad=accumulate_into_main_grad,
                 delay_wgrad_compute=delay_wgrad_compute,
             )
@@ -3427,8 +3433,14 @@ class TestSequentialModules:
                     getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_test[group_idx])
                     getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_test[group_idx])
                 if bias:
-                    getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_test[group_idx])
-                    getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_test[group_idx])
+                    if single_grouped_bias:
+                        fc1_bparts = fc1.bias.split_into_quantized_tensors()
+                        fc2_bparts = fc2.bias.split_into_quantized_tensors()
+                        fc1_bparts[group_idx].reshape(-1).copy_(fc1_bs_test[group_idx])
+                        fc2_bparts[group_idx].reshape(-1).copy_(fc2_bs_test[group_idx])
+                    else:
+                        getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_test[group_idx])
+                        getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_test[group_idx])
             if accumulate_into_main_grad:
                 if single_grouped_parameter:
                     fc1.weight.main_grad = torch.full(
@@ -3498,8 +3510,17 @@ class TestSequentialModules:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(probs_test, probs_ref, **tols)
         for group_idx in range(group_size):
-            assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
-            assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
+            if bias:
+                if single_grouped_bias:
+                    assert_close_grads(
+                        fc2.bias.grad[group_idx, 0], fc2_bs_ref[group_idx], **tols
+                    )
+                    assert_close_grads(
+                        fc1.bias.grad[group_idx, 0], fc1_bs_ref[group_idx], **tols
+                    )
+                else:
+                    assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
+                    assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
             if not single_grouped_parameter and not accumulate_into_main_grad:
                 assert_close_grads(
                     getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols

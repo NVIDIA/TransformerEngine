@@ -65,8 +65,12 @@ def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[to
     if not linear_op.has_bias:
         return None
     num_groups = linear_op.num_groups
+    grouped_bias = getattr(linear_op, "bias", None)
+    if grouped_bias is not None:
+        packed = grouped_bias.rowwise_data.view(num_groups, -1)
+        return packed.transpose(0, 1)
     rows = [getattr(linear_op, f"bias{group_idx}") for group_idx in range(num_groups)]
-    # stack to [num_groups, n] but cuDNM expects [n, num_groups] with stride [1, n].
+    # stack to [num_groups, n] but cuDNN expects [n, num_groups] with stride [1, n].
     return torch.stack(rows, dim=0).transpose(0, 1)
 
 

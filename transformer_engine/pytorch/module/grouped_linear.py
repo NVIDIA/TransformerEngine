@@ -599,6 +599,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                        If set to ``True``, grouped weights are stored as a single grouped parameter
                        instead of one parameter per GEMM.
                        EXPERIMENTAL and subject to change.
+    single_grouped_bias : bool, default = False
+                       If set to ``True``, grouped biases are stored as a single grouped bias
+                       instead of one bias per GEMM.
+                       EXPERIMENTAL and subject to change.
 
     Notes
     -----
@@ -630,6 +634,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         save_original_input: bool = False,
         single_grouped_parameter: bool = False,
+        single_grouped_bias: bool = False,
         name: Optional[str] = None,
     ) -> None:
         super().__init__(name)
@@ -637,6 +642,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         # Temporary for quick testing.
         if os.getenv("_NVTE_SINGLE_GROUPED_PARAMETER_TMP_VAR", None) == "1":
             single_grouped_parameter = True
+        if os.getenv("_NVTE_SINGLE_GROUPED_BIAS_TMP_VAR", None) == "1":
+            single_grouped_bias = True
 
         self.params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.num_gemms = num_gemms
@@ -651,6 +658,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_name = ub_name
         self.save_original_input = save_original_input
         self.single_grouped_parameter = single_grouped_parameter
+        self.single_grouped_bias = single_grouped_bias
         if ub_overlap_rs or ub_overlap_ag:
             raise ValueError("GroupedLinear doesn't support Userbuffer overlap.")
         self.init_method = init_method
@@ -742,6 +750,9 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         if self.wgrad_store.delay_wgrad_compute():
             for name, param in self.named_parameters():
+                if name in ("weight", "bias"):
+                    param.skip_backward_post_hook = True
+                    continue
                 for i in range(self.num_gemms):
                     if name in (f"weight{i}", f"bias{i}"):
                         param.skip_backward_post_hook = True
@@ -793,7 +804,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                     grouped_weights.quantized_tensors[i].copy_(weights[i])
 
         # Re-register as a single grouped weight parameter.
-        # Re-register as a single grouped weight parameter.
         if not (
             isinstance(grouped_weights, torch.Tensor)
             and (weight_quantizers[0] is None or not weight_quantizers[0].internal)
@@ -809,13 +819,33 @@ class GroupedLinear(TransformerEngineBaseModule):
         for i in range(self.num_gemms):
             self.register_parameter(f"weight{i}", None)
 
+        if self.use_bias and self.single_grouped_bias:
+            self._make_grouped_biases()
+
         self.set_tensor_parallel_attributes(defer_init=defer_init)
+
+    def _make_grouped_biases(self) -> None:
+        """Pack per-GEMM biases into one ``GroupedTensor`` (``single_grouped_bias``)."""
+        biases = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
+        packed = torch.stack([b.detach().clone() for b in biases], dim=0).contiguous()
+        grouped_bias = GroupedTensor.make_grouped_tensor_from_rowwise_data(
+            num_tensors=self.num_gemms,
+            tensor_shape=(1, self.out_features),
+            rowwise_data=packed,
+            dtype=packed.dtype,
+        )
+        grouped_bias.requires_grad_(True)
+        self.register_parameter("bias", torch.nn.Parameter(grouped_bias))
+        for i in range(self.num_gemms):
+            self.register_parameter(f"bias{i}", None)
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
-        # Grouped tensor weights is an opt-in feature.
+        # Grouped tensor weights / biases are opt-in features.
         if self.single_grouped_parameter:
             self.make_grouped_weights(defer_init=defer_init)
+        elif self.single_grouped_bias:
+            self._make_grouped_biases()
 
     def set_tensor_parallel_attributes(self, defer_init=False) -> None:
         """Set attributes needed for TP"""
@@ -841,15 +871,24 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             # Set parallelism attributes for linear biases
             if self.use_bias:
-                for i in range(self.num_gemms):
+                grouped_bias = getattr(self, "bias", None)
+                if grouped_bias is not None:
                     if self.parallel_mode == "row":
-                        setattr(
-                            getattr(self, f"bias{i}"),
-                            "sequence_parallel",
-                            self.sequence_parallel,
-                        )
+                        setattr(grouped_bias, "sequence_parallel", self.sequence_parallel)
                     elif self.parallel_mode == "column":
-                        set_tensor_model_parallel_attributes(getattr(self, f"bias{i}"), True, 0, 1)
+                        set_tensor_model_parallel_attributes(grouped_bias, True, 0, 1)
+                else:
+                    for i in range(self.num_gemms):
+                        if self.parallel_mode == "row":
+                            setattr(
+                                getattr(self, f"bias{i}"),
+                                "sequence_parallel",
+                                self.sequence_parallel,
+                            )
+                        elif self.parallel_mode == "column":
+                            set_tensor_model_parallel_attributes(
+                                getattr(self, f"bias{i}"), True, 0, 1
+                            )
 
     def _remap_grouped_weight_state_dict_keys(self, state_dict, prefix: str) -> None:
         """Remap weight keys between single and per-GEMM checkpoint formats."""
@@ -903,6 +942,37 @@ class GroupedLinear(TransformerEngineBaseModule):
                 # Drop any redundant grouped key to avoid strict-load unexpected-key errors.
                 state_dict.pop(grouped_weight_key, None)
 
+    def _remap_grouped_bias_state_dict_keys(self, state_dict, prefix: str) -> None:
+        """Remap bias keys between single grouped and per-GEMM checkpoint formats."""
+        if not self.use_bias:
+            return
+        grouped_bias_key = f"{prefix}bias"
+        per_gemm_bias_keys = [f"{prefix}bias{i}" for i in range(self.num_gemms)]
+        has_grouped_bias = grouped_bias_key in state_dict
+        has_per_gemm_biases = all(key in state_dict for key in per_gemm_bias_keys)
+
+        if self.single_grouped_bias:
+            if not has_grouped_bias and has_per_gemm_biases:
+                per_gemm = [state_dict.pop(key) for key in per_gemm_bias_keys]
+                state_dict[grouped_bias_key] = torch.stack(per_gemm, dim=0)
+            elif has_grouped_bias:
+                for key in per_gemm_bias_keys:
+                    state_dict.pop(key, None)
+        else:
+            if not has_per_gemm_biases and has_grouped_bias:
+                gb = state_dict.pop(grouped_bias_key)
+                if hasattr(gb, "split_into_quantized_tensors"):
+                    members = gb.quantized_tensors
+                    if members is None:
+                        members = gb.split_into_quantized_tensors()
+                    per_gemm = [m.reshape(-1) if m.dim() > 1 else m for m in members]
+                else:
+                    per_gemm = list(gb.unbind(0))
+                for i, b in enumerate(per_gemm):
+                    state_dict[f"{prefix}bias{i}"] = b.reshape(-1) if b.dim() > 1 else b
+            elif has_per_gemm_biases:
+                state_dict.pop(grouped_bias_key, None)
+
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
         """Load state dict with grouped-weight format compatibility."""
         state_dict_copy = state_dict.copy()
@@ -910,6 +980,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if metadata is not None:
             state_dict_copy._metadata = metadata
         self._remap_grouped_weight_state_dict_keys(state_dict_copy, prefix="")
+        self._remap_grouped_bias_state_dict_keys(state_dict_copy, prefix="")
         return super().load_state_dict(state_dict_copy, strict=strict, assign=assign)
 
     def _load_from_state_dict(
@@ -917,6 +988,7 @@ class GroupedLinear(TransformerEngineBaseModule):
     ):
         """Load state, including compatibility across grouped-weight checkpoint formats."""
         self._remap_grouped_weight_state_dict_keys(state_dict, prefix)
+        self._remap_grouped_bias_state_dict_keys(state_dict, prefix)
 
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
@@ -967,7 +1039,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         inp = self.prepare_forward(inp, num_gemms=self.num_gemms)
         try:
             weight_tensors = self._get_weight_tensors()
-            bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
+            bias_tensors = self._get_bias_tensors()
 
             quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
 
@@ -1035,14 +1107,22 @@ class GroupedLinear(TransformerEngineBaseModule):
             (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
             wgrad_list = tensor_list[2]
             weight_params = self._get_weight_tensors()
-            bias_params = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             if not self.fuse_wgrad_accumulation:
                 for i in range(self.num_gemms):
                     weight_params[i].grad = wgrad_list[i].to(weight_params[i].dtype)
             if self.use_bias:
-                for i in range(self.num_gemms):
-                    if bias_params[i].grad is None:
-                        bias_params[i].grad = grad_biases_[i].to(bias_params[i].dtype)
+                grouped_bias = getattr(self, "bias", None)
+                if grouped_bias is not None:
+                    gstack = torch.stack(grad_biases_, dim=0).unsqueeze(1).to(grouped_bias.dtype)
+                    if grouped_bias.grad is None:
+                        grouped_bias.grad = gstack
+                    else:
+                        grouped_bias.grad.add_(gstack)
+                else:
+                    bias_params = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
+                    for i in range(self.num_gemms):
+                        if bias_params[i].grad is None:
+                            bias_params[i].grad = grad_biases_[i].to(bias_params[i].dtype)
             del grad_biases_
             del wgrad_list
             del tensor_list
@@ -1103,6 +1183,16 @@ class GroupedLinear(TransformerEngineBaseModule):
                 for w in weight_tensors
             ]
         return weight_tensors
+
+    def _get_bias_tensors(self) -> List[torch.Tensor]:
+        """Per-GEMM bias tensors (views into grouped storage when ``single_grouped_bias``)."""
+        grouped_bias = getattr(self, "bias", None)
+        if grouped_bias is not None:
+            parts = grouped_bias.quantized_tensors
+            if parts is None:
+                parts = grouped_bias.split_into_quantized_tensors()
+            return [p.reshape(-1) for p in parts]
+        return [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""

@@ -155,6 +155,18 @@ def check_grouped_weight(
     )
 
 
+def check_grouped_bias(module: GroupedLinear, num_gemms: int, out_features: int):
+    """Verify GroupedLinear exposes one grouped bias parameter with shape [num_gemms, 1, out_features]."""
+    bias_params = [(name, p) for name, p in module.named_parameters() if name == "bias"]
+    assert len(bias_params) == 1, f"Expected 1 grouped bias parameter, got {len(bias_params)}"
+    name, bias = bias_params[0]
+    assert name == "bias", f"Expected grouped parameter name 'bias', got {name}"
+    assert tuple(bias.shape) == (num_gemms, 1, out_features), (
+        "Grouped bias has unexpected shape. "
+        f"Expected {(num_gemms, 1, out_features)}, got {tuple(bias.shape)}"
+    )
+
+
 def _test_sanity_e2e_amp(block, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         (config.max_seqlen_q, config.batch_size, config.hidden_size),
@@ -524,12 +536,15 @@ def test_sanity_grouped_linear(
             bias=use_bias,
             params_dtype=dtype,
             single_grouped_parameter=single_param,
+            single_grouped_bias=single_param,
         ).cuda()
 
-    # Verify grouped linear exposes a single grouped weight parameter.
+    # Verify grouped linear exposes a single grouped weight parameter (and bias when applicable).
     if fp8_recipe is None or not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
         if single_param:
             check_grouped_weight(te_grouped_linear, num_gemms, ffn_hidden_size, config.hidden_size)
+            if use_bias:
+                check_grouped_bias(te_grouped_linear, num_gemms, ffn_hidden_size)
 
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
