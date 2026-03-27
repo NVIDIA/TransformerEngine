@@ -278,7 +278,7 @@ std::vector<py::object> fused_attn_fwd(
   // f16_arbitrary:
   // return_max_logit=false: S [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
   // return_max_logit=true: Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
-  // fp8          : M [b, h, sq, 1], ZInv [b, h, sq, 1], rng_state [2]
+  // fp8          : M [b, h, sq, 1], optional ZInv [b, h, sq, 1] (T3HD path), rng_state [2]
   size_t i = 0;
   at::Tensor output_tensor;
   // intermediate softmax tensor, S or M
@@ -286,8 +286,8 @@ std::vector<py::object> fused_attn_fwd(
       allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                     static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
   set_tensor_param(i++, output_tensor);
-  // fp8 has an additional softmax stats tensor, ZInv; return_max_logit=true has an additional Sum_Exp tensor
-  if (return_max_logit || qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
+  // fp8 T3HD: second softmax stats ZInv; return_max_logit=true: Max (FP8 FE v1 BSHD/SBHD/BHSD skips ZInv)
+  if (((qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) && qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) || return_max_logit) {
     output_tensor =
         allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                       static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);

@@ -863,7 +863,10 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 #if (CUDNN_VERSION >= 8900)
     size_t i = 0;
     const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    const Tensor *input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    const Tensor *input_ZInv = nullptr;
+    if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
+      input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    }
     const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     const Tensor *input_SoftmaxOffset = nullptr;
     if (softmax_type != NVTE_VANILLA_SOFTMAX) {

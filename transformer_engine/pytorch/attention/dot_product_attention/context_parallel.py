@@ -977,7 +977,10 @@ def cp_p2p_fwd_fused_attn(
     )
 
     if fp8:
-        softmax_lse_per_step, _, rng_states = aux_ctx_tensors
+        if qkv_layout != "t3hd":
+            softmax_lse_per_step, rng_states = aux_ctx_tensors
+        else:
+            softmax_lse_per_step, _, rng_states = aux_ctx_tensors
     else:
         softmax_lse_per_step, rng_states, *rest = aux_ctx_tensors
         attn_bias = rest[0] if len(rest) > 0 else None
@@ -3192,7 +3195,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             **fp8_meta_kwargs,
                         )
                         if fp8:
-                            softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                            if qkv_layout != "t3hd":
+                                softmax_lse_per_step[i], rng_states[i] = aux_ctx_tensors
+                            else:
+                                softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
                         else:
                             softmax_lse_per_step[i], rng_states[i], *_ = aux_ctx_tensors
                         if return_max_logit:
@@ -3554,11 +3560,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     out_part = out.select(seq_dim_o, i).contiguous()
                     dout_part = dout.select(seq_dim_o, i).contiguous()
                     if ctx.use_fused_attention:
-                        aux_ctx_tensors = [
-                            softmax_lse_per_step[i],
-                            softmax_lse_per_step[i],
-                            rng_states[i],
-                        ]
+                        if ctx.fp8 and ctx.qkv_layout == "t3hd":
+                            aux_ctx_tensors = [
+                                softmax_lse_per_step[i],
+                                softmax_lse_per_step[i],
+                                rng_states[i],
+                            ]
+                        else:
+                            aux_ctx_tensors = [
+                                softmax_lse_per_step[i],
+                                rng_states[i],
+                            ]
                         fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout

@@ -2745,14 +2745,16 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   if (Aux_CTX_Tensors->size == 0) {
     int i = 0;
     Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_M->data.dptr = nullptr;
     output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
     output_M->data.dtype = DType::kFloat32;
-    output_ZInv->data.dptr = nullptr;
-    output_ZInv->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
-    output_ZInv->data.dtype = DType::kFloat32;
+    if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
+      Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_ZInv->data.dptr = nullptr;
+      output_ZInv->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+      output_ZInv->data.dtype = DType::kFloat32;
+    }
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = nullptr;
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
@@ -2763,13 +2765,16 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
       output_softmax_offset->data.dtype = DType::kFloat32;
     }
     Aux_CTX_Tensors->size = i;
-  } else if (Aux_CTX_Tensors->size >= 3) {
+  } else if (Aux_CTX_Tensors->size >= 2) {
     int i = 0;
     Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     devPtrM = output_M->data.dptr;
-    devPtrZInv = output_ZInv->data.dptr;
+    devPtrZInv = nullptr;
+    if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
+      Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      devPtrZInv = output_ZInv->data.dptr;
+    }
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = rng_state->data.dptr;
     if (softmax_type != NVTE_VANILLA_SOFTMAX) {
       Tensor* output_softmax_offset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -2874,7 +2879,8 @@ void fused_attn_fp8_bwd(
   }
 
   void* devPtrM = input_M->data.dptr;
-  void* devPtrZInv = input_ZInv->data.dptr;
+  void* devPtrZInv =
+      (input_ZInv != nullptr) ? input_ZInv->data.dptr : nullptr;
 
   void* devPtrScaleS = input_S->scale.dptr;
   void* devPtrDescaleS = input_S->scale_inv.dptr;
@@ -2930,6 +2936,9 @@ void fused_attn_fp8_bwd(
         get_cudnn_fe_dtype(O_type), get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type),
         input_dO->scaling_mode, workspace->data.dptr, &workspace_size, stream, handle);
   } else if (dqkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
+    // remove this when cuDNN FE supports FP8 + THD
+    NVTE_CHECK(input_ZInv != nullptr && input_ZInv->data.dptr != nullptr,
+               "ZInv tensor required for FP8 fused attention backward with T3HD layout.");
     fused_attn::fused_attn_fp8_bwd_impl(
         batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim_qk, attn_scale, p_dropout,
         qkv_layout, devPtrQ, devPtrK, devPtrV, devPtrM, devPtrZInv, devPtrO, devPtrdO, devPtrdQ,

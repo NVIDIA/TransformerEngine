@@ -256,7 +256,7 @@ def fused_attn_fwd(
                        M: torch.Tensor
                            max(Q*K.T)
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
-                       ZInv: torch.Tensor
+                       ZInv: torch.Tensor, only allocated for T3HD path
                            1/sum(e^(x - max(x))), where x=Q*K.T
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
                 rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
