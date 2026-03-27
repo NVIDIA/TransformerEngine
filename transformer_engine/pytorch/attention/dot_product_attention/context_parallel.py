@@ -1214,7 +1214,7 @@ def cp_p2p_bwd_fused_attn(
             ]
         else:
             q_part, k_part, v_part, qkv_layout = combine_and_quantize(
-                qkv_layout, q_part, k_part, v_part, QKV_quantizer_per_step
+                qkv_layout, q_part, k_part, v_part, QKV_quantizer_per_step, used_in_forward=False, used_in_backward=True
             )
         if not fp8_recipe.mxfp8():
             if not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16):
@@ -3588,7 +3588,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 )
                             else:
                                 q_part, k_part, v_part, new_qkv_layout = combine_and_quantize(
-                                    ctx.qkv_layout, q_part, k_part, v_part, ctx.QKV_quantizer
+                                    ctx.qkv_layout, q_part, k_part, v_part, ctx.QKV_quantizer, used_in_forward=False, used_in_backward=True
                                 )
                                 dout_part, do_format = dpa_utils.permute_to_grouped_tensor(
                                     do_format, dout_part

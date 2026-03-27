@@ -2349,7 +2349,7 @@ class PermuteToGroupedTensor(torch.autograd.Function):
         return q, k, v, None
 
 
-def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
+def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer, used_in_forward=True, used_in_backward=False):
     """Combine q,k,v based on qkv_layout and quantize them together"""
     if isinstance(qkv_quantizer, MXFP8Quantizer):
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
@@ -2406,7 +2406,23 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
         #     q_fp8, k_fp8, v_fp8 = quantized_tensors[0], quantized_tensors[1], quantized_tensors[2]
         # else:
         #     q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
-        q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
+        if used_in_forward and used_in_backward:
+            q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
+        if used_in_forward and not used_in_backward:
+            qkv_quantizer.rowwise_usage = True
+            qkv_quantizer.columnwise_usage = False
+            q_fp8, k_fp8 = [qkv_quantizer(x) for x in [q, k]]
+            qkv_quantizer.rowwise_usage = False
+            qkv_quantizer.columnwise_usage = True
+            v_fp8 = qkv_quantizer(v)
+        if (not used_in_forward) and used_in_backward:
+            qkv_quantizer.rowwise_usage = True
+            qkv_quantizer.columnwise_usage = True
+            q_fp8, k_fp8 = [qkv_quantizer(x) for x in [q, k]]
+            qkv_quantizer.rowwise_usage = True
+            qkv_quantizer.columnwise_usage = False
+            v_fp8 = qkv_quantizer(v)
+
         # view rowwise/columnwise data back to original shapes, not rowwise_scale_inv/columnwise_scale_inv
         q_fp8, k_fp8, v_fp8 = [x.view(s) for x, s in zip([q_fp8, k_fp8, v_fp8], original_shapes)]
 
