@@ -532,10 +532,13 @@ class GroupedLinear(BasicOperation):
                 for group_idx in range(self.num_groups):
                     bias = getattr(self, f"bias{group_idx}")
                     if bias is None:
-                        raise RuntimeError(f"Expected biases, but bias {group_idx} is uninitialized")
+                        raise RuntimeError(
+                            f"Expected biases, but bias {group_idx} is uninitialized"
+                        )
                     if bias.dtype != dtype:
                         raise RuntimeError(
-                            f"Bias {group_idx} has invalid dtype (expected {dtype}, got {bias.dtype})."
+                            f"Bias {group_idx} has invalid dtype (expected {dtype}, got"
+                            f" {bias.dtype})."
                         )
                     if not devices_match(bias.device, device):
                         raise RuntimeError(
@@ -555,7 +558,9 @@ class GroupedLinear(BasicOperation):
                 for group_idx in range(self.num_groups):
                     bias = getattr(self, f"bias{group_idx}")
                     if bias is not None:
-                        raise RuntimeError(f"Expected no biases, but bias {group_idx} is initialized")
+                        raise RuntimeError(
+                            f"Expected no biases, but bias {group_idx} is initialized"
+                        )
 
     def pre_fuser_forward(self, *, requires_grad: bool) -> None:
         super().pre_fuser_forward(requires_grad=requires_grad)
@@ -708,7 +713,10 @@ class GroupedLinear(BasicOperation):
                     bias_parts = self.bias.split_into_quantized_tensors()
                 bs = [maybe_dequantize(p.reshape(-1), dtype) for p in bias_parts]
             else:
-                bs = [maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(num_groups)]
+                bs = [
+                    maybe_dequantize(getattr(self, f"bias{idx}"), dtype)
+                    for idx in range(num_groups)
+                ]
 
         # Convert weight dtype if needed
         ws = []
@@ -949,7 +957,9 @@ class GroupedLinear(BasicOperation):
                 # Be mindful of param registration order.
                 if has_bias:
                     if self.single_grouped_bias:
-                        final_bias_grads = torch.stack(grad_biases, dim=0).to(ctx.dtype).unsqueeze(1)
+                        final_bias_grads = (
+                            torch.stack(grad_biases, dim=0).to(ctx.dtype).unsqueeze(1)
+                        )
                         grad_params = [final_bias_grads, grad_weight]
                     else:
                         grad_params = grad_biases + [grad_weight]

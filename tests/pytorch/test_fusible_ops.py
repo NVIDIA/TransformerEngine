@@ -3512,15 +3512,15 @@ class TestSequentialModules:
         for group_idx in range(group_size):
             if bias:
                 if single_grouped_bias:
-                    assert_close_grads(
-                        fc2.bias.grad[group_idx, 0], fc2_bs_ref[group_idx], **tols
-                    )
-                    assert_close_grads(
-                        fc1.bias.grad[group_idx, 0], fc1_bs_ref[group_idx], **tols
-                    )
+                    assert_close_grads(fc2.bias.grad[group_idx, 0], fc2_bs_ref[group_idx], **tols)
+                    assert_close_grads(fc1.bias.grad[group_idx, 0], fc1_bs_ref[group_idx], **tols)
                 else:
-                    assert_close_grads(getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols)
-                    assert_close_grads(getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols)
+                    assert_close_grads(
+                        getattr(fc2, f"bias{group_idx}"), fc2_bs_ref[group_idx], **tols
+                    )
+                    assert_close_grads(
+                        getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols
+                    )
             if not single_grouped_parameter and not accumulate_into_main_grad:
                 assert_close_grads(
                     getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols
