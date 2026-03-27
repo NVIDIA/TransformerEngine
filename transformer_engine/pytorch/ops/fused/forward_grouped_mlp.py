@@ -48,7 +48,9 @@ def _glu_wrapper_has_bias_tensor_arg() -> bool:
 def _quant_wrapper_has_bias_tensor_arg() -> bool:
     """True if cudnn-frontend SM100 Quant wrapper accepts ``bias_tensor``."""
     try:
-        from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=import-outside-toplevel
+        from cudnn import (
+            grouped_gemm_quant_wrapper_sm100,
+        )  # pylint: disable=import-outside-toplevel
     except ImportError:
         return False
     try:
@@ -58,27 +60,14 @@ def _quant_wrapper_has_bias_tensor_arg() -> bool:
     return "bias_tensor" in params
 
 
-def _pack_grouped_linear_bias_for_cudnn(
-    linear_op: GroupedLinear,
-    *,
-    num_groups: int,
-    out_features: int,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> Optional[torch.Tensor]:
+def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[torch.Tensor]:
     """Bias layout expected by cuDNN grouped GEMM: shape (n, num_groups), stride (1, n)."""
     if not linear_op.has_bias:
         return None
-    packed = torch.empty_strided(
-        (out_features, num_groups),
-        (1, out_features),
-        dtype=dtype,
-        device=device,
-    )
-    for group_idx in range(num_groups):
-        bias_param = getattr(linear_op, f"bias{group_idx}")
-        packed.select(1, group_idx).copy_(maybe_dequantize(bias_param, dtype))
-    return packed
+    num_groups = linear_op.num_groups
+    rows = [getattr(linear_op, f"bias{group_idx}") for group_idx in range(num_groups)]
+    # stack to [num_groups, n] but cuDNM expects [n, num_groups] with stride [1, n].
+    return torch.stack(rows, dim=0).transpose(0, 1)
 
 
 class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
@@ -361,20 +350,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
         current_stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
 
-        fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(
-            fc1_op,
-            num_groups=num_groups,
-            out_features=fc1_weight_shape[0],
-            dtype=dtype,
-            device=device,
-        )
-        fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(
-            fc2_op,
-            num_groups=num_groups,
-            out_features=fc2_weight_shape[0],
-            dtype=dtype,
-            device=device,
-        )
+        fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
+        fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
 
         if fc1_op.single_grouped_parameter:
             # Pack weight tensors for stacked kernel
@@ -696,9 +673,15 @@ def fuse_forward_ops(
             matches_pattern = False
         elif window[1].glu_interleave_size != 32:
             matches_pattern = False
-        elif window[0].has_bias and not ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_fc1_bias_supported():
+        elif (
+            window[0].has_bias
+            and not ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_fc1_bias_supported()
+        ):
             matches_pattern = False
-        elif window[2].has_bias and not ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_fc2_bias_supported():
+        elif (
+            window[2].has_bias
+            and not ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_fc2_bias_supported()
+        ):
             matches_pattern = False
 
         if matches_pattern:

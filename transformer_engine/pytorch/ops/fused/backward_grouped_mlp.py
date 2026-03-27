@@ -970,7 +970,10 @@ def fuse_backward_ops(
             matches_pattern = False
         elif window[1].glu_interleave_size != 32:
             matches_pattern = False
-        elif window[0].has_bias and not BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_fc1_bias_supported():
+        elif (
+            window[0].has_bias
+            and not BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_fc1_bias_supported()
+        ):
             matches_pattern = False
 
         if matches_pattern:
