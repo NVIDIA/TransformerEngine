@@ -520,18 +520,24 @@ def generic_gemm(A, transa, B, transb, D, quantizer, out_dtype, bias,
         if isinstance(D_amax, torch.Tensor) and D_amax.numel() == 0: D_amax = None
         if isinstance(D_scale, torch.Tensor) and D_scale.numel() == 0: D_scale = None
     else:
-        M = A_data.shape[0] if not transa else A_data.shape[1]
-        N = B_data.shape[1] if not transb else B_data.shape[0]
+        # NVTE GEMM column-major convention:
+        # k = (transa ? A1 : A0), M = (transa ? A0 : A1), N = (transb ? B1 : B0)
+        # Output TensorWrapper shape is (N, M)
+        M = A_data.shape[0] if transa else A_data.shape[1]
+        N = B_data.shape[1] if transb else B_data.shape[0]
         if quantizer is not None:
-            D = quantizer.make_empty([M, N],
+            D = quantizer.make_empty([N, M],
                                      dtype=A.dtype if isinstance(A, torch.Tensor) else torch.bfloat16,
                                      device=A_data.device)
             D_data, D_dtype, D_scale_inv, D_sm = extract_tensor_data(D)
             D_amax = getattr(quantizer, 'amax', None)
             D_scale = getattr(quantizer, 'scale', None)
         else:
-            D = torch.empty(M, N, dtype=torch.bfloat16, device=A_data.device)
-            D_data, D_dtype, D_scale_inv, D_sm = D, 6, None, 0
+            # Use input dtype for output (cuBLAS requires compatible types)
+            out_dt = A_data.dtype
+            D = torch.empty(N, M, dtype=out_dt, device=A_data.device)
+            _TORCH_DT = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6, torch.uint8: 0}
+            D_data, D_dtype, D_scale_inv, D_sm = D, _TORCH_DT.get(out_dt, 6), None, 0
             D_amax, D_scale = None, None
 
     _ops.gemm(
