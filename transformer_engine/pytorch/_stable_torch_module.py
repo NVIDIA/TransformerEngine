@@ -12,6 +12,7 @@ The stable extension is loaded once via `torch.ops.load_library()`.
 All ops are accessed as `torch.ops.transformer_engine_stable.<op_name>`.
 """
 
+import ctypes as _ctypes
 import glob
 import importlib.util
 import os
@@ -757,14 +758,26 @@ def generic_gemm(A, transa, B, transb, D, quantizer, out_dtype, bias,
         dbias = torch.empty(B_data.shape[-1], dtype=dbias_dt, device=A_data.device)
         bias_arg = dbias
 
-    _ops.gemm(
-        A_data, A_dtype, A_scale_inv, A_cw_data, A_cw_scale_inv, A_sm, A_swizzled, transa,
-        B_data, B_dtype, B_scale_inv, B_cw_data, B_cw_scale_inv, B_sm, B_swizzled, transb,
-        D_data, D_dtype, D_amax, D_scale, D_scale_inv, D_sm,
-        bias_arg, int(bias_type) if bias_type is not None else 0,
-        gelu_in, workspace,
-        grad, accumulate, use_split_accumulator, alpha,
-    )
+    if comm_overlap is not None:
+        _ops.gemm_with_comm_overlap(
+            A_data, A_dtype, A_scale_inv, A_cw_data, A_cw_scale_inv, A_sm, A_swizzled, transa,
+            B_data, B_dtype, B_scale_inv, B_cw_data, B_cw_scale_inv, B_sm, B_swizzled, transb,
+            D_data, D_dtype, D_amax, D_scale, D_scale_inv, D_sm,
+            bias_arg, int(bias_type) if bias_type is not None else 0,
+            gelu_in, workspace,
+            grad, accumulate, use_split_accumulator,
+            comm_overlap._handle, int(comm_type), bulk_overlap,
+            extra_output,
+        )
+    else:
+        _ops.gemm(
+            A_data, A_dtype, A_scale_inv, A_cw_data, A_cw_scale_inv, A_sm, A_swizzled, transa,
+            B_data, B_dtype, B_scale_inv, B_cw_data, B_cw_scale_inv, B_sm, B_swizzled, transb,
+            D_data, D_dtype, D_amax, D_scale, D_scale_inv, D_sm,
+            bias_arg, int(bias_type) if bias_type is not None else 0,
+            gelu_in, workspace,
+            grad, accumulate, use_split_accumulator, alpha,
+        )
 
     return [D, dbias, gelu_in, extra_output]
 
@@ -1569,25 +1582,187 @@ class CommOverlapP2PBase(CommOverlapCore):
     pass
 
 
+_AllgatherCB = _ctypes.CFUNCTYPE(
+    None,
+    _ctypes.c_void_p, _ctypes.c_size_t,
+    _ctypes.c_void_p, _ctypes.c_size_t,
+    _ctypes.c_char_p,
+)
+_BarrierCB = _ctypes.CFUNCTYPE(None, _ctypes.c_char_p)
+
+_TORCH_TO_TE_DTYPE = {
+    torch.float32: 4, torch.float16: 5, torch.bfloat16: 6,
+    torch.uint8: 0, torch.int8: 0,
+}
+
+
 class CommOverlapHelper:
     """Python replacement for pybind11 CommOverlapHelper."""
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("CommOverlapHelper not yet in stable ABI module")
+
+    def __init__(self, world_group=None, intra_domain_group=None):
+        if world_group is None:
+            raise RuntimeError(
+                "CommOverlapHelper requires a process group (MPI-only builds "
+                "are not supported in the stable ABI path)"
+            )
+        self.myrank = torch.distributed.get_rank(world_group)
+        self.numranks = torch.distributed.get_world_size(world_group)
+        backend = torch.distributed.get_backend(world_group)
+        self.backend_is_nccl = backend == "nccl"
+        if intra_domain_group is not None:
+            self.mylocal = torch.distributed.get_rank(intra_domain_group)
+            self.numlocal = torch.distributed.get_world_size(intra_domain_group)
+            if self.numlocal == self.numranks:
+                self.mynode, self.numnodes = 0, 1
+            else:
+                self.mynode = self.myrank // self.numlocal
+                self.numnodes = self.numranks // self.numlocal
+        else:
+            self.mylocal = self.myrank
+            self.numlocal = self.numranks
+            self.mynode, self.numnodes = 0, 1
+        self._groups = {
+            "world": world_group,
+            "intra": intra_domain_group if intra_domain_group is not None else world_group,
+        }
+        self.initialized = True
+
+    def ub_allgather(self, globaldata_ptr, globalbytes, localdata_ptr, localbytes, group_name):
+        group = self._groups.get(group_name, self._groups["world"])
+        num_ranks = torch.distributed.get_world_size(group)
+        local_buf = (_ctypes.c_uint8 * localbytes).from_address(localdata_ptr)
+        local_tensor = torch.frombuffer(local_buf, dtype=torch.uint8).clone()
+        if self.backend_is_nccl:
+            local_tensor = local_tensor.cuda()
+        chunks = [torch.empty_like(local_tensor) for _ in range(num_ranks)]
+        torch.distributed.all_gather(chunks, local_tensor, group=group)
+        global_tensor = torch.cat(chunks)
+        if self.backend_is_nccl:
+            global_tensor = global_tensor.cpu()
+        _ctypes.memmove(globaldata_ptr, global_tensor.data_ptr(), globalbytes)
+
+    def ub_barrier(self, group_name):
+        group = self._groups.get(group_name, self._groups["world"])
+        torch.distributed.barrier(group=group)
+
+
+def _make_comm_callbacks(helper):
+    """Create ctypes callback objects bound to a CommOverlapHelper."""
+    h = helper
+
+    @_AllgatherCB
+    def _ag_cb(gptr, gb, lptr, lb, grp):
+        h.ub_allgather(gptr, gb, lptr, lb, grp.decode() if grp else "world")
+
+    @_BarrierCB
+    def _bar_cb(grp):
+        h.ub_barrier(grp.decode() if grp else "world")
+
+    return _ag_cb, _bar_cb
 
 
 class CommOverlap:
-    """Python replacement for pybind11 CommOverlap."""
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("CommOverlap not yet in stable ABI module")
+    """Python replacement for pybind11 CommOverlap (handle-based stable ABI)."""
+
+    def __init__(self, shape, dtype, helper, tp_size,
+                 num_splits=3, num_max_streams=3, comm_cga_size=2,
+                 gemm_priority=0, comm_priority=0, num_comm_sm=16,
+                 set_sm_margin=True, atomic_gemm=False, rs_overlap_first_gemm=False):
+        self._ag_cb, self._bar_cb = _make_comm_callbacks(helper)
+        ag_ptr = _ctypes.cast(self._ag_cb, _ctypes.c_void_p).value
+        bar_ptr = _ctypes.cast(self._bar_cb, _ctypes.c_void_p).value
+        _ops.register_comm_callbacks(ag_ptr, bar_ptr)
+
+        buf_dtype = _TORCH_TO_TE_DTYPE.get(dtype, 6)
+        self._handle = _ops.create_comm_overlap(
+            list(shape), buf_dtype,
+            helper.myrank, helper.numranks,
+            helper.mylocal, helper.numlocal,
+            helper.mynode, helper.numnodes,
+            tp_size, num_splits, num_max_streams, comm_cga_size,
+            gemm_priority, comm_priority, num_comm_sm,
+            set_sm_margin, atomic_gemm, rs_overlap_first_gemm,
+        )
+
+    def copy_into_buffer(self, input, local_chunk=False):
+        _ops.comm_overlap_copy_into_buffer(input, self._handle, local_chunk)
+
+    def get_buffer(self, local_chunk=False, shape=None):
+        if shape is not None and len(shape) >= 2:
+            dim0, dim1 = shape[0], shape[1]
+        else:
+            dim0, dim1 = -1, -1
+        return _ops.comm_overlap_get_buffer(self._handle, local_chunk, dim0, dim1)
+
+    def get_communication_stream(self):
+        raw = _ops.comm_overlap_get_stream(self._handle)
+        s = torch.cuda.ExternalStream(raw)
+        return s, s  # send == recv for non-P2P
 
     def is_fp8_ubuf(self):
-        return False
+        return _ops.comm_overlap_is_fp8_ubuf(self._handle)
+
+    def is_atomic_gemm(self):
+        return _ops.comm_overlap_is_atomic_gemm(self._handle)
+
+    def is_p2p_overlap(self):
+        return _ops.comm_overlap_is_p2p(self._handle)
+
+    def __del__(self):
+        if hasattr(self, "_handle"):
+            _ops.destroy_comm_overlap(self._handle)
 
 
 class CommOverlapP2P:
-    """Python replacement for pybind11 CommOverlapP2P."""
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("CommOverlapP2P not yet in stable ABI module")
+    """Python replacement for pybind11 CommOverlapP2P (handle-based stable ABI)."""
+
+    def __init__(self, shape, dtype, helper, tp_size, comm_type,
+                 num_max_streams=3, comm_cga_size=1, gemm_priority=0,
+                 comm_priority=0, num_comm_sm=1, set_sm_margin=False,
+                 use_ce=True, atomic_gemm=False, aggregate=False):
+        self._ag_cb, self._bar_cb = _make_comm_callbacks(helper)
+        ag_ptr = _ctypes.cast(self._ag_cb, _ctypes.c_void_p).value
+        bar_ptr = _ctypes.cast(self._bar_cb, _ctypes.c_void_p).value
+        _ops.register_comm_callbacks(ag_ptr, bar_ptr)
+
+        buf_dtype = _TORCH_TO_TE_DTYPE.get(dtype, 6)
+        self._handle = _ops.create_comm_overlap_p2p(
+            list(shape), buf_dtype,
+            helper.myrank, helper.numranks,
+            helper.mylocal, helper.numlocal,
+            helper.mynode, helper.numnodes,
+            tp_size, int(comm_type),
+            num_max_streams, comm_cga_size,
+            gemm_priority, comm_priority, num_comm_sm,
+            set_sm_margin, use_ce, atomic_gemm, aggregate,
+        )
+
+    def copy_into_buffer(self, input, local_chunk=False):
+        _ops.comm_overlap_copy_into_buffer(input, self._handle, local_chunk)
+
+    def get_buffer(self, local_chunk=False, shape=None):
+        if shape is not None and len(shape) >= 2:
+            dim0, dim1 = shape[0], shape[1]
+        else:
+            dim0, dim1 = -1, -1
+        return _ops.comm_overlap_get_buffer(self._handle, local_chunk, dim0, dim1)
+
+    def get_communication_stream(self):
+        send_raw, recv_raw = _ops.comm_overlap_p2p_get_streams(self._handle)
+        return torch.cuda.ExternalStream(send_raw), torch.cuda.ExternalStream(recv_raw)
+
+    def is_fp8_ubuf(self):
+        return _ops.comm_overlap_is_fp8_ubuf(self._handle)
+
+    def is_atomic_gemm(self):
+        return _ops.comm_overlap_is_atomic_gemm(self._handle)
+
+    def is_p2p_overlap(self):
+        return _ops.comm_overlap_is_p2p(self._handle)
+
+    def __del__(self):
+        if hasattr(self, "_handle"):
+            _ops.destroy_comm_overlap_p2p(self._handle)
 
 
 # ============================================================================
